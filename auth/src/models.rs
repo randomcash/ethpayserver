@@ -4,6 +4,10 @@ use chrono::{DateTime, Utc};
 use crypto::{EncryptedBlob, KdfParams};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+pub use webauthn_rs::prelude::{
+    CreationChallengeResponse, Passkey, PasskeyAuthentication, PasskeyRegistration,
+    PublicKeyCredential, RegisterPublicKeyCredential, RequestChallengeResponse,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Unique identifier for a user.
@@ -485,4 +489,187 @@ pub struct RecoveryRequest {
     /// Optional: new encrypted recovery key if user wants to keep recovery enabled.
     #[zeroize(skip)]
     pub new_encrypted_recovery_key: Option<EncryptedBlob>,
+}
+
+// ============================================================================
+// Passkey/WebAuthn Models
+// ============================================================================
+
+/// Unique identifier for a passkey credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PasskeyId(pub Uuid);
+
+impl PasskeyId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for PasskeyId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for PasskeyId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A stored passkey credential for WebAuthn authentication.
+///
+/// This wraps the webauthn-rs `Passkey` type with additional metadata.
+/// Passkeys are the RECOMMENDED authentication method (over email+password).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PasskeyCredential {
+    /// Unique identifier for this credential.
+    pub id: PasskeyId,
+
+    /// User who owns this passkey.
+    pub user_id: UserId,
+
+    /// Human-readable name for this passkey (e.g., "MacBook Pro Touch ID").
+    pub name: String,
+
+    /// The actual WebAuthn passkey data (credential ID, public key, etc.).
+    /// This is the serialized webauthn-rs Passkey type.
+    pub passkey: Passkey,
+
+    /// When this passkey was registered.
+    pub created_at: DateTime<Utc>,
+
+    /// Last time this passkey was used for authentication.
+    pub last_used_at: Option<DateTime<Utc>>,
+
+    /// Whether this passkey is currently active.
+    pub is_active: bool,
+}
+
+impl PasskeyCredential {
+    /// Create a new passkey credential.
+    pub fn new(user_id: UserId, name: String, passkey: Passkey) -> Self {
+        Self {
+            id: PasskeyId::new(),
+            user_id,
+            name,
+            passkey,
+            created_at: Utc::now(),
+            last_used_at: None,
+            is_active: true,
+        }
+    }
+}
+
+/// Sanitized passkey information for API responses.
+/// Does NOT include the actual passkey data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PasskeyInfo {
+    /// Unique passkey identifier.
+    pub id: PasskeyId,
+
+    /// Human-readable passkey name.
+    pub name: String,
+
+    /// When this passkey was registered.
+    pub created_at: DateTime<Utc>,
+
+    /// Last time this passkey was used.
+    pub last_used_at: Option<DateTime<Utc>>,
+
+    /// Whether this passkey is currently active.
+    pub is_active: bool,
+}
+
+impl From<&PasskeyCredential> for PasskeyInfo {
+    fn from(cred: &PasskeyCredential) -> Self {
+        Self {
+            id: cred.id,
+            name: cred.name.clone(),
+            created_at: cred.created_at,
+            last_used_at: cred.last_used_at,
+            is_active: cred.is_active,
+        }
+    }
+}
+
+/// Request to start passkey registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartPasskeyRegistrationRequest {
+    /// Human-readable name for the passkey (e.g., "MacBook Pro Touch ID").
+    pub passkey_name: String,
+}
+
+/// Response for starting passkey registration.
+/// Client uses this to prompt the user's authenticator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartPasskeyRegistrationResponse {
+    /// WebAuthn credential creation options for the client.
+    pub options: CreationChallengeResponse,
+}
+
+/// Request to complete passkey registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletePasskeyRegistrationRequest {
+    /// The passkey name provided in the start request.
+    pub passkey_name: String,
+
+    /// The credential response from the authenticator.
+    pub credential: RegisterPublicKeyCredential,
+}
+
+/// Response for starting passkey authentication.
+/// Client uses this to prompt the user's authenticator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartPasskeyLoginResponse {
+    /// WebAuthn request options for the client.
+    pub options: RequestChallengeResponse,
+}
+
+/// Request to complete passkey authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletePasskeyLoginRequest {
+    /// User's email (to look up their passkeys).
+    pub email: String,
+
+    /// The credential response from the authenticator.
+    pub credential: PublicKeyCredential,
+
+    /// Device name for the session.
+    pub device_name: String,
+
+    /// Device type.
+    pub device_type: DeviceType,
+}
+
+/// Data for registering a new user with passkey (recommended flow).
+///
+/// Unlike password registration, this doesn't require a master password hash.
+/// The user's symmetric key is encrypted with a key derived from the passkey.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PasskeyRegisterRequest {
+    /// User's email address.
+    pub email: String,
+
+    /// KDF parameters used by the client.
+    pub kdf_params: KdfParams,
+
+    /// User's symmetric key, encrypted with a key derived from passkey material.
+    /// Note: The client must implement key derivation from passkey output.
+    pub encrypted_symmetric_key: EncryptedBlob,
+
+    /// Device name for the first device.
+    pub device_name: String,
+
+    /// Device type.
+    pub device_type: DeviceType,
+
+    /// Human-readable name for the passkey.
+    pub passkey_name: String,
+
+    /// Optional: encrypted recovery key if user wants BIP39 backup.
+    pub encrypted_recovery_key: Option<EncryptedBlob>,
+
+    /// Optional: hash of recovery verification key.
+    pub recovery_verification_hash: Option<String>,
 }

@@ -5,13 +5,21 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use url::Url;
+use webauthn_rs::prelude::*;
+use webauthn_rs::Webauthn;
 
 use crate::error::{AuthError, Result};
 use crate::models::{
-    Device, DeviceId, DeviceInfo, DeviceType, LoginRequest, LoginResponse, RecoveryRequest,
-    RegisterRequest, Session, SessionId, User, UserInfo,
+    CompletePasskeyLoginRequest, CompletePasskeyRegistrationRequest, Device, DeviceId, DeviceInfo,
+    DeviceType, LoginRequest, LoginResponse, PasskeyCredential, PasskeyId, PasskeyInfo,
+    PasskeyRegisterRequest, RecoveryRequest, RegisterRequest, Session, SessionId,
+    StartPasskeyLoginResponse, StartPasskeyRegistrationRequest, StartPasskeyRegistrationResponse,
+    User, UserId, UserInfo,
 };
-use crate::repository::{DeviceRepository, SessionRepository, UserRepository};
+use crate::repository::{
+    ChallengeRepository, DeviceRepository, PasskeyRepository, SessionRepository, UserRepository,
+};
 
 /// Validates email format.
 /// Checks for basic structure: non-empty local part, @, non-empty domain with at least one dot.
@@ -70,6 +78,18 @@ pub struct AuthConfig {
 
     /// Maximum devices per user.
     pub max_devices_per_user: u32,
+
+    /// Maximum passkeys per user.
+    pub max_passkeys_per_user: u32,
+
+    /// WebAuthn Relying Party ID (typically the domain, e.g., "example.com").
+    pub rp_id: String,
+
+    /// WebAuthn Relying Party name (displayed to user, e.g., "Example App").
+    pub rp_name: String,
+
+    /// WebAuthn Relying Party origin (the full URL, e.g., "https://example.com").
+    pub rp_origin: String,
 }
 
 impl Default for AuthConfig {
@@ -80,6 +100,10 @@ impl Default for AuthConfig {
             session_duration: Duration::hours(24),
             idle_timeout: Some(Duration::hours(2)), // 2 hour idle timeout
             max_devices_per_user: 10,
+            max_passkeys_per_user: 10,
+            rp_id: "localhost".to_string(),
+            rp_name: "PayServer".to_string(),
+            rp_origin: "http://localhost:8080".to_string(),
         }
     }
 }
@@ -87,27 +111,50 @@ impl Default for AuthConfig {
 /// Authentication service handling registration, login, and session management.
 pub struct AuthService<R>
 where
-    R: UserRepository + DeviceRepository + SessionRepository,
+    R: UserRepository + DeviceRepository + SessionRepository + PasskeyRepository + ChallengeRepository,
 {
     repo: Arc<R>,
     config: AuthConfig,
+    webauthn: Arc<Webauthn>,
+}
+
+/// Build a Webauthn instance from config.
+fn build_webauthn(config: &AuthConfig) -> std::result::Result<Webauthn, WebauthnError> {
+    let rp_origin = Url::parse(&config.rp_origin).map_err(|_| WebauthnError::Configuration)?;
+    let builder = WebauthnBuilder::new(&config.rp_id, &rp_origin)?
+        .rp_name(&config.rp_name);
+    builder.build()
 }
 
 impl<R> AuthService<R>
 where
-    R: UserRepository + DeviceRepository + SessionRepository,
+    R: UserRepository + DeviceRepository + SessionRepository + PasskeyRepository + ChallengeRepository,
 {
     /// Create a new auth service with the given repository and default config.
+    ///
+    /// # Panics
+    /// Panics if the WebAuthn configuration is invalid.
     pub fn new(repo: Arc<R>) -> Self {
+        let config = AuthConfig::default();
+        let webauthn = build_webauthn(&config).expect("Invalid WebAuthn config");
         Self {
             repo,
-            config: AuthConfig::default(),
+            config,
+            webauthn: Arc::new(webauthn),
         }
     }
 
     /// Create a new auth service with custom config.
+    ///
+    /// # Panics
+    /// Panics if the WebAuthn configuration is invalid.
     pub fn with_config(repo: Arc<R>, config: AuthConfig) -> Self {
-        Self { repo, config }
+        let webauthn = build_webauthn(&config).expect("Invalid WebAuthn config");
+        Self {
+            repo,
+            config,
+            webauthn: Arc::new(webauthn),
+        }
     }
 
     /// Register a new user.
@@ -657,6 +704,406 @@ where
     /// - Idle-timed-out (no activity for idle_timeout duration)
     pub async fn cleanup_stale_sessions(&self) -> Result<u64> {
         self.repo.delete_stale_sessions(self.config.idle_timeout).await
+    }
+
+    // ========================================================================
+    // Passkey/WebAuthn Methods (RECOMMENDED authentication)
+    // ========================================================================
+
+    /// Start passkey registration for an existing user.
+    ///
+    /// Requires a valid session. Returns WebAuthn challenge options for the client
+    /// to pass to the authenticator (e.g., browser's `navigator.credentials.create()`).
+    pub async fn start_passkey_registration(
+        &self,
+        session_id: SessionId,
+        request: StartPasskeyRegistrationRequest,
+    ) -> Result<StartPasskeyRegistrationResponse> {
+        // Validate session
+        let (user_info, _session) = self.validate_session(session_id).await?;
+
+        // Check passkey limit
+        let passkey_count = self.repo.count_active_passkeys(user_info.id).await?;
+        if passkey_count >= self.config.max_passkeys_per_user {
+            return Err(AuthError::MaxDevicesReached(self.config.max_passkeys_per_user));
+        }
+
+        // Get existing passkeys to exclude from registration
+        let existing_passkeys = self.repo.get_passkeys_for_user(user_info.id).await?;
+        let excluded_credentials: Vec<_> = existing_passkeys
+            .iter()
+            .filter(|p| p.is_active)
+            .map(|p| p.passkey.cred_id().clone())
+            .collect();
+
+        // Generate WebAuthn registration challenge
+        let (ccr, passkey_registration) = self
+            .webauthn
+            .start_passkey_registration(
+                Uuid::from(user_info.id.0),
+                &user_info.email,
+                &user_info.email, // Display name same as email
+                Some(excluded_credentials),
+            )
+            .map_err(|e| AuthError::WebAuthn(e.to_string()))?;
+
+        // Store the challenge state (will be consumed during completion)
+        self.repo
+            .store_registration_challenge(user_info.id, passkey_registration)
+            .await?;
+
+        // Note: we store passkey_name in the challenge response - client sends it back
+        let _ = request.passkey_name; // Used during completion
+
+        Ok(StartPasskeyRegistrationResponse { options: ccr })
+    }
+
+    /// Complete passkey registration.
+    ///
+    /// Validates the credential from the authenticator and stores the passkey.
+    pub async fn complete_passkey_registration(
+        &self,
+        session_id: SessionId,
+        request: CompletePasskeyRegistrationRequest,
+    ) -> Result<PasskeyInfo> {
+        // Validate session
+        let (user_info, _session) = self.validate_session(session_id).await?;
+
+        // Retrieve the stored challenge state
+        let passkey_registration = self
+            .repo
+            .take_registration_challenge(user_info.id)
+            .await?
+            .ok_or(AuthError::PasskeyChallengeExpired)?;
+
+        // Complete WebAuthn registration
+        let passkey = self
+            .webauthn
+            .finish_passkey_registration(&request.credential, &passkey_registration)
+            .map_err(|e| AuthError::WebAuthn(e.to_string()))?;
+
+        // Store the passkey credential
+        let credential = PasskeyCredential::new(user_info.id, request.passkey_name, passkey);
+        let passkey_info = PasskeyInfo::from(&credential);
+        self.repo.create_passkey(&credential).await?;
+
+        Ok(passkey_info)
+    }
+
+    /// Start passkey authentication.
+    ///
+    /// Returns WebAuthn challenge options for the client to pass to the authenticator.
+    /// Unlike password login, passkey login starts before we know who the user is
+    /// (discoverable credentials) or after the user provides their email.
+    pub async fn start_passkey_login(&self, email: &str) -> Result<StartPasskeyLoginResponse> {
+        let email_lower = email.to_lowercase();
+
+        // Find user - return generic error to prevent enumeration
+        let user = self
+            .repo
+            .get_user_by_email(&email_lower)
+            .await?
+            .ok_or(AuthError::InvalidCredentials)?;
+
+        // Get user's passkeys
+        let passkeys = self.repo.get_passkeys_for_user(user.id).await?;
+        let active_passkeys: Vec<Passkey> = passkeys
+            .iter()
+            .filter(|p| p.is_active)
+            .map(|p| p.passkey.clone())
+            .collect();
+
+        if active_passkeys.is_empty() {
+            // User has no passkeys - return same error as invalid credentials
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        // Generate WebAuthn authentication challenge
+        let (rcr, passkey_authentication) = self
+            .webauthn
+            .start_passkey_authentication(&active_passkeys)
+            .map_err(|e| AuthError::WebAuthn(e.to_string()))?;
+
+        // Store the challenge state
+        self.repo
+            .store_authentication_challenge(user.id, passkey_authentication)
+            .await?;
+
+        Ok(StartPasskeyLoginResponse { options: rcr })
+    }
+
+    /// Complete passkey authentication.
+    ///
+    /// Validates the credential from the authenticator and creates a session.
+    pub async fn complete_passkey_login(
+        &self,
+        request: CompletePasskeyLoginRequest,
+    ) -> Result<LoginResponse> {
+        let email_lower = request.email.to_lowercase();
+
+        // Find user
+        let user = self
+            .repo
+            .get_user_by_email(&email_lower)
+            .await?
+            .ok_or(AuthError::InvalidCredentials)?;
+
+        // Check if account is locked
+        if user.is_locked() {
+            return Err(AuthError::AccountLocked);
+        }
+
+        // Retrieve the stored challenge state
+        let passkey_authentication = self
+            .repo
+            .take_authentication_challenge(user.id)
+            .await?
+            .ok_or(AuthError::PasskeyChallengeExpired)?;
+
+        // Get user's passkeys for verification
+        let passkeys = self.repo.get_passkeys_for_user(user.id).await?;
+        let mut active_passkeys: Vec<_> = passkeys.into_iter().filter(|p| p.is_active).collect();
+
+        // Complete WebAuthn authentication
+        let auth_result = self
+            .webauthn
+            .finish_passkey_authentication(&request.credential, &passkey_authentication)
+            .map_err(|_| {
+                // WebAuthn verification failed - this could be an attack
+                // Don't increment failed logins for now (passkey failures are different from password guessing)
+                AuthError::PasskeyVerificationFailed
+            })?;
+
+        // Update the passkey counter and last_used_at
+        if let Some(cred) = active_passkeys
+            .iter_mut()
+            .find(|p| p.passkey.cred_id() == auth_result.cred_id())
+        {
+            cred.passkey.update_credential(&auth_result);
+            cred.last_used_at = Some(Utc::now());
+            self.repo.update_passkey(cred).await?;
+        }
+
+        // Reset failed login attempts on successful passkey auth
+        self.repo.reset_failed_logins(user.id).await?;
+
+        // Find or create device
+        let devices = self.repo.get_devices_for_user(user.id).await?;
+        let device = devices
+            .iter()
+            .find(|d| d.name == request.device_name && d.is_active);
+
+        let device_id = if let Some(existing) = device {
+            let mut updated = existing.clone();
+            updated.last_used_at = Some(Utc::now());
+            self.repo.update_device(&updated).await?;
+            existing.id
+        } else {
+            // Check device limit
+            let active_count = self.repo.count_active_devices(user.id).await?;
+            if active_count >= self.config.max_devices_per_user {
+                return Err(AuthError::MaxDevicesReached(self.config.max_devices_per_user));
+            }
+
+            // Create new device
+            let new_device = Device::new(
+                user.id,
+                request.device_name.clone(),
+                request.device_type,
+                user.encrypted_symmetric_key.clone(),
+                user.kdf_params.clone(),
+            );
+            let id = new_device.id;
+            self.repo.create_device(&new_device).await?;
+            id
+        };
+
+        // Update last login
+        let mut updated_user = user.clone();
+        updated_user.last_login_at = Some(Utc::now());
+        self.repo.update_user(&updated_user).await?;
+
+        // Create session
+        let expires_at = Utc::now() + self.config.session_duration;
+        let session = Session::with_expiration(user.id, device_id, expires_at);
+        let session_id = session.id;
+        self.repo.create_session(&session).await?;
+
+        Ok(LoginResponse {
+            session_id,
+            encrypted_symmetric_key: user.encrypted_symmetric_key,
+            kdf_params: user.kdf_params,
+            email: user.email,
+            expires_at,
+        })
+    }
+
+    /// Get all passkeys for the current user.
+    ///
+    /// Requires a valid session. Returns sanitized PasskeyInfo (without actual key material).
+    pub async fn get_passkeys(&self, session_id: SessionId) -> Result<Vec<PasskeyInfo>> {
+        let (user_info, _session) = self.validate_session(session_id).await?;
+
+        let passkeys = self.repo.get_passkeys_for_user(user_info.id).await?;
+
+        Ok(passkeys
+            .iter()
+            .filter(|p| p.is_active)
+            .map(PasskeyInfo::from)
+            .collect())
+    }
+
+    /// Revoke a passkey.
+    ///
+    /// Requires a valid session for authentication.
+    pub async fn revoke_passkey(&self, session_id: SessionId, passkey_id: PasskeyId) -> Result<()> {
+        let (user_info, _session) = self.validate_session(session_id).await?;
+
+        // Verify the passkey belongs to this user
+        let passkey = self
+            .repo
+            .get_passkey(passkey_id)
+            .await?
+            .ok_or(AuthError::PasskeyNotFound(passkey_id.to_string()))?;
+
+        if passkey.user_id != user_info.id {
+            return Err(AuthError::PasskeyNotFound(passkey_id.to_string()));
+        }
+
+        // Deactivate the passkey
+        self.repo.deactivate_passkey(passkey_id).await
+    }
+
+    /// Register a new user with passkey (RECOMMENDED registration flow).
+    ///
+    /// This is a two-step process:
+    /// 1. Client calls start_new_user_passkey_registration to get challenge
+    /// 2. Client calls complete_new_user_passkey_registration with credential
+    ///
+    /// The client must generate the symmetric key and encrypt it appropriately.
+    /// Since passkeys don't directly provide a decryption key, the client should:
+    /// - Use PRF extension if available to derive a key
+    /// - Or use a hybrid approach with recovery mnemonic as primary key source
+    pub async fn start_new_user_passkey_registration(
+        &self,
+        email: &str,
+    ) -> Result<StartPasskeyRegistrationResponse> {
+        // Validate email
+        validate_email(email)?;
+        let email_lower = email.to_lowercase();
+
+        // Check if user already exists
+        if self.repo.get_user_by_email(&email_lower).await?.is_some() {
+            return Err(AuthError::UserExists(email_lower));
+        }
+
+        // Generate a temporary user ID for the registration
+        let temp_user_id = UserId::new();
+
+        // Generate WebAuthn registration challenge
+        let (ccr, passkey_registration) = self
+            .webauthn
+            .start_passkey_registration(
+                Uuid::from(temp_user_id.0),
+                &email_lower,
+                &email_lower,
+                None, // No excluded credentials for new user
+            )
+            .map_err(|e| AuthError::WebAuthn(e.to_string()))?;
+
+        // Store the challenge state (keyed by temp user ID)
+        self.repo
+            .store_registration_challenge(temp_user_id, passkey_registration)
+            .await?;
+
+        Ok(StartPasskeyRegistrationResponse { options: ccr })
+    }
+
+    /// Complete new user registration with passkey.
+    ///
+    /// Creates the user account and passkey credential.
+    pub async fn complete_new_user_passkey_registration(
+        &self,
+        request: PasskeyRegisterRequest,
+        temp_user_id: UserId,
+        credential: RegisterPublicKeyCredential,
+    ) -> Result<LoginResponse> {
+        // Validate email
+        validate_email(&request.email)?;
+        let email_lower = request.email.to_lowercase();
+
+        // Check if user already exists (race condition check)
+        if self.repo.get_user_by_email(&email_lower).await?.is_some() {
+            return Err(AuthError::UserExists(email_lower));
+        }
+
+        // Validate recovery setup
+        if request.encrypted_recovery_key.is_some() != request.recovery_verification_hash.is_some() {
+            return Err(AuthError::InvalidRecoverySetup);
+        }
+
+        // Retrieve the stored challenge state
+        let passkey_registration = self
+            .repo
+            .take_registration_challenge(temp_user_id)
+            .await?
+            .ok_or(AuthError::PasskeyChallengeExpired)?;
+
+        // Complete WebAuthn registration
+        let passkey = self
+            .webauthn
+            .finish_passkey_registration(&credential, &passkey_registration)
+            .map_err(|e| AuthError::WebAuthn(e.to_string()))?;
+
+        // Create user (passkey-only users have no master_password_hash)
+        let mut user = User::new(
+            email_lower.clone(),
+            String::new(), // No password for passkey-only users
+            request.kdf_params.clone(),
+            request.encrypted_symmetric_key.clone(),
+        );
+        // Use the temp_user_id so it matches the passkey's user handle
+        user.id = temp_user_id;
+
+        // Set up recovery if provided
+        if let (Some(encrypted_key), Some(verification_hash)) =
+            (request.encrypted_recovery_key.clone(), request.recovery_verification_hash.clone())
+        {
+            user.encrypted_recovery_key = Some(encrypted_key);
+            user.recovery_verification_hash = Some(verification_hash);
+            user.recovery_enabled = true;
+        }
+
+        self.repo.create_user(&user).await?;
+
+        // Store the passkey credential
+        let passkey_cred = PasskeyCredential::new(user.id, request.passkey_name, passkey);
+        self.repo.create_passkey(&passkey_cred).await?;
+
+        // Create first device
+        let device = Device::new(
+            user.id,
+            request.device_name.clone(),
+            request.device_type,
+            request.encrypted_symmetric_key.clone(),
+            request.kdf_params.clone(),
+        );
+        let device_id = device.id;
+        self.repo.create_device(&device).await?;
+
+        // Create session
+        let expires_at = Utc::now() + self.config.session_duration;
+        let session = Session::with_expiration(user.id, device_id, expires_at);
+        let session_id = session.id;
+        self.repo.create_session(&session).await?;
+
+        Ok(LoginResponse {
+            session_id,
+            encrypted_symmetric_key: request.encrypted_symmetric_key,
+            kdf_params: request.kdf_params,
+            email: email_lower,
+            expires_at,
+        })
     }
 }
 
@@ -1340,5 +1787,114 @@ mod tests {
 
         let result = service.register(request).await;
         assert!(matches!(result, Err(AuthError::InvalidRecoverySetup)));
+    }
+
+    // ========================================================================
+    // Passkey Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_get_passkeys_empty_for_new_user() {
+        let service = create_service();
+        let request = register_request("test@example.com");
+        let response = service.register(request).await.unwrap();
+
+        // New user should have no passkeys
+        let passkeys = service.get_passkeys(response.session_id).await.unwrap();
+        assert!(passkeys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_passkeys_requires_valid_session() {
+        let service = create_service();
+
+        let result = service.get_passkeys(SessionId::new()).await;
+        assert!(matches!(result, Err(AuthError::SessionInvalid)));
+    }
+
+    #[tokio::test]
+    async fn test_start_passkey_login_no_passkeys() {
+        let service = create_service();
+
+        // Register user with password (no passkeys)
+        let request = register_request("test@example.com");
+        service.register(request).await.unwrap();
+
+        // Try passkey login - should fail because user has no passkeys
+        let result = service.start_passkey_login("test@example.com").await;
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    }
+
+    #[tokio::test]
+    async fn test_start_passkey_login_user_not_found() {
+        let service = create_service();
+
+        // Try passkey login for non-existent user
+        let result = service.start_passkey_login("nonexistent@example.com").await;
+        // Should return InvalidCredentials (not UserNotFound) to prevent enumeration
+        assert!(matches!(result, Err(AuthError::InvalidCredentials)));
+    }
+
+    #[tokio::test]
+    async fn test_revoke_passkey_not_found() {
+        let service = create_service();
+        let request = register_request("test@example.com");
+        let response = service.register(request).await.unwrap();
+
+        // Try to revoke a non-existent passkey
+        let result = service
+            .revoke_passkey(response.session_id, PasskeyId::new())
+            .await;
+        assert!(matches!(result, Err(AuthError::PasskeyNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_revoke_passkey_requires_valid_session() {
+        let service = create_service();
+
+        let result = service.revoke_passkey(SessionId::new(), PasskeyId::new()).await;
+        assert!(matches!(result, Err(AuthError::SessionInvalid)));
+    }
+
+    #[tokio::test]
+    async fn test_start_passkey_registration_requires_valid_session() {
+        let service = create_service();
+
+        let request = StartPasskeyRegistrationRequest {
+            passkey_name: "Test Passkey".to_string(),
+        };
+
+        let result = service
+            .start_passkey_registration(SessionId::new(), request)
+            .await;
+        assert!(matches!(result, Err(AuthError::SessionInvalid)));
+    }
+
+    // Note: Testing complete_passkey_registration requires real WebAuthn credentials
+    // which cannot be mocked easily. Integration tests should be used for full flow testing.
+
+    #[tokio::test]
+    async fn test_start_new_user_passkey_registration_duplicate_email() {
+        let service = create_service();
+
+        // Register user with password first
+        let request = register_request("test@example.com");
+        service.register(request).await.unwrap();
+
+        // Try to start passkey registration for same email
+        let result = service
+            .start_new_user_passkey_registration("test@example.com")
+            .await;
+        assert!(matches!(result, Err(AuthError::UserExists(_))));
+    }
+
+    #[tokio::test]
+    async fn test_start_new_user_passkey_registration_invalid_email() {
+        let service = create_service();
+
+        let result = service
+            .start_new_user_passkey_registration("invalid-email")
+            .await;
+        assert!(matches!(result, Err(AuthError::InvalidEmail(_))));
     }
 }

@@ -51,8 +51,19 @@ pub mod service;
 // Re-export main types
 pub use error::{AuthError, Result};
 pub use models::{
+    // User/Device types
     Device, DeviceId, DeviceInfo, DeviceType, LoginRequest, LoginResponse, RecoveryRequest,
     RegisterRequest, Session, SessionId, User, UserId, UserInfo,
+    // Passkey types
+    CompletePasskeyLoginRequest, CompletePasskeyRegistrationRequest, PasskeyCredential, PasskeyId,
+    PasskeyInfo, PasskeyRegisterRequest, StartPasskeyLoginResponse,
+    StartPasskeyRegistrationRequest, StartPasskeyRegistrationResponse,
+    // WebAuthn re-exports (for client use)
+    CreationChallengeResponse, Passkey, PublicKeyCredential, RegisterPublicKeyCredential,
+    RequestChallengeResponse,
 };
-pub use repository::{AuthRepository, DeviceRepository, SessionRepository, UserRepository};
+pub use repository::{
+    AuthRepository, ChallengeRepository, DeviceRepository, PasskeyRepository, SessionRepository,
+    UserRepository,
+};
 pub use service::{AuthConfig, AuthService};

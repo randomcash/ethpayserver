@@ -27,6 +27,22 @@ pub enum AuthError {
     #[error("Device already exists: {0}")]
     DeviceExists(String),
 
+    /// Passkey not found.
+    #[error("Passkey not found: {0}")]
+    PasskeyNotFound(String),
+
+    /// Passkey verification failed.
+    #[error("Passkey verification failed")]
+    PasskeyVerificationFailed,
+
+    /// Passkey challenge expired or not found.
+    #[error("Passkey challenge expired or not found")]
+    PasskeyChallengeExpired,
+
+    /// WebAuthn error.
+    #[error("WebAuthn error: {0}")]
+    WebAuthn(String),
+
     /// Cannot revoke current device.
     #[error("Cannot revoke the device you are currently using")]
     CannotRevokeCurrentDevice,

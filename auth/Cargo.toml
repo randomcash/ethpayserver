@@ -18,6 +18,11 @@ tokio = { version = "1.40", features = ["sync"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# WebAuthn/Passkey
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+url = "2.5"
+base64 = "0.22"
+
 # Utilities
 thiserror = "2.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }

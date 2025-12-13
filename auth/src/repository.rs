@@ -4,9 +4,10 @@
 //! the database implementation.
 
 use async_trait::async_trait;
+use webauthn_rs::prelude::{PasskeyAuthentication, PasskeyRegistration};
 
 use crate::error::Result;
-use crate::models::{Device, DeviceId, Session, SessionId, User, UserId};
+use crate::models::{Device, DeviceId, PasskeyCredential, PasskeyId, Session, SessionId, User, UserId};
 
 /// Repository for user data persistence.
 #[async_trait]
@@ -103,12 +104,80 @@ pub trait SessionRepository: Send + Sync {
     async fn get_sessions_for_user(&self, user_id: UserId) -> Result<Vec<Session>>;
 }
 
-/// Combined repository trait for convenience.
+/// Repository for passkey credential persistence.
 #[async_trait]
-pub trait AuthRepository: UserRepository + DeviceRepository + SessionRepository {}
+pub trait PasskeyRepository: Send + Sync {
+    /// Store a new passkey credential.
+    async fn create_passkey(&self, credential: &PasskeyCredential) -> Result<()>;
 
-// Blanket implementation for any type implementing all three
-impl<T> AuthRepository for T where T: UserRepository + DeviceRepository + SessionRepository {}
+    /// Get a passkey by ID.
+    async fn get_passkey(&self, id: PasskeyId) -> Result<Option<PasskeyCredential>>;
+
+    /// Get all passkeys for a user.
+    async fn get_passkeys_for_user(&self, user_id: UserId) -> Result<Vec<PasskeyCredential>>;
+
+    /// Update a passkey (e.g., counter, last_used_at).
+    async fn update_passkey(&self, credential: &PasskeyCredential) -> Result<()>;
+
+    /// Deactivate a passkey (soft delete).
+    async fn deactivate_passkey(&self, id: PasskeyId) -> Result<()>;
+
+    /// Delete a passkey permanently.
+    async fn delete_passkey(&self, id: PasskeyId) -> Result<()>;
+
+    /// Delete all passkeys for a user.
+    async fn delete_all_passkeys_for_user(&self, user_id: UserId) -> Result<()>;
+
+    /// Count active passkeys for a user.
+    async fn count_active_passkeys(&self, user_id: UserId) -> Result<u32>;
+}
+
+/// Repository for WebAuthn challenge state persistence.
+///
+/// Challenges are ephemeral and should expire after a short time (e.g., 5 minutes).
+/// The implementor should handle cleanup of expired challenges.
+#[async_trait]
+pub trait ChallengeRepository: Send + Sync {
+    /// Store a passkey registration challenge state.
+    /// The key should be unique per user+session, e.g., user_id + timestamp.
+    async fn store_registration_challenge(
+        &self,
+        user_id: UserId,
+        state: PasskeyRegistration,
+    ) -> Result<()>;
+
+    /// Retrieve and consume a passkey registration challenge.
+    /// Returns None if expired or not found.
+    async fn take_registration_challenge(&self, user_id: UserId) -> Result<Option<PasskeyRegistration>>;
+
+    /// Store a passkey authentication challenge state.
+    async fn store_authentication_challenge(
+        &self,
+        user_id: UserId,
+        state: PasskeyAuthentication,
+    ) -> Result<()>;
+
+    /// Retrieve and consume a passkey authentication challenge.
+    /// Returns None if expired or not found.
+    async fn take_authentication_challenge(&self, user_id: UserId) -> Result<Option<PasskeyAuthentication>>;
+
+    /// Cleanup expired challenges.
+    async fn cleanup_expired_challenges(&self) -> Result<u64>;
+}
+
+/// Combined repository trait for convenience.
+/// Includes all auth-related repositories.
+#[async_trait]
+pub trait AuthRepository:
+    UserRepository + DeviceRepository + SessionRepository + PasskeyRepository + ChallengeRepository
+{
+}
+
+// Blanket implementation for any type implementing all traits
+impl<T> AuthRepository for T where
+    T: UserRepository + DeviceRepository + SessionRepository + PasskeyRepository + ChallengeRepository
+{
+}
 
 #[cfg(test)]
 pub mod inmemory {
@@ -130,6 +199,9 @@ pub mod inmemory {
         users_by_email: RwLock<HashMap<String, UserId>>,
         devices: RwLock<HashMap<DeviceId, Device>>,
         sessions: RwLock<HashMap<SessionId, Session>>,
+        passkeys: RwLock<HashMap<PasskeyId, PasskeyCredential>>,
+        registration_challenges: RwLock<HashMap<UserId, PasskeyRegistration>>,
+        authentication_challenges: RwLock<HashMap<UserId, PasskeyAuthentication>>,
     }
 
     impl InMemoryRepository {
@@ -378,6 +450,126 @@ pub mod inmemory {
                 .filter(|s| s.user_id == user_id)
                 .cloned()
                 .collect())
+        }
+    }
+
+    #[async_trait]
+    impl PasskeyRepository for InMemoryRepository {
+        async fn create_passkey(&self, credential: &PasskeyCredential) -> Result<()> {
+            let mut passkeys = self.passkeys.write().unwrap_or_else(|e| e.into_inner());
+            passkeys.insert(credential.id, credential.clone());
+            Ok(())
+        }
+
+        async fn get_passkey(&self, id: PasskeyId) -> Result<Option<PasskeyCredential>> {
+            let passkeys = self.passkeys.read().unwrap_or_else(|e| e.into_inner());
+            Ok(passkeys.get(&id).cloned())
+        }
+
+        async fn get_passkeys_for_user(&self, user_id: UserId) -> Result<Vec<PasskeyCredential>> {
+            let passkeys = self.passkeys.read().unwrap_or_else(|e| e.into_inner());
+            Ok(passkeys
+                .values()
+                .filter(|p| p.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn update_passkey(&self, credential: &PasskeyCredential) -> Result<()> {
+            let mut passkeys = self.passkeys.write().unwrap_or_else(|e| e.into_inner());
+            if passkeys.contains_key(&credential.id) {
+                passkeys.insert(credential.id, credential.clone());
+                Ok(())
+            } else {
+                Err(AuthError::PasskeyNotFound(credential.id.to_string()))
+            }
+        }
+
+        async fn deactivate_passkey(&self, id: PasskeyId) -> Result<()> {
+            let mut passkeys = self.passkeys.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(passkey) = passkeys.get_mut(&id) {
+                passkey.is_active = false;
+                Ok(())
+            } else {
+                Err(AuthError::PasskeyNotFound(id.to_string()))
+            }
+        }
+
+        async fn delete_passkey(&self, id: PasskeyId) -> Result<()> {
+            let mut passkeys = self.passkeys.write().unwrap_or_else(|e| e.into_inner());
+            passkeys.remove(&id);
+            Ok(())
+        }
+
+        async fn delete_all_passkeys_for_user(&self, user_id: UserId) -> Result<()> {
+            let mut passkeys = self.passkeys.write().unwrap_or_else(|e| e.into_inner());
+            passkeys.retain(|_, p| p.user_id != user_id);
+            Ok(())
+        }
+
+        async fn count_active_passkeys(&self, user_id: UserId) -> Result<u32> {
+            let passkeys = self.passkeys.read().unwrap_or_else(|e| e.into_inner());
+            Ok(passkeys
+                .values()
+                .filter(|p| p.user_id == user_id && p.is_active)
+                .count() as u32)
+        }
+    }
+
+    #[async_trait]
+    impl ChallengeRepository for InMemoryRepository {
+        async fn store_registration_challenge(
+            &self,
+            user_id: UserId,
+            state: PasskeyRegistration,
+        ) -> Result<()> {
+            let mut challenges = self
+                .registration_challenges
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            challenges.insert(user_id, state);
+            Ok(())
+        }
+
+        async fn take_registration_challenge(
+            &self,
+            user_id: UserId,
+        ) -> Result<Option<PasskeyRegistration>> {
+            let mut challenges = self
+                .registration_challenges
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            Ok(challenges.remove(&user_id))
+        }
+
+        async fn store_authentication_challenge(
+            &self,
+            user_id: UserId,
+            state: PasskeyAuthentication,
+        ) -> Result<()> {
+            let mut challenges = self
+                .authentication_challenges
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            challenges.insert(user_id, state);
+            Ok(())
+        }
+
+        async fn take_authentication_challenge(
+            &self,
+            user_id: UserId,
+        ) -> Result<Option<PasskeyAuthentication>> {
+            let mut challenges = self
+                .authentication_challenges
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            Ok(challenges.remove(&user_id))
+        }
+
+        async fn cleanup_expired_challenges(&self) -> Result<u64> {
+            // In-memory implementation doesn't track expiration times
+            // Real implementations should track timestamps and clean up old challenges
+            Ok(0)
         }
     }
 }
