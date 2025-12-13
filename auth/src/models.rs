@@ -78,40 +78,32 @@ impl std::fmt::Display for SessionId {
 
 /// User account with encrypted key material.
 ///
-/// The server stores:
-/// - Master password hash (for authentication, NOT the password)
-/// - Encrypted symmetric key (encrypted with user's stretched key)
+/// Authentication is passkey-only. The server stores:
+/// - Encrypted symmetric key (encrypted with mnemonic-derived key)
 /// - KDF parameters (so client can derive the same keys)
+/// - Recovery verification hash (to verify mnemonic during recovery)
+///
+/// Passkeys are stored separately in PasskeyCredential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     /// Unique user identifier.
     pub id: UserId,
 
-    /// User's email address (used as salt component).
+    /// User's email address (used as salt component for key derivation).
     pub email: String,
 
-    /// Master password hash (base64, for server-side verification).
-    /// This is NOT the password - it's derived via PBKDF2 from the master key.
-    pub master_password_hash: String,
-
-    /// KDF parameters used to derive the master key.
+    /// KDF parameters used to derive keys from the mnemonic.
     pub kdf_params: KdfParams,
 
-    /// User's symmetric key, encrypted with their stretched key.
-    /// Only the user can decrypt this.
+    /// User's symmetric key, encrypted with mnemonic-derived key.
+    /// Only the user (with the mnemonic) can decrypt this.
     pub encrypted_symmetric_key: EncryptedBlob,
-
-    /// Optional encrypted recovery key blob.
-    /// If set, user can recover account with BIP39 mnemonic.
-    pub encrypted_recovery_key: Option<EncryptedBlob>,
 
     /// Hash of the recovery verification key (derived from mnemonic).
     /// Used to verify the user knows the mnemonic during recovery.
-    /// This is SHA-256(Argon2id(mnemonic, email)).
-    pub recovery_verification_hash: Option<String>,
-
-    /// Whether recovery is enabled for this account.
-    pub recovery_enabled: bool,
+    /// This is base64(SHA-256(Argon2id(mnemonic, email))).
+    /// Required for account recovery.
+    pub recovery_verification_hash: String,
 
     /// Account creation timestamp.
     pub created_at: DateTime<Utc>,
@@ -119,7 +111,7 @@ pub struct User {
     /// Last successful login timestamp.
     pub last_login_at: Option<DateTime<Utc>>,
 
-    /// Number of failed login attempts (for rate limiting).
+    /// Number of failed login/recovery attempts (for rate limiting).
     pub failed_login_attempts: u32,
 
     /// Account locked until this time (if locked).
@@ -128,21 +120,20 @@ pub struct User {
 
 impl User {
     /// Create a new user with the given parameters.
+    ///
+    /// The recovery_verification_hash is required as it's needed for account recovery.
     pub fn new(
         email: String,
-        master_password_hash: String,
         kdf_params: KdfParams,
         encrypted_symmetric_key: EncryptedBlob,
+        recovery_verification_hash: String,
     ) -> Self {
         Self {
             id: UserId::new(),
             email,
-            master_password_hash,
             kdf_params,
             encrypted_symmetric_key,
-            encrypted_recovery_key: None,
-            recovery_verification_hash: None,
-            recovery_enabled: false,
+            recovery_verification_hash,
             created_at: Utc::now(),
             last_login_at: None,
             failed_login_attempts: 0,
@@ -159,8 +150,8 @@ impl User {
 
 /// A registered device that can access the user's account.
 ///
-/// Each device stores its own copy of the user's symmetric key,
-/// encrypted with device-specific keys derived from the user's password.
+/// Each device stores the user's encrypted symmetric key for offline access.
+/// The key is encrypted with a key derived from the user's BIP39 mnemonic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Device {
     /// Unique device identifier.
@@ -175,11 +166,11 @@ pub struct Device {
     /// Device type for UI display.
     pub device_type: DeviceType,
 
-    /// User's symmetric key encrypted for this specific device.
-    /// Encrypted with a key derived from user's password + device-specific salt.
+    /// User's symmetric key encrypted for this device.
+    /// Encrypted with a key derived from the user's mnemonic.
     pub encrypted_symmetric_key: EncryptedBlob,
 
-    /// Device-specific KDF parameters (may differ from user's main params).
+    /// KDF parameters used to derive the encryption key.
     pub kdf_params: KdfParams,
 
     /// When this device was registered.
@@ -312,7 +303,7 @@ impl Session {
 }
 
 /// Sanitized user information for API responses.
-/// Does NOT include sensitive fields like master_password_hash or recovery_verification_hash.
+/// Does NOT include sensitive fields like recovery_verification_hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
     /// Unique user identifier.
@@ -320,9 +311,6 @@ pub struct UserInfo {
 
     /// User's email address.
     pub email: String,
-
-    /// Whether recovery is enabled for this account.
-    pub recovery_enabled: bool,
 
     /// Account creation timestamp.
     pub created_at: DateTime<Utc>,
@@ -336,7 +324,6 @@ impl From<&User> for UserInfo {
         Self {
             id: user.id,
             email: user.email.clone(),
-            recovery_enabled: user.recovery_enabled,
             created_at: user.created_at,
             last_login_at: user.last_login_at,
         }
@@ -379,87 +366,42 @@ impl From<&Device> for DeviceInfo {
     }
 }
 
-/// Data returned to client after successful login.
+/// Data returned to client after successful login or registration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginResponse {
     /// Session token for subsequent requests.
     pub session_id: SessionId,
 
-    /// User's encrypted symmetric key (client decrypts with stretched key).
+    /// Device ID for this device.
+    /// Client should store this locally and send it in future login requests
+    /// to identify the same device.
+    pub device_id: DeviceId,
+
+    /// User's encrypted symmetric key.
+    /// Client decrypts with mnemonic-derived key.
     pub encrypted_symmetric_key: EncryptedBlob,
 
-    /// KDF parameters for deriving the stretched key.
+    /// KDF parameters for deriving the decryption key from mnemonic.
     pub kdf_params: KdfParams,
 
-    /// User's email (for client-side salt).
+    /// User's email (used as salt for key derivation).
     pub email: String,
 
     /// Session expiration time.
     pub expires_at: DateTime<Utc>,
 }
 
-/// Data for registering a new user.
+// Note: Password-based RegisterRequest and LoginRequest have been removed.
+// Use passkey authentication instead:
+// - New users: start_new_user_passkey_registration + complete_new_user_passkey_registration
+// - Existing users: start_passkey_login + complete_passkey_login
+
+/// Request to start account recovery using BIP39 mnemonic.
 ///
-/// Implements ZeroizeOnDrop to clear sensitive password hash from memory.
+/// This is the first step of the recovery process. After verification,
+/// the server returns a passkey registration challenge.
 #[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-pub struct RegisterRequest {
-    /// User's email address.
-    pub email: String,
-
-    /// Master password hash (derived client-side).
-    /// SENSITIVE: Zeroized on drop.
-    pub master_password_hash: String,
-
-    /// KDF parameters used by the client.
-    #[zeroize(skip)]
-    pub kdf_params: KdfParams,
-
-    /// User's symmetric key, encrypted with stretched key.
-    #[zeroize(skip)]
-    pub encrypted_symmetric_key: EncryptedBlob,
-
-    /// Device name for the first device.
-    pub device_name: String,
-
-    /// Device type.
-    #[zeroize(skip)]
-    pub device_type: DeviceType,
-
-    /// Optional: encrypted recovery key if user wants BIP39 backup.
-    #[zeroize(skip)]
-    pub encrypted_recovery_key: Option<EncryptedBlob>,
-
-    /// Optional: hash of recovery verification key (required if encrypted_recovery_key is set).
-    /// Client derives this as: base64(SHA-256(Argon2id(mnemonic, email))).
-    /// SENSITIVE: Zeroized on drop.
-    pub recovery_verification_hash: Option<String>,
-}
-
-/// Data for logging in.
-///
-/// Implements ZeroizeOnDrop to clear sensitive password hash from memory.
-#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-pub struct LoginRequest {
-    /// User's email address.
-    pub email: String,
-
-    /// Master password hash (derived client-side).
-    /// SENSITIVE: Zeroized on drop.
-    pub master_password_hash: String,
-
-    /// Device name (for new device registration or identification).
-    pub device_name: String,
-
-    /// Device type.
-    #[zeroize(skip)]
-    pub device_type: DeviceType,
-}
-
-/// Data for account recovery using BIP39 mnemonic.
-///
-/// Implements ZeroizeOnDrop to clear sensitive hashes from memory.
-#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-pub struct RecoveryRequest {
+pub struct StartRecoveryRequest {
     /// User's email address.
     pub email: String,
 
@@ -468,27 +410,51 @@ pub struct RecoveryRequest {
     /// Must match the hash stored during registration.
     /// SENSITIVE: Zeroized on drop.
     pub recovery_verification_hash: String,
+}
 
-    /// New master password hash (after recovery).
-    /// SENSITIVE: Zeroized on drop.
-    pub new_master_password_hash: String,
+/// Request to complete account recovery.
+///
+/// After verifying the mnemonic and registering a new passkey,
+/// this completes the recovery process.
+///
+/// The `new_recovery_verification_hash` field is zeroized on drop for security.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteRecoveryRequest {
+    /// The passkey credential from the authenticator.
+    pub credential: RegisterPublicKeyCredential,
+
+    /// Human-readable name for the new passkey.
+    pub passkey_name: String,
 
     /// New KDF parameters.
-    #[zeroize(skip)]
     pub new_kdf_params: KdfParams,
 
-    /// New encrypted symmetric key (re-encrypted with new password).
-    #[zeroize(skip)]
+    /// New encrypted symmetric key (re-encrypted with recovery-derived key).
     pub new_encrypted_symmetric_key: EncryptedBlob,
 
-    /// Optional: new recovery verification hash if user wants to keep recovery enabled.
-    /// If not provided, recovery will be disabled after account recovery.
+    /// New recovery verification hash.
+    /// Required because the hash depends on KDF params.
+    /// Client derives: base64(SHA-256(Argon2id(mnemonic, email, new_kdf_params))).
     /// SENSITIVE: Zeroized on drop.
-    pub new_recovery_verification_hash: Option<String>,
+    pub new_recovery_verification_hash: String,
 
-    /// Optional: new encrypted recovery key if user wants to keep recovery enabled.
-    #[zeroize(skip)]
-    pub new_encrypted_recovery_key: Option<EncryptedBlob>,
+    /// Device name for the recovery device.
+    pub device_name: String,
+
+    /// Device type.
+    pub device_type: DeviceType,
+}
+
+impl Zeroize for CompleteRecoveryRequest {
+    fn zeroize(&mut self) {
+        self.new_recovery_verification_hash.zeroize();
+    }
+}
+
+impl Drop for CompleteRecoveryRequest {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 // ============================================================================
@@ -520,7 +486,7 @@ impl std::fmt::Display for PasskeyId {
 /// A stored passkey credential for WebAuthn authentication.
 ///
 /// This wraps the webauthn-rs `Passkey` type with additional metadata.
-/// Passkeys are the RECOMMENDED authentication method (over email+password).
+/// Passkeys are the primary authentication method for this system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PasskeyCredential {
     /// Unique identifier for this credential.
@@ -608,6 +574,71 @@ pub struct StartPasskeyRegistrationResponse {
     pub options: CreationChallengeResponse,
 }
 
+/// Response for starting NEW USER passkey registration.
+/// Includes the temporary user ID needed to complete registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartNewUserPasskeyRegistrationResponse {
+    /// WebAuthn credential creation options for the client.
+    pub options: CreationChallengeResponse,
+
+    /// Temporary user ID. Must be passed back to complete_new_user_passkey_registration.
+    /// This is the user ID that will be assigned to the new user.
+    pub user_id: UserId,
+
+    /// The email address (normalized to lowercase).
+    /// Must match the email in CompleteNewUserPasskeyRegistrationRequest.
+    pub email: String,
+}
+
+/// Request to complete NEW USER passkey registration.
+/// Combines the passkey credential with user account details.
+///
+/// The `recovery_verification_hash` field is zeroized on drop for security.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteNewUserPasskeyRegistrationRequest {
+    /// The temporary user ID from StartNewUserPasskeyRegistrationResponse.
+    pub user_id: UserId,
+
+    /// The credential response from the authenticator.
+    pub credential: RegisterPublicKeyCredential,
+
+    /// User's email address.
+    pub email: String,
+
+    /// KDF parameters used to derive keys from mnemonic.
+    pub kdf_params: KdfParams,
+
+    /// User's symmetric key, encrypted with mnemonic-derived key.
+    pub encrypted_symmetric_key: EncryptedBlob,
+
+    /// Hash of the recovery verification key (derived from mnemonic).
+    /// REQUIRED for account recovery.
+    /// Client derives: base64(SHA-256(Argon2id(mnemonic, email))).
+    /// SENSITIVE: Zeroized on drop.
+    pub recovery_verification_hash: String,
+
+    /// Device name for the first device.
+    pub device_name: String,
+
+    /// Device type (browser, mobile, etc.).
+    pub device_type: DeviceType,
+
+    /// Name for the passkey (e.g., "MacBook Pro Touch ID").
+    pub passkey_name: String,
+}
+
+impl Zeroize for CompleteNewUserPasskeyRegistrationRequest {
+    fn zeroize(&mut self) {
+        self.recovery_verification_hash.zeroize();
+    }
+}
+
+impl Drop for CompleteNewUserPasskeyRegistrationRequest {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 /// Request to complete passkey registration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletePasskeyRegistrationRequest {
@@ -635,41 +666,18 @@ pub struct CompletePasskeyLoginRequest {
     /// The credential response from the authenticator.
     pub credential: PublicKeyCredential,
 
-    /// Device name for the session.
+    /// Device ID from a previous login on this device.
+    /// If provided, the server will reuse the existing device record.
+    /// If None, a new device will be created.
+    /// Client should store the device_id from LoginResponse and send it here.
+    pub device_id: Option<DeviceId>,
+
+    /// Device name for the session (used when creating a new device).
     pub device_name: String,
 
-    /// Device type.
+    /// Device type (used when creating a new device).
     pub device_type: DeviceType,
 }
 
-/// Data for registering a new user with passkey (recommended flow).
-///
-/// Unlike password registration, this doesn't require a master password hash.
-/// The user's symmetric key is encrypted with a key derived from the passkey.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PasskeyRegisterRequest {
-    /// User's email address.
-    pub email: String,
-
-    /// KDF parameters used by the client.
-    pub kdf_params: KdfParams,
-
-    /// User's symmetric key, encrypted with a key derived from passkey material.
-    /// Note: The client must implement key derivation from passkey output.
-    pub encrypted_symmetric_key: EncryptedBlob,
-
-    /// Device name for the first device.
-    pub device_name: String,
-
-    /// Device type.
-    pub device_type: DeviceType,
-
-    /// Human-readable name for the passkey.
-    pub passkey_name: String,
-
-    /// Optional: encrypted recovery key if user wants BIP39 backup.
-    pub encrypted_recovery_key: Option<EncryptedBlob>,
-
-    /// Optional: hash of recovery verification key.
-    pub recovery_verification_hash: Option<String>,
-}
+// Note: PasskeyRegisterRequest has been replaced by CompleteNewUserPasskeyRegistrationRequest
+// which includes the user_id and credential from the WebAuthn registration flow.

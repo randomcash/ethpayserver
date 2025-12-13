@@ -61,7 +61,7 @@ pub trait DeviceRepository: Send + Sync {
     /// Delete a device permanently.
     async fn delete_device(&self, id: DeviceId) -> Result<()>;
 
-    /// Delete all devices for a user (used during password reset/recovery).
+    /// Delete all devices for a user (used during account recovery).
     async fn delete_all_devices_for_user(&self, user_id: UserId) -> Result<()>;
 
     /// Count active devices for a user.
@@ -138,17 +138,19 @@ pub trait PasskeyRepository: Send + Sync {
 /// The implementor should handle cleanup of expired challenges.
 #[async_trait]
 pub trait ChallengeRepository: Send + Sync {
-    /// Store a passkey registration challenge state.
-    /// The key should be unique per user+session, e.g., user_id + timestamp.
+    /// Store a passkey registration challenge state along with the email.
+    /// The email is stored to verify consistency between start and complete.
     async fn store_registration_challenge(
         &self,
         user_id: UserId,
+        email: &str,
         state: PasskeyRegistration,
     ) -> Result<()>;
 
     /// Retrieve and consume a passkey registration challenge.
     /// Returns None if expired or not found.
-    async fn take_registration_challenge(&self, user_id: UserId) -> Result<Option<PasskeyRegistration>>;
+    /// Returns (PasskeyRegistration, email) to verify email consistency.
+    async fn take_registration_challenge(&self, user_id: UserId) -> Result<Option<(PasskeyRegistration, String)>>;
 
     /// Store a passkey authentication challenge state.
     async fn store_authentication_challenge(
@@ -200,7 +202,8 @@ pub mod inmemory {
         devices: RwLock<HashMap<DeviceId, Device>>,
         sessions: RwLock<HashMap<SessionId, Session>>,
         passkeys: RwLock<HashMap<PasskeyId, PasskeyCredential>>,
-        registration_challenges: RwLock<HashMap<UserId, PasskeyRegistration>>,
+        /// Registration challenges stored with email for consistency verification.
+        registration_challenges: RwLock<HashMap<UserId, (PasskeyRegistration, String)>>,
         authentication_challenges: RwLock<HashMap<UserId, PasskeyAuthentication>>,
     }
 
@@ -521,20 +524,21 @@ pub mod inmemory {
         async fn store_registration_challenge(
             &self,
             user_id: UserId,
+            email: &str,
             state: PasskeyRegistration,
         ) -> Result<()> {
             let mut challenges = self
                 .registration_challenges
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            challenges.insert(user_id, state);
+            challenges.insert(user_id, (state, email.to_string()));
             Ok(())
         }
 
         async fn take_registration_challenge(
             &self,
             user_id: UserId,
-        ) -> Result<Option<PasskeyRegistration>> {
+        ) -> Result<Option<(PasskeyRegistration, String)>> {
             let mut challenges = self
                 .registration_challenges
                 .write()

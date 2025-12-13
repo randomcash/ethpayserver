@@ -13,7 +13,8 @@ pub enum AuthError {
     #[error("User not found: {0}")]
     UserNotFound(String),
 
-    /// Invalid credentials (password hash mismatch).
+    /// Invalid credentials (user not found or passkey verification failed).
+    /// Used as a generic error to prevent user enumeration.
     #[error("Invalid credentials")]
     InvalidCredentials,
 
@@ -62,8 +63,10 @@ pub enum AuthError {
     #[error("Recovery not available for this account")]
     RecoveryNotAvailable,
 
-    /// Invalid recovery setup (must provide both encrypted key and verification hash).
-    #[error("Invalid recovery setup: both encrypted_recovery_key and recovery_verification_hash are required")]
+    /// Invalid recovery setup.
+    /// Reserved for future use. Recovery is now always required during registration.
+    #[allow(dead_code)]
+    #[error("Invalid recovery setup")]
     InvalidRecoverySetup,
 
     /// Invalid email format.
@@ -91,6 +94,10 @@ pub enum AuthError {
     /// Maximum devices reached.
     #[error("Maximum devices reached ({0}). Please remove a device first.")]
     MaxDevicesReached(u32),
+
+    /// Maximum passkeys reached.
+    #[error("Maximum passkeys reached ({0}). Please remove a passkey first.")]
+    MaxPasskeysReached(u32),
 }
 
 /// Result type for auth operations.
