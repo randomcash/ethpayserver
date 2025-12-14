@@ -98,6 +98,38 @@ pub enum AuthError {
     /// Maximum passkeys reached.
     #[error("Maximum passkeys reached ({0}). Please remove a passkey first.")]
     MaxPasskeysReached(u32),
+
+    // =========================================================================
+    // Wallet Authentication Errors
+    // =========================================================================
+
+    /// Invalid wallet address format.
+    #[error("Invalid wallet address: {0}")]
+    InvalidWalletAddress(String),
+
+    /// Wallet not found.
+    #[error("Wallet not found: {0}")]
+    WalletNotFound(String),
+
+    /// Wallet already registered to a user.
+    #[error("Wallet already registered")]
+    WalletAlreadyRegistered,
+
+    /// Wallet signature verification failed.
+    #[error("Wallet signature verification failed")]
+    WalletSignatureVerificationFailed,
+
+    /// Wallet challenge expired or not found.
+    #[error("Wallet challenge expired or not found")]
+    WalletChallengeExpired,
+
+    /// Maximum wallets reached for this account.
+    #[error("Maximum wallets reached ({0}). Please remove a wallet first.")]
+    MaxWalletsReached(u32),
+
+    /// Cannot remove primary wallet (used as account identifier for wallet-only accounts).
+    #[error("Cannot remove primary wallet")]
+    CannotRemovePrimaryWallet,
 }
 
 /// Result type for auth operations.

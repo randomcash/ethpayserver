@@ -1,7 +1,8 @@
 //! User authentication and device management for PayServer.
 //!
-//! This crate provides passkey-only authentication with BIP39 mnemonic recovery:
+//! This crate provides multiple authentication methods with BIP39 mnemonic recovery:
 //! - **Passkeys** for phishing-resistant, passwordless authentication
+//! - **Ethereum Wallets** for Web3-native authentication (MetaMask, etc.)
 //! - **BIP39 mnemonic** for account recovery (required)
 //! - Server stores only encrypted blobs it cannot decrypt
 //!
@@ -10,7 +11,7 @@
 //! ```text
 //! Client                                    Server
 //! ──────                                    ──────
-//! BIP39 Mnemonic + Email
+//! BIP39 Mnemonic + Identifier (email or wallet)
 //!       │
 //!       ▼ Argon2id
 //! Recovery Key ──────────────────────────► recovery_verification_hash
@@ -19,13 +20,20 @@
 //! Encrypted Symmetric Key ───────────────► Stored (user can decrypt)
 //!
 //! Passkey ───────────────────────────────► Stored (for authentication)
+//! Wallet Signature ──────────────────────► Verified (EIP-191 personal_sign)
 //! ```
 //!
-//! # Authentication Flow
+//! # Authentication Flows
 //!
-//! 1. **Registration**: User creates account with passkey + mnemonic
+//! ## Email + Passkey (Traditional)
+//! 1. **Registration**: User creates account with email + passkey + mnemonic
 //! 2. **Login**: User authenticates with passkey (Touch ID, Face ID, etc.)
 //! 3. **Recovery**: If passkeys are lost, user can recover with mnemonic
+//!
+//! ## Wallet-Only (Web3)
+//! 1. **Registration**: User creates account with wallet signature + mnemonic
+//! 2. **Login**: User signs challenge message with wallet
+//! 3. **Recovery**: User recovers with mnemonic (salt is "wallet:{address}")
 //!
 //! # Usage
 //!
@@ -66,6 +74,12 @@ pub use models::{
     CompletePasskeyRegistrationRequest, PasskeyCredential, PasskeyId, PasskeyInfo,
     StartNewUserPasskeyRegistrationResponse, StartPasskeyLoginResponse,
     StartPasskeyRegistrationRequest, StartPasskeyRegistrationResponse,
+    // Wallet types (Ethereum wallet authentication)
+    CompleteNewUserWalletRegistrationRequest, CompleteWalletLoginRequest,
+    CompleteWalletRegistrationRequest, StartNewUserWalletRegistrationRequest,
+    StartNewUserWalletRegistrationResponse, StartWalletLoginRequest, StartWalletLoginResponse,
+    StartWalletRegistrationRequest, StartWalletRegistrationResponse, WalletChallenge,
+    WalletCredential, WalletCredentialId, WalletInfo,
     // Recovery types
     CompleteRecoveryRequest, StartRecoveryRequest,
     // WebAuthn re-exports (for client use)
@@ -74,6 +88,6 @@ pub use models::{
 };
 pub use repository::{
     AuthRepository, ChallengeRepository, DeviceRepository, PasskeyRepository, SessionRepository,
-    UserRepository,
+    UserRepository, WalletRepository,
 };
 pub use service::{AuthConfig, AuthService};

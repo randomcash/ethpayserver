@@ -31,5 +31,14 @@ zeroize = { version = "1.8", features = ["derive"] }
 subtle = "2.6"
 sha2 = "0.10"
 
+# Ethereum wallet authentication
+# TODO: Upgrade alloy-primitives when a version drops unmaintained transitive deps:
+#   - derivative (RUSTSEC-2024-0388) via ark-ff -> ruint
+#   - paste (RUSTSEC-2024-0436) via ark-ff -> ruint
+alloy-primitives = "0.8"  # Address type, checksumming (EIP-55)
+k256 = { version = "0.13", features = ["ecdsa"] }  # secp256k1 signature recovery
+sha3 = "0.10"  # Keccak256 for EIP-191 message hashing
+hex = "0.4"  # Hex encoding/decoding for signatures
+
 [dev-dependencies]
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros"] }

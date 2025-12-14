@@ -7,7 +7,10 @@ use async_trait::async_trait;
 use webauthn_rs::prelude::{PasskeyAuthentication, PasskeyRegistration};
 
 use crate::error::Result;
-use crate::models::{Device, DeviceId, PasskeyCredential, PasskeyId, Session, SessionId, User, UserId};
+use crate::models::{
+    Device, DeviceId, PasskeyCredential, PasskeyId, Session, SessionId, User, UserId,
+    WalletChallenge, WalletCredential, WalletCredentialId,
+};
 
 /// Repository for user data persistence.
 #[async_trait]
@@ -20,6 +23,10 @@ pub trait UserRepository: Send + Sync {
 
     /// Find a user by email.
     async fn get_user_by_email(&self, email: &str) -> Result<Option<User>>;
+
+    /// Find a user by wallet address.
+    /// The address should be checksummed (EIP-55) for consistent lookups.
+    async fn get_user_by_wallet_address(&self, address: &str) -> Result<Option<User>>;
 
     /// Update an existing user.
     async fn update_user(&self, user: &User) -> Result<()>;
@@ -132,6 +139,37 @@ pub trait PasskeyRepository: Send + Sync {
     async fn count_active_passkeys(&self, user_id: UserId) -> Result<u32>;
 }
 
+/// Repository for wallet credential persistence.
+#[async_trait]
+pub trait WalletRepository: Send + Sync {
+    /// Store a new wallet credential.
+    async fn create_wallet(&self, credential: &WalletCredential) -> Result<()>;
+
+    /// Get a wallet by ID.
+    async fn get_wallet(&self, id: WalletCredentialId) -> Result<Option<WalletCredential>>;
+
+    /// Get a wallet by address (checksummed).
+    async fn get_wallet_by_address(&self, address: &str) -> Result<Option<WalletCredential>>;
+
+    /// Get all wallets for a user.
+    async fn get_wallets_for_user(&self, user_id: UserId) -> Result<Vec<WalletCredential>>;
+
+    /// Update a wallet (e.g., last_used_at, name).
+    async fn update_wallet(&self, credential: &WalletCredential) -> Result<()>;
+
+    /// Deactivate a wallet (soft delete).
+    async fn deactivate_wallet(&self, id: WalletCredentialId) -> Result<()>;
+
+    /// Delete a wallet permanently.
+    async fn delete_wallet(&self, id: WalletCredentialId) -> Result<()>;
+
+    /// Delete all wallets for a user.
+    async fn delete_all_wallets_for_user(&self, user_id: UserId) -> Result<()>;
+
+    /// Count active wallets for a user.
+    async fn count_active_wallets(&self, user_id: UserId) -> Result<u32>;
+}
+
 /// Repository for WebAuthn challenge state persistence.
 ///
 /// Challenges are ephemeral and should expire after a short time (e.g., 5 minutes).
@@ -163,6 +201,13 @@ pub trait ChallengeRepository: Send + Sync {
     /// Returns None if expired or not found.
     async fn take_authentication_challenge(&self, user_id: UserId) -> Result<Option<PasskeyAuthentication>>;
 
+    /// Store a wallet authentication challenge state.
+    async fn store_wallet_challenge(&self, user_id: UserId, challenge: WalletChallenge) -> Result<()>;
+
+    /// Retrieve and consume a wallet authentication challenge.
+    /// Returns None if expired or not found.
+    async fn take_wallet_challenge(&self, user_id: UserId) -> Result<Option<WalletChallenge>>;
+
     /// Cleanup expired challenges.
     async fn cleanup_expired_challenges(&self) -> Result<u64>;
 }
@@ -171,13 +216,23 @@ pub trait ChallengeRepository: Send + Sync {
 /// Includes all auth-related repositories.
 #[async_trait]
 pub trait AuthRepository:
-    UserRepository + DeviceRepository + SessionRepository + PasskeyRepository + ChallengeRepository
+    UserRepository
+    + DeviceRepository
+    + SessionRepository
+    + PasskeyRepository
+    + WalletRepository
+    + ChallengeRepository
 {
 }
 
 // Blanket implementation for any type implementing all traits
 impl<T> AuthRepository for T where
-    T: UserRepository + DeviceRepository + SessionRepository + PasskeyRepository + ChallengeRepository
+    T: UserRepository
+        + DeviceRepository
+        + SessionRepository
+        + PasskeyRepository
+        + WalletRepository
+        + ChallengeRepository
 {
 }
 
@@ -199,12 +254,15 @@ pub mod inmemory {
     pub struct InMemoryRepository {
         users: RwLock<HashMap<UserId, User>>,
         users_by_email: RwLock<HashMap<String, UserId>>,
+        users_by_wallet: RwLock<HashMap<String, UserId>>,
         devices: RwLock<HashMap<DeviceId, Device>>,
         sessions: RwLock<HashMap<SessionId, Session>>,
         passkeys: RwLock<HashMap<PasskeyId, PasskeyCredential>>,
-        /// Registration challenges stored with email for consistency verification.
+        wallets: RwLock<HashMap<WalletCredentialId, WalletCredential>>,
+        /// Registration challenges stored with identifier (email or wallet) for consistency verification.
         registration_challenges: RwLock<HashMap<UserId, (PasskeyRegistration, String)>>,
         authentication_challenges: RwLock<HashMap<UserId, PasskeyAuthentication>>,
+        wallet_challenges: RwLock<HashMap<UserId, WalletChallenge>>,
     }
 
     impl InMemoryRepository {
@@ -219,13 +277,29 @@ pub mod inmemory {
             // Handle poisoned locks gracefully by recovering the data
             let mut users = self.users.write().unwrap_or_else(|e| e.into_inner());
             let mut by_email = self.users_by_email.write().unwrap_or_else(|e| e.into_inner());
+            let mut by_wallet = self.users_by_wallet.write().unwrap_or_else(|e| e.into_inner());
 
-            if by_email.contains_key(&user.email) {
-                return Err(AuthError::UserExists(user.email.clone()));
+            // Check for existing user by email
+            if let Some(ref email) = user.email {
+                if by_email.contains_key(email) {
+                    return Err(AuthError::UserExists(email.clone()));
+                }
+            }
+
+            // Check for existing user by wallet
+            if let Some(ref wallet) = user.primary_wallet_address {
+                if by_wallet.contains_key(wallet) {
+                    return Err(AuthError::UserExists(wallet.clone()));
+                }
             }
 
             users.insert(user.id, user.clone());
-            by_email.insert(user.email.clone(), user.id);
+            if let Some(ref email) = user.email {
+                by_email.insert(email.clone(), user.id);
+            }
+            if let Some(ref wallet) = user.primary_wallet_address {
+                by_wallet.insert(wallet.clone(), user.id);
+            }
             Ok(())
         }
 
@@ -245,9 +319,33 @@ pub mod inmemory {
             }
         }
 
+        async fn get_user_by_wallet_address(&self, address: &str) -> Result<Option<User>> {
+            let by_wallet = self.users_by_wallet.read().unwrap_or_else(|e| e.into_inner());
+            let users = self.users.read().unwrap_or_else(|e| e.into_inner());
+
+            if let Some(id) = by_wallet.get(address) {
+                Ok(users.get(id).cloned())
+            } else {
+                Ok(None)
+            }
+        }
+
         async fn update_user(&self, user: &User) -> Result<()> {
             let mut users = self.users.write().unwrap_or_else(|e| e.into_inner());
+            let mut by_wallet = self.users_by_wallet.write().unwrap_or_else(|e| e.into_inner());
+
             if users.contains_key(&user.id) {
+                // Update wallet index if primary wallet changed
+                if let Some(old_user) = users.get(&user.id) {
+                    if old_user.primary_wallet_address != user.primary_wallet_address {
+                        if let Some(ref old_wallet) = old_user.primary_wallet_address {
+                            by_wallet.remove(old_wallet);
+                        }
+                        if let Some(ref new_wallet) = user.primary_wallet_address {
+                            by_wallet.insert(new_wallet.clone(), user.id);
+                        }
+                    }
+                }
                 users.insert(user.id, user.clone());
                 Ok(())
             } else {
@@ -258,9 +356,15 @@ pub mod inmemory {
         async fn delete_user(&self, id: UserId) -> Result<()> {
             let mut users = self.users.write().unwrap_or_else(|e| e.into_inner());
             let mut by_email = self.users_by_email.write().unwrap_or_else(|e| e.into_inner());
+            let mut by_wallet = self.users_by_wallet.write().unwrap_or_else(|e| e.into_inner());
 
             if let Some(user) = users.remove(&id) {
-                by_email.remove(&user.email);
+                if let Some(ref email) = user.email {
+                    by_email.remove(email);
+                }
+                if let Some(ref wallet) = user.primary_wallet_address {
+                    by_wallet.remove(wallet);
+                }
             }
             Ok(())
         }
@@ -520,6 +624,86 @@ pub mod inmemory {
     }
 
     #[async_trait]
+    impl WalletRepository for InMemoryRepository {
+        async fn create_wallet(&self, credential: &WalletCredential) -> Result<()> {
+            let mut wallets = self.wallets.write().unwrap_or_else(|e| e.into_inner());
+            let mut by_wallet = self.users_by_wallet.write().unwrap_or_else(|e| e.into_inner());
+
+            // Check if wallet address already exists
+            if wallets.values().any(|w| w.address == credential.address && w.is_active) {
+                return Err(AuthError::WalletAlreadyRegistered);
+            }
+
+            wallets.insert(credential.id, credential.clone());
+
+            // If this is the primary wallet, update the user lookup
+            if credential.is_primary {
+                by_wallet.insert(credential.address.clone(), credential.user_id);
+            }
+            Ok(())
+        }
+
+        async fn get_wallet(&self, id: WalletCredentialId) -> Result<Option<WalletCredential>> {
+            let wallets = self.wallets.read().unwrap_or_else(|e| e.into_inner());
+            Ok(wallets.get(&id).cloned())
+        }
+
+        async fn get_wallet_by_address(&self, address: &str) -> Result<Option<WalletCredential>> {
+            let wallets = self.wallets.read().unwrap_or_else(|e| e.into_inner());
+            Ok(wallets.values().find(|w| w.address == address && w.is_active).cloned())
+        }
+
+        async fn get_wallets_for_user(&self, user_id: UserId) -> Result<Vec<WalletCredential>> {
+            let wallets = self.wallets.read().unwrap_or_else(|e| e.into_inner());
+            Ok(wallets
+                .values()
+                .filter(|w| w.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn update_wallet(&self, credential: &WalletCredential) -> Result<()> {
+            let mut wallets = self.wallets.write().unwrap_or_else(|e| e.into_inner());
+            if wallets.contains_key(&credential.id) {
+                wallets.insert(credential.id, credential.clone());
+                Ok(())
+            } else {
+                Err(AuthError::WalletNotFound(credential.id.to_string()))
+            }
+        }
+
+        async fn deactivate_wallet(&self, id: WalletCredentialId) -> Result<()> {
+            let mut wallets = self.wallets.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(wallet) = wallets.get_mut(&id) {
+                wallet.is_active = false;
+                Ok(())
+            } else {
+                Err(AuthError::WalletNotFound(id.to_string()))
+            }
+        }
+
+        async fn delete_wallet(&self, id: WalletCredentialId) -> Result<()> {
+            let mut wallets = self.wallets.write().unwrap_or_else(|e| e.into_inner());
+            wallets.remove(&id);
+            Ok(())
+        }
+
+        async fn delete_all_wallets_for_user(&self, user_id: UserId) -> Result<()> {
+            let mut wallets = self.wallets.write().unwrap_or_else(|e| e.into_inner());
+            wallets.retain(|_, w| w.user_id != user_id);
+            Ok(())
+        }
+
+        async fn count_active_wallets(&self, user_id: UserId) -> Result<u32> {
+            let wallets = self.wallets.read().unwrap_or_else(|e| e.into_inner());
+            Ok(wallets
+                .values()
+                .filter(|w| w.user_id == user_id && w.is_active)
+                .count() as u32)
+        }
+    }
+
+    #[async_trait]
     impl ChallengeRepository for InMemoryRepository {
         async fn store_registration_challenge(
             &self,
@@ -565,6 +749,23 @@ pub mod inmemory {
         ) -> Result<Option<PasskeyAuthentication>> {
             let mut challenges = self
                 .authentication_challenges
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            Ok(challenges.remove(&user_id))
+        }
+
+        async fn store_wallet_challenge(&self, user_id: UserId, challenge: WalletChallenge) -> Result<()> {
+            let mut challenges = self
+                .wallet_challenges
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            challenges.insert(user_id, challenge);
+            Ok(())
+        }
+
+        async fn take_wallet_challenge(&self, user_id: UserId) -> Result<Option<WalletChallenge>> {
+            let mut challenges = self
+                .wallet_challenges
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             Ok(challenges.remove(&user_id))

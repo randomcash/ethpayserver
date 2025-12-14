@@ -78,19 +78,31 @@ impl std::fmt::Display for SessionId {
 
 /// User account with encrypted key material.
 ///
-/// Authentication is passkey-only. The server stores:
+/// Authentication is passkey-only or wallet-based. The server stores:
 /// - Encrypted symmetric key (encrypted with mnemonic-derived key)
 /// - KDF parameters (so client can derive the same keys)
 /// - Recovery verification hash (to verify mnemonic during recovery)
 ///
+/// Users can be identified by email OR wallet address:
+/// - Email users: Traditional registration with email + passkey
+/// - Wallet-only users: Registration with just an Ethereum wallet
+/// - Both: Users can have both email and wallet authentication
+///
 /// Passkeys are stored separately in PasskeyCredential.
+/// Wallets are stored separately in WalletCredential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     /// Unique user identifier.
     pub id: UserId,
 
     /// User's email address (used as salt component for key derivation).
-    pub email: String,
+    /// None for wallet-only accounts.
+    pub email: Option<String>,
+
+    /// Primary wallet address for wallet-only accounts.
+    /// Used as the identifier/salt when email is None.
+    /// Set to the first registered wallet's address.
+    pub primary_wallet_address: Option<String>,
 
     /// KDF parameters used to derive keys from the mnemonic.
     pub kdf_params: KdfParams,
@@ -119,7 +131,7 @@ pub struct User {
 }
 
 impl User {
-    /// Create a new user with the given parameters.
+    /// Create a new user with email authentication.
     ///
     /// The recovery_verification_hash is required as it's needed for account recovery.
     pub fn new(
@@ -130,7 +142,8 @@ impl User {
     ) -> Self {
         Self {
             id: UserId::new(),
-            email,
+            email: Some(email),
+            primary_wallet_address: None,
             kdf_params,
             encrypted_symmetric_key,
             recovery_verification_hash,
@@ -138,6 +151,44 @@ impl User {
             last_login_at: None,
             failed_login_attempts: 0,
             locked_until: None,
+        }
+    }
+
+    /// Create a new wallet-only user.
+    ///
+    /// The recovery_verification_hash is required as it's needed for account recovery.
+    /// The wallet address is used as the salt component for key derivation.
+    pub fn new_wallet_only(
+        wallet_address: String,
+        kdf_params: KdfParams,
+        encrypted_symmetric_key: EncryptedBlob,
+        recovery_verification_hash: String,
+    ) -> Self {
+        Self {
+            id: UserId::new(),
+            email: None,
+            primary_wallet_address: Some(wallet_address),
+            kdf_params,
+            encrypted_symmetric_key,
+            recovery_verification_hash,
+            created_at: Utc::now(),
+            last_login_at: None,
+            failed_login_attempts: 0,
+            locked_until: None,
+        }
+    }
+
+    /// Get the identifier used for KDF salt derivation.
+    ///
+    /// Returns the email if set, otherwise returns `wallet:{address}` format.
+    /// Returns an error if the user has neither email nor primary wallet address.
+    pub fn kdf_salt_identifier(&self) -> Result<String, &'static str> {
+        if let Some(ref email) = self.email {
+            Ok(email.clone())
+        } else if let Some(ref wallet) = self.primary_wallet_address {
+            Ok(format!("wallet:{}", wallet))
+        } else {
+            Err("User has neither email nor primary wallet address")
         }
     }
 
@@ -309,8 +360,11 @@ pub struct UserInfo {
     /// Unique user identifier.
     pub id: UserId,
 
-    /// User's email address.
-    pub email: String,
+    /// User's email address (None for wallet-only accounts).
+    pub email: Option<String>,
+
+    /// Primary wallet address (None for email-only accounts).
+    pub primary_wallet_address: Option<String>,
 
     /// Account creation timestamp.
     pub created_at: DateTime<Utc>,
@@ -324,6 +378,7 @@ impl From<&User> for UserInfo {
         Self {
             id: user.id,
             email: user.email.clone(),
+            primary_wallet_address: user.primary_wallet_address.clone(),
             created_at: user.created_at,
             last_login_at: user.last_login_at,
         }
@@ -384,8 +439,13 @@ pub struct LoginResponse {
     /// KDF parameters for deriving the decryption key from mnemonic.
     pub kdf_params: KdfParams,
 
-    /// User's email (used as salt for key derivation).
-    pub email: String,
+    /// User's email (None for wallet-only accounts).
+    /// Used as salt for key derivation when present.
+    pub email: Option<String>,
+
+    /// Primary wallet address (None for email-only accounts).
+    /// Used as salt for key derivation when email is None.
+    pub primary_wallet_address: Option<String>,
 
     /// Session expiration time.
     pub expires_at: DateTime<Utc>,
@@ -402,11 +462,14 @@ pub struct LoginResponse {
 /// the server returns a passkey registration challenge.
 #[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct StartRecoveryRequest {
-    /// User's email address.
-    pub email: String,
+    /// User's identifier - either email address or wallet address.
+    /// For email-based accounts: the user's email
+    /// For wallet-only accounts: the primary wallet address (checksummed)
+    pub identifier: String,
 
     /// Recovery verification hash to prove possession of mnemonic.
-    /// Client derives this as: base64(SHA-256(Argon2id(mnemonic, email))).
+    /// Client derives this as: base64(SHA-256(Argon2id(mnemonic, salt))).
+    /// Salt is the email for email accounts, or "wallet:{address}" for wallet-only accounts.
     /// Must match the hash stored during registration.
     /// SENSITIVE: Zeroized on drop.
     pub recovery_verification_hash: String,
@@ -681,3 +744,303 @@ pub struct CompletePasskeyLoginRequest {
 
 // Note: PasskeyRegisterRequest has been replaced by CompleteNewUserPasskeyRegistrationRequest
 // which includes the user_id and credential from the WebAuthn registration flow.
+
+// ============================================================================
+// Wallet/Ethereum Authentication Models
+// ============================================================================
+
+/// Unique identifier for a wallet credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WalletCredentialId(pub Uuid);
+
+impl WalletCredentialId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for WalletCredentialId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for WalletCredentialId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A stored Ethereum wallet credential for authentication.
+///
+/// Wallets use EIP-191 personal_sign for authentication.
+/// The first wallet registered to a wallet-only account becomes the "primary" wallet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletCredential {
+    /// Unique identifier for this credential.
+    pub id: WalletCredentialId,
+
+    /// User who owns this wallet.
+    pub user_id: UserId,
+
+    /// Checksummed Ethereum address (EIP-55).
+    pub address: String,
+
+    /// Human-readable name for this wallet (e.g., "MetaMask", "Ledger").
+    pub name: String,
+
+    /// Whether this is the primary wallet for the account.
+    /// Primary wallet is used as identifier/salt for wallet-only accounts.
+    /// Cannot be removed if it's the only identifier for the account.
+    pub is_primary: bool,
+
+    /// When this wallet was registered.
+    pub created_at: DateTime<Utc>,
+
+    /// Last time this wallet was used for authentication.
+    pub last_used_at: Option<DateTime<Utc>>,
+
+    /// Whether this wallet is currently active.
+    pub is_active: bool,
+}
+
+impl WalletCredential {
+    /// Create a new wallet credential.
+    pub fn new(user_id: UserId, address: String, name: String, is_primary: bool) -> Self {
+        Self {
+            id: WalletCredentialId::new(),
+            user_id,
+            address,
+            name,
+            is_primary,
+            created_at: Utc::now(),
+            last_used_at: None,
+            is_active: true,
+        }
+    }
+}
+
+/// Sanitized wallet information for API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletInfo {
+    /// Unique wallet credential identifier.
+    pub id: WalletCredentialId,
+
+    /// Checksummed Ethereum address (EIP-55).
+    pub address: String,
+
+    /// Human-readable wallet name.
+    pub name: String,
+
+    /// Whether this is the primary wallet.
+    pub is_primary: bool,
+
+    /// When this wallet was registered.
+    pub created_at: DateTime<Utc>,
+
+    /// Last time this wallet was used.
+    pub last_used_at: Option<DateTime<Utc>>,
+
+    /// Whether this wallet is currently active.
+    pub is_active: bool,
+}
+
+impl From<&WalletCredential> for WalletInfo {
+    fn from(cred: &WalletCredential) -> Self {
+        Self {
+            id: cred.id,
+            address: cred.address.clone(),
+            name: cred.name.clone(),
+            is_primary: cred.is_primary,
+            created_at: cred.created_at,
+            last_used_at: cred.last_used_at,
+            is_active: cred.is_active,
+        }
+    }
+}
+
+/// Challenge state for wallet authentication.
+///
+/// Stored server-side while waiting for the client to sign the challenge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletChallenge {
+    /// Random challenge string (32 bytes hex-encoded).
+    pub challenge: String,
+
+    /// Wallet address this challenge is for.
+    pub address: String,
+
+    /// When this challenge was created.
+    pub created_at: DateTime<Utc>,
+}
+
+impl WalletChallenge {
+    /// Create a new wallet challenge.
+    pub fn new(challenge: String, address: String) -> Self {
+        Self {
+            challenge,
+            address,
+            created_at: Utc::now(),
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Wallet Login (existing user authenticating with wallet)
+// ----------------------------------------------------------------------------
+
+/// Request to start wallet login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartWalletLoginRequest {
+    /// Wallet address attempting to login (will be checksummed by server).
+    pub address: String,
+}
+
+/// Response for starting wallet login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartWalletLoginResponse {
+    /// The challenge message to sign.
+    /// Client should display this and have the user sign it with their wallet.
+    pub challenge_message: String,
+
+    /// User ID (needed for completion).
+    pub user_id: UserId,
+}
+
+/// Request to complete wallet login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteWalletLoginRequest {
+    /// User ID from StartWalletLoginResponse.
+    pub user_id: UserId,
+
+    /// Wallet address (checksummed).
+    pub address: String,
+
+    /// Signature of the challenge message (hex-encoded, 65 bytes: r + s + v).
+    pub signature: String,
+
+    /// Device ID from a previous login on this device.
+    /// If provided, the server will reuse the existing device record.
+    /// If None, a new device will be created.
+    pub device_id: Option<DeviceId>,
+
+    /// Device name for the session (used when creating a new device).
+    pub device_name: String,
+
+    /// Device type (used when creating a new device).
+    pub device_type: DeviceType,
+}
+
+// ----------------------------------------------------------------------------
+// New User Wallet Registration (wallet-only account creation)
+// ----------------------------------------------------------------------------
+
+/// Request to start new user registration with wallet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartNewUserWalletRegistrationRequest {
+    /// Wallet address for the new account (will be checksummed by server).
+    pub address: String,
+
+    /// Human-readable name for this wallet.
+    pub wallet_name: String,
+}
+
+/// Response for starting new user wallet registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartNewUserWalletRegistrationResponse {
+    /// The challenge message to sign.
+    pub challenge_message: String,
+
+    /// Temporary user ID. Must be passed back to complete registration.
+    pub user_id: UserId,
+
+    /// Checksummed wallet address.
+    pub address: String,
+}
+
+/// Request to complete new user registration with wallet.
+///
+/// The `recovery_verification_hash` field is zeroized on drop for security.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteNewUserWalletRegistrationRequest {
+    /// User ID from StartNewUserWalletRegistrationResponse.
+    pub user_id: UserId,
+
+    /// Wallet address (checksummed).
+    pub address: String,
+
+    /// Signature of the challenge message (hex-encoded, 65 bytes: r + s + v).
+    pub signature: String,
+
+    /// Human-readable name for this wallet.
+    pub wallet_name: String,
+
+    /// KDF parameters used to derive keys from mnemonic.
+    /// Salt will be "wallet:{address}" for wallet-only accounts.
+    pub kdf_params: KdfParams,
+
+    /// User's symmetric key, encrypted with mnemonic-derived key.
+    pub encrypted_symmetric_key: EncryptedBlob,
+
+    /// Hash of the recovery verification key (derived from mnemonic).
+    /// REQUIRED for account recovery.
+    /// Client derives: base64(SHA-256(Argon2id(mnemonic, "wallet:{address}"))).
+    /// SENSITIVE: Zeroized on drop.
+    pub recovery_verification_hash: String,
+
+    /// Device name for the first device.
+    pub device_name: String,
+
+    /// Device type (browser, mobile, etc.).
+    pub device_type: DeviceType,
+}
+
+impl Zeroize for CompleteNewUserWalletRegistrationRequest {
+    fn zeroize(&mut self) {
+        self.recovery_verification_hash.zeroize();
+    }
+}
+
+impl Drop for CompleteNewUserWalletRegistrationRequest {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Add Wallet to Existing User (user already authenticated)
+// ----------------------------------------------------------------------------
+
+/// Request to start adding a wallet to an existing account.
+/// Requires an active session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartWalletRegistrationRequest {
+    /// Wallet address to add (will be checksummed by server).
+    pub address: String,
+
+    /// Human-readable name for this wallet.
+    pub wallet_name: String,
+}
+
+/// Response for starting wallet registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartWalletRegistrationResponse {
+    /// The challenge message to sign.
+    pub challenge_message: String,
+
+    /// Checksummed wallet address.
+    pub address: String,
+}
+
+/// Request to complete adding a wallet to an existing account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteWalletRegistrationRequest {
+    /// Wallet address (checksummed).
+    pub address: String,
+
+    /// Signature of the challenge message (hex-encoded, 65 bytes: r + s + v).
+    pub signature: String,
+
+    /// Human-readable name for this wallet.
+    pub wallet_name: String,
+}
