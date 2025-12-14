@@ -10,7 +10,7 @@ description = "Data access layer for PayServer"
 test-utils = []
 
 [dependencies]
-common = { version = "0.1.0", path = "../common" }
+types = { version = "0.1.0", path = "../types" }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
 tokio = { version = "1.42", features = ["sync"] }
 chrono = { version = "0.4", features = ["serde"] }

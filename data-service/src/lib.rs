@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use common::{Network, InvoiceData, InvoiceId, InvoiceStatus, PaymentData};
+use types::{Network, InvoiceData, InvoiceId, InvoiceStatus, PaymentData};
 use thiserror::Error;
 use uuid::Uuid;
 

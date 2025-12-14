@@ -1,5 +1,5 @@
 [workspace]
-members = ["data-service", "common", "crypto", "auth"]
+members = ["data-service", "types", "crypto", "auth"]
 resolver = "3"
 
 [workspace.package]
