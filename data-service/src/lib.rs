@@ -3,12 +3,17 @@
 //! This crate provides database implementations for the repository traits
 //! defined in the `types` crate.
 //!
+//! # Features
+//!
+//! - `postgres` (default) - PostgreSQL implementation
+//!
 //! # Implementations
 //!
-//! - PostgreSQL implementation (production)
-//! - In-memory implementation (testing)
+//! - PostgreSQL implementation (production, requires `postgres` feature)
+//! - In-memory implementation (testing, requires `test-utils` feature)
 
-pub mod implementation;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -30,6 +35,7 @@ pub use types::{
 /// Convert sqlx::Error to RepositoryError.
 ///
 /// This helper is needed because we can't implement From trait due to orphan rules.
+#[cfg(feature = "postgres")]
 pub fn sqlx_to_repo_error(e: sqlx::Error) -> RepositoryError {
     match e {
         sqlx::Error::RowNotFound => RepositoryError::NotFound("row not found".into()),
