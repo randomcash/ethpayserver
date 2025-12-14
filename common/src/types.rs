@@ -1,9 +1,117 @@
 //! Core types for the PayServer ecosystem.
+//!
+//! This module contains network-agnostic types that are shared across all PayServers.
+//! Network-specific types (like ERC20 tokens, Lightning invoices) are defined in
+//! their respective PayServer crates.
 
-use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Supported blocknetwork networks across the PayServer ecosystem.
+///
+/// Each PayServer implementation supports a subset of these networks.
+/// For example, `ethpayserver` handles all EVM networks, while `bitcoinpayserver`
+/// handles Bitcoin mainnet and Lightning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Network {
+    // =========================================================================
+    // Bitcoin family
+    // =========================================================================
+    /// Bitcoin mainnet (on-network)
+    BitcoinMainnet,
+    /// Bitcoin Lightning Network
+    BitcoinLightning,
+
+    // =========================================================================
+    // EVM-compatible networks
+    // =========================================================================
+    /// Ethereum mainnet
+    Ethereum,
+    /// Polygon (formerly Matic)
+    Polygon,
+    /// Arbitrum One
+    Arbitrum,
+    /// Optimism
+    Optimism,
+    /// Base (Coinbase L2)
+    Base,
+    /// Avalanche C-Network
+    Avalanche,
+    /// BNB Smart Network (formerly BSC)
+    BinanceSmartChain,
+    /// zkSync Era
+    ZkSync,
+    /// Linea
+    Linea,
+    /// Scroll
+    Scroll,
+}
+
+impl Network {
+    /// Returns true if this is an EVM-compatible network.
+    pub fn is_evm(&self) -> bool {
+        matches!(
+            self,
+            Network::Ethereum
+                | Network::Polygon
+                | Network::Arbitrum
+                | Network::Optimism
+                | Network::Base
+                | Network::Avalanche
+                | Network::BinanceSmartChain
+                | Network::ZkSync
+                | Network::Linea
+                | Network::Scroll
+        )
+    }
+
+    /// Returns true if this is a Bitcoin-family network.
+    pub fn is_bitcoin(&self) -> bool {
+        matches!(self, Network::BitcoinMainnet | Network::BitcoinLightning)
+    }
+
+    /// Returns the display name for this network.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Network::BitcoinMainnet => "Bitcoin",
+            Network::BitcoinLightning => "Lightning Network",
+            Network::Ethereum => "Ethereum",
+            Network::Polygon => "Polygon",
+            Network::Arbitrum => "Arbitrum",
+            Network::Optimism => "Optimism",
+            Network::Base => "Base",
+            Network::Avalanche => "Avalanche",
+            Network::BinanceSmartChain => "BNB Network",
+            Network::ZkSync => "zkSync",
+            Network::Linea => "Linea",
+            Network::Scroll => "Scroll",
+        }
+    }
+
+    /// Returns the native currency symbol for this network.
+    pub fn native_symbol(&self) -> &'static str {
+        match self {
+            Network::BitcoinMainnet | Network::BitcoinLightning => "BTC",
+            Network::Ethereum => "ETH",
+            Network::Polygon => "POL",
+            Network::Arbitrum => "ETH",
+            Network::Optimism => "ETH",
+            Network::Base => "ETH",
+            Network::Avalanche => "AVAX",
+            Network::BinanceSmartChain => "BNB",
+            Network::ZkSync => "ETH",
+            Network::Linea => "ETH",
+            Network::Scroll => "ETH",
+        }
+    }
+}
+
+impl std::fmt::Display for Network {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
 
 /// Unique identifier for an invoice.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,116 +143,6 @@ impl std::fmt::Display for InvoiceId {
     }
 }
 
-/// Represents a monetary amount with currency.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Amount {
-    /// The value in the smallest unit of the currency (e.g., satoshis for BTC, wei for ETH).
-    pub value: i64,
-    /// The currency of the amount.
-    pub currency: Currency,
-}
-
-impl Amount {
-    pub fn new(value: i64, currency: Currency) -> Self {
-        Self { value, currency }
-    }
-
-    /// Create an amount in BTC (value in satoshis).
-    pub fn btc(satoshis: i64) -> Self {
-        Self::new(satoshis, Currency::BTC)
-    }
-
-    /// Create an amount in ETH (value in wei).
-    pub fn eth(wei: i64) -> Self {
-        Self::new(wei, Currency::ETH)
-    }
-
-    /// Create an amount in USDT (value in smallest unit, 6 decimals).
-    pub fn usdt(value: i64) -> Self {
-        Self::new(value, Currency::USDT)
-    }
-
-    /// Convert to decimal representation using the currency's decimals.
-    pub fn to_decimal(&self) -> Decimal {
-        let decimals = self.currency.decimals();
-        Decimal::new(self.value, decimals as u32)
-    }
-}
-
-/// Supported currencies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum Currency {
-    /// Bitcoin
-    BTC,
-    /// Ethereum
-    ETH,
-    /// Tether USD (ERC-20)
-    USDT,
-    /// USD Coin (ERC-20)
-    USDC,
-    /// Litecoin
-    LTC,
-}
-
-impl Currency {
-    /// Returns the number of decimal places for this currency.
-    pub fn decimals(&self) -> u8 {
-        match self {
-            Currency::BTC => 8,  // satoshis
-            Currency::ETH => 18, // wei
-            Currency::USDT => 6,
-            Currency::USDC => 6,
-            Currency::LTC => 8,
-        }
-    }
-
-    /// Returns the currency symbol.
-    pub fn symbol(&self) -> &'static str {
-        match self {
-            Currency::BTC => "BTC",
-            Currency::ETH => "ETH",
-            Currency::USDT => "USDT",
-            Currency::USDC => "USDC",
-            Currency::LTC => "LTC",
-        }
-    }
-}
-
-impl std::fmt::Display for Currency {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.symbol())
-    }
-}
-
-/// Payment method specifying the network/protocol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "network")]
-pub enum PaymentMethod {
-    /// On-chain Bitcoin payment.
-    BitcoinOnChain,
-    /// Bitcoin Lightning Network payment.
-    BitcoinLightning,
-    /// On-chain Ethereum payment (native ETH).
-    EthereumOnChain,
-    /// ERC-20 token payment on Ethereum.
-    ERC20 { token: Currency },
-    /// On-chain Litecoin payment.
-    LitecoinOnChain,
-}
-
-impl PaymentMethod {
-    /// Returns the base currency for this payment method.
-    pub fn currency(&self) -> Currency {
-        match self {
-            PaymentMethod::BitcoinOnChain | PaymentMethod::BitcoinLightning => Currency::BTC,
-            PaymentMethod::EthereumOnChain => Currency::ETH,
-            PaymentMethod::ERC20 { token } => *token,
-            PaymentMethod::LitecoinOnChain => Currency::LTC,
-        }
-    }
-}
-
 /// Status of an invoice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -166,6 +164,7 @@ pub enum InvoiceStatus {
 }
 
 impl InvoiceStatus {
+    /// Returns true if this is a final status (no more changes expected).
     pub fn is_final(&self) -> bool {
         matches!(
             self,
@@ -176,6 +175,7 @@ impl InvoiceStatus {
         )
     }
 
+    /// Returns true if this invoice can still receive payments.
     pub fn is_payable(&self) -> bool {
         matches!(
             self,
@@ -199,82 +199,47 @@ impl std::fmt::Display for InvoiceStatus {
     }
 }
 
-/// An invoice requesting payment.
+/// Health status of a PayServer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Invoice {
-    /// Unique identifier for this invoice.
-    pub id: InvoiceId,
-    /// Amount requested.
-    pub amount: Amount,
-    /// Accepted payment methods.
-    pub payment_methods: Vec<PaymentMethod>,
-    /// Current status.
-    pub status: InvoiceStatus,
-    /// Address to receive payment (depends on payment method).
-    pub payment_address: Option<String>,
-    /// Payment request string (e.g., Lightning invoice, payment URI).
-    pub payment_request: Option<String>,
-    /// When the invoice was created.
-    pub created_at: DateTime<Utc>,
-    /// When the invoice expires.
-    pub expires_at: DateTime<Utc>,
-    /// Amount received so far.
-    pub amount_received: i64,
-    /// Optional metadata.
-    pub metadata: Option<serde_json::Value>,
-    /// Optional webhook URL for notifications.
-    pub webhook_url: Option<String>,
-    /// Optional redirect URL after payment.
-    pub redirect_url: Option<String>,
-}
-
-impl Invoice {
-    pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at
-    }
-
-    pub fn is_fully_paid(&self) -> bool {
-        self.amount_received >= self.amount.value
-    }
-
-    pub fn remaining_amount(&self) -> i64 {
-        (self.amount.value - self.amount_received).max(0)
-    }
-}
-
-/// A payment received for an invoice.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Payment {
-    /// Unique identifier for this payment.
-    pub id: Uuid,
-    /// The invoice this payment is for.
-    pub invoice_id: InvoiceId,
-    /// Amount received.
-    pub amount: Amount,
-    /// Payment method used.
-    pub payment_method: PaymentMethod,
-    /// Transaction hash/ID on the blockchain.
-    pub tx_hash: Option<String>,
-    /// Number of confirmations.
-    pub confirmations: u32,
-    /// When the payment was detected.
-    pub detected_at: DateTime<Utc>,
-    /// When the payment was confirmed.
-    pub confirmed_at: Option<DateTime<Utc>>,
-    /// Sender address (if known).
-    pub from_address: Option<String>,
+pub struct HealthStatus {
+    /// Whether the service is healthy.
+    pub healthy: bool,
+    /// Service version.
+    pub version: String,
+    /// Networks this server supports.
+    pub supported_networks: Vec<Network>,
+    /// Current block heights per network (if applicable).
+    pub block_heights: Option<std::collections::HashMap<Network, u64>>,
+    /// Number of pending invoices.
+    pub pending_invoices: Option<u64>,
+    /// Additional details.
+    pub details: Option<serde_json::Value>,
 }
 
 /// Events emitted by the payment system.
+///
+/// These are network-agnostic events. PayServers may emit additional
+/// network-specific events internally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event", content = "data")]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum PaymentEvent {
     /// Invoice was created.
-    InvoiceCreated { invoice: Invoice },
+    InvoiceCreated {
+        invoice_id: InvoiceId,
+        network: Network,
+    },
     /// Payment was detected (unconfirmed).
-    PaymentDetected { payment: Payment },
+    PaymentDetected {
+        invoice_id: InvoiceId,
+        tx_hash: String,
+        network: Network,
+    },
     /// Payment was confirmed.
-    PaymentConfirmed { payment: Payment },
+    PaymentConfirmed {
+        invoice_id: InvoiceId,
+        tx_hash: String,
+        confirmations: u32,
+    },
     /// Invoice status changed.
     InvoiceStatusChanged {
         invoice_id: InvoiceId,
@@ -282,24 +247,9 @@ pub enum PaymentEvent {
         new_status: InvoiceStatus,
     },
     /// Invoice was fully paid.
-    InvoicePaid { invoice: Invoice },
+    InvoicePaid { invoice_id: InvoiceId },
     /// Invoice expired.
     InvoiceExpired { invoice_id: InvoiceId },
-}
-
-/// Health status of a service.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthStatus {
-    /// Whether the service is healthy.
-    pub healthy: bool,
-    /// Service version.
-    pub version: String,
-    /// Current block height (if applicable).
-    pub block_height: Option<u64>,
-    /// Number of pending invoices.
-    pub pending_invoices: Option<u64>,
-    /// Additional details.
-    pub details: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -314,39 +264,47 @@ mod tests {
     }
 
     #[test]
-    fn test_amount_to_decimal() {
-        let btc = Amount::btc(100_000_000); // 1 BTC
-        assert_eq!(btc.to_decimal(), Decimal::new(1, 0));
-
-        let eth = Amount::eth(1_000_000_000_000_000_000); // 1 ETH
-        assert_eq!(eth.to_decimal(), Decimal::new(1, 0));
+    fn test_network_is_evm() {
+        assert!(Network::Ethereum.is_evm());
+        assert!(Network::Polygon.is_evm());
+        assert!(Network::Arbitrum.is_evm());
+        assert!(!Network::BitcoinMainnet.is_evm());
+        assert!(!Network::BitcoinLightning.is_evm());
     }
 
     #[test]
-    fn test_currency_decimals() {
-        assert_eq!(Currency::BTC.decimals(), 8);
-        assert_eq!(Currency::ETH.decimals(), 18);
-        assert_eq!(Currency::USDT.decimals(), 6);
+    fn test_network_is_bitcoin() {
+        assert!(Network::BitcoinMainnet.is_bitcoin());
+        assert!(Network::BitcoinLightning.is_bitcoin());
+        assert!(!Network::Ethereum.is_bitcoin());
+    }
+
+    #[test]
+    fn test_network_native_symbol() {
+        assert_eq!(Network::BitcoinMainnet.native_symbol(), "BTC");
+        assert_eq!(Network::Ethereum.native_symbol(), "ETH");
+        assert_eq!(Network::Polygon.native_symbol(), "POL");
+        assert_eq!(Network::Avalanche.native_symbol(), "AVAX");
+        assert_eq!(Network::BinanceSmartChain.native_symbol(), "BNB");
     }
 
     #[test]
     fn test_invoice_status() {
         assert!(InvoiceStatus::Paid.is_final());
+        assert!(InvoiceStatus::Expired.is_final());
         assert!(!InvoiceStatus::Pending.is_final());
+        assert!(!InvoiceStatus::Processing.is_final());
+
         assert!(InvoiceStatus::Pending.is_payable());
+        assert!(InvoiceStatus::PartiallyPaid.is_payable());
         assert!(!InvoiceStatus::Paid.is_payable());
+        assert!(!InvoiceStatus::Expired.is_payable());
     }
 
     #[test]
-    fn test_payment_method_currency() {
-        assert_eq!(PaymentMethod::BitcoinOnChain.currency(), Currency::BTC);
-        assert_eq!(PaymentMethod::EthereumOnChain.currency(), Currency::ETH);
-        assert_eq!(
-            PaymentMethod::ERC20 {
-                token: Currency::USDT
-            }
-            .currency(),
-            Currency::USDT
-        );
+    fn test_network_display() {
+        assert_eq!(Network::Ethereum.to_string(), "Ethereum");
+        assert_eq!(Network::BitcoinLightning.to_string(), "Lightning Network");
+        assert_eq!(Network::BinanceSmartChain.to_string(), "BNB Network");
     }
 }

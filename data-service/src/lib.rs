@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use common::{Invoice, InvoiceId, InvoiceStatus, Payment, PaymentMethod};
+use common::{Network, InvoiceData, InvoiceId, InvoiceStatus, PaymentData};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -67,7 +67,7 @@ where
 #[derive(Debug, Clone, Default)]
 pub struct InvoiceQueryParams {
     pub status: Option<InvoiceStatus>,
-    pub payment_method: Option<PaymentMethod>,
+    pub network: Option<Network>,
     pub created_after: Option<DateTime<Utc>>,
     pub created_before: Option<DateTime<Utc>>,
     pub limit: i64,
@@ -78,7 +78,7 @@ impl InvoiceQueryParams {
     pub fn new() -> Self {
         Self {
             status: None,
-            payment_method: None,
+            network: None,
             created_after: None,
             created_before: None,
             limit: 50,
@@ -88,6 +88,11 @@ impl InvoiceQueryParams {
 
     pub fn with_status(mut self, status: InvoiceStatus) -> Self {
         self.status = Some(status);
+        self
+    }
+
+    pub fn with_network(mut self, network: Network) -> Self {
+        self.network = Some(network);
         self
     }
 
@@ -118,14 +123,14 @@ pub trait DataService: Send + Sync {
     /// Insert a new invoice.
     fn insert_invoice<'a>(
         &'a self,
-        invoice: &'a Invoice,
+        invoice: &'a InvoiceData,
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>>;
 
     /// Get an invoice by ID.
     fn get_invoice<'a>(
         &'a self,
         id: &'a InvoiceId,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<Invoice>, Self::Error>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<InvoiceData>, Self::Error>> + Send + 'a>>;
 
     /// Update an invoice's status.
     fn update_invoice_status<'a>(
@@ -138,37 +143,37 @@ pub trait DataService: Send + Sync {
     fn update_invoice_amount_received<'a>(
         &'a self,
         id: &'a InvoiceId,
-        amount_received: i64,
+        amount_received: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>>;
 
     /// Query invoices with pagination.
     fn query_invoices<'a>(
         &'a self,
         params: &'a InvoiceQueryParams,
-    ) -> Pin<Box<dyn Future<Output = Result<(i64, Vec<Invoice>), Self::Error>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<(i64, Vec<InvoiceData>), Self::Error>> + Send + 'a>>;
 
     /// Get all pending invoices that have expired.
     fn get_expired_invoices<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Invoice>, Self::Error>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<InvoiceData>, Self::Error>> + Send + 'a>>;
 
     /// Insert a new payment.
     fn insert_payment<'a>(
         &'a self,
-        payment: &'a Payment,
+        payment: &'a PaymentData,
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>>;
 
     /// Get a payment by ID.
     fn get_payment<'a>(
         &'a self,
         id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<Payment>, Self::Error>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Option<PaymentData>, Self::Error>> + Send + 'a>>;
 
     /// Get all payments for an invoice.
     fn get_payments_for_invoice<'a>(
         &'a self,
         invoice_id: &'a InvoiceId,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Payment>, Self::Error>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<PaymentData>, Self::Error>> + Send + 'a>>;
 
     /// Update payment confirmations.
     fn update_payment_confirmations<'a>(
@@ -182,30 +187,33 @@ pub trait DataService: Send + Sync {
     fn get_unconfirmed_payments<'a>(
         &'a self,
         min_confirmations: u32,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<Payment>, Self::Error>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<PaymentData>, Self::Error>> + Send + 'a>>;
 
     /// Store a watched address.
     fn insert_watched_address<'a>(
         &'a self,
         address: &'a str,
         invoice_id: &'a InvoiceId,
+        network: Network,
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>>;
 
     /// Get the invoice ID associated with an address.
     fn get_invoice_by_address<'a>(
         &'a self,
         address: &'a str,
+        network: Network,
     ) -> Pin<Box<dyn Future<Output = Result<Option<InvoiceId>, Self::Error>> + Send + 'a>>;
 
     /// Get all active watched addresses.
     fn get_active_watched_addresses<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(String, InvoiceId)>, Self::Error>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<(String, InvoiceId, Network)>, Self::Error>> + Send + 'a>>;
 
     /// Remove a watched address.
     fn remove_watched_address<'a>(
         &'a self,
         address: &'a str,
+        network: Network,
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>>;
 }
 
@@ -213,16 +221,15 @@ pub trait DataService: Send + Sync {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
     use super::*;
-    use common::Amount;
     use std::collections::HashMap;
     use std::sync::RwLock;
 
     /// In-memory implementation of DataService for testing.
     #[derive(Default)]
     pub struct InMemoryDataService {
-        invoices: RwLock<HashMap<String, Invoice>>,
-        payments: RwLock<HashMap<Uuid, Payment>>,
-        addresses: RwLock<HashMap<String, InvoiceId>>,
+        invoices: RwLock<HashMap<String, InvoiceData>>,
+        payments: RwLock<HashMap<Uuid, PaymentData>>,
+        addresses: RwLock<HashMap<(String, Network), InvoiceId>>,
     }
 
     impl InMemoryDataService {
@@ -236,7 +243,7 @@ pub mod test_utils {
 
         fn insert_invoice<'a>(
             &'a self,
-            invoice: &'a Invoice,
+            invoice: &'a InvoiceData,
         ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
             Box::pin(async move {
                 let mut invoices = self.invoices.write().unwrap();
@@ -248,7 +255,7 @@ pub mod test_utils {
         fn get_invoice<'a>(
             &'a self,
             id: &'a InvoiceId,
-        ) -> Pin<Box<dyn Future<Output = Result<Option<Invoice>, Self::Error>> + Send + 'a>>
+        ) -> Pin<Box<dyn Future<Output = Result<Option<InvoiceData>, Self::Error>> + Send + 'a>>
         {
             Box::pin(async move {
                 let invoices = self.invoices.read().unwrap();
@@ -273,12 +280,12 @@ pub mod test_utils {
         fn update_invoice_amount_received<'a>(
             &'a self,
             id: &'a InvoiceId,
-            amount_received: i64,
+            amount_received: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
             Box::pin(async move {
                 let mut invoices = self.invoices.write().unwrap();
                 if let Some(invoice) = invoices.get_mut(&id.0) {
-                    invoice.amount_received = amount_received;
+                    invoice.amount_received = amount_received.to_string();
                 }
                 Ok(())
             })
@@ -287,15 +294,20 @@ pub mod test_utils {
         fn query_invoices<'a>(
             &'a self,
             params: &'a InvoiceQueryParams,
-        ) -> Pin<Box<dyn Future<Output = Result<(i64, Vec<Invoice>), Self::Error>> + Send + 'a>>
+        ) -> Pin<Box<dyn Future<Output = Result<(i64, Vec<InvoiceData>), Self::Error>> + Send + 'a>>
         {
             Box::pin(async move {
                 let invoices = self.invoices.read().unwrap();
-                let mut results: Vec<Invoice> = invoices
+                let mut results: Vec<InvoiceData> = invoices
                     .values()
                     .filter(|inv| {
                         if let Some(status) = params.status {
                             if inv.status != status {
+                                return false;
+                            }
+                        }
+                        if let Some(network) = params.network {
+                            if inv.network != network {
                                 return false;
                             }
                         }
@@ -317,7 +329,7 @@ pub mod test_utils {
 
         fn get_expired_invoices<'a>(
             &'a self,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Invoice>, Self::Error>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<InvoiceData>, Self::Error>> + Send + 'a>> {
             Box::pin(async move {
                 let invoices = self.invoices.read().unwrap();
                 let now = Utc::now();
@@ -331,7 +343,7 @@ pub mod test_utils {
 
         fn insert_payment<'a>(
             &'a self,
-            payment: &'a Payment,
+            payment: &'a PaymentData,
         ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
             Box::pin(async move {
                 let mut payments = self.payments.write().unwrap();
@@ -343,7 +355,7 @@ pub mod test_utils {
         fn get_payment<'a>(
             &'a self,
             id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<Option<Payment>, Self::Error>> + Send + 'a>>
+        ) -> Pin<Box<dyn Future<Output = Result<Option<PaymentData>, Self::Error>> + Send + 'a>>
         {
             Box::pin(async move {
                 let payments = self.payments.read().unwrap();
@@ -354,7 +366,7 @@ pub mod test_utils {
         fn get_payments_for_invoice<'a>(
             &'a self,
             invoice_id: &'a InvoiceId,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Payment>, Self::Error>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<PaymentData>, Self::Error>> + Send + 'a>> {
             Box::pin(async move {
                 let payments = self.payments.read().unwrap();
                 Ok(payments
@@ -386,7 +398,7 @@ pub mod test_utils {
         fn get_unconfirmed_payments<'a>(
             &'a self,
             min_confirmations: u32,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Payment>, Self::Error>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<PaymentData>, Self::Error>> + Send + 'a>> {
             Box::pin(async move {
                 let payments = self.payments.read().unwrap();
                 Ok(payments
@@ -401,10 +413,11 @@ pub mod test_utils {
             &'a self,
             address: &'a str,
             invoice_id: &'a InvoiceId,
+            network: Network,
         ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
             Box::pin(async move {
                 let mut addresses = self.addresses.write().unwrap();
-                addresses.insert(address.to_string(), invoice_id.clone());
+                addresses.insert((address.to_string(), network), invoice_id.clone());
                 Ok(())
             })
         }
@@ -412,24 +425,25 @@ pub mod test_utils {
         fn get_invoice_by_address<'a>(
             &'a self,
             address: &'a str,
+            network: Network,
         ) -> Pin<Box<dyn Future<Output = Result<Option<InvoiceId>, Self::Error>> + Send + 'a>>
         {
             Box::pin(async move {
                 let addresses = self.addresses.read().unwrap();
-                Ok(addresses.get(address).cloned())
+                Ok(addresses.get(&(address.to_string(), network)).cloned())
             })
         }
 
         fn get_active_watched_addresses<'a>(
             &'a self,
         ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<(String, InvoiceId)>, Self::Error>> + Send + 'a>,
+            Box<dyn Future<Output = Result<Vec<(String, InvoiceId, Network)>, Self::Error>> + Send + 'a>,
         > {
             Box::pin(async move {
                 let addresses = self.addresses.read().unwrap();
                 Ok(addresses
                     .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .map(|((addr, network), id)| (addr.clone(), id.clone(), *network))
                     .collect())
             })
         }
@@ -437,30 +451,49 @@ pub mod test_utils {
         fn remove_watched_address<'a>(
             &'a self,
             address: &'a str,
+            network: Network,
         ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
             Box::pin(async move {
                 let mut addresses = self.addresses.write().unwrap();
-                addresses.remove(address);
+                addresses.remove(&(address.to_string(), network));
                 Ok(())
             })
         }
     }
 
     /// Create a test invoice.
-    pub fn create_test_invoice() -> Invoice {
-        Invoice {
+    pub fn create_test_invoice() -> InvoiceData {
+        InvoiceData {
             id: InvoiceId::new(),
-            amount: Amount::btc(100_000),
-            payment_methods: vec![common::PaymentMethod::BitcoinOnChain],
+            network: Network::Ethereum,
             status: InvoiceStatus::Pending,
-            payment_address: Some("bc1qtest...".to_string()),
+            amount: "1000000000000000000".to_string(), // 1 ETH in wei
+            amount_received: "0".to_string(),
+            asset_symbol: "ETH".to_string(),
+            payment_address: Some("0x1234567890abcdef1234567890abcdef12345678".to_string()),
             payment_request: None,
             created_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
-            amount_received: 0,
             metadata: None,
-            webhook_url: None,
-            redirect_url: None,
+            extra: None,
+        }
+    }
+
+    /// Create a test payment.
+    pub fn create_test_payment(invoice_id: &InvoiceId) -> PaymentData {
+        PaymentData {
+            id: Uuid::new_v4(),
+            invoice_id: invoice_id.clone(),
+            network: Network::Ethereum,
+            amount: "1000000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            tx_hash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
+            block_number: Some(12345678),
+            confirmations: 0,
+            detected_at: Utc::now(),
+            confirmed_at: None,
+            from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".to_string()),
+            extra: None,
         }
     }
 }
@@ -495,17 +528,43 @@ mod tests {
     async fn test_watched_addresses() {
         let ds = InMemoryDataService::new();
         let invoice_id = InvoiceId::new();
-        let address = "bc1qtest123";
+        let address = "0x1234567890abcdef1234567890abcdef12345678";
+        let network = Network::Ethereum;
 
-        ds.insert_watched_address(address, &invoice_id)
+        ds.insert_watched_address(address, &invoice_id, network)
             .await
             .unwrap();
 
-        let found = ds.get_invoice_by_address(address).await.unwrap();
+        let found = ds.get_invoice_by_address(address, network).await.unwrap();
         assert_eq!(found, Some(invoice_id.clone()));
 
-        ds.remove_watched_address(address).await.unwrap();
-        let found = ds.get_invoice_by_address(address).await.unwrap();
+        ds.remove_watched_address(address, network).await.unwrap();
+        let found = ds.get_invoice_by_address(address, network).await.unwrap();
         assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_query_by_network() {
+        let ds = InMemoryDataService::new();
+
+        let eth_invoice = create_test_invoice();
+        ds.insert_invoice(&eth_invoice).await.unwrap();
+
+        let mut btc_invoice = create_test_invoice();
+        btc_invoice.id = InvoiceId::new();
+        btc_invoice.network = Network::BitcoinMainnet;
+        btc_invoice.asset_symbol = "BTC".to_string();
+        ds.insert_invoice(&btc_invoice).await.unwrap();
+
+        // Query all
+        let params = InvoiceQueryParams::new();
+        let (total, _) = ds.query_invoices(&params).await.unwrap();
+        assert_eq!(total, 2);
+
+        // Query ETH only
+        let params = InvoiceQueryParams::new().with_network(Network::Ethereum);
+        let (total, invoices) = ds.query_invoices(&params).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(invoices[0].network, Network::Ethereum);
     }
 }

@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::types::{Currency, InvoiceId, InvoiceStatus, PaymentMethod};
+use crate::types::{InvoiceId, InvoiceStatus, Network};
 
 /// Main error type for PayServer operations.
 #[derive(Debug, Error)]
@@ -16,20 +16,22 @@ pub enum PayServerError {
     InvoiceExpired(InvoiceId),
 
     /// Invoice is in an invalid state for the requested operation.
-    #[error("invalid invoice state: invoice {invoice_id} is {current_status}, expected one of {expected:?}")]
+    #[error(
+        "invalid invoice state: invoice {invoice_id} is {current_status}, expected one of {expected:?}"
+    )]
     InvalidInvoiceState {
         invoice_id: InvoiceId,
         current_status: InvoiceStatus,
         expected: Vec<InvoiceStatus>,
     },
 
-    /// Payment method not supported.
-    #[error("unsupported payment method: {0:?}")]
-    UnsupportedPaymentMethod(PaymentMethod),
+    /// Network not supported by this PayServer.
+    #[error("unsupported network: {0}")]
+    UnsupportedNetwork(Network),
 
-    /// Currency not supported.
-    #[error("unsupported currency: {0}")]
-    UnsupportedCurrency(Currency),
+    /// Asset not supported on this network.
+    #[error("unsupported asset: {asset} on {network}")]
+    UnsupportedAsset { network: Network, asset: String },
 
     /// Invalid amount.
     #[error("invalid amount: {0}")]
@@ -43,9 +45,9 @@ pub enum PayServerError {
     #[error("network error: {0}")]
     Network(String),
 
-    /// Blockchain node error.
-    #[error("blockchain error: {0}")]
-    Blockchain(String),
+    /// Blocknetwork node error.
+    #[error("blocknetwork error: {0}")]
+    Blocknetwork(String),
 
     /// Configuration error.
     #[error("configuration error: {0}")]
@@ -78,7 +80,7 @@ impl PayServerError {
         matches!(
             self,
             PayServerError::Network(_)
-                | PayServerError::Blockchain(_)
+                | PayServerError::Blocknetwork(_)
                 | PayServerError::WebhookFailed(_)
                 | PayServerError::RateLimitExceeded
         )
@@ -90,15 +92,15 @@ impl PayServerError {
             PayServerError::InvoiceNotFound(_) => 404,
             PayServerError::InvoiceExpired(_) => 410,
             PayServerError::InvalidInvoiceState { .. } => 409,
-            PayServerError::UnsupportedPaymentMethod(_) => 400,
-            PayServerError::UnsupportedCurrency(_) => 400,
+            PayServerError::UnsupportedNetwork(_) => 400,
+            PayServerError::UnsupportedAsset { .. } => 400,
             PayServerError::InvalidAmount(_) => 400,
             PayServerError::Validation(_) => 400,
             PayServerError::RateLimitExceeded => 429,
             PayServerError::Configuration(_) => 500,
             PayServerError::Database(_) => 500,
             PayServerError::Network(_) => 502,
-            PayServerError::Blockchain(_) => 502,
+            PayServerError::Blocknetwork(_) => 502,
             PayServerError::WebhookFailed(_) => 502,
             PayServerError::Internal(_) => 500,
             PayServerError::Serialization(_) => 500,
@@ -129,6 +131,10 @@ mod tests {
         assert_eq!(PayServerError::RateLimitExceeded.http_status_code(), 429);
         assert_eq!(
             PayServerError::Validation("bad input".into()).http_status_code(),
+            400
+        );
+        assert_eq!(
+            PayServerError::UnsupportedNetwork(Network::BitcoinLightning).http_status_code(),
             400
         );
     }
