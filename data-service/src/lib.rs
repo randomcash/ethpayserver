@@ -6,14 +6,22 @@
 //! # Features
 //!
 //! - `postgres` (default) - PostgreSQL implementation
+//! - `test-utils` - In-memory implementation for testing
 //!
-//! # Implementations
+//! # Migrations
 //!
-//! - PostgreSQL implementation (production, requires `postgres` feature)
-//! - In-memory implementation (testing, requires `test-utils` feature)
+//! Each database implementation has its own migrations directory:
+//!
+//! ```bash
+//! # PostgreSQL
+//! sqlx migrate run --source migrations/postgres
+//! ```
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
+
+#[cfg(feature = "postgres")]
+pub use postgres::PgDataService;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
