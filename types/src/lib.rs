@@ -9,14 +9,28 @@
 //! - `Network`: Enum of all supported blockchain networks
 //! - `PayServer` trait: Core interface all payment servers implement
 //! - `InvoiceData`, `PaymentData`: Generic data structures for invoices and payments
+//! - Repository traits: `InvoiceRepository`, `PaymentRepository`, `WatchedAddressRepository`
 //! - Network-specific types (like ERC20 tokens) are defined in their respective PayServer crates
 
 pub mod error;
+pub mod repositories;
 pub mod traits;
 pub mod types;
 
 // Re-export commonly used types at the crate root for convenience.
 pub use error::{PayServerError, PayServerResult};
+pub use repositories::{
+    // Combined traits
+    DataService, DataServiceReader, DataServiceWriter,
+    // Invoice
+    InvoiceQueryParams, InvoiceReader, InvoiceRepository, InvoiceWriter,
+    // Payment
+    PaymentQueryParams, PaymentReader, PaymentRepository, PaymentWriter,
+    // Watched Address
+    WatchedAddressReader, WatchedAddressRepository, WatchedAddressWriter,
+    // Errors
+    RepositoryError, RepositoryResult,
+};
 pub use traits::{
     CreateInvoiceRequest, InvoiceData, InvoiceQuery, PayServer, PaymentData, PaymentEventPublisher,
     PaymentEventSubscriber, PaymentMonitor,
