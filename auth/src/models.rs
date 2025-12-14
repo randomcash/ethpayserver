@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use crypto::{EncryptedBlob, KdfParams};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 pub use webauthn_rs::prelude::{
     CreationChallengeResponse, Passkey, PasskeyAuthentication, PasskeyRegistration,
@@ -11,7 +12,7 @@ pub use webauthn_rs::prelude::{
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Unique identifier for a user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct UserId(pub Uuid);
 
 impl UserId {
@@ -33,7 +34,7 @@ impl std::fmt::Display for UserId {
 }
 
 /// Unique identifier for a device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct DeviceId(pub Uuid);
 
 impl DeviceId {
@@ -55,7 +56,7 @@ impl std::fmt::Display for DeviceId {
 }
 
 /// Unique identifier for a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct SessionId(pub Uuid);
 
 impl SessionId {
@@ -90,7 +91,7 @@ impl std::fmt::Display for SessionId {
 ///
 /// Passkeys are stored separately in PasskeyCredential.
 /// Wallets are stored separately in WalletCredential.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct User {
     /// Unique user identifier.
     pub id: UserId,
@@ -105,10 +106,12 @@ pub struct User {
     pub primary_wallet_address: Option<String>,
 
     /// KDF parameters used to derive keys from the mnemonic.
+    #[schema(value_type = Object)]
     pub kdf_params: KdfParams,
 
     /// User's symmetric key, encrypted with mnemonic-derived key.
     /// Only the user (with the mnemonic) can decrypt this.
+    #[schema(value_type = Object)]
     pub encrypted_symmetric_key: EncryptedBlob,
 
     /// Hash of the recovery verification key (derived from mnemonic).
@@ -203,7 +206,7 @@ impl User {
 ///
 /// Each device stores the user's encrypted symmetric key for offline access.
 /// The key is encrypted with a key derived from the user's BIP39 mnemonic.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Device {
     /// Unique device identifier.
     pub id: DeviceId,
@@ -219,9 +222,11 @@ pub struct Device {
 
     /// User's symmetric key encrypted for this device.
     /// Encrypted with a key derived from the user's mnemonic.
+    #[schema(value_type = Object)]
     pub encrypted_symmetric_key: EncryptedBlob,
 
     /// KDF parameters used to derive the encryption key.
+    #[schema(value_type = Object)]
     pub kdf_params: KdfParams,
 
     /// When this device was registered.
@@ -258,7 +263,7 @@ impl Device {
 }
 
 /// Type of device for UI categorization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceType {
     /// Web browser.
@@ -280,7 +285,7 @@ impl Default for DeviceType {
 }
 
 /// An active login session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Session {
     /// Unique session identifier.
     pub id: SessionId,
@@ -355,7 +360,7 @@ impl Session {
 
 /// Sanitized user information for API responses.
 /// Does NOT include sensitive fields like recovery_verification_hash.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UserInfo {
     /// Unique user identifier.
     pub id: UserId,
@@ -387,7 +392,7 @@ impl From<&User> for UserInfo {
 
 /// Sanitized device information for API responses.
 /// Does NOT include the encrypted_symmetric_key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DeviceInfo {
     /// Unique device identifier.
     pub id: DeviceId,
@@ -422,7 +427,7 @@ impl From<&Device> for DeviceInfo {
 }
 
 /// Data returned to client after successful login or registration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct LoginResponse {
     /// Session token for subsequent requests.
     pub session_id: SessionId,
@@ -434,9 +439,11 @@ pub struct LoginResponse {
 
     /// User's encrypted symmetric key.
     /// Client decrypts with mnemonic-derived key.
+    #[schema(value_type = Object)]
     pub encrypted_symmetric_key: EncryptedBlob,
 
     /// KDF parameters for deriving the decryption key from mnemonic.
+    #[schema(value_type = Object)]
     pub kdf_params: KdfParams,
 
     /// User's email (None for wallet-only accounts).
@@ -460,7 +467,7 @@ pub struct LoginResponse {
 ///
 /// This is the first step of the recovery process. After verification,
 /// the server returns a passkey registration challenge.
-#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Zeroize, ZeroizeOnDrop)]
 pub struct StartRecoveryRequest {
     /// User's identifier - either email address or wallet address.
     /// For email-based accounts: the user's email
@@ -481,18 +488,21 @@ pub struct StartRecoveryRequest {
 /// this completes the recovery process.
 ///
 /// The `new_recovery_verification_hash` field is zeroized on drop for security.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompleteRecoveryRequest {
     /// The passkey credential from the authenticator.
+    #[schema(value_type = Object)]
     pub credential: RegisterPublicKeyCredential,
 
     /// Human-readable name for the new passkey.
     pub passkey_name: String,
 
     /// New KDF parameters.
+    #[schema(value_type = Object)]
     pub new_kdf_params: KdfParams,
 
     /// New encrypted symmetric key (re-encrypted with recovery-derived key).
+    #[schema(value_type = Object)]
     pub new_encrypted_symmetric_key: EncryptedBlob,
 
     /// New recovery verification hash.
@@ -525,7 +535,7 @@ impl Drop for CompleteRecoveryRequest {
 // ============================================================================
 
 /// Unique identifier for a passkey credential.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct PasskeyId(pub Uuid);
 
 impl PasskeyId {
@@ -550,7 +560,7 @@ impl std::fmt::Display for PasskeyId {
 ///
 /// This wraps the webauthn-rs `Passkey` type with additional metadata.
 /// Passkeys are the primary authentication method for this system.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PasskeyCredential {
     /// Unique identifier for this credential.
     pub id: PasskeyId,
@@ -563,6 +573,7 @@ pub struct PasskeyCredential {
 
     /// The actual WebAuthn passkey data (credential ID, public key, etc.).
     /// This is the serialized webauthn-rs Passkey type.
+    #[schema(value_type = Object)]
     pub passkey: Passkey,
 
     /// When this passkey was registered.
@@ -592,7 +603,7 @@ impl PasskeyCredential {
 
 /// Sanitized passkey information for API responses.
 /// Does NOT include the actual passkey data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PasskeyInfo {
     /// Unique passkey identifier.
     pub id: PasskeyId,
@@ -623,7 +634,7 @@ impl From<&PasskeyCredential> for PasskeyInfo {
 }
 
 /// Request to start passkey registration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartPasskeyRegistrationRequest {
     /// Human-readable name for the passkey (e.g., "MacBook Pro Touch ID").
     pub passkey_name: String,
@@ -631,17 +642,19 @@ pub struct StartPasskeyRegistrationRequest {
 
 /// Response for starting passkey registration.
 /// Client uses this to prompt the user's authenticator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartPasskeyRegistrationResponse {
     /// WebAuthn credential creation options for the client.
+    #[schema(value_type = Object)]
     pub options: CreationChallengeResponse,
 }
 
 /// Response for starting NEW USER passkey registration.
 /// Includes the temporary user ID needed to complete registration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartNewUserPasskeyRegistrationResponse {
     /// WebAuthn credential creation options for the client.
+    #[schema(value_type = Object)]
     pub options: CreationChallengeResponse,
 
     /// Temporary user ID. Must be passed back to complete_new_user_passkey_registration.
@@ -657,21 +670,24 @@ pub struct StartNewUserPasskeyRegistrationResponse {
 /// Combines the passkey credential with user account details.
 ///
 /// The `recovery_verification_hash` field is zeroized on drop for security.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompleteNewUserPasskeyRegistrationRequest {
     /// The temporary user ID from StartNewUserPasskeyRegistrationResponse.
     pub user_id: UserId,
 
     /// The credential response from the authenticator.
+    #[schema(value_type = Object)]
     pub credential: RegisterPublicKeyCredential,
 
     /// User's email address.
     pub email: String,
 
     /// KDF parameters used to derive keys from mnemonic.
+    #[schema(value_type = Object)]
     pub kdf_params: KdfParams,
 
     /// User's symmetric key, encrypted with mnemonic-derived key.
+    #[schema(value_type = Object)]
     pub encrypted_symmetric_key: EncryptedBlob,
 
     /// Hash of the recovery verification key (derived from mnemonic).
@@ -703,30 +719,33 @@ impl Drop for CompleteNewUserPasskeyRegistrationRequest {
 }
 
 /// Request to complete passkey registration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompletePasskeyRegistrationRequest {
     /// The passkey name provided in the start request.
     pub passkey_name: String,
 
     /// The credential response from the authenticator.
+    #[schema(value_type = Object)]
     pub credential: RegisterPublicKeyCredential,
 }
 
 /// Response for starting passkey authentication.
 /// Client uses this to prompt the user's authenticator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartPasskeyLoginResponse {
     /// WebAuthn request options for the client.
+    #[schema(value_type = Object)]
     pub options: RequestChallengeResponse,
 }
 
 /// Request to complete passkey authentication.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompletePasskeyLoginRequest {
     /// User's email (to look up their passkeys).
     pub email: String,
 
     /// The credential response from the authenticator.
+    #[schema(value_type = Object)]
     pub credential: PublicKeyCredential,
 
     /// Device ID from a previous login on this device.
@@ -750,7 +769,7 @@ pub struct CompletePasskeyLoginRequest {
 // ============================================================================
 
 /// Unique identifier for a wallet credential.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct WalletCredentialId(pub Uuid);
 
 impl WalletCredentialId {
@@ -775,7 +794,7 @@ impl std::fmt::Display for WalletCredentialId {
 ///
 /// Wallets use EIP-191 personal_sign for authentication.
 /// The first wallet registered to a wallet-only account becomes the "primary" wallet.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WalletCredential {
     /// Unique identifier for this credential.
     pub id: WalletCredentialId,
@@ -821,7 +840,7 @@ impl WalletCredential {
 }
 
 /// Sanitized wallet information for API responses.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WalletInfo {
     /// Unique wallet credential identifier.
     pub id: WalletCredentialId,
@@ -862,7 +881,7 @@ impl From<&WalletCredential> for WalletInfo {
 /// Challenge state for wallet authentication.
 ///
 /// Stored server-side while waiting for the client to sign the challenge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WalletChallenge {
     /// Random challenge string (32 bytes hex-encoded).
     pub challenge: String,
@@ -890,14 +909,14 @@ impl WalletChallenge {
 // ----------------------------------------------------------------------------
 
 /// Request to start wallet login.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartWalletLoginRequest {
     /// Wallet address attempting to login (will be checksummed by server).
     pub address: String,
 }
 
 /// Response for starting wallet login.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartWalletLoginResponse {
     /// The challenge message to sign.
     /// Client should display this and have the user sign it with their wallet.
@@ -908,7 +927,7 @@ pub struct StartWalletLoginResponse {
 }
 
 /// Request to complete wallet login.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompleteWalletLoginRequest {
     /// User ID from StartWalletLoginResponse.
     pub user_id: UserId,
@@ -936,7 +955,7 @@ pub struct CompleteWalletLoginRequest {
 // ----------------------------------------------------------------------------
 
 /// Request to start new user registration with wallet.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartNewUserWalletRegistrationRequest {
     /// Wallet address for the new account (will be checksummed by server).
     pub address: String,
@@ -946,7 +965,7 @@ pub struct StartNewUserWalletRegistrationRequest {
 }
 
 /// Response for starting new user wallet registration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartNewUserWalletRegistrationResponse {
     /// The challenge message to sign.
     pub challenge_message: String,
@@ -961,7 +980,7 @@ pub struct StartNewUserWalletRegistrationResponse {
 /// Request to complete new user registration with wallet.
 ///
 /// The `recovery_verification_hash` field is zeroized on drop for security.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompleteNewUserWalletRegistrationRequest {
     /// User ID from StartNewUserWalletRegistrationResponse.
     pub user_id: UserId,
@@ -977,9 +996,11 @@ pub struct CompleteNewUserWalletRegistrationRequest {
 
     /// KDF parameters used to derive keys from mnemonic.
     /// Salt will be "wallet:{address}" for wallet-only accounts.
+    #[schema(value_type = Object)]
     pub kdf_params: KdfParams,
 
     /// User's symmetric key, encrypted with mnemonic-derived key.
+    #[schema(value_type = Object)]
     pub encrypted_symmetric_key: EncryptedBlob,
 
     /// Hash of the recovery verification key (derived from mnemonic).
@@ -1013,7 +1034,7 @@ impl Drop for CompleteNewUserWalletRegistrationRequest {
 
 /// Request to start adding a wallet to an existing account.
 /// Requires an active session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartWalletRegistrationRequest {
     /// Wallet address to add (will be checksummed by server).
     pub address: String,
@@ -1023,7 +1044,7 @@ pub struct StartWalletRegistrationRequest {
 }
 
 /// Response for starting wallet registration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartWalletRegistrationResponse {
     /// The challenge message to sign.
     pub challenge_message: String,
@@ -1033,7 +1054,7 @@ pub struct StartWalletRegistrationResponse {
 }
 
 /// Request to complete adding a wallet to an existing account.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompleteWalletRegistrationRequest {
     /// Wallet address (checksummed).
     pub address: String,

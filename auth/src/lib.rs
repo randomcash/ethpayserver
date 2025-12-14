@@ -1,5 +1,20 @@
 //! User authentication and device management for PayServer.
 //!
+//! # HTTP API
+//!
+//! This crate provides ready-to-use axum routes. Mount them at `/auth`:
+//!
+//! ```rust,ignore
+//! use auth::{api, AuthService};
+//! use std::sync::Arc;
+//!
+//! let service = Arc::new(AuthService::new(repo));
+//! let state = api::AuthState::new(service);
+//!
+//! let app = Router::new()
+//!     .nest("/auth", api::router(state));
+//! ```
+//!
 //! This crate provides multiple authentication methods with BIP39 mnemonic recovery:
 //! - **Passkeys** for phishing-resistant, passwordless authentication
 //! - **Ethereum Wallets** for Web3-native authentication (MetaMask, etc.)
@@ -58,10 +73,14 @@
 //! let (user, session) = service.validate_session(session_id).await?;
 //! ```
 
+pub mod api;
 pub mod error;
 pub mod models;
 pub mod repository;
 pub mod service;
+
+// Re-export OpenAPI doc
+pub use api::AuthApiDoc;
 
 // Re-export main types
 pub use error::{AuthError, Result};
