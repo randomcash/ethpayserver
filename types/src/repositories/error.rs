@@ -16,6 +16,10 @@ pub enum RepositoryError {
     /// Serialization/deserialization error.
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    /// Invalid data (e.g., unsupported enum variant, data corruption).
+    #[error("invalid data: {0}")]
+    InvalidData(String),
 }
 
 /// Result type for repository operations.

@@ -885,7 +885,9 @@ name = "data-service"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "auth",
  "chrono",
+ "crypto",
  "serde",
  "serde_json",
  "sqlx",
