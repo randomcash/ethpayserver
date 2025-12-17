@@ -2002,9 +2002,11 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "async-trait",
+ "axum",
  "chrono",
  "coins-bip32",
  "coins-bip39",
+ "data-service",
  "hex",
  "k256",
  "rand 0.9.2",
@@ -2013,7 +2015,9 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tracing",
+ "types",
  "url",
+ "utoipa",
 ]
 
 [[package]]

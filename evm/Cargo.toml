@@ -6,6 +6,10 @@ rust-version.workspace = true
 description = "EVM blockchain interaction layer for ethpayserver"
 license = "MIT"
 
+[features]
+default = []
+api = ["axum", "utoipa", "types", "data-service"]
+
 [dependencies]
 # Ethereum/EVM - alloy ecosystem
 alloy = { version = "1.0", features = [
@@ -43,6 +47,12 @@ chrono = { version = "0.4", features = ["serde"] }
 url = { version = "2.5", features = ["serde"] }
 hex = "0.4"
 rand = "0.9"
+
+# API (optional)
+axum = { version = "0.8", optional = true }
+utoipa = { version = "5", features = ["axum_extras"], optional = true }
+types = { path = "../types", optional = true }
+data-service = { path = "../data-service", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["full", "test-util"] }

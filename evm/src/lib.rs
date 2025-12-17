@@ -28,6 +28,9 @@
 //! let balance = provider.get_native_balance(address).await?;
 //! ```
 
+#[cfg(feature = "api")]
+pub mod api;
+
 pub mod error;
 pub mod network;
 pub mod provider;

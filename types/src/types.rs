@@ -105,11 +105,51 @@ impl Network {
             Network::Scroll => "ETH",
         }
     }
+
+    /// Returns the network identifier as a string (for database storage).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BitcoinMainnet => "bitcoin_mainnet",
+            Self::BitcoinLightning => "bitcoin_lightning",
+            Self::Ethereum => "ethereum",
+            Self::Polygon => "polygon",
+            Self::Arbitrum => "arbitrum",
+            Self::Optimism => "optimism",
+            Self::Base => "base",
+            Self::Avalanche => "avalanche",
+            Self::BinanceSmartChain => "binance_smart_chain",
+            Self::ZkSync => "zksync",
+            Self::Linea => "linea",
+            Self::Scroll => "scroll",
+        }
+    }
 }
 
 impl std::fmt::Display for Network {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.display_name())
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Network {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "bitcoin_mainnet" | "bitcoin" | "btc" => Ok(Self::BitcoinMainnet),
+            "bitcoin_lightning" | "lightning" | "ln" => Ok(Self::BitcoinLightning),
+            "ethereum" | "eth" => Ok(Self::Ethereum),
+            "polygon" | "matic" => Ok(Self::Polygon),
+            "arbitrum" | "arb" => Ok(Self::Arbitrum),
+            "optimism" | "op" => Ok(Self::Optimism),
+            "base" => Ok(Self::Base),
+            "avalanche" | "avax" => Ok(Self::Avalanche),
+            "binance_smart_chain" | "bsc" | "bnb" => Ok(Self::BinanceSmartChain),
+            "zksync" | "zk_sync" => Ok(Self::ZkSync),
+            "linea" => Ok(Self::Linea),
+            "scroll" => Ok(Self::Scroll),
+            _ => Err(format!("unknown network: {}", s)),
+        }
     }
 }
 
@@ -303,8 +343,17 @@ mod tests {
 
     #[test]
     fn test_network_display() {
-        assert_eq!(Network::Ethereum.to_string(), "Ethereum");
-        assert_eq!(Network::BitcoinLightning.to_string(), "Lightning Network");
-        assert_eq!(Network::BinanceSmartChain.to_string(), "BNB Network");
+        assert_eq!(Network::Ethereum.to_string(), "ethereum");
+        assert_eq!(Network::BitcoinLightning.to_string(), "bitcoin_lightning");
+        assert_eq!(Network::BinanceSmartChain.to_string(), "binance_smart_chain");
+    }
+
+    #[test]
+    fn test_network_from_str() {
+        assert_eq!("ethereum".parse::<Network>().unwrap(), Network::Ethereum);
+        assert_eq!("eth".parse::<Network>().unwrap(), Network::Ethereum);
+        assert_eq!("polygon".parse::<Network>().unwrap(), Network::Polygon);
+        assert_eq!("bsc".parse::<Network>().unwrap(), Network::BinanceSmartChain);
+        assert!("invalid".parse::<Network>().is_err());
     }
 }

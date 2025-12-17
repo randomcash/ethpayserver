@@ -51,6 +51,7 @@ let balance = provider.get_native_balance(address).await?;
 | `provider` | Alloy RPC provider wrapper |
 | `tokens` | `EvmTokenStandard`, ERC20 operations |
 | `error` | `EvmError` and `EvmResult` |
+| `api` | REST API endpoints (feature: `api`) |
 
 ## Token Standards
 
@@ -60,3 +61,34 @@ use evm::EvmTokenStandard;
 let standard: EvmTokenStandard = "erc20".parse()?;
 standard.validate(Some(18), None)?; // ERC20 needs decimals, no token_id
 ```
+
+## REST API (feature: `api`)
+
+Enable with `--features api`. Provides axum routes for token and network management.
+
+```rust
+use evm::api::{EvmState, router};
+use data_service::PgDataService;
+use std::sync::Arc;
+
+let ds = Arc::new(PgDataService::connect("postgres://...").await?);
+let app = Router::new().nest("/evm", router(EvmState::new(ds)));
+```
+
+### Token Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/evm/tokens` | List tokens (filter by network, type, symbol) |
+| POST | `/evm/tokens` | Create token |
+| GET | `/evm/tokens/{id}` | Get token |
+| PUT | `/evm/tokens/{id}` | Update token |
+| DELETE | `/evm/tokens/{id}` | Delete token |
+| PUT | `/evm/tokens/{id}/enabled` | Enable/disable token |
+
+### Network Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/evm/networks` | List all networks |
+| GET | `/evm/networks/{id}` | Get network info |

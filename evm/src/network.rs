@@ -96,11 +96,47 @@ impl EvmNetwork {
             _ => None,
         }
     }
+
+    /// Returns the network identifier as a string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ethereum => "ethereum",
+            Self::Polygon => "polygon",
+            Self::Arbitrum => "arbitrum",
+            Self::Optimism => "optimism",
+            Self::Base => "base",
+            Self::Avalanche => "avalanche",
+            Self::BinanceSmartChain => "binance_smart_chain",
+            Self::ZkSync => "zksync",
+            Self::Linea => "linea",
+            Self::Scroll => "scroll",
+        }
+    }
 }
 
 impl std::fmt::Display for EvmNetwork {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.display_name())
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for EvmNetwork {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "ethereum" | "eth" => Ok(Self::Ethereum),
+            "polygon" | "matic" => Ok(Self::Polygon),
+            "arbitrum" | "arb" => Ok(Self::Arbitrum),
+            "optimism" | "op" => Ok(Self::Optimism),
+            "base" => Ok(Self::Base),
+            "avalanche" | "avax" => Ok(Self::Avalanche),
+            "binance_smart_chain" | "bsc" | "bnb" => Ok(Self::BinanceSmartChain),
+            "zksync" | "zk_sync" => Ok(Self::ZkSync),
+            "linea" => Ok(Self::Linea),
+            "scroll" => Ok(Self::Scroll),
+            _ => Err(format!("unknown network: {}", s)),
+        }
     }
 }
 
