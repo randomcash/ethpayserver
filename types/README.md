@@ -17,10 +17,34 @@ This crate provides the foundation shared across all PayServer implementations (
 
 | Module | Description |
 |--------|-------------|
-| `types` | Core types: `Network`, `InvoiceId`, `InvoiceStatus`, `PaymentEvent` |
+| `types` | Core types: `Network`, `InvoiceId`, `InvoiceStatus`, `PaymentEvent`, `UserId` |
+| `store` | Multi-tenant types: `Store`, `StoreId`, `StoreInfo` |
 | `traits` | `PayServer` trait, `InvoiceData`, `PaymentData`, `CreateInvoiceRequest` |
 | `repositories` | Database traits: `InvoiceRepository`, `PaymentRepository`, `TokenRepository` |
 | `error` | `PayServerError` and `PayServerResult` |
+
+## Store Types
+
+The `store` module provides multi-tenant store support:
+
+```rust
+use types::{Store, StoreId, StoreInfo, UserId};
+
+// Create a store
+let owner_id = UserId::new();
+let store = Store::new("My Shop", owner_id)
+    .with_website("https://myshop.com");
+
+// StoreInfo for API responses (excludes owner_id)
+let info: StoreInfo = (&store).into();
+```
+
+| Type | Description |
+|------|-------------|
+| `StoreId` | UUID wrapper for store identification |
+| `Store` | Full store entity with owner_id |
+| `StoreInfo` | Sanitized store data for API responses |
+| `UserId` | UUID wrapper for user identification |
 
 ## Repository Pattern
 
@@ -48,3 +72,9 @@ fn process_payment(repo: &impl InvoiceRepository) { ... }
 
 ### Lightning
 - Lightning Network
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| `openapi` | Adds `utoipa::ToSchema` derives for OpenAPI documentation |

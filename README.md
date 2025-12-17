@@ -125,16 +125,56 @@ ethpayserver/
 
 ## Development Status
 
-**Current Phase:** Initial Setup
+**Current Phase:** Foundation Complete
 
 This project is in active development. See the [project overview](./memos/project-overview.md) for detailed technical specifications and roadmap.
 
-### Development Phases
+### What's Implemented
 
-- [ ] **Phase 1:** Core (EVMChain trait, ETH monitoring, basic API)
-- [ ] **Phase 2:** Tokens (ERC20 support, token registry)
-- [ ] **Phase 3:** Multi-Chain (Polygon, Arbitrum, Optimism, Base, BSC)
-- [ ] **Phase 4:** Production (Reorg handling, monitoring, security audit)
+#### Infrastructure
+- [x] Workspace structure with modular crates
+- [x] PostgreSQL database with migrations
+- [x] Repository pattern (Reader/Writer traits)
+
+#### Authentication (`auth` crate)
+- [x] Passkey/WebAuthn authentication
+- [x] Ethereum wallet authentication (EIP-191)
+- [x] BIP39 mnemonic recovery
+- [x] Session and device management
+- [x] Role-based permissions (ServerAdmin, User)
+- [x] Multi-tenant stores with StoreRoles
+
+#### EVM Support (`evm` crate)
+- [x] 10 EVM networks configured (Ethereum, Polygon, Arbitrum, etc.)
+- [x] HD wallet derivation (BIP-32/44)
+- [x] RPC provider abstraction (Alloy)
+- [x] Token management API (CRUD + enable/disable)
+- [x] Admin authentication on API endpoints
+
+#### Database Schema
+- [x] Users, sessions, devices, credentials
+- [x] Stores, store_roles, user_stores
+- [x] Invoices, payments, watched_addresses
+- [x] Tokens table
+
+### What's Remaining
+
+#### Payment Processing
+- [ ] Payment monitor (watch addresses for incoming payments)
+- [ ] Gas estimator (EIP-1559 dynamic pricing)
+- [ ] Reorg detector (handle chain reorganizations)
+
+#### API & Integration
+- [ ] gRPC API for gateway integration
+- [ ] Invoice creation workflow
+- [ ] Webhook notifications
+- [ ] Exchange rate feeds
+
+#### Production Readiness
+- [ ] Prometheus metrics
+- [ ] Health checks per chain
+- [ ] Load testing
+- [ ] Security audit
 
 ## Documentation
 

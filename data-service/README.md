@@ -11,7 +11,7 @@ Data access layer for ethpayserver.
 
 ## Repository Traits
 
-Implements the repository traits from `types`:
+Implements the repository traits from `types` and `auth`:
 
 | Repository | Description |
 |------------|-------------|
@@ -19,6 +19,9 @@ Implements the repository traits from `types`:
 | `PaymentRepository` | Payment records and confirmations |
 | `TokenRepository` | Token configuration (ERC20, etc.) |
 | `WatchedAddressRepository` | Address monitoring for payments |
+| `StoreRepository` | Store CRUD and user access |
+| `StoreRoleRepository` | Role definitions and permissions |
+| `UserStoreRepository` | User-store membership management |
 
 ## Usage
 
@@ -76,6 +79,20 @@ let ds = InMemoryDataService::new();
 - `sessions` - Active sessions
 - `devices` - Registered devices/passkeys
 - `wallets` - Linked Ethereum wallets
+
+### Store Tables (Multi-Tenant)
+- `stores` - Merchant stores
+- `store_roles` - Role definitions with permissions (Owner, Manager, Employee, Guest)
+- `user_stores` - Links users to stores with roles
+
+```sql
+-- Default store roles are seeded on migration
+-- Store-specific roles have store_id set, global defaults have NULL
+INSERT INTO store_roles (store_id, role, permissions) VALUES
+    (NULL, 'Owner', '["ethpay.store.canmodifystoresettings", ...]'),
+    (NULL, 'Manager', '["ethpay.store.canviewinvoices", ...]'),
+    ...
+```
 
 ## Structure
 
