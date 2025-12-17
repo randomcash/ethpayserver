@@ -103,17 +103,25 @@ docker run -p 5001:5001 -p 5002:5002 \
 
 ```
 ethpayserver/
-├── src/
-│   ├── core/          # Chain abstraction, wallet, tokens
-│   ├── chains/        # Per-chain implementations
-│   ├── monitoring/    # Payment monitoring, gas estimation
-│   ├── api/           # gRPC and REST servers
-│   ├── db/            # Database models and queries
-│   └── utils/         # Exchange rates, retry logic
-├── migrations/        # SQL migrations
-├── proto/             # gRPC proto definitions
-└── docker/            # Docker configuration
+├── auth/              # User authentication (passkeys, wallets, recovery)
+├── crypto/            # Cryptographic primitives (Argon2, AES, Ed25519)
+├── data-service/      # PostgreSQL data access layer
+├── evm/               # EVM blockchain interaction
+├── types/             # Common types and traits
+└── memos/             # Project documentation
 ```
+
+## Crates
+
+| Crate | Description |
+|-------|-------------|
+| [auth](./auth/README.md) | User authentication: passkeys, Ethereum wallets, BIP39 recovery |
+| [crypto](./crypto/README.md) | Cryptographic primitives: Argon2id, AES-256, X25519, Ed25519 |
+| [data-service](./data-service/README.md) | PostgreSQL repository implementations |
+| [evm](./evm/README.md) | EVM blockchain: 10 networks, HD wallet, ERC20/721/1155 |
+| [types](./types/README.md) | Common types shared across all payservers |
+
+> **Note**: `auth`, `crypto`, and `types` will be moved to a shared `payserver-commons` repository.
 
 ## Development Status
 
