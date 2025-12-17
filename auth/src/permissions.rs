@@ -52,7 +52,32 @@ impl Policies {
     pub const SERVER_VIEW_USERS: &'static str = "ethpay.server.canviewusers";
 
     // =========================================================================
-    // User-level permissions (regular authenticated users)
+    // Store-level permissions (scoped to specific stores)
+    // =========================================================================
+
+    /// Can modify store settings
+    pub const STORE_MODIFY_SETTINGS: &'static str = "ethpay.store.canmodifystoresettings";
+
+    /// Can view store settings
+    pub const STORE_VIEW_SETTINGS: &'static str = "ethpay.store.canviewstoresettings";
+
+    /// Can create invoices in store
+    pub const STORE_CREATE_INVOICE: &'static str = "ethpay.store.cancreateinvoice";
+
+    /// Can view invoices in store
+    pub const STORE_VIEW_INVOICES: &'static str = "ethpay.store.canviewinvoices";
+
+    /// Can modify invoices in store
+    pub const STORE_MODIFY_INVOICES: &'static str = "ethpay.store.canmodifyinvoices";
+
+    /// Can view payments in store
+    pub const STORE_VIEW_PAYMENTS: &'static str = "ethpay.store.canviewpayments";
+
+    /// Can manage webhooks in store
+    pub const STORE_MANAGE_WEBHOOKS: &'static str = "ethpay.store.canmanagewebhooks";
+
+    // =========================================================================
+    // User-level permissions (personal, not store-scoped)
     // =========================================================================
 
     /// Can view own profile
@@ -61,14 +86,11 @@ impl Policies {
     /// Can modify own profile
     pub const USER_MODIFY_PROFILE: &'static str = "ethpay.user.canmodifyprofile";
 
-    /// Can create invoices
-    pub const USER_CREATE_INVOICE: &'static str = "ethpay.user.cancreateinvoice";
+    /// Can delete own account
+    pub const USER_DELETE_ACCOUNT: &'static str = "ethpay.user.candeleteaccount";
 
-    /// Can view own invoices
-    pub const USER_VIEW_INVOICES: &'static str = "ethpay.user.canviewinvoices";
-
-    /// Can view own payments
-    pub const USER_VIEW_PAYMENTS: &'static str = "ethpay.user.canviewpayments";
+    /// Can manage own notifications
+    pub const USER_MANAGE_NOTIFICATIONS: &'static str = "ethpay.user.canmanagenotifications";
 
     /// Unrestricted access (has all permissions)
     pub const UNRESTRICTED: &'static str = "unrestricted";
@@ -76,16 +98,25 @@ impl Policies {
     /// Get all defined policies.
     pub fn all() -> &'static [&'static str] {
         &[
+            // Server policies
             Self::SERVER_MODIFY_SETTINGS,
             Self::SERVER_MANAGE_TOKENS,
             Self::SERVER_VIEW_SETTINGS,
             Self::SERVER_MANAGE_USERS,
             Self::SERVER_VIEW_USERS,
+            // Store policies
+            Self::STORE_MODIFY_SETTINGS,
+            Self::STORE_VIEW_SETTINGS,
+            Self::STORE_CREATE_INVOICE,
+            Self::STORE_VIEW_INVOICES,
+            Self::STORE_MODIFY_INVOICES,
+            Self::STORE_VIEW_PAYMENTS,
+            Self::STORE_MANAGE_WEBHOOKS,
+            // User policies
             Self::USER_VIEW_PROFILE,
             Self::USER_MODIFY_PROFILE,
-            Self::USER_CREATE_INVOICE,
-            Self::USER_VIEW_INVOICES,
-            Self::USER_VIEW_PAYMENTS,
+            Self::USER_DELETE_ACCOUNT,
+            Self::USER_MANAGE_NOTIFICATIONS,
             Self::UNRESTRICTED,
         ]
     }
@@ -100,6 +131,11 @@ impl Policies {
         policy.starts_with("ethpay.server")
     }
 
+    /// Check if this is a store-level policy (can be scoped to a store).
+    pub fn is_store_policy(policy: &str) -> bool {
+        policy.starts_with("ethpay.store")
+    }
+
     /// Check if this is a user-level policy.
     pub fn is_user_policy(policy: &str) -> bool {
         policy.starts_with("ethpay.user")
@@ -110,7 +146,7 @@ impl Policies {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
-    // Server permissions
+    // Server permissions (global, not store-scoped)
     /// Can modify server settings
     ServerModifySettings,
     /// Can manage tokens
@@ -122,17 +158,31 @@ pub enum Permission {
     /// Can view users
     ServerViewUsers,
 
-    // User permissions
+    // Store permissions (scoped to specific stores)
+    /// Can modify store settings
+    StoreModifySettings,
+    /// Can view store settings
+    StoreViewSettings,
+    /// Can create invoices in store
+    StoreCreateInvoice,
+    /// Can view invoices in store
+    StoreViewInvoices,
+    /// Can modify invoices in store
+    StoreModifyInvoices,
+    /// Can view payments in store
+    StoreViewPayments,
+    /// Can manage webhooks in store
+    StoreManageWebhooks,
+
+    // User permissions (personal, not store-scoped)
     /// Can view own profile
     UserViewProfile,
     /// Can modify own profile
     UserModifyProfile,
-    /// Can create invoices
-    UserCreateInvoice,
-    /// Can view own invoices
-    UserViewInvoices,
-    /// Can view own payments
-    UserViewPayments,
+    /// Can delete own account
+    UserDeleteAccount,
+    /// Can manage own notifications
+    UserManageNotifications,
 
     /// Unrestricted - has all permissions
     Unrestricted,
@@ -142,16 +192,25 @@ impl Permission {
     /// Convert permission to policy string.
     pub fn as_policy(&self) -> &'static str {
         match self {
+            // Server
             Permission::ServerModifySettings => Policies::SERVER_MODIFY_SETTINGS,
             Permission::ServerManageTokens => Policies::SERVER_MANAGE_TOKENS,
             Permission::ServerViewSettings => Policies::SERVER_VIEW_SETTINGS,
             Permission::ServerManageUsers => Policies::SERVER_MANAGE_USERS,
             Permission::ServerViewUsers => Policies::SERVER_VIEW_USERS,
+            // Store
+            Permission::StoreModifySettings => Policies::STORE_MODIFY_SETTINGS,
+            Permission::StoreViewSettings => Policies::STORE_VIEW_SETTINGS,
+            Permission::StoreCreateInvoice => Policies::STORE_CREATE_INVOICE,
+            Permission::StoreViewInvoices => Policies::STORE_VIEW_INVOICES,
+            Permission::StoreModifyInvoices => Policies::STORE_MODIFY_INVOICES,
+            Permission::StoreViewPayments => Policies::STORE_VIEW_PAYMENTS,
+            Permission::StoreManageWebhooks => Policies::STORE_MANAGE_WEBHOOKS,
+            // User
             Permission::UserViewProfile => Policies::USER_VIEW_PROFILE,
             Permission::UserModifyProfile => Policies::USER_MODIFY_PROFILE,
-            Permission::UserCreateInvoice => Policies::USER_CREATE_INVOICE,
-            Permission::UserViewInvoices => Policies::USER_VIEW_INVOICES,
-            Permission::UserViewPayments => Policies::USER_VIEW_PAYMENTS,
+            Permission::UserDeleteAccount => Policies::USER_DELETE_ACCOUNT,
+            Permission::UserManageNotifications => Policies::USER_MANAGE_NOTIFICATIONS,
             Permission::Unrestricted => Policies::UNRESTRICTED,
         }
     }
@@ -159,19 +218,33 @@ impl Permission {
     /// Parse permission from policy string.
     pub fn from_policy(policy: &str) -> Option<Self> {
         match policy {
+            // Server
             Policies::SERVER_MODIFY_SETTINGS => Some(Permission::ServerModifySettings),
             Policies::SERVER_MANAGE_TOKENS => Some(Permission::ServerManageTokens),
             Policies::SERVER_VIEW_SETTINGS => Some(Permission::ServerViewSettings),
             Policies::SERVER_MANAGE_USERS => Some(Permission::ServerManageUsers),
             Policies::SERVER_VIEW_USERS => Some(Permission::ServerViewUsers),
+            // Store
+            Policies::STORE_MODIFY_SETTINGS => Some(Permission::StoreModifySettings),
+            Policies::STORE_VIEW_SETTINGS => Some(Permission::StoreViewSettings),
+            Policies::STORE_CREATE_INVOICE => Some(Permission::StoreCreateInvoice),
+            Policies::STORE_VIEW_INVOICES => Some(Permission::StoreViewInvoices),
+            Policies::STORE_MODIFY_INVOICES => Some(Permission::StoreModifyInvoices),
+            Policies::STORE_VIEW_PAYMENTS => Some(Permission::StoreViewPayments),
+            Policies::STORE_MANAGE_WEBHOOKS => Some(Permission::StoreManageWebhooks),
+            // User
             Policies::USER_VIEW_PROFILE => Some(Permission::UserViewProfile),
             Policies::USER_MODIFY_PROFILE => Some(Permission::UserModifyProfile),
-            Policies::USER_CREATE_INVOICE => Some(Permission::UserCreateInvoice),
-            Policies::USER_VIEW_INVOICES => Some(Permission::UserViewInvoices),
-            Policies::USER_VIEW_PAYMENTS => Some(Permission::UserViewPayments),
+            Policies::USER_DELETE_ACCOUNT => Some(Permission::UserDeleteAccount),
+            Policies::USER_MANAGE_NOTIFICATIONS => Some(Permission::UserManageNotifications),
             Policies::UNRESTRICTED => Some(Permission::Unrestricted),
             _ => None,
         }
+    }
+
+    /// Check if this permission is store-scoped.
+    pub fn is_store_scoped(&self) -> bool {
+        Policies::is_store_policy(self.as_policy())
     }
 
     /// Check if this permission implies another permission (hierarchy).
@@ -189,6 +262,7 @@ impl Permission {
 
         // Permission hierarchy
         match self {
+            // Server hierarchy
             Permission::ServerModifySettings => matches!(
                 other,
                 Permission::ServerViewSettings
@@ -197,7 +271,26 @@ impl Permission {
                     | Permission::ServerViewUsers
             ),
             Permission::ServerManageUsers => matches!(other, Permission::ServerViewUsers),
+
+            // Store hierarchy
+            Permission::StoreModifySettings => matches!(
+                other,
+                Permission::StoreViewSettings
+                    | Permission::StoreModifyInvoices
+                    | Permission::StoreManageWebhooks
+            ),
+            Permission::StoreModifyInvoices => matches!(
+                other,
+                Permission::StoreViewInvoices | Permission::StoreCreateInvoice
+            ),
+            Permission::StoreViewSettings => matches!(
+                other,
+                Permission::StoreViewInvoices | Permission::StoreViewPayments
+            ),
+
+            // User hierarchy
             Permission::UserModifyProfile => matches!(other, Permission::UserViewProfile),
+
             _ => false,
         }
     }
@@ -225,18 +318,22 @@ impl Role {
     }
 
     /// Check if this role has a specific permission.
+    ///
+    /// Note: Store-scoped permissions (like `StoreCreateInvoice`) are not granted
+    /// by the Role directly. They come from `StoreRole` via the `UserStore` relationship.
+    /// This method only checks server-level and user-level permissions.
     pub fn has_permission(&self, permission: Permission) -> bool {
         match self {
             Role::ServerAdmin => true, // Admin has all permissions
             Role::User => {
-                // Users have limited permissions
+                // Users have user-level permissions only
+                // Store permissions come from StoreRole, not Role
                 matches!(
                     permission,
                     Permission::UserViewProfile
                         | Permission::UserModifyProfile
-                        | Permission::UserCreateInvoice
-                        | Permission::UserViewInvoices
-                        | Permission::UserViewPayments
+                        | Permission::UserDeleteAccount
+                        | Permission::UserManageNotifications
                 )
             }
         }
@@ -252,27 +349,31 @@ impl Role {
     }
 
     /// Get all permissions granted to this role.
+    ///
+    /// Note: Store-scoped permissions are not included here. They come from
+    /// `StoreRole` via the `UserStore` relationship.
     pub fn permissions(&self) -> Vec<Permission> {
         match self {
             Role::ServerAdmin => vec![
+                // Server permissions
                 Permission::ServerModifySettings,
                 Permission::ServerManageTokens,
                 Permission::ServerViewSettings,
                 Permission::ServerManageUsers,
                 Permission::ServerViewUsers,
+                // User permissions
                 Permission::UserViewProfile,
                 Permission::UserModifyProfile,
-                Permission::UserCreateInvoice,
-                Permission::UserViewInvoices,
-                Permission::UserViewPayments,
+                Permission::UserDeleteAccount,
+                Permission::UserManageNotifications,
+                // Unrestricted
                 Permission::Unrestricted,
             ],
             Role::User => vec![
                 Permission::UserViewProfile,
                 Permission::UserModifyProfile,
-                Permission::UserCreateInvoice,
-                Permission::UserViewInvoices,
-                Permission::UserViewPayments,
+                Permission::UserDeleteAccount,
+                Permission::UserManageNotifications,
             ],
         }
     }
@@ -344,11 +445,16 @@ mod tests {
     #[test]
     fn test_user_has_limited_permissions() {
         let user = Role::User;
+        // User has user-level permissions
         assert!(user.has_permission(Permission::UserViewProfile));
-        assert!(user.has_permission(Permission::UserCreateInvoice));
+        assert!(user.has_permission(Permission::UserModifyProfile));
+        assert!(user.has_permission(Permission::UserDeleteAccount));
+        // User doesn't have server permissions
         assert!(!user.has_permission(Permission::ServerModifySettings));
         assert!(!user.has_permission(Permission::ServerManageTokens));
         assert!(!user.has_permission(Permission::Unrestricted));
+        // Store permissions come from StoreRole, not Role
+        assert!(!user.has_permission(Permission::StoreCreateInvoice));
     }
 
     #[test]

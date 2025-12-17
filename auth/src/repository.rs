@@ -212,6 +212,101 @@ pub trait ChallengeRepository: Send + Sync {
     async fn cleanup_expired_challenges(&self) -> Result<u64>;
 }
 
+/// Repository for store data persistence.
+#[async_trait]
+pub trait StoreRepository: Send + Sync {
+    /// Create a new store.
+    async fn create_store(&self, store: &crate::store::Store) -> Result<()>;
+
+    /// Get a store by ID.
+    async fn get_store(&self, id: crate::store::StoreId) -> Result<Option<crate::store::Store>>;
+
+    /// Get all stores for a user (as owner or member).
+    async fn get_stores_for_user(&self, user_id: UserId) -> Result<Vec<crate::store::Store>>;
+
+    /// Get stores owned by a user.
+    async fn get_stores_owned_by(&self, user_id: UserId) -> Result<Vec<crate::store::Store>>;
+
+    /// Update a store.
+    async fn update_store(&self, store: &crate::store::Store) -> Result<()>;
+
+    /// Archive a store (soft delete).
+    async fn archive_store(&self, id: crate::store::StoreId) -> Result<()>;
+
+    /// Delete a store permanently.
+    async fn delete_store(&self, id: crate::store::StoreId) -> Result<()>;
+}
+
+/// Repository for store role data persistence.
+#[async_trait]
+pub trait StoreRoleRepository: Send + Sync {
+    /// Create a new store role.
+    async fn create_store_role(&self, role: &crate::store::StoreRole) -> Result<()>;
+
+    /// Get a store role by ID.
+    async fn get_store_role(&self, id: crate::store::StoreRoleId) -> Result<Option<crate::store::StoreRole>>;
+
+    /// Get all roles for a store (including global defaults).
+    async fn get_roles_for_store(&self, store_id: crate::store::StoreId) -> Result<Vec<crate::store::StoreRole>>;
+
+    /// Get global default roles (store_id is NULL).
+    async fn get_default_roles(&self) -> Result<Vec<crate::store::StoreRole>>;
+
+    /// Get a default role by name.
+    async fn get_default_role_by_name(&self, name: &str) -> Result<Option<crate::store::StoreRole>>;
+
+    /// Update a store role.
+    async fn update_store_role(&self, role: &crate::store::StoreRole) -> Result<()>;
+
+    /// Delete a store role.
+    async fn delete_store_role(&self, id: crate::store::StoreRoleId) -> Result<()>;
+}
+
+/// Repository for user-store relationship data persistence.
+#[async_trait]
+pub trait UserStoreRepository: Send + Sync {
+    /// Add a user to a store with a specific role.
+    async fn add_user_to_store(&self, user_store: &crate::store::UserStore) -> Result<()>;
+
+    /// Get a user's membership in a specific store.
+    async fn get_user_store(
+        &self,
+        user_id: UserId,
+        store_id: crate::store::StoreId,
+    ) -> Result<Option<crate::store::UserStore>>;
+
+    /// Get all store memberships for a user.
+    async fn get_user_stores(&self, user_id: UserId) -> Result<Vec<crate::store::UserStore>>;
+
+    /// Get all users in a store.
+    async fn get_store_users(&self, store_id: crate::store::StoreId) -> Result<Vec<crate::store::UserStore>>;
+
+    /// Update a user's role in a store.
+    async fn update_user_store(&self, user_store: &crate::store::UserStore) -> Result<()>;
+
+    /// Remove a user from a store.
+    async fn remove_user_from_store(&self, user_id: UserId, store_id: crate::store::StoreId) -> Result<()>;
+
+    /// Check if a user has a specific permission in a store.
+    /// This resolves the role and checks its permissions.
+    async fn user_has_store_permission(
+        &self,
+        user_id: UserId,
+        store_id: crate::store::StoreId,
+        permission: &str,
+    ) -> Result<bool>;
+
+    /// Get a user's full store info (store + role details).
+    async fn get_user_store_info(
+        &self,
+        user_id: UserId,
+        store_id: crate::store::StoreId,
+    ) -> Result<Option<crate::store::UserStoreInfo>>;
+
+    /// Get all store infos for a user.
+    async fn get_user_store_infos(&self, user_id: UserId) -> Result<Vec<crate::store::UserStoreInfo>>;
+}
+
 /// Combined repository trait for convenience.
 /// Includes all auth-related repositories.
 #[async_trait]
@@ -222,6 +317,9 @@ pub trait AuthRepository:
     + PasskeyRepository
     + WalletRepository
     + ChallengeRepository
+    + StoreRepository
+    + StoreRoleRepository
+    + UserStoreRepository
 {
 }
 
@@ -233,6 +331,9 @@ impl<T> AuthRepository for T where
         + PasskeyRepository
         + WalletRepository
         + ChallengeRepository
+        + StoreRepository
+        + StoreRoleRepository
+        + UserStoreRepository
 {
 }
 
@@ -263,6 +364,10 @@ pub mod inmemory {
         registration_challenges: RwLock<HashMap<UserId, (PasskeyRegistration, String)>>,
         authentication_challenges: RwLock<HashMap<UserId, PasskeyAuthentication>>,
         wallet_challenges: RwLock<HashMap<UserId, WalletChallenge>>,
+        // Store-related data
+        stores: RwLock<HashMap<crate::store::StoreId, crate::store::Store>>,
+        store_roles: RwLock<HashMap<crate::store::StoreRoleId, crate::store::StoreRole>>,
+        user_stores: RwLock<HashMap<(UserId, crate::store::StoreId), crate::store::UserStore>>,
     }
 
     impl InMemoryRepository {
@@ -775,6 +880,239 @@ pub mod inmemory {
             // In-memory implementation doesn't track expiration times
             // Real implementations should track timestamps and clean up old challenges
             Ok(0)
+        }
+    }
+
+    #[async_trait]
+    impl StoreRepository for InMemoryRepository {
+        async fn create_store(&self, store: &crate::store::Store) -> Result<()> {
+            let mut stores = self.stores.write().unwrap_or_else(|e| e.into_inner());
+            stores.insert(store.id, store.clone());
+            Ok(())
+        }
+
+        async fn get_store(&self, id: crate::store::StoreId) -> Result<Option<crate::store::Store>> {
+            let stores = self.stores.read().unwrap_or_else(|e| e.into_inner());
+            Ok(stores.get(&id).cloned())
+        }
+
+        async fn get_stores_for_user(&self, user_id: UserId) -> Result<Vec<crate::store::Store>> {
+            let stores = self.stores.read().unwrap_or_else(|e| e.into_inner());
+            let user_stores = self.user_stores.read().unwrap_or_else(|e| e.into_inner());
+
+            let store_ids: Vec<_> = user_stores
+                .keys()
+                .filter(|(uid, _)| *uid == user_id)
+                .map(|(_, sid)| *sid)
+                .collect();
+
+            Ok(stores
+                .values()
+                .filter(|s| store_ids.contains(&s.id) || s.owner_id == user_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn get_stores_owned_by(&self, user_id: UserId) -> Result<Vec<crate::store::Store>> {
+            let stores = self.stores.read().unwrap_or_else(|e| e.into_inner());
+            Ok(stores
+                .values()
+                .filter(|s| s.owner_id == user_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn update_store(&self, store: &crate::store::Store) -> Result<()> {
+            let mut stores = self.stores.write().unwrap_or_else(|e| e.into_inner());
+            if stores.contains_key(&store.id) {
+                stores.insert(store.id, store.clone());
+                Ok(())
+            } else {
+                Err(AuthError::StoreNotFound(store.id.to_string()))
+            }
+        }
+
+        async fn archive_store(&self, id: crate::store::StoreId) -> Result<()> {
+            let mut stores = self.stores.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(store) = stores.get_mut(&id) {
+                store.archived = true;
+                Ok(())
+            } else {
+                Err(AuthError::StoreNotFound(id.to_string()))
+            }
+        }
+
+        async fn delete_store(&self, id: crate::store::StoreId) -> Result<()> {
+            let mut stores = self.stores.write().unwrap_or_else(|e| e.into_inner());
+            stores.remove(&id);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl StoreRoleRepository for InMemoryRepository {
+        async fn create_store_role(&self, role: &crate::store::StoreRole) -> Result<()> {
+            let mut roles = self.store_roles.write().unwrap_or_else(|e| e.into_inner());
+            roles.insert(role.id, role.clone());
+            Ok(())
+        }
+
+        async fn get_store_role(&self, id: crate::store::StoreRoleId) -> Result<Option<crate::store::StoreRole>> {
+            let roles = self.store_roles.read().unwrap_or_else(|e| e.into_inner());
+            Ok(roles.get(&id).cloned())
+        }
+
+        async fn get_roles_for_store(&self, store_id: crate::store::StoreId) -> Result<Vec<crate::store::StoreRole>> {
+            let roles = self.store_roles.read().unwrap_or_else(|e| e.into_inner());
+            Ok(roles
+                .values()
+                .filter(|r| r.store_id == Some(store_id) || r.store_id.is_none())
+                .cloned()
+                .collect())
+        }
+
+        async fn get_default_roles(&self) -> Result<Vec<crate::store::StoreRole>> {
+            let roles = self.store_roles.read().unwrap_or_else(|e| e.into_inner());
+            Ok(roles
+                .values()
+                .filter(|r| r.store_id.is_none())
+                .cloned()
+                .collect())
+        }
+
+        async fn get_default_role_by_name(&self, name: &str) -> Result<Option<crate::store::StoreRole>> {
+            let roles = self.store_roles.read().unwrap_or_else(|e| e.into_inner());
+            Ok(roles
+                .values()
+                .find(|r| r.store_id.is_none() && r.role == name)
+                .cloned())
+        }
+
+        async fn update_store_role(&self, role: &crate::store::StoreRole) -> Result<()> {
+            let mut roles = self.store_roles.write().unwrap_or_else(|e| e.into_inner());
+            if roles.contains_key(&role.id) {
+                roles.insert(role.id, role.clone());
+                Ok(())
+            } else {
+                Err(AuthError::StoreRoleNotFound(role.id.to_string()))
+            }
+        }
+
+        async fn delete_store_role(&self, id: crate::store::StoreRoleId) -> Result<()> {
+            let mut roles = self.store_roles.write().unwrap_or_else(|e| e.into_inner());
+            roles.remove(&id);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl UserStoreRepository for InMemoryRepository {
+        async fn add_user_to_store(&self, user_store: &crate::store::UserStore) -> Result<()> {
+            let mut user_stores = self.user_stores.write().unwrap_or_else(|e| e.into_inner());
+            user_stores.insert((user_store.user_id, user_store.store_id), user_store.clone());
+            Ok(())
+        }
+
+        async fn get_user_store(
+            &self,
+            user_id: UserId,
+            store_id: crate::store::StoreId,
+        ) -> Result<Option<crate::store::UserStore>> {
+            let user_stores = self.user_stores.read().unwrap_or_else(|e| e.into_inner());
+            Ok(user_stores.get(&(user_id, store_id)).cloned())
+        }
+
+        async fn get_user_stores(&self, user_id: UserId) -> Result<Vec<crate::store::UserStore>> {
+            let user_stores = self.user_stores.read().unwrap_or_else(|e| e.into_inner());
+            Ok(user_stores
+                .values()
+                .filter(|us| us.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn get_store_users(&self, store_id: crate::store::StoreId) -> Result<Vec<crate::store::UserStore>> {
+            let user_stores = self.user_stores.read().unwrap_or_else(|e| e.into_inner());
+            Ok(user_stores
+                .values()
+                .filter(|us| us.store_id == store_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn update_user_store(&self, user_store: &crate::store::UserStore) -> Result<()> {
+            let mut user_stores = self.user_stores.write().unwrap_or_else(|e| e.into_inner());
+            let key = (user_store.user_id, user_store.store_id);
+            if user_stores.contains_key(&key) {
+                user_stores.insert(key, user_store.clone());
+                Ok(())
+            } else {
+                Err(AuthError::UserNotInStore)
+            }
+        }
+
+        async fn remove_user_from_store(&self, user_id: UserId, store_id: crate::store::StoreId) -> Result<()> {
+            let mut user_stores = self.user_stores.write().unwrap_or_else(|e| e.into_inner());
+            user_stores.remove(&(user_id, store_id));
+            Ok(())
+        }
+
+        async fn user_has_store_permission(
+            &self,
+            user_id: UserId,
+            store_id: crate::store::StoreId,
+            permission: &str,
+        ) -> Result<bool> {
+            let user_stores = self.user_stores.read().unwrap_or_else(|e| e.into_inner());
+            let roles = self.store_roles.read().unwrap_or_else(|e| e.into_inner());
+
+            if let Some(user_store) = user_stores.get(&(user_id, store_id)) {
+                if let Some(role) = roles.get(&user_store.store_role_id) {
+                    return Ok(role.has_permission(permission));
+                }
+            }
+            Ok(false)
+        }
+
+        async fn get_user_store_info(
+            &self,
+            user_id: UserId,
+            store_id: crate::store::StoreId,
+        ) -> Result<Option<crate::store::UserStoreInfo>> {
+            let user_stores = self.user_stores.read().unwrap_or_else(|e| e.into_inner());
+            let stores = self.stores.read().unwrap_or_else(|e| e.into_inner());
+            let roles = self.store_roles.read().unwrap_or_else(|e| e.into_inner());
+
+            if let Some(user_store) = user_stores.get(&(user_id, store_id)) {
+                if let Some(store) = stores.get(&store_id) {
+                    if let Some(role) = roles.get(&user_store.store_role_id) {
+                        return Ok(Some(crate::store::UserStoreInfo {
+                            store: crate::store::StoreInfo::from(store),
+                            role: crate::store::StoreRoleInfo::from(role),
+                        }));
+                    }
+                }
+            }
+            Ok(None)
+        }
+
+        async fn get_user_store_infos(&self, user_id: UserId) -> Result<Vec<crate::store::UserStoreInfo>> {
+            let user_stores = self.user_stores.read().unwrap_or_else(|e| e.into_inner());
+            let stores = self.stores.read().unwrap_or_else(|e| e.into_inner());
+            let roles = self.store_roles.read().unwrap_or_else(|e| e.into_inner());
+
+            let mut result = Vec::new();
+            for user_store in user_stores.values().filter(|us| us.user_id == user_id) {
+                if let Some(store) = stores.get(&user_store.store_id) {
+                    if let Some(role) = roles.get(&user_store.store_role_id) {
+                        result.push(crate::store::UserStoreInfo {
+                            store: crate::store::StoreInfo::from(store),
+                            role: crate::store::StoreRoleInfo::from(role),
+                        });
+                    }
+                }
+            }
+            Ok(result)
         }
     }
 }

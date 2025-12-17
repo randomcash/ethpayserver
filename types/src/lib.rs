@@ -10,10 +10,12 @@
 //! - `PayServer` trait: Core interface all payment servers implement
 //! - `InvoiceData`, `PaymentData`: Generic data structures for invoices and payments
 //! - Repository traits: `InvoiceRepository`, `PaymentRepository`, `WatchedAddressRepository`
+//! - `Store`, `StoreRole`, `UserStore`: Multi-tenant store management
 //! - Network-specific types (like ERC20 tokens) are defined in their respective PayServer crates
 
 pub mod error;
 pub mod repositories;
+pub mod store;
 pub mod traits;
 pub mod types;
 
@@ -37,4 +39,5 @@ pub use traits::{
     CreateInvoiceRequest, InvoiceData, InvoiceQuery, PayServer, PaymentData, PaymentEventPublisher,
     PaymentEventSubscriber, PaymentMonitor,
 };
-pub use types::{HealthStatus, InvoiceId, InvoiceStatus, Network, PaymentEvent};
+pub use types::{HealthStatus, InvoiceId, InvoiceStatus, Network, PaymentEvent, UserId};
+pub use store::{Store, StoreId, StoreInfo};

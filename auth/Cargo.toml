@@ -9,6 +9,7 @@ description = "User authentication and device management for PayServer"
 [dependencies]
 # Internal crates
 crypto = { path = "../crypto" }
+types = { path = "../types", features = ["openapi"] }
 
 # Async
 async-trait = "0.1"

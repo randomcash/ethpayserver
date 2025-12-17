@@ -1054,6 +1054,7 @@ dependencies = [
  "subtle",
  "thiserror 2.0.17",
  "tokio",
+ "types",
  "url",
  "utoipa",
  "uuid",
@@ -4926,6 +4927,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.17",
  "tokio",
+ "utoipa",
  "uuid",
 ]
 

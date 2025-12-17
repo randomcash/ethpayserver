@@ -15,5 +15,10 @@ rust_decimal = { version = "1.36", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 tokio = { version = "1.42", features = ["sync"] }
 async-trait = "0.1"
+utoipa = { version = "5.3", optional = true }
+
+[features]
+default = []
+openapi = ["utoipa"]
 
 [dev-dependencies]

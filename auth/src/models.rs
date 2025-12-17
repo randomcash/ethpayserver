@@ -11,27 +11,8 @@ pub use webauthn_rs::prelude::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Unique identifier for a user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
-pub struct UserId(pub Uuid);
-
-impl UserId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for UserId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for UserId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+// Re-export UserId from types crate
+pub use types::UserId;
 
 /// Unique identifier for a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]

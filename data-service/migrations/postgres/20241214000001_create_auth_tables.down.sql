@@ -3,6 +3,11 @@
 -- Drop cleanup function
 DROP FUNCTION IF EXISTS cleanup_expired_challenges(INTERVAL);
 
+-- Drop store tables (reverse order of creation)
+DROP TABLE IF EXISTS user_stores;
+DROP TABLE IF EXISTS store_roles;
+DROP TABLE IF EXISTS stores;
+
 -- Drop challenge tables
 DROP TABLE IF EXISTS wallet_challenges;
 DROP TABLE IF EXISTS passkey_authentication_challenges;

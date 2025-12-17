@@ -130,6 +130,34 @@ pub enum AuthError {
     /// Cannot remove primary wallet (used as account identifier for wallet-only accounts).
     #[error("Cannot remove primary wallet")]
     CannotRemovePrimaryWallet,
+
+    // =========================================================================
+    // Store Errors
+    // =========================================================================
+
+    /// Store not found.
+    #[error("Store not found: {0}")]
+    StoreNotFound(String),
+
+    /// Store role not found.
+    #[error("Store role not found: {0}")]
+    StoreRoleNotFound(String),
+
+    /// User is not a member of the store.
+    #[error("User is not a member of this store")]
+    UserNotInStore,
+
+    /// User is already a member of the store.
+    #[error("User is already a member of this store")]
+    UserAlreadyInStore,
+
+    /// Cannot remove store owner from store.
+    #[error("Cannot remove store owner from store")]
+    CannotRemoveStoreOwner,
+
+    /// Insufficient store permissions.
+    #[error("Insufficient permissions for this store operation")]
+    InsufficientStorePermissions,
 }
 
 /// Result type for auth operations.

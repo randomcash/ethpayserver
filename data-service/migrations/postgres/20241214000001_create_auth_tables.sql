@@ -194,6 +194,83 @@ CREATE TABLE wallet_challenges (
 CREATE INDEX idx_wallet_challenges_created ON wallet_challenges(created_at);
 
 -- =============================================================================
+-- Stores table (merchant accounts)
+-- =============================================================================
+CREATE TABLE stores (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    -- Store info
+    name VARCHAR(255) NOT NULL,
+    website VARCHAR(255),
+
+    -- Store owner (user who created it)
+    owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+    -- Status
+    archived BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Timestamps
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Indexes for stores
+CREATE INDEX idx_stores_owner_id ON stores(owner_id);
+CREATE INDEX idx_stores_archived ON stores(archived) WHERE archived = FALSE;
+
+-- =============================================================================
+-- Store roles table (permission sets for stores)
+-- =============================================================================
+CREATE TABLE store_roles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    -- Store this role belongs to (NULL for global default roles)
+    store_id UUID REFERENCES stores(id) ON DELETE CASCADE,
+
+    -- Role name (e.g., "Owner", "Manager", "Employee", "Guest")
+    role VARCHAR(100) NOT NULL,
+
+    -- List of permission policy strings (JSONB array)
+    permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+    -- Unique constraint: role name must be unique within a store (or globally for defaults)
+    CONSTRAINT unique_store_role UNIQUE (store_id, role)
+);
+
+-- Indexes for store_roles
+CREATE INDEX idx_store_roles_store_id ON store_roles(store_id);
+CREATE INDEX idx_store_roles_default ON store_roles(store_id) WHERE store_id IS NULL;
+
+-- =============================================================================
+-- User-store relationships (links users to stores with roles)
+-- =============================================================================
+CREATE TABLE user_stores (
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+    store_role_id UUID NOT NULL REFERENCES store_roles(id) ON DELETE RESTRICT,
+
+    -- Composite primary key
+    PRIMARY KEY (user_id, store_id)
+);
+
+-- Indexes for user_stores
+CREATE INDEX idx_user_stores_user_id ON user_stores(user_id);
+CREATE INDEX idx_user_stores_store_id ON user_stores(store_id);
+CREATE INDEX idx_user_stores_role_id ON user_stores(store_role_id);
+
+-- =============================================================================
+-- Default store roles (inserted once, available to all stores)
+-- =============================================================================
+INSERT INTO store_roles (id, store_id, role, permissions) VALUES
+    -- Owner: Full access to the store
+    (uuid_generate_v4(), NULL, 'Owner', '["ethpay.store.canmodifystoresettings", "ethpay.store.canviewstoresettings", "ethpay.store.cancreateinvoice", "ethpay.store.canviewinvoices", "ethpay.store.canmodifyinvoices", "ethpay.store.canviewpayments", "ethpay.store.canmanagewebhooks"]'::jsonb),
+    -- Manager: Can manage most settings but not delete store
+    (uuid_generate_v4(), NULL, 'Manager', '["ethpay.store.canviewstoresettings", "ethpay.store.cancreateinvoice", "ethpay.store.canviewinvoices", "ethpay.store.canmodifyinvoices", "ethpay.store.canviewpayments", "ethpay.store.canmanagewebhooks"]'::jsonb),
+    -- Employee: Can view and create invoices
+    (uuid_generate_v4(), NULL, 'Employee', '["ethpay.store.cancreateinvoice", "ethpay.store.canviewinvoices", "ethpay.store.canviewpayments"]'::jsonb),
+    -- Guest: Read-only access
+    (uuid_generate_v4(), NULL, 'Guest', '["ethpay.store.canviewinvoices", "ethpay.store.canviewpayments"]'::jsonb);
+
+-- =============================================================================
 -- Cleanup function for expired challenges
 -- =============================================================================
 CREATE OR REPLACE FUNCTION cleanup_expired_challenges(max_age INTERVAL DEFAULT '5 minutes')
@@ -233,3 +310,8 @@ COMMENT ON TABLE wallet_challenges IS 'Ephemeral challenges for wallet auth (aut
 COMMENT ON COLUMN users.kdf_params IS 'JSON: {algorithm, memory_mib, iterations, parallelism, salt_base64}';
 COMMENT ON COLUMN users.encrypted_symmetric_key IS 'JSON: {ciphertext_base64, nonce_base64, tag_base64}';
 COMMENT ON COLUMN users.recovery_verification_hash IS 'base64(SHA-256(Argon2id(mnemonic, identifier)))';
+
+COMMENT ON TABLE stores IS 'Merchant stores that can process payments';
+COMMENT ON TABLE store_roles IS 'Permission sets for store access (global defaults have NULL store_id)';
+COMMENT ON TABLE user_stores IS 'Links users to stores with specific roles';
+COMMENT ON COLUMN store_roles.permissions IS 'JSONB array of permission policy strings';
