@@ -5,7 +5,7 @@
 use chrono::{Duration, Utc};
 
 use auth::{
-    ChallengeRepository, DeviceRepository, DeviceType, Session, SessionId, SessionRepository,
+    ChallengeRepository, DeviceRepository, DeviceType, Role, Session, SessionId, SessionRepository,
     User, UserId, UserRepository, WalletCredentialId, WalletRepository,
     error::AuthError,
 };
@@ -108,6 +108,7 @@ async fn integration_user_wallet_address() {
         last_login_at: None,
         failed_login_attempts: 0,
         locked_until: None,
+        role: Role::User,
     };
     service.create_user(&user).await.unwrap();
 

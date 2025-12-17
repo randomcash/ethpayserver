@@ -2002,6 +2002,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "async-trait",
+ "auth",
  "axum",
  "chrono",
  "coins-bip32",
@@ -2018,6 +2019,7 @@ dependencies = [
  "types",
  "url",
  "utoipa",
+ "uuid",
 ]
 
 [[package]]

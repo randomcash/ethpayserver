@@ -36,6 +36,9 @@ CREATE TABLE users (
     failed_login_attempts INTEGER NOT NULL DEFAULT 0,
     locked_until TIMESTAMPTZ,
 
+    -- Role for permission checking (user, server_admin)
+    role VARCHAR(50) NOT NULL DEFAULT 'user',
+
     -- Constraints
     CONSTRAINT users_has_identifier CHECK (
         email IS NOT NULL OR primary_wallet_address IS NOT NULL
@@ -46,6 +49,7 @@ CREATE TABLE users (
 CREATE INDEX idx_users_email ON users(email) WHERE email IS NOT NULL;
 CREATE INDEX idx_users_wallet ON users(primary_wallet_address) WHERE primary_wallet_address IS NOT NULL;
 CREATE INDEX idx_users_locked ON users(locked_until) WHERE locked_until IS NOT NULL;
+CREATE INDEX idx_users_role ON users(role);
 
 -- =============================================================================
 -- Devices table

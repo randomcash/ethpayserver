@@ -131,6 +131,9 @@ pub struct User {
 
     /// Account locked until this time (if locked).
     pub locked_until: Option<DateTime<Utc>>,
+
+    /// User's role for permission checking.
+    pub role: crate::permissions::Role,
 }
 
 impl User {
@@ -154,6 +157,7 @@ impl User {
             last_login_at: None,
             failed_login_attempts: 0,
             locked_until: None,
+            role: crate::permissions::Role::User,
         }
     }
 
@@ -178,6 +182,7 @@ impl User {
             last_login_at: None,
             failed_login_attempts: 0,
             locked_until: None,
+            role: crate::permissions::Role::User,
         }
     }
 
@@ -376,6 +381,9 @@ pub struct UserInfo {
 
     /// Last successful login timestamp.
     pub last_login_at: Option<DateTime<Utc>>,
+
+    /// User's role for permission checking.
+    pub role: crate::permissions::Role,
 }
 
 impl From<&User> for UserInfo {
@@ -386,6 +394,7 @@ impl From<&User> for UserInfo {
             primary_wallet_address: user.primary_wallet_address.clone(),
             created_at: user.created_at,
             last_login_at: user.last_login_at,
+            role: user.role,
         }
     }
 }

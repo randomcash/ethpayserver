@@ -2,7 +2,7 @@
 
 use chrono::{Duration, Utc};
 
-use auth::{Device, DeviceId, DeviceType, Session, SessionId, User, UserId, WalletChallenge, WalletCredential, WalletCredentialId};
+use auth::{Device, DeviceId, DeviceType, Role, Session, SessionId, User, UserId, WalletChallenge, WalletCredential, WalletCredentialId};
 use crypto::{EncryptedBlob, KdfParams};
 
 use super::{db_to_device_type, device_type_to_db};
@@ -41,6 +41,7 @@ pub(super) fn test_user() -> User {
         last_login_at: None,
         failed_login_attempts: 0,
         locked_until: None,
+        role: Role::User,
     }
 }
 

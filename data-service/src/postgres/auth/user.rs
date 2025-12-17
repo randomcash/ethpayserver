@@ -21,8 +21,8 @@ impl UserRepository for PgDataService {
             INSERT INTO users (
                 id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
                 recovery_verification_hash, created_at, last_login_at,
-                failed_login_attempts, locked_until
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                failed_login_attempts, locked_until, role
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(user.id.0)
@@ -35,6 +35,7 @@ impl UserRepository for PgDataService {
         .bind(user.last_login_at)
         .bind(user.failed_login_attempts as i32)
         .bind(user.locked_until)
+        .bind(user.role.as_str())
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;
@@ -47,7 +48,7 @@ impl UserRepository for PgDataService {
             r#"
             SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
                    recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until
+                   failed_login_attempts, locked_until, role
             FROM users WHERE id = $1
             "#,
         )
@@ -64,7 +65,7 @@ impl UserRepository for PgDataService {
             r#"
             SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
                    recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until
+                   failed_login_attempts, locked_until, role
             FROM users WHERE LOWER(email) = LOWER($1)
             "#,
         )
@@ -81,7 +82,7 @@ impl UserRepository for PgDataService {
             r#"
             SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
                    recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until
+                   failed_login_attempts, locked_until, role
             FROM users WHERE primary_wallet_address = $1
             "#,
         )
@@ -104,7 +105,8 @@ impl UserRepository for PgDataService {
             UPDATE users SET
                 email = $2, primary_wallet_address = $3, kdf_params = $4,
                 encrypted_symmetric_key = $5, recovery_verification_hash = $6,
-                last_login_at = $7, failed_login_attempts = $8, locked_until = $9
+                last_login_at = $7, failed_login_attempts = $8, locked_until = $9,
+                role = $10
             WHERE id = $1
             "#,
         )
@@ -117,6 +119,7 @@ impl UserRepository for PgDataService {
         .bind(user.last_login_at)
         .bind(user.failed_login_attempts as i32)
         .bind(user.locked_until)
+        .bind(user.role.as_str())
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;
@@ -204,6 +207,7 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
     let kdf_params_json: serde_json::Value = row.get("kdf_params");
     let encrypted_key_json: serde_json::Value = row.get("encrypted_symmetric_key");
     let failed_attempts: i32 = row.get("failed_login_attempts");
+    let role_str: String = row.get("role");
 
     Ok(User {
         id: UserId(row.get("id")),
@@ -218,5 +222,6 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
         last_login_at: row.get("last_login_at"),
         failed_login_attempts: failed_attempts as u32,
         locked_until: row.get("locked_until"),
+        role: role_str.parse().unwrap_or_default(),
     })
 }

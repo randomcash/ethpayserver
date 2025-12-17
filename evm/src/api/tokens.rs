@@ -1,15 +1,18 @@
 //! Token management endpoints.
+//!
+//! All endpoints require admin authentication.
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
+use auth::AuthRepository;
 use serde::{Deserialize, Serialize};
 use types::{Network, TokenData, TokenQueryParams, TokenReader, TokenWriter};
 use utoipa::{IntoParams, ToSchema};
 
-use super::EvmState;
+use super::{extractors::AdminAuth, EvmState};
 use crate::EvmTokenStandard;
 
 /// Request to create a new token.
@@ -142,15 +145,22 @@ fn validate_token_standard(
     path = "/evm/tokens",
     tag = "tokens",
     params(ListTokensQuery),
+    security(("bearer" = [])),
     responses(
         (status = 200, body = TokenListResponse),
         (status = 400, description = "Invalid query parameters"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
     )
 )]
-pub async fn list_tokens(
-    State(state): State<EvmState>,
+pub async fn list_tokens<R>(
+    _admin: AdminAuth,
+    State(state): State<EvmState<R>>,
     Query(query): Query<ListTokensQuery>,
-) -> ApiResult<TokenListResponse> {
+) -> ApiResult<TokenListResponse>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
     let mut params = TokenQueryParams::default()
         .with_limit(query.limit)
         .with_offset(query.offset);
@@ -184,15 +194,22 @@ pub async fn list_tokens(
     path = "/evm/tokens/{id}",
     tag = "tokens",
     params(("id" = i64, Path)),
+    security(("bearer" = [])),
     responses(
         (status = 200, body = TokenResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
         (status = 404, description = "Token not found"),
     )
 )]
-pub async fn get_token(
-    State(state): State<EvmState>,
+pub async fn get_token<R>(
+    _admin: AdminAuth,
+    State(state): State<EvmState<R>>,
     Path(id): Path<i64>,
-) -> ApiResult<TokenResponse> {
+) -> ApiResult<TokenResponse>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
     let token = TokenReader::get(&*state.data_service, id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -206,15 +223,22 @@ pub async fn get_token(
     path = "/evm/tokens",
     tag = "tokens",
     request_body = CreateTokenRequest,
+    security(("bearer" = [])),
     responses(
         (status = 201, body = TokenResponse),
         (status = 400, description = "Invalid token data"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
     )
 )]
-pub async fn create_token(
-    State(state): State<EvmState>,
+pub async fn create_token<R>(
+    _admin: AdminAuth,
+    State(state): State<EvmState<R>>,
     Json(req): Json<CreateTokenRequest>,
-) -> Result<(StatusCode, Json<TokenResponse>), (StatusCode, String)> {
+) -> Result<(StatusCode, Json<TokenResponse>), (StatusCode, String)>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
     // Validate network
     let network = parse_network(&req.network)?;
 
@@ -260,16 +284,23 @@ pub async fn create_token(
     tag = "tokens",
     params(("id" = i64, Path)),
     request_body = UpdateTokenRequest,
+    security(("bearer" = [])),
     responses(
         (status = 200, body = TokenResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
         (status = 404, description = "Token not found"),
     )
 )]
-pub async fn update_token(
-    State(state): State<EvmState>,
+pub async fn update_token<R>(
+    _admin: AdminAuth,
+    State(state): State<EvmState<R>>,
     Path(id): Path<i64>,
     Json(req): Json<UpdateTokenRequest>,
-) -> ApiResult<TokenResponse> {
+) -> ApiResult<TokenResponse>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
     // Get existing token
     let mut token = TokenReader::get(&*state.data_service, id)
         .await
@@ -303,15 +334,22 @@ pub async fn update_token(
     path = "/evm/tokens/{id}",
     tag = "tokens",
     params(("id" = i64, Path)),
+    security(("bearer" = [])),
     responses(
         (status = 204, description = "Token deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
         (status = 404, description = "Token not found"),
     )
 )]
-pub async fn delete_token(
-    State(state): State<EvmState>,
+pub async fn delete_token<R>(
+    _admin: AdminAuth,
+    State(state): State<EvmState<R>>,
     Path(id): Path<i64>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, (StatusCode, String)>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
     TokenWriter::delete(&*state.data_service, id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
@@ -325,16 +363,23 @@ pub async fn delete_token(
     tag = "tokens",
     params(("id" = i64, Path)),
     request_body = SetEnabledRequest,
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "Token enabled status updated"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
         (status = 404, description = "Token not found"),
     )
 )]
-pub async fn set_token_enabled(
-    State(state): State<EvmState>,
+pub async fn set_token_enabled<R>(
+    _admin: AdminAuth,
+    State(state): State<EvmState<R>>,
     Path(id): Path<i64>,
     Json(req): Json<SetEnabledRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, (StatusCode, String)>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
     TokenWriter::set_enabled(&*state.data_service, id, req.enabled)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;

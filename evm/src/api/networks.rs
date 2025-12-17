@@ -1,10 +1,13 @@
 //! Network information endpoints.
+//!
+//! These endpoints are public and do not require authentication.
 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
+use auth::AuthRepository;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -61,7 +64,12 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
         (status = 200, body = NetworkListResponse),
     )
 )]
-pub async fn list_networks(State(_state): State<EvmState>) -> ApiResult<NetworkListResponse> {
+pub async fn list_networks<R>(
+    State(_state): State<EvmState<R>>,
+) -> ApiResult<NetworkListResponse>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
     let networks = ALL_CHAINS.iter().map(NetworkInfo::from).collect();
     Ok(Json(NetworkListResponse { networks }))
 }
@@ -76,10 +84,13 @@ pub async fn list_networks(State(_state): State<EvmState>) -> ApiResult<NetworkL
         (status = 404, description = "Network not found"),
     )
 )]
-pub async fn get_network(
-    State(_state): State<EvmState>,
+pub async fn get_network<R>(
+    State(_state): State<EvmState<R>>,
     Path(network): Path<String>,
-) -> ApiResult<NetworkInfo> {
+) -> ApiResult<NetworkInfo>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
     let evm_network: EvmNetwork = network
         .parse()
         .map_err(|_| (StatusCode::NOT_FOUND, format!("network '{}' not found", network)))?;

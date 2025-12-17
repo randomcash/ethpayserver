@@ -76,6 +76,7 @@
 pub mod api;
 pub mod error;
 pub mod models;
+pub mod permissions;
 pub mod repository;
 pub mod service;
 
@@ -110,3 +111,4 @@ pub use repository::{
     UserRepository, WalletRepository,
 };
 pub use service::{AuthConfig, AuthService};
+pub use permissions::{Permission, Policies, Role};
