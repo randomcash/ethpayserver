@@ -4,6 +4,7 @@ mod challenge;
 mod device;
 mod passkey;
 mod session;
+mod store;
 mod user;
 mod wallet;
 

@@ -103,6 +103,7 @@ docker run -p 5001:5001 -p 5002:5002 \
 
 ```
 ethpayserver/
+├── core/              # Main server binary and unified API
 ├── auth/              # User authentication (passkeys, wallets, recovery)
 ├── crypto/            # Cryptographic primitives (Argon2, AES, Ed25519)
 ├── data-service/      # PostgreSQL data access layer
@@ -115,6 +116,7 @@ ethpayserver/
 
 | Crate | Description |
 |-------|-------------|
+| [core](./core/README.md) | Main server: unified API, health checks, Swagger UI |
 | [auth](./auth/README.md) | User authentication: passkeys, Ethereum wallets, BIP39 recovery |
 | [crypto](./crypto/README.md) | Cryptographic primitives: Argon2id, AES-256, X25519, Ed25519 |
 | [data-service](./data-service/README.md) | PostgreSQL repository implementations |
@@ -135,6 +137,9 @@ This project is in active development. See the [project overview](./memos/projec
 - [x] Workspace structure with modular crates
 - [x] PostgreSQL database with migrations
 - [x] Repository pattern (Reader/Writer traits)
+- [x] Unified API server (`core` crate)
+- [x] Health check endpoints
+- [x] Swagger UI / OpenAPI documentation
 
 #### Authentication (`auth` crate)
 - [x] Passkey/WebAuthn authentication

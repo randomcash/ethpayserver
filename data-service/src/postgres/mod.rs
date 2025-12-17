@@ -26,8 +26,20 @@ impl PgDataService {
         Self { pool }
     }
 
+    /// Connect to PostgreSQL with the given database URL.
+    pub async fn connect(database_url: &str) -> Result<Self, sqlx::Error> {
+        let pool = PgPool::connect(database_url).await?;
+        Ok(Self::new(pool))
+    }
+
     /// Get a reference to the connection pool.
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Check database connectivity.
+    pub async fn health_check(&self) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
     }
 }
