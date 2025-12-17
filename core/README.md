@@ -53,6 +53,49 @@ cargo run --release --bin ethpayserver
 | `GET /health/live` | Liveness probe (always 200 if running) |
 | `GET /health/ready` | Readiness probe (checks database) |
 
+### Stores (mounted at `/stores`)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /stores` | List stores for authenticated user |
+| `POST /stores` | Create a new store |
+| `GET /stores/{id}` | Get store details |
+| `PUT /stores/{id}` | Update store |
+| `DELETE /stores/{id}` | Archive store |
+| `GET /stores/{id}/members` | List store members |
+| `POST /stores/{id}/members` | Add member to store |
+| `PUT /stores/{id}/members/{user_id}` | Update member role |
+| `DELETE /stores/{id}/members/{user_id}` | Remove member |
+
+### Invoices (mounted at `/invoices`)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /invoices` | List invoices with filters |
+| `POST /invoices` | Create a new invoice |
+| `GET /invoices/{id}` | Get invoice details |
+| `POST /invoices/{id}/cancel` | Cancel a pending invoice |
+| `POST /invoices/expire` | Mark expired invoices (admin) |
+
+### Auth (mounted at `/auth`)
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /auth/passkey/new-user/start` | Start passkey registration for new user |
+| `POST /auth/passkey/new-user/complete` | Complete passkey registration |
+| `POST /auth/passkey/login/start` | Start passkey login |
+| `POST /auth/passkey/login/complete` | Complete passkey login |
+| `POST /auth/wallet/new-user/start` | Start wallet registration for new user |
+| `POST /auth/wallet/new-user/complete` | Complete wallet registration |
+| `POST /auth/wallet/login/start` | Start wallet login |
+| `POST /auth/wallet/login/complete` | Complete wallet login |
+| `POST /auth/recovery/start` | Start account recovery |
+| `POST /auth/recovery/complete` | Complete account recovery |
+| `GET /auth/devices` | List user's devices |
+| `DELETE /auth/devices/{id}` | Revoke a device |
+| `POST /auth/logout` | Logout current session |
+| `POST /auth/logout/all` | Logout all sessions |
+
 ### EVM (mounted at `/evm`)
 
 | Endpoint | Description |

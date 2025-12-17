@@ -265,6 +265,23 @@ impl std::fmt::Display for InvoiceStatus {
     }
 }
 
+impl std::str::FromStr for InvoiceStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending" => Ok(InvoiceStatus::Pending),
+            "processing" => Ok(InvoiceStatus::Processing),
+            "partially_paid" => Ok(InvoiceStatus::PartiallyPaid),
+            "paid" => Ok(InvoiceStatus::Paid),
+            "expired" => Ok(InvoiceStatus::Expired),
+            "cancelled" | "canceled" => Ok(InvoiceStatus::Cancelled),
+            "refunded" => Ok(InvoiceStatus::Refunded),
+            _ => Err(format!("unknown invoice status: {}", s)),
+        }
+    }
+}
+
 /// Health status of a PayServer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthStatus {
