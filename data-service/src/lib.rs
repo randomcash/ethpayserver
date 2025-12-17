@@ -34,6 +34,8 @@ pub use types::{
     InvoiceQueryParams, InvoiceReader, InvoiceRepository, InvoiceWriter,
     // Payment
     PaymentQueryParams, PaymentReader, PaymentRepository, PaymentWriter,
+    // Token
+    TokenData, TokenQueryParams, TokenReader, TokenRepository, TokenWriter,
     // Watched Address
     WatchedAddressReader, WatchedAddressRepository, WatchedAddressWriter,
     // Errors

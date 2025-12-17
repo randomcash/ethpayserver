@@ -27,11 +27,13 @@
 mod error;
 mod invoice;
 mod payment;
+mod token;
 mod watched_address;
 
 pub use error::{RepositoryError, RepositoryResult};
 pub use invoice::{InvoiceQueryParams, InvoiceReader, InvoiceRepository, InvoiceWriter};
 pub use payment::{PaymentQueryParams, PaymentReader, PaymentRepository, PaymentWriter};
+pub use token::{TokenData, TokenQueryParams, TokenReader, TokenRepository, TokenWriter};
 pub use watched_address::{WatchedAddressReader, WatchedAddressRepository, WatchedAddressWriter};
 
 /// Combined data service trait with full read/write access to all repositories.
@@ -40,13 +42,13 @@ pub use watched_address::{WatchedAddressReader, WatchedAddressRepository, Watche
 /// access to all data operations. For more focused dependencies, use the
 /// individual Reader/Writer traits.
 pub trait DataService:
-    InvoiceRepository + PaymentRepository + WatchedAddressRepository
+    InvoiceRepository + PaymentRepository + WatchedAddressRepository + TokenRepository
 {
 }
 
 /// Blanket implementation: any type implementing all repository traits is a DataService.
 impl<T> DataService for T where
-    T: InvoiceRepository + PaymentRepository + WatchedAddressRepository
+    T: InvoiceRepository + PaymentRepository + WatchedAddressRepository + TokenRepository
 {
 }
 
@@ -54,13 +56,13 @@ impl<T> DataService for T where
 ///
 /// Use this when you only need read access to all repositories.
 pub trait DataServiceReader:
-    InvoiceReader + PaymentReader + WatchedAddressReader
+    InvoiceReader + PaymentReader + WatchedAddressReader + TokenReader
 {
 }
 
 /// Blanket implementation for read-only access.
 impl<T> DataServiceReader for T where
-    T: InvoiceReader + PaymentReader + WatchedAddressReader
+    T: InvoiceReader + PaymentReader + WatchedAddressReader + TokenReader
 {
 }
 
@@ -68,12 +70,12 @@ impl<T> DataServiceReader for T where
 ///
 /// Use this when you only need write access to all repositories.
 pub trait DataServiceWriter:
-    InvoiceWriter + PaymentWriter + WatchedAddressWriter
+    InvoiceWriter + PaymentWriter + WatchedAddressWriter + TokenWriter
 {
 }
 
 /// Blanket implementation for write-only access.
 impl<T> DataServiceWriter for T where
-    T: InvoiceWriter + PaymentWriter + WatchedAddressWriter
+    T: InvoiceWriter + PaymentWriter + WatchedAddressWriter + TokenWriter
 {
 }

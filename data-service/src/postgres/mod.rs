@@ -6,6 +6,7 @@ mod auth;
 mod conversions;
 mod invoice;
 mod payment;
+mod token;
 mod watched_address;
 
 #[cfg(test)]

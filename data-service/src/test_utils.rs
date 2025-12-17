@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use types::{
     InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter,
-    Network, PaymentData, PaymentReader, PaymentWriter, RepositoryResult, WatchedAddressReader,
-    WatchedAddressWriter,
+    Network, PaymentData, PaymentReader, PaymentWriter, RepositoryResult, TokenData,
+    TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
 
@@ -18,6 +18,8 @@ pub struct InMemoryDataService {
     invoices: RwLock<HashMap<String, InvoiceData>>,
     payments: RwLock<HashMap<Uuid, PaymentData>>,
     addresses: RwLock<HashMap<(String, Network), InvoiceId>>,
+    tokens: RwLock<HashMap<i64, TokenData>>,
+    token_id_counter: RwLock<i64>,
 }
 
 impl InMemoryDataService {
@@ -190,6 +192,159 @@ impl WatchedAddressWriter for InMemoryDataService {
         let mut addresses = self.addresses.write().unwrap();
         addresses.remove(&(address.to_string(), network));
         Ok(())
+    }
+}
+
+#[async_trait]
+impl TokenReader for InMemoryDataService {
+    async fn get(&self, id: i64) -> RepositoryResult<Option<TokenData>> {
+        let tokens = self.tokens.read().unwrap();
+        Ok(tokens.get(&id).cloned())
+    }
+
+    async fn get_by_address(
+        &self,
+        network: Network,
+        address: &str,
+    ) -> RepositoryResult<Option<TokenData>> {
+        let tokens = self.tokens.read().unwrap();
+        Ok(tokens
+            .values()
+            .find(|t| t.network == network && t.address.eq_ignore_ascii_case(address))
+            .cloned())
+    }
+
+    async fn find_by_symbol(
+        &self,
+        network: Network,
+        symbol: &str,
+    ) -> RepositoryResult<Option<TokenData>> {
+        let tokens = self.tokens.read().unwrap();
+        Ok(tokens
+            .values()
+            .find(|t| {
+                t.network == network
+                    && t.symbol
+                        .as_ref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(symbol))
+            })
+            .cloned())
+    }
+
+    async fn query(&self, params: &TokenQueryParams) -> RepositoryResult<(i64, Vec<TokenData>)> {
+        let tokens = self.tokens.read().unwrap();
+        let mut results: Vec<TokenData> = tokens
+            .values()
+            .filter(|t| {
+                if let Some(ref token_type) = params.token_type {
+                    if t.token_type != *token_type {
+                        return false;
+                    }
+                }
+                if let Some(network) = params.network {
+                    if t.network != network {
+                        return false;
+                    }
+                }
+                if let Some(enabled) = params.enabled {
+                    if t.enabled != enabled {
+                        return false;
+                    }
+                }
+                if let Some(ref symbol) = params.symbol {
+                    if !t
+                        .symbol
+                        .as_ref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(symbol))
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+
+        let total = results.len() as i64;
+        results.sort_by(|a, b| {
+            a.network
+                .display_name()
+                .cmp(b.network.display_name())
+                .then_with(|| a.symbol.cmp(&b.symbol))
+        });
+
+        let offset = params.offset as usize;
+        let limit = params.limit as usize;
+        let results = results.into_iter().skip(offset).take(limit).collect();
+
+        Ok((total, results))
+    }
+
+    async fn get_enabled_for_network(&self, network: Network) -> RepositoryResult<Vec<TokenData>> {
+        let tokens = self.tokens.read().unwrap();
+        Ok(tokens
+            .values()
+            .filter(|t| t.network == network && t.enabled)
+            .cloned()
+            .collect())
+    }
+}
+
+#[async_trait]
+impl TokenWriter for InMemoryDataService {
+    async fn insert(&self, token: &TokenData) -> RepositoryResult<i64> {
+        let mut tokens = self.tokens.write().unwrap();
+        let mut counter = self.token_id_counter.write().unwrap();
+        *counter += 1;
+        let id = *counter;
+
+        let mut token = token.clone();
+        token.id = Some(id);
+        tokens.insert(id, token);
+
+        Ok(id)
+    }
+
+    async fn update(&self, token: &TokenData) -> RepositoryResult<()> {
+        let id = token.id.ok_or_else(|| {
+            types::RepositoryError::InvalidData("Token must have an ID for update".into())
+        })?;
+
+        let mut tokens = self.tokens.write().unwrap();
+        if tokens.contains_key(&id) {
+            tokens.insert(id, token.clone());
+            Ok(())
+        } else {
+            Err(types::RepositoryError::NotFound(format!(
+                "Token {} not found",
+                id
+            )))
+        }
+    }
+
+    async fn delete(&self, id: i64) -> RepositoryResult<()> {
+        let mut tokens = self.tokens.write().unwrap();
+        if tokens.remove(&id).is_some() {
+            Ok(())
+        } else {
+            Err(types::RepositoryError::NotFound(format!(
+                "Token {} not found",
+                id
+            )))
+        }
+    }
+
+    async fn set_enabled(&self, id: i64, enabled: bool) -> RepositoryResult<()> {
+        let mut tokens = self.tokens.write().unwrap();
+        if let Some(token) = tokens.get_mut(&id) {
+            token.enabled = enabled;
+            Ok(())
+        } else {
+            Err(types::RepositoryError::NotFound(format!(
+                "Token {} not found",
+                id
+            )))
+        }
     }
 }
 
