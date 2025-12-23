@@ -127,22 +127,49 @@ rpc_ws = "wss://polygon-mainnet.g.alchemy.com/v2/KEY"
 
 WebSocket uses `eth_subscribe("newHeads")` for instant block notifications. HTTP polling is automatic fallback if WebSocket fails.
 
-### Events
+### Bidirectional Communication
 
-Published to Redis channel `evmmonitor:events`:
+The monitor supports bidirectional communication via Redis:
+
+- **Events channel** (`evmmonitor:events`): Monitor -> API server
+- **Commands channel** (`evmmonitor:commands`): API server -> Monitor
+
+### Commands (API Server -> Monitor)
+
+- `WatchAddress` - Start watching an address for payments
+- `UnwatchAddress` - Stop watching an address
+- `GetStatus` - Request status of watched addresses
+
+### Events (Monitor -> API Server)
 
 - `PaymentDetected` - Payment received (unconfirmed)
 - `PaymentConfirmed` - Payment reached required confirmations
 - `ReorgDetected` - Chain reorganization detected
+- `AddressWatched` - Confirmation that address is being watched
+- `AddressUnwatched` - Address removed from watch list
+- `StatusReport` - Response to GetStatus command
 - `MonitorStarted` / `MonitorStopped` - Lifecycle events
 
 ### API Server Integration
 
 ```rust
-use evm::monitor::{BridgeConfig, EventBridge, MonitorEvent};
+use evm::monitor::{BridgeConfig, EventBridge, MonitorEvent, MonitorCommand};
+use evm::monitor::events::WatchAddressCommand;
 use tokio_stream::StreamExt;
 
 let bridge = BridgeConfig::redis("redis://localhost:6379").build().await?;
+
+// Send command to watch an address
+let cmd = MonitorCommand::WatchAddress(WatchAddressCommand {
+    chain_id: 1,
+    address: payment_address,
+    invoice_id,
+    expected_amount: Some(amount),
+    token_contract: None,
+});
+bridge.publish_command(&cmd).await?;
+
+// Subscribe to events
 let mut events = bridge.subscribe().await?;
 
 while let Some(event) = events.next().await {

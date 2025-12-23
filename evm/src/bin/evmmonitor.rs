@@ -4,6 +4,16 @@
 //! transactions and publishes events to a Redis bridge. Multiple instances
 //! can run in parallel, each handling a subset of chains.
 //!
+//! ## Bidirectional Communication
+//!
+//! The monitor supports bidirectional communication via Redis:
+//!
+//! - **Events** (monitor -> API server): PaymentDetected, PaymentConfirmed, etc.
+//! - **Commands** (API server -> monitor): WatchAddress, UnwatchAddress, GetStatus
+//!
+//! This allows the API server to dynamically add/remove watched addresses without
+//! restarting the monitor.
+//!
 //! # Configuration
 //!
 //! Configure via TOML file or environment variables:
@@ -12,7 +22,8 @@
 //! # evmmonitor.toml
 //! [bridge]
 //! redis_url = "redis://localhost:6379"
-//! channel = "evmmonitor:events"
+//! events_channel = "evmmonitor:events"
+//! commands_channel = "evmmonitor:commands"
 //!
 //! [[chains]]
 //! chain_id = 1
@@ -27,24 +38,28 @@
 //! Or via environment:
 //! ```bash
 //! EVMMONITOR_REDIS_URL=redis://localhost:6379
+//! EVMMONITOR_CHAINS=1,137
 //! EVMMONITOR_CHAIN_1_RPC_HTTP=https://eth.llamarpc.com
 //! EVMMONITOR_CHAIN_1_RPC_WS=wss://eth.llamarpc.com
 //! EVMMONITOR_CHAIN_137_RPC_HTTP=https://polygon-rpc.com
 //! ```
 
+use chrono::Utc;
 use clap::Parser;
 use evm::error::{EvmError, EvmResult};
 use evm::monitor::bridge::{EventBridge, RedisBridge};
+use evm::monitor::events::{AddressUnwatched, AddressWatched, StatusReport, WatchedAddressInfo};
 use evm::monitor::{
     ChainMonitor, ChainMonitorConfig, CoordinatorConfig, EventHandler, LoggingHandler,
-    MonitorCoordinator, MonitorEvent, RpcBlockSource,
+    MonitorCommand, MonitorCoordinator, MonitorEvent, RpcBlockSource, WatchedAddress,
 };
 use evm::network::get_chain_config_by_id;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
-use tracing::{error, info, warn};
+use tokio_stream::StreamExt;
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[derive(Parser, Debug)]
@@ -60,9 +75,13 @@ struct Args {
     #[arg(long, env = "EVMMONITOR_REDIS_URL")]
     redis_url: Option<String>,
 
-    /// Redis channel for events
-    #[arg(long, env = "EVMMONITOR_REDIS_CHANNEL", default_value = "evmmonitor:events")]
-    redis_channel: String,
+    /// Redis channel for events (monitor -> API server)
+    #[arg(long, env = "EVMMONITOR_EVENTS_CHANNEL", default_value = "evmmonitor:events")]
+    events_channel: String,
+
+    /// Redis channel for commands (API server -> monitor)
+    #[arg(long, env = "EVMMONITOR_COMMANDS_CHANNEL", default_value = "evmmonitor:commands")]
+    commands_channel: String,
 
     /// Chain IDs to monitor (comma-separated)
     #[arg(long, env = "EVMMONITOR_CHAINS")]
@@ -81,15 +100,16 @@ struct Args {
 #[derive(Debug, Deserialize, Default)]
 struct Config {
     #[serde(default)]
-    bridge: BridgeConfig,
+    bridge: BridgeConfigFile,
     #[serde(default)]
     chains: Vec<ChainRpcConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct BridgeConfig {
+struct BridgeConfigFile {
     redis_url: Option<String>,
-    channel: Option<String>,
+    events_channel: Option<String>,
+    commands_channel: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -144,7 +164,10 @@ async fn main() -> anyhow::Result<()> {
         .or(config.bridge.redis_url.clone())
         .ok_or_else(|| anyhow::anyhow!("redis_url is required"))?;
 
-    let redis_channel = args.redis_channel.clone();
+    let events_channel = config.bridge.events_channel.clone()
+        .unwrap_or_else(|| args.events_channel.clone());
+    let commands_channel = config.bridge.commands_channel.clone()
+        .unwrap_or_else(|| args.commands_channel.clone());
 
     // Get chain configs - merge CLI chains with config file
     let chain_configs = get_chain_configs(&args.chains, &config.chains)?;
@@ -158,9 +181,14 @@ async fn main() -> anyhow::Result<()> {
         "monitoring chains"
     );
 
-    // Create Redis bridge
-    let bridge = Arc::new(RedisBridge::new(&redis_url, &redis_channel).await?);
-    info!(url = %redis_url, channel = %redis_channel, "connected to redis");
+    // Create Redis bridge with bidirectional channels
+    let bridge = Arc::new(RedisBridge::new(&redis_url, &events_channel, &commands_channel).await?);
+    info!(
+        url = %redis_url,
+        events = %events_channel,
+        commands = %commands_channel,
+        "connected to redis"
+    );
 
     // Health check
     bridge.health_check().await?;
@@ -198,15 +226,148 @@ async fn main() -> anyhow::Result<()> {
     coordinator.clone().start().await?;
     info!("monitor coordinator started");
 
+    // Subscribe to commands from API server
+    let commands_stream = bridge.subscribe_commands().await?;
+    info!("subscribed to commands channel");
+
+    // Spawn command handler task
+    let command_coordinator = coordinator.clone();
+    let command_bridge = bridge.clone();
+    let command_handle = tokio::spawn(async move {
+        handle_commands(commands_stream, command_coordinator, command_bridge).await;
+    });
+
     // Wait for shutdown signal
     shutdown_signal().await;
     info!("shutdown signal received");
+
+    // Abort command handler
+    command_handle.abort();
 
     // Graceful shutdown
     coordinator.stop().await?;
     info!("evmmonitor stopped");
 
     Ok(())
+}
+
+/// Handle incoming commands from the API server.
+async fn handle_commands(
+    mut commands: evm::monitor::bridge::CommandStream,
+    coordinator: Arc<MonitorCoordinator<RpcBlockSource>>,
+    bridge: Arc<dyn EventBridge>,
+) {
+    while let Some(command) = commands.next().await {
+        debug!(?command, "received command");
+
+        match command {
+            MonitorCommand::WatchAddress(cmd) => {
+                info!(
+                    chain_id = cmd.chain_id,
+                    address = %cmd.address,
+                    invoice_id = %cmd.invoice_id,
+                    "watch address command"
+                );
+
+                // Find the chain monitor
+                if let Some(monitor) = coordinator.get_chain(cmd.chain_id).await {
+                    let watched = WatchedAddress {
+                        address: cmd.address,
+                        invoice_id: cmd.invoice_id,
+                        expected_amount: cmd.expected_amount,
+                        token_contract: cmd.token_contract,
+                        created_at: Utc::now(),
+                        last_known_balance: alloy::primitives::U256::ZERO,
+                    };
+
+                    monitor.watch(watched).await;
+
+                    // Publish confirmation event
+                    let event = MonitorEvent::AddressWatched(AddressWatched {
+                        chain_id: cmd.chain_id,
+                        address: cmd.address,
+                        invoice_id: cmd.invoice_id,
+                        watched_at: Utc::now(),
+                    });
+
+                    if let Err(e) = bridge.publish(&event).await {
+                        error!(error = %e, "failed to publish AddressWatched event");
+                    }
+                } else {
+                    warn!(
+                        chain_id = cmd.chain_id,
+                        "chain not monitored by this instance"
+                    );
+                }
+            }
+
+            MonitorCommand::UnwatchAddress(cmd) => {
+                info!(
+                    chain_id = cmd.chain_id,
+                    address = %cmd.address,
+                    "unwatch address command"
+                );
+
+                if let Some(monitor) = coordinator.get_chain(cmd.chain_id).await {
+                    let removed = monitor.unwatch(&cmd.address).await;
+
+                    // Publish confirmation event
+                    let event = MonitorEvent::AddressUnwatched(AddressUnwatched {
+                        chain_id: cmd.chain_id,
+                        address: cmd.address,
+                        invoice_id: removed.map(|w| w.invoice_id),
+                    });
+
+                    if let Err(e) = bridge.publish(&event).await {
+                        error!(error = %e, "failed to publish AddressUnwatched event");
+                    }
+                } else {
+                    warn!(
+                        chain_id = cmd.chain_id,
+                        "chain not monitored by this instance"
+                    );
+                }
+            }
+
+            MonitorCommand::GetStatus(cmd) => {
+                info!(chain_id = ?cmd.chain_id, "get status command");
+
+                let chain_ids = if let Some(chain_id) = cmd.chain_id {
+                    vec![chain_id]
+                } else {
+                    coordinator.chain_ids().await
+                };
+
+                for chain_id in chain_ids {
+                    if let Some(monitor) = coordinator.get_chain(chain_id).await {
+                        let watched = monitor.watched_addresses().await;
+                        let current_block = monitor.current_block().await.unwrap_or(0);
+
+                        let event = MonitorEvent::StatusReport(StatusReport {
+                            chain_id,
+                            watched_count: watched.len(),
+                            current_block,
+                            addresses: watched
+                                .into_iter()
+                                .map(|w| WatchedAddressInfo {
+                                    address: w.address,
+                                    invoice_id: w.invoice_id,
+                                    token_contract: w.token_contract,
+                                })
+                                .collect(),
+                            reported_at: Utc::now(),
+                        });
+
+                        if let Err(e) = bridge.publish(&event).await {
+                            error!(error = %e, "failed to publish StatusReport event");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    warn!("commands stream ended");
 }
 
 fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {

@@ -2,10 +2,14 @@
 //!
 //! Useful for testing and single-process deployments where the monitor
 //! runs in the same process as the API server.
+//!
+//! Supports bidirectional communication:
+//! - Events flow from monitor to API server
+//! - Commands flow from API server to monitor
 
-use super::{EventBridge, EventStream};
+use super::{CommandStream, EventBridge, EventStream};
 use crate::error::EvmResult;
-use crate::monitor::events::MonitorEvent;
+use crate::monitor::events::{MonitorCommand, MonitorEvent};
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -13,7 +17,10 @@ use tokio_stream::StreamExt;
 
 /// In-memory event bridge using tokio broadcast channels.
 pub struct MemoryBridge {
-    tx: broadcast::Sender<MonitorEvent>,
+    /// Events channel (monitor -> API server).
+    events_tx: broadcast::Sender<MonitorEvent>,
+    /// Commands channel (API server -> monitor).
+    commands_tx: broadcast::Sender<MonitorCommand>,
 }
 
 impl MemoryBridge {
@@ -24,13 +31,19 @@ impl MemoryBridge {
 
     /// Create a new in-memory bridge with specified capacity.
     pub fn with_capacity(capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(capacity);
-        Self { tx }
+        let (events_tx, _) = broadcast::channel(capacity);
+        let (commands_tx, _) = broadcast::channel(capacity);
+        Self { events_tx, commands_tx }
     }
 
-    /// Get a raw broadcast sender for direct use.
-    pub fn sender(&self) -> broadcast::Sender<MonitorEvent> {
-        self.tx.clone()
+    /// Get a raw broadcast sender for events (for direct use).
+    pub fn events_sender(&self) -> broadcast::Sender<MonitorEvent> {
+        self.events_tx.clone()
+    }
+
+    /// Get a raw broadcast sender for commands (for direct use).
+    pub fn commands_sender(&self) -> broadcast::Sender<MonitorCommand> {
+        self.commands_tx.clone()
     }
 }
 
@@ -42,17 +55,41 @@ impl Default for MemoryBridge {
 
 #[async_trait]
 impl EventBridge for MemoryBridge {
+    // =========================================================================
+    // Events (Monitor -> API Server)
+    // =========================================================================
+
     async fn publish(&self, event: &MonitorEvent) -> EvmResult<()> {
         // Ignore send errors (no receivers is fine)
-        let _ = self.tx.send(event.clone());
+        let _ = self.events_tx.send(event.clone());
         Ok(())
     }
 
     async fn subscribe(&self) -> EvmResult<EventStream> {
-        let rx = self.tx.subscribe();
+        let rx = self.events_tx.subscribe();
         let stream = BroadcastStream::new(rx).filter_map(|result| result.ok());
         Ok(Box::pin(stream))
     }
+
+    // =========================================================================
+    // Commands (API Server -> Monitor)
+    // =========================================================================
+
+    async fn publish_command(&self, command: &MonitorCommand) -> EvmResult<()> {
+        // Ignore send errors (no receivers is fine)
+        let _ = self.commands_tx.send(command.clone());
+        Ok(())
+    }
+
+    async fn subscribe_commands(&self) -> EvmResult<CommandStream> {
+        let rx = self.commands_tx.subscribe();
+        let stream = BroadcastStream::new(rx).filter_map(|result| result.ok());
+        Ok(Box::pin(stream))
+    }
+
+    // =========================================================================
+    // Utility
+    // =========================================================================
 
     fn name(&self) -> &str {
         "MemoryBridge"
@@ -67,7 +104,7 @@ impl EventBridge for MemoryBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::monitor::events::PaymentDetected;
+    use crate::monitor::events::{PaymentDetected, WatchAddressCommand};
     use alloy::primitives::{Address, B256, U256};
     use chrono::Utc;
     use tokio_stream::StreamExt;
@@ -91,8 +128,18 @@ mod tests {
         })
     }
 
+    fn make_command() -> MonitorCommand {
+        MonitorCommand::WatchAddress(WatchAddressCommand {
+            chain_id: 1,
+            address: Address::ZERO,
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: Some(U256::from(1000)),
+            token_contract: None,
+        })
+    }
+
     #[tokio::test]
-    async fn test_memory_bridge_pubsub() {
+    async fn test_memory_bridge_events_pubsub() {
         let bridge = MemoryBridge::new();
 
         // Subscribe first
@@ -116,6 +163,34 @@ mod tests {
                 assert_eq!(p.chain_id, 1);
             }
             _ => panic!("unexpected event type"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_memory_bridge_commands_pubsub() {
+        let bridge = MemoryBridge::new();
+
+        // Subscribe to commands first
+        let mut stream = bridge.subscribe_commands().await.unwrap();
+
+        // Publish command
+        let command = make_command();
+        bridge.publish_command(&command).await.unwrap();
+
+        // Receive command
+        let received = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            stream.next(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        match received {
+            MonitorCommand::WatchAddress(w) => {
+                assert_eq!(w.chain_id, 1);
+            }
+            _ => panic!("unexpected command type"),
         }
     }
 

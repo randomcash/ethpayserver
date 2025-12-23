@@ -13,7 +13,9 @@
 //!                             ├── RpcBlockSource (direct WS/HTTP)
 //!                             ├── AlchemyBlockSource (Alchemy enhanced APIs)
 //!                             └── InfuraBlockSource (Infura APIs)
-//!     └── EventBridge (publishes events)
+//!     └── EventBridge (bidirectional communication)
+//!             ├── Events: monitor -> API server (PaymentDetected, etc.)
+//!             ├── Commands: API server -> monitor (WatchAddress, etc.)
 //!             ├── RedisBridge (production - multiple instances)
 //!             └── MemoryBridge (testing/single process)
 //!
@@ -43,13 +45,25 @@
 //!         _ => {}
 //!     }
 //! }
+//!
+//! // API server sends commands to monitor:
+//! use evm::monitor::events::{MonitorCommand, WatchAddressCommand};
+//!
+//! let cmd = MonitorCommand::WatchAddress(WatchAddressCommand {
+//!     chain_id: 1,
+//!     address: payment_address,
+//!     invoice_id,
+//!     expected_amount: Some(amount),
+//!     token_contract: None,
+//! });
+//! bridge.publish_command(&cmd).await?;
 //! ```
 
 pub mod bridge;
+pub mod events;
 mod source;
 mod chain;
 mod coordinator;
-mod events;
 mod handlers;
 
 pub use source::{BlockSource, BlockNotification, LogFilter};
@@ -57,11 +71,16 @@ pub use source::rpc::{RpcBlockSource, RpcSourceConfig};
 // pub use source::alchemy::AlchemyBlockSource;
 // pub use source::infura::InfuraBlockSource;
 
-pub use bridge::{EventBridge, EventStream, BridgeConfig, MemoryBridge};
+pub use bridge::{CommandStream, EventBridge, EventStream, BridgeConfig, MemoryBridge};
 #[cfg(feature = "redis")]
 pub use bridge::RedisBridge;
 
 pub use chain::{ChainMonitor, ChainMonitorConfig, WatchedAddress};
 pub use coordinator::{MonitorCoordinator, CoordinatorConfig};
-pub use events::{MonitorEvent, PaymentDetected, PaymentConfirmed, ReorgDetected};
+pub use events::{
+    MonitorEvent, MonitorCommand,
+    PaymentDetected, PaymentConfirmed, ReorgDetected,
+    WatchAddressCommand, UnwatchAddressCommand, GetStatusCommand,
+    AddressWatched, AddressUnwatched, StatusReport,
+};
 pub use handlers::{EventHandler, EventHandlerFn, LoggingHandler};

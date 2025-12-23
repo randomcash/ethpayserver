@@ -1,8 +1,62 @@
-//! Monitor events for payment detection.
+//! Monitor events and commands for payment detection.
+//!
+//! Events flow from monitor -> API server (e.g., PaymentDetected).
+//! Commands flow from API server -> monitor (e.g., WatchAddress).
 
 use alloy::primitives::{Address, B256, U256};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+// ============================================================================
+// Commands (API Server -> Monitor)
+// ============================================================================
+
+/// Commands sent to the monitor from the API server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MonitorCommand {
+    /// Watch an address for incoming payments.
+    WatchAddress(WatchAddressCommand),
+    /// Stop watching an address.
+    UnwatchAddress(UnwatchAddressCommand),
+    /// Request current status of watched addresses.
+    GetStatus(GetStatusCommand),
+}
+
+/// Command to watch an address for payments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchAddressCommand {
+    /// Target chain ID.
+    pub chain_id: u64,
+    /// Address to watch.
+    pub address: Address,
+    /// Invoice ID this address is for.
+    pub invoice_id: uuid::Uuid,
+    /// Expected amount (optional, for validation).
+    pub expected_amount: Option<U256>,
+    /// Token contract address (None = native currency).
+    pub token_contract: Option<Address>,
+}
+
+/// Command to stop watching an address.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnwatchAddressCommand {
+    /// Target chain ID.
+    pub chain_id: u64,
+    /// Address to stop watching.
+    pub address: Address,
+}
+
+/// Request status of watched addresses on a chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetStatusCommand {
+    /// Target chain ID (None = all chains).
+    pub chain_id: Option<u64>,
+}
+
+// ============================================================================
+// Events (Monitor -> API Server)
+// ============================================================================
 
 /// Events emitted by the payment monitor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +74,62 @@ pub enum MonitorEvent {
     MonitorStopped { chain_id: u64 },
     /// Monitor encountered an error.
     MonitorError { chain_id: u64, error: String },
+    /// Address was added to watch list.
+    AddressWatched(AddressWatched),
+    /// Address was removed from watch list.
+    AddressUnwatched(AddressUnwatched),
+    /// Status response (in response to GetStatus command).
+    StatusReport(StatusReport),
+}
+
+/// Event confirming an address is now being watched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressWatched {
+    /// Chain ID.
+    pub chain_id: u64,
+    /// Address being watched.
+    pub address: Address,
+    /// Invoice ID.
+    pub invoice_id: uuid::Uuid,
+    /// When watching started.
+    pub watched_at: DateTime<Utc>,
+}
+
+/// Event confirming an address is no longer being watched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressUnwatched {
+    /// Chain ID.
+    pub chain_id: u64,
+    /// Address that was unwatched.
+    pub address: Address,
+    /// Invoice ID (if it was being watched).
+    pub invoice_id: Option<uuid::Uuid>,
+}
+
+/// Status report for monitored addresses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusReport {
+    /// Chain ID.
+    pub chain_id: u64,
+    /// Number of watched addresses.
+    pub watched_count: usize,
+    /// Current block number.
+    pub current_block: u64,
+    /// Watched addresses with their invoice IDs.
+    pub addresses: Vec<WatchedAddressInfo>,
+    /// Report timestamp.
+    pub reported_at: DateTime<Utc>,
+}
+
+/// Info about a watched address (for status reports).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchedAddressInfo {
+    /// The watched address.
+    pub address: Address,
+    /// Invoice ID.
+    pub invoice_id: uuid::Uuid,
+    /// Token contract (None = native).
+    pub token_contract: Option<Address>,
 }
 
 /// Payment detected event.

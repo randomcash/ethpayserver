@@ -107,6 +107,30 @@ impl EventHandler for LoggingHandler {
             MonitorEvent::MonitorError { chain_id, error } => {
                 tracing::error!(chain_id, %error, "monitor error");
             }
+            MonitorEvent::AddressWatched(w) => {
+                tracing::info!(
+                    chain_id = w.chain_id,
+                    address = %w.address,
+                    invoice_id = %w.invoice_id,
+                    "address watched"
+                );
+            }
+            MonitorEvent::AddressUnwatched(w) => {
+                tracing::info!(
+                    chain_id = w.chain_id,
+                    address = %w.address,
+                    invoice_id = ?w.invoice_id,
+                    "address unwatched"
+                );
+            }
+            MonitorEvent::StatusReport(s) => {
+                tracing::info!(
+                    chain_id = s.chain_id,
+                    watched_count = s.watched_count,
+                    current_block = s.current_block,
+                    "status report"
+                );
+            }
         }
         Ok(())
     }
@@ -138,6 +162,9 @@ impl<H: EventHandler> EventHandler for ChainFilter<H> {
             MonitorEvent::MonitorStarted { chain_id } => *chain_id,
             MonitorEvent::MonitorStopped { chain_id } => *chain_id,
             MonitorEvent::MonitorError { chain_id, .. } => *chain_id,
+            MonitorEvent::AddressWatched(w) => w.chain_id,
+            MonitorEvent::AddressUnwatched(w) => w.chain_id,
+            MonitorEvent::StatusReport(s) => s.chain_id,
         };
 
         if self.chain_ids.contains(&chain_id) {

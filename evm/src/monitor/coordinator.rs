@@ -7,6 +7,7 @@ use super::source::BlockSource;
 use crate::error::{EvmError, EvmResult};
 use alloy::primitives::Address;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
@@ -31,27 +32,34 @@ impl CoordinatorConfig {
 ///
 /// The coordinator manages monitors for multiple chains, aggregates
 /// their events, and routes them to registered handlers.
-pub struct MonitorCoordinator {
+///
+/// It is generic over the block source type `S`, allowing access to
+/// the underlying chain monitors for command handling.
+pub struct MonitorCoordinator<S: BlockSource + 'static> {
     config: CoordinatorConfig,
     /// Monitors by chain ID.
-    monitors: RwLock<HashMap<u64, MonitorHandle>>,
+    monitors: RwLock<HashMap<u64, MonitorHandle<S>>>,
     /// Aggregated event sender.
     event_tx: broadcast::Sender<MonitorEvent>,
     /// Registered event handlers.
     handlers: RwLock<Vec<Arc<dyn EventHandler>>>,
     /// Handler task.
     handler_task: RwLock<Option<JoinHandle<()>>>,
+    /// Phantom data for the block source type.
+    _phantom: PhantomData<S>,
 }
 
 /// Handle to a running chain monitor.
-struct MonitorHandle {
+struct MonitorHandle<S: BlockSource + 'static> {
     chain_id: u64,
     chain_name: String,
+    /// Reference to the actual monitor for command handling.
+    monitor: Arc<ChainMonitor<S>>,
     task: JoinHandle<()>,
     event_rx: broadcast::Receiver<MonitorEvent>,
 }
 
-impl MonitorCoordinator {
+impl<S: BlockSource + 'static> MonitorCoordinator<S> {
     /// Create a new coordinator.
     pub fn new(config: CoordinatorConfig) -> Self {
         let (event_tx, _) = broadcast::channel(config.event_channel_capacity);
@@ -62,6 +70,7 @@ impl MonitorCoordinator {
             event_tx,
             handlers: RwLock::new(Vec::new()),
             handler_task: RwLock::new(None),
+            _phantom: PhantomData,
         }
     }
 
@@ -76,7 +85,7 @@ impl MonitorCoordinator {
     }
 
     /// Add and start a chain monitor.
-    pub async fn add_chain<S: BlockSource + 'static>(
+    pub async fn add_chain(
         &self,
         monitor: Arc<ChainMonitor<S>>,
     ) -> EvmResult<()> {
@@ -102,12 +111,13 @@ impl MonitorCoordinator {
             }
         });
 
-        // Store handle
+        // Store handle with reference to monitor
         self.monitors.write().await.insert(
             chain_id,
             MonitorHandle {
                 chain_id,
                 chain_name: chain_name.clone(),
+                monitor,
                 task,
                 event_rx,
             },
@@ -116,6 +126,20 @@ impl MonitorCoordinator {
         info!(chain_id, chain = chain_name, "chain monitor added");
 
         Ok(())
+    }
+
+    /// Get a chain monitor by chain ID.
+    pub async fn get_chain(&self, chain_id: u64) -> Option<Arc<ChainMonitor<S>>> {
+        self.monitors
+            .read()
+            .await
+            .get(&chain_id)
+            .map(|h| h.monitor.clone())
+    }
+
+    /// Get all monitored chain IDs.
+    pub async fn chain_ids(&self) -> Vec<u64> {
+        self.monitors.read().await.keys().copied().collect()
     }
 
     /// Remove and stop a chain monitor.
@@ -134,8 +158,9 @@ impl MonitorCoordinator {
     }
 
     /// Get list of monitored chain IDs.
+    #[deprecated(since = "0.1.0", note = "use chain_ids() instead")]
     pub async fn monitored_chains(&self) -> Vec<u64> {
-        self.monitors.read().await.keys().copied().collect()
+        self.chain_ids().await
     }
 
     /// Start the event routing loop.
@@ -211,28 +236,31 @@ impl MonitorCoordinator {
 
     /// Watch an address on a specific chain.
     pub async fn watch(&self, chain_id: u64, watched: WatchedAddress) -> EvmResult<()> {
-        // This would require storing Arc<ChainMonitor> instead of just the handle
-        // For now, this is a placeholder showing the intended API
-        Err(EvmError::Monitor(
-            "direct watch not implemented - use monitor.watch()".to_string(),
-        ))
+        if let Some(monitor) = self.get_chain(chain_id).await {
+            monitor.watch(watched).await;
+            Ok(())
+        } else {
+            Err(EvmError::Monitor(format!("chain {} not found", chain_id)))
+        }
     }
 
     /// Unwatch an address.
-    pub async fn unwatch(&self, chain_id: u64, address: &Address) -> EvmResult<()> {
-        Err(EvmError::Monitor(
-            "direct unwatch not implemented - use monitor.unwatch()".to_string(),
-        ))
+    pub async fn unwatch(&self, chain_id: u64, address: &Address) -> EvmResult<Option<WatchedAddress>> {
+        if let Some(monitor) = self.get_chain(chain_id).await {
+            Ok(monitor.unwatch(address).await)
+        } else {
+            Err(EvmError::Monitor(format!("chain {} not found", chain_id)))
+        }
     }
 }
 
-impl Default for MonitorCoordinator {
+impl<S: BlockSource + 'static> Default for MonitorCoordinator<S> {
     fn default() -> Self {
         Self::new(CoordinatorConfig::new())
     }
 }
 
-impl std::fmt::Debug for MonitorCoordinator {
+impl<S: BlockSource + 'static> std::fmt::Debug for MonitorCoordinator<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MonitorCoordinator")
             .field("config", &self.config)
