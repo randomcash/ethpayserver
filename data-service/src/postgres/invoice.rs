@@ -2,12 +2,13 @@
 
 use async_trait::async_trait;
 use sqlx::Row;
+use uuid::Uuid;
 
 use crate::{
     InvoiceQueryParams, InvoiceReader, InvoiceWriter, RepositoryError, RepositoryResult,
     sqlx_to_repo_error,
 };
-use types::{InvoiceData, InvoiceId, InvoiceStatus};
+use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
 
 use super::conversions::{status_to_db, try_db_to_network, try_db_to_status, try_network_to_db};
 use super::PgDataService;
@@ -18,7 +19,7 @@ impl InvoiceReader for PgDataService {
         let row = sqlx::query(
             r#"
             SELECT
-                id, network::text, status::text, amount_value::text,
+                id, store_id, network::text, status::text, amount_value::text,
                 amount_received::text, asset_symbol, payment_address,
                 created_at, expires_at, metadata, extra
             FROM invoices
@@ -41,6 +42,10 @@ impl InvoiceReader for PgDataService {
         let mut conditions = Vec::new();
         let mut bind_idx = 1;
 
+        if params.store_id.is_some() {
+            conditions.push(format!("store_id = ${}", bind_idx));
+            bind_idx += 1;
+        }
         if params.status.is_some() {
             conditions.push(format!("status = ${}::invoice_status", bind_idx));
             bind_idx += 1;
@@ -71,7 +76,7 @@ impl InvoiceReader for PgDataService {
         let data_sql = format!(
             r#"
             SELECT
-                id, network::text, status::text, amount_value::text,
+                id, store_id, network::text, status::text, amount_value::text,
                 amount_received::text, asset_symbol, payment_address,
                 created_at, expires_at, metadata, extra
             FROM invoices
@@ -86,6 +91,9 @@ impl InvoiceReader for PgDataService {
 
         // Build and execute count query
         let mut count_query = sqlx::query(&count_sql);
+        if let Some(store_id) = params.store_id {
+            count_query = count_query.bind(store_id.0);
+        }
         if let Some(status) = params.status {
             count_query = count_query.bind(status_to_db(status));
         }
@@ -107,6 +115,9 @@ impl InvoiceReader for PgDataService {
 
         // Build and execute data query
         let mut data_query = sqlx::query(&data_sql);
+        if let Some(store_id) = params.store_id {
+            data_query = data_query.bind(store_id.0);
+        }
         if let Some(status) = params.status {
             data_query = data_query.bind(status_to_db(status));
         }
@@ -136,7 +147,7 @@ impl InvoiceReader for PgDataService {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, network::text, status::text, amount_value::text,
+                id, store_id, network::text, status::text, amount_value::text,
                 amount_received::text, asset_symbol, payment_address,
                 created_at, expires_at, metadata, extra
             FROM invoices
@@ -161,12 +172,12 @@ impl InvoiceWriter for PgDataService {
         sqlx::query(
             r#"
             INSERT INTO invoices (
-                id, network, status, amount_value, amount_received,
+                id, store_id, network, status, amount_value, amount_received,
                 asset_symbol, payment_address, created_at, expires_at,
                 metadata, extra, asset_type
             ) VALUES (
-                $1, $2::network, $3::invoice_status, $4::numeric, $5::numeric,
-                $6, $7, $8, $9, $10, $11, 'native'::asset_type
+                $1, $2, $3::network, $4::invoice_status, $5::numeric, $6::numeric,
+                $7, $8, $9, $10, $11, $12, 'native'::asset_type
             )
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
@@ -180,6 +191,7 @@ impl InvoiceWriter for PgDataService {
             "#,
         )
         .bind(invoice.id.as_str())
+        .bind(invoice.store_id.0)
         .bind(try_network_to_db(invoice.network)?)
         .bind(status_to_db(invoice.status))
         .bind(&invoice.amount)
@@ -236,8 +248,10 @@ impl InvoiceWriter for PgDataService {
 
 /// Convert a database row to InvoiceData.
 fn try_row_to_invoice(row: &sqlx::postgres::PgRow) -> RepositoryResult<InvoiceData> {
+    let store_id: Uuid = row.get("store_id");
     Ok(InvoiceData {
         id: InvoiceId::from_string(row.get("id")),
+        store_id: StoreId(store_id),
         network: try_db_to_network(row.get("network"))?,
         status: try_db_to_status(row.get("status"))?,
         amount: row.get("amount_value"),

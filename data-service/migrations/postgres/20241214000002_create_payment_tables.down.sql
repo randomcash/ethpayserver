@@ -2,11 +2,13 @@
 
 -- Drop triggers first
 DROP TRIGGER IF EXISTS trigger_update_invoice_on_payment ON payments;
+DROP TRIGGER IF EXISTS tokens_updated_at ON tokens;
 
 -- Drop functions
 DROP FUNCTION IF EXISTS update_invoice_on_payment();
 DROP FUNCTION IF EXISTS expire_old_invoices();
-DROP FUNCTION IF EXISTS get_asset_display(network, asset_type, UUID);
+DROP FUNCTION IF EXISTS get_asset_display(network, asset_type, BIGINT);
+DROP FUNCTION IF EXISTS update_tokens_updated_at();
 
 -- Drop tables in dependency order
 DROP TABLE IF EXISTS payment_events;

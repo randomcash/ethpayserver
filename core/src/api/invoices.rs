@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use auth::{AuthRepository, StoreId, repository::UserStoreRepository};
+use auth::{AuthRepository, repository::UserStoreRepository};
 use types::{
-    InvoiceId, InvoiceStatus, Network,
+    InvoiceId, InvoiceStatus, Network, StoreId,
     InvoiceReader, InvoiceWriter, InvoiceQueryParams,
     traits::InvoiceData,
 };
@@ -238,6 +238,7 @@ where
     // Create invoice data
     let invoice = InvoiceData {
         id: InvoiceId::new(),
+        store_id: StoreId(req.store_id),
         network,
         status: InvoiceStatus::Pending,
         amount: req.amount,

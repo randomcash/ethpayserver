@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
-use types::{InvoiceData, InvoiceId, InvoiceStatus, Network, PaymentData};
+use types::{InvoiceData, InvoiceId, InvoiceStatus, Network, PaymentData, StoreId};
 
 use super::PgDataService;
 
@@ -24,6 +24,7 @@ pub(super) async fn create_test_service() -> Option<PgDataService> {
 pub(super) fn test_invoice() -> InvoiceData {
     InvoiceData {
         id: InvoiceId::new(),
+        store_id: StoreId::new(),
         network: Network::Ethereum,
         status: InvoiceStatus::Pending,
         amount: "1000000000000000000".to_string(), // 1 ETH in wei

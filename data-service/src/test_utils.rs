@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use types::{
     InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter,
-    Network, PaymentData, PaymentReader, PaymentWriter, RepositoryResult, TokenData,
+    Network, PaymentData, PaymentReader, PaymentWriter, RepositoryResult, StoreId, TokenData,
     TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
@@ -43,6 +43,11 @@ impl InvoiceReader for InMemoryDataService {
         let mut results: Vec<InvoiceData> = invoices
             .values()
             .filter(|inv| {
+                if let Some(store_id) = params.store_id {
+                    if inv.store_id != store_id {
+                        return false;
+                    }
+                }
                 if let Some(status) = params.status {
                     if inv.status != status {
                         return false;
@@ -352,6 +357,7 @@ impl TokenWriter for InMemoryDataService {
 pub fn create_test_invoice() -> InvoiceData {
     InvoiceData {
         id: InvoiceId::new(),
+        store_id: StoreId::new(),
         network: Network::Ethereum,
         status: InvoiceStatus::Pending,
         amount: "1000000000000000000".to_string(), // 1 ETH in wei

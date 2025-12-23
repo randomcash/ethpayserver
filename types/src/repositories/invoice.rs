@@ -4,12 +4,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use super::RepositoryResult;
+use crate::store::StoreId;
 use crate::traits::InvoiceData;
 use crate::types::{InvoiceId, InvoiceStatus, Network};
 
 /// Query parameters for listing invoices.
 #[derive(Debug, Clone, Default)]
 pub struct InvoiceQueryParams {
+    pub store_id: Option<StoreId>,
     pub status: Option<InvoiceStatus>,
     pub network: Option<Network>,
     pub created_after: Option<DateTime<Utc>>,
@@ -21,6 +23,7 @@ pub struct InvoiceQueryParams {
 impl InvoiceQueryParams {
     pub fn new() -> Self {
         Self {
+            store_id: None,
             status: None,
             network: None,
             created_after: None,
@@ -28,6 +31,11 @@ impl InvoiceQueryParams {
             limit: 50,
             offset: 0,
         }
+    }
+
+    pub fn with_store_id(mut self, store_id: StoreId) -> Self {
+        self.store_id = Some(store_id);
+        self
     }
 
     pub fn with_status(mut self, status: InvoiceStatus) -> Self {

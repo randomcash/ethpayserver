@@ -8,6 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::error::PayServerResult;
+use crate::store::StoreId;
 use crate::types::{HealthStatus, InvoiceId, InvoiceStatus, Network, PaymentEvent};
 
 /// Configuration for creating an invoice.
@@ -16,6 +17,8 @@ use crate::types::{HealthStatus, InvoiceId, InvoiceStatus, Network, PaymentEvent
 /// the `asset_details` field according to its supported networks.
 #[derive(Debug, Clone)]
 pub struct CreateInvoiceRequest {
+    /// The store this invoice belongs to.
+    pub store_id: StoreId,
     /// The blocknetwork to receive payment on.
     pub network: Network,
     /// Amount in the smallest unit (satoshis, wei, etc.) as a string to support large values.
@@ -35,9 +38,10 @@ pub struct CreateInvoiceRequest {
 
 impl CreateInvoiceRequest {
     /// Create a new invoice request for native currency on a network.
-    pub fn native(network: Network, amount: impl Into<String>) -> Self {
+    pub fn native(store_id: StoreId, network: Network, amount: impl Into<String>) -> Self {
         Self {
-            network: network,
+            store_id,
+            network,
             amount: amount.into(),
             asset_details: None,
             expiration_seconds: None,
@@ -93,6 +97,8 @@ pub struct InvoiceQuery {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InvoiceData {
     pub id: InvoiceId,
+    /// The store this invoice belongs to.
+    pub store_id: StoreId,
     pub network: Network,
     pub status: InvoiceStatus,
     /// Amount requested (smallest unit as string).
@@ -227,10 +233,12 @@ mod tests {
 
     #[test]
     fn test_create_invoice_request_builder() {
-        let request = CreateInvoiceRequest::native(Network::Ethereum, "1000000000000000000")
+        let store_id = StoreId::new();
+        let request = CreateInvoiceRequest::native(store_id, Network::Ethereum, "1000000000000000000")
             .with_expiration(3600)
             .with_webhook("https://example.com/webhook".to_string());
 
+        assert_eq!(request.store_id, store_id);
         assert_eq!(request.network, Network::Ethereum);
         assert_eq!(request.amount, "1000000000000000000");
         assert_eq!(request.expiration_seconds, Some(3600));
@@ -240,13 +248,14 @@ mod tests {
 
     #[test]
     fn test_create_invoice_request_with_token() {
+        let store_id = StoreId::new();
         let token_details = serde_json::json!({
             "contract_address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
             "symbol": "USDT",
             "decimals": 6
         });
 
-        let request = CreateInvoiceRequest::native(Network::Ethereum, "1000000")
+        let request = CreateInvoiceRequest::native(store_id, Network::Ethereum, "1000000")
             .with_asset_details(token_details);
 
         assert!(request.asset_details.is_some());

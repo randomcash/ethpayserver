@@ -37,36 +37,67 @@ CREATE TYPE invoice_status AS ENUM (
 );
 
 -- =============================================================================
--- Tokens registry table
--- Tracks known ERC20 tokens across EVM networks
+-- Tokens table
+-- Generic token storage for all payservers.
+-- Token type validation is done at the application layer, not in the database,
+-- to support different token standards across different blockchain networks.
 -- =============================================================================
 CREATE TABLE tokens (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id BIGSERIAL PRIMARY KEY,
 
-    -- Token identification
-    network network NOT NULL,
-    contract_address VARCHAR(42) NOT NULL,  -- Checksummed address
+    -- Token type (e.g., "erc20", "erc721", "erc1155", "brc20", "runes")
+    -- Validation of valid token types is done at the application layer
+    token_type VARCHAR(32) NOT NULL,
 
-    -- Token metadata
-    symbol VARCHAR(32) NOT NULL,            -- e.g., 'USDT', 'USDC', 'DAI'
-    name VARCHAR(128) NOT NULL,             -- e.g., 'Tether USD'
-    decimals SMALLINT NOT NULL,             -- Usually 6 for stables, 18 for most tokens
+    -- Contract/token address or identifier
+    -- Format depends on the network (checksummed for EVM)
+    address VARCHAR(128) NOT NULL,
 
-    -- Display info
-    logo_url TEXT,
+    -- Network (matches network enum for EVM, or string for other chains)
+    network VARCHAR(32) NOT NULL,
 
     -- Status
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+
+    -- Metadata
+    name VARCHAR(128),
+    symbol VARCHAR(32),
+
+    -- Number of decimals for fungible tokens
+    decimals SMALLINT CHECK (decimals IS NULL OR (decimals >= 0 AND decimals <= 18)),
+
+    -- Specific token ID within a collection/contract (for NFTs)
+    token_id VARCHAR(78),  -- uint256 max is 78 digits
 
     -- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT unique_token_per_network UNIQUE (network, contract_address)
+    -- Unique constraint: network + address + token_id (token_id can be NULL)
+    CONSTRAINT tokens_unique UNIQUE NULLS NOT DISTINCT (network, address, token_id)
 );
 
--- Index for token lookups
-CREATE INDEX idx_tokens_network_symbol ON tokens(network, symbol);
-CREATE INDEX idx_tokens_active ON tokens(is_active) WHERE is_active = TRUE;
+-- Indexes for tokens
+CREATE INDEX idx_tokens_token_type ON tokens(token_type);
+CREATE INDEX idx_tokens_network ON tokens(network);
+CREATE INDEX idx_tokens_network_enabled ON tokens(network, enabled) WHERE enabled = true;
+CREATE INDEX idx_tokens_symbol ON tokens(LOWER(symbol)) WHERE symbol IS NOT NULL;
+CREATE INDEX idx_tokens_address ON tokens(LOWER(address));
+CREATE INDEX idx_tokens_type_network ON tokens(token_type, network);
+
+-- Trigger to update updated_at on tokens
+CREATE OR REPLACE FUNCTION update_tokens_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER tokens_updated_at
+    BEFORE UPDATE ON tokens
+    FOR EACH ROW
+    EXECUTE FUNCTION update_tokens_updated_at();
 
 -- =============================================================================
 -- Invoices table
@@ -80,7 +111,7 @@ CREATE TABLE invoices (
     -- Asset specification
     network network NOT NULL,
     asset_type asset_type NOT NULL,
-    token_id UUID REFERENCES tokens(id),   -- NULL for native assets
+    token_id BIGINT REFERENCES tokens(id),   -- NULL for native assets
 
     -- Asset symbol for display (e.g., 'ETH', 'POL', 'USDT')
     asset_symbol VARCHAR(32) NOT NULL,
@@ -103,8 +134,8 @@ CREATE TABLE invoices (
     webhook_url TEXT,
     redirect_url TEXT,
 
-    -- Link to user (optional - for authenticated invoices)
-    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    -- Link to store (required - invoices belong to stores)
+    store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
 
     -- Chain-specific extra data
     extra JSONB,
@@ -119,7 +150,7 @@ CREATE TABLE invoices (
 -- Indexes for invoices
 CREATE INDEX idx_invoices_status ON invoices(status);
 CREATE INDEX idx_invoices_network ON invoices(network);
-CREATE INDEX idx_invoices_user_id ON invoices(user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX idx_invoices_store_id ON invoices(store_id);
 CREATE INDEX idx_invoices_expires_at ON invoices(expires_at);
 CREATE INDEX idx_invoices_created_at ON invoices(created_at);
 CREATE INDEX idx_invoices_payment_address ON invoices(payment_address) WHERE payment_address IS NOT NULL;
@@ -139,7 +170,7 @@ CREATE TABLE payments (
     -- Asset (should match invoice, but stored for audit)
     network network NOT NULL,
     asset_type asset_type NOT NULL,
-    token_id UUID REFERENCES tokens(id),
+    token_id BIGINT REFERENCES tokens(id),
     asset_symbol VARCHAR(32) NOT NULL,
 
     -- Transaction details
@@ -266,22 +297,28 @@ INSERT INTO network_configs (network, chain_id, name, native_symbol, native_deci
 -- =============================================================================
 -- Seed common tokens (USDT, USDC) on major EVM networks
 -- =============================================================================
-INSERT INTO tokens (network, contract_address, symbol, name, decimals) VALUES
+INSERT INTO tokens (token_type, network, address, symbol, name, decimals) VALUES
     -- Ethereum
-    ('ethereum', '0xdAC17F958D2ee523a2206206994597C13D831ec7', 'USDT', 'Tether USD', 6),
-    ('ethereum', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', 'USDC', 'USD Coin', 6),
-    ('ethereum', '0x6B175474E89094C44Da98b954EedeAC495271d0F', 'DAI', 'Dai Stablecoin', 18),
+    ('erc20', 'ethereum', '0xdAC17F958D2ee523a2206206994597C13D831ec7', 'USDT', 'Tether USD', 6),
+    ('erc20', 'ethereum', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', 'USDC', 'USD Coin', 6),
+    ('erc20', 'ethereum', '0x6B175474E89094C44Da98b954EedeAC495271d0F', 'DAI', 'Dai Stablecoin', 18),
     -- Polygon
-    ('polygon', '0xc2132D05D31c914a87C6611C10748AEb04B58e8F', 'USDT', 'Tether USD', 6),
-    ('polygon', '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', 'USDC', 'USD Coin', 6),
+    ('erc20', 'polygon', '0xc2132D05D31c914a87C6611C10748AEb04B58e8F', 'USDT', 'Tether USD', 6),
+    ('erc20', 'polygon', '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', 'USDC', 'USD Coin', 6),
     -- Arbitrum
-    ('arbitrum', '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', 'USDT', 'Tether USD', 6),
-    ('arbitrum', '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', 'USDC', 'USD Coin', 6),
+    ('erc20', 'arbitrum', '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', 'USDT', 'Tether USD', 6),
+    ('erc20', 'arbitrum', '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', 'USDC', 'USD Coin', 6),
     -- Optimism
-    ('optimism', '0x94b008aA00579c1307B0EF2c499aD98a8ce58e58', 'USDT', 'Tether USD', 6),
-    ('optimism', '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', 'USDC', 'USD Coin', 6),
+    ('erc20', 'optimism', '0x94b008aA00579c1307B0EF2c499aD98a8ce58e58', 'USDT', 'Tether USD', 6),
+    ('erc20', 'optimism', '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', 'USDC', 'USD Coin', 6),
     -- Base
-    ('base', '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', 'USDC', 'USD Coin', 6);
+    ('erc20', 'base', '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', 'USDC', 'USD Coin', 6),
+    -- BNB Smart Chain
+    ('erc20', 'binance_smart_chain', '0x55d398326f99059fF775485246999027B3197955', 'USDT', 'Tether USD', 18),
+    ('erc20', 'binance_smart_chain', '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', 'USDC', 'USD Coin', 18),
+    -- Avalanche
+    ('erc20', 'avalanche', '0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7', 'USDT', 'Tether USD', 6),
+    ('erc20', 'avalanche', '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', 'USDC', 'USD Coin', 6);
 
 -- =============================================================================
 -- Helper functions
@@ -336,7 +373,7 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION get_asset_display(
     p_network network,
     p_asset_type asset_type,
-    p_token_id UUID
+    p_token_id BIGINT
 ) RETURNS TEXT AS $$
 DECLARE
     network_symbol TEXT;
