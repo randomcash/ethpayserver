@@ -12,8 +12,8 @@ postgres = ["dep:sqlx"]
 test-utils = []
 
 [dependencies]
-types = { version = "0.1.0", path = "../types" }
-auth = { version = "0.1.0", path = "../auth" }
+types = { git = "ssh://git@gitlab.com/random.cash/payserver-commons.git" }
+auth = { git = "ssh://git@gitlab.com/random.cash/payserver-commons.git" }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"], optional = true }
 tokio = { version = "1.42", features = ["sync"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -25,4 +25,4 @@ async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
-crypto = { version = "0.1.0", path = "../crypto" }
+crypto = { git = "ssh://git@gitlab.com/random.cash/payserver-commons.git" }

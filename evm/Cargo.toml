@@ -8,7 +8,7 @@ license = "MIT"
 
 [features]
 default = []
-api = ["axum", "utoipa", "types", "data-service", "auth", "uuid"]
+api = ["axum", "utoipa", "types", "data-service", "auth"]
 
 [dependencies]
 # Ethereum/EVM - alloy ecosystem
@@ -16,6 +16,7 @@ alloy = { version = "1.0", features = [
     "providers",
     "provider-http",
     "provider-ws",
+    "pubsub",
     "network",
     "contract",
     "rpc-types",
@@ -30,7 +31,9 @@ k256 = "0.13"
 
 # Async runtime
 tokio = { version = "1.42", features = ["sync", "time"] }
+tokio-stream = "0.1"
 async-trait = "0.1"
+async-stream = "0.3"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -47,14 +50,14 @@ chrono = { version = "0.4", features = ["serde"] }
 url = { version = "2.5", features = ["serde"] }
 hex = "0.4"
 rand = "0.9"
+uuid = { version = "1.11", features = ["v4", "serde"] }
 
 # API (optional)
 axum = { version = "0.8", optional = true }
 utoipa = { version = "5", features = ["axum_extras"], optional = true }
-types = { path = "../types", optional = true }
+types = { git = "ssh://git@gitlab.com/random.cash/payserver-commons.git", optional = true }
 data-service = { path = "../data-service", optional = true }
-auth = { path = "../auth", optional = true }
-uuid = { version = "1.11", optional = true }
+auth = { git = "ssh://git@gitlab.com/random.cash/payserver-commons.git", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["full", "test-util"] }
