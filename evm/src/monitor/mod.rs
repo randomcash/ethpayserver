@@ -1,0 +1,67 @@
+//! Payment monitoring system for EVM chains.
+//!
+//! This module provides a flexible architecture for monitoring blockchain
+//! transactions across multiple EVM chains and providers.
+//!
+//! # Architecture
+//!
+//! ```text
+//! evmmonitor binary (one or more instances)
+//!     └── MonitorCoordinator
+//!             └── ChainMonitor (per chain)
+//!                     └── BlockSource (trait - provider abstraction)
+//!                             ├── RpcBlockSource (direct WS/HTTP)
+//!                             ├── AlchemyBlockSource (Alchemy enhanced APIs)
+//!                             └── InfuraBlockSource (Infura APIs)
+//!     └── EventBridge (publishes events)
+//!             ├── RedisBridge (production - multiple instances)
+//!             └── MemoryBridge (testing/single process)
+//!
+//! ethpayserver API (subscribes to events via bridge)
+//! ```
+//!
+//! # Example - Running as separate binary
+//!
+//! ```ignore
+//! // evmmonitor binary handles chain monitoring
+//! // Configure via TOML or environment variables:
+//! //   EVMMONITOR_CHAINS=1,137,42161
+//! //   EVMMONITOR_REDIS_URL=redis://localhost:6379
+//! //   EVMMONITOR_RPC_1=https://eth.llamarpc.com
+//! //   EVMMONITOR_WS_1=wss://eth.llamarpc.com
+//!
+//! // API server subscribes to events:
+//! use evm::monitor::bridge::{BridgeConfig, EventBridge};
+//!
+//! let bridge = BridgeConfig::redis("redis://localhost:6379").build().await?;
+//! let mut events = bridge.subscribe().await?;
+//!
+//! while let Some(event) = events.next().await {
+//!     match event {
+//!         MonitorEvent::PaymentDetected(p) => { /* update invoice */ }
+//!         MonitorEvent::PaymentConfirmed(p) => { /* mark complete */ }
+//!         _ => {}
+//!     }
+//! }
+//! ```
+
+pub mod bridge;
+mod source;
+mod chain;
+mod coordinator;
+mod events;
+mod handlers;
+
+pub use source::{BlockSource, BlockNotification, LogFilter};
+pub use source::rpc::{RpcBlockSource, RpcSourceConfig};
+// pub use source::alchemy::AlchemyBlockSource;
+// pub use source::infura::InfuraBlockSource;
+
+pub use bridge::{EventBridge, EventStream, BridgeConfig, MemoryBridge};
+#[cfg(feature = "redis")]
+pub use bridge::RedisBridge;
+
+pub use chain::{ChainMonitor, ChainMonitorConfig, WatchedAddress};
+pub use coordinator::{MonitorCoordinator, CoordinatorConfig};
+pub use events::{MonitorEvent, PaymentDetected, PaymentConfirmed, ReorgDetected};
+pub use handlers::{EventHandler, EventHandlerFn, LoggingHandler};

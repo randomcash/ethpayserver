@@ -8,6 +8,8 @@ EVM blockchain interaction layer for ethpayserver.
 - **HD wallet** - BIP-32/44 address derivation for payment invoices
 - **RPC provider** - Alloy-based provider for blockchain interaction
 - **Token support** - ERC20, ERC721, ERC1155 standards
+- **Payment monitor** - Real-time block monitoring via WebSocket
+- **Event bridge** - Redis pub/sub for distributed deployments
 
 ## Supported Networks
 
@@ -50,8 +52,108 @@ let balance = provider.get_native_balance(address).await?;
 | `wallet` | BIP-32/44 HD wallet derivation |
 | `provider` | Alloy RPC provider wrapper |
 | `tokens` | `EvmTokenStandard`, ERC20 operations |
+| `monitor` | Payment monitoring system |
 | `error` | `EvmError` and `EvmResult` |
 | `api` | REST API endpoints (feature: `api`) |
+
+## Payment Monitor (`evmmonitor` binary)
+
+Standalone binary that monitors EVM chains for payments and publishes events to Redis.
+
+### Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  evmmonitor     │     │  evmmonitor     │     │  evmmonitor     │
+│  (Ethereum)     │     │  (Polygon)      │     │  (Arbitrum)     │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │ WebSocket             │ WebSocket             │ WebSocket
+         │ subscription          │ subscription          │ subscription
+         └───────────────────────┼───────────────────────┘
+                                 │ Redis pub/sub
+                                 ▼
+                       ┌─────────────────┐
+                       │  ethpayserver   │
+                       │  (API server)   │
+                       └─────────────────┘
+```
+
+### Build
+
+```bash
+cargo build --release --bin evmmonitor --features monitor-bin
+```
+
+### Run
+
+```bash
+# Environment variables
+EVMMONITOR_REDIS_URL=redis://localhost:6379 \
+EVMMONITOR_CHAINS=1,137,42161 \
+EVMMONITOR_CHAIN_1_RPC_HTTP=https://eth-mainnet.g.alchemy.com/v2/KEY \
+EVMMONITOR_CHAIN_1_RPC_WS=wss://eth-mainnet.g.alchemy.com/v2/KEY \
+EVMMONITOR_CHAIN_137_RPC_HTTP=https://polygon-mainnet.g.alchemy.com/v2/KEY \
+EVMMONITOR_CHAIN_137_RPC_WS=wss://polygon-mainnet.g.alchemy.com/v2/KEY \
+./target/release/evmmonitor
+```
+
+Or with config file (`evmmonitor.toml`):
+
+```toml
+[bridge]
+redis_url = "redis://localhost:6379"
+
+[[chains]]
+chain_id = 1
+rpc_http = "https://eth-mainnet.g.alchemy.com/v2/KEY"
+rpc_ws = "wss://eth-mainnet.g.alchemy.com/v2/KEY"
+
+[[chains]]
+chain_id = 137
+rpc_http = "https://polygon-mainnet.g.alchemy.com/v2/KEY"
+rpc_ws = "wss://polygon-mainnet.g.alchemy.com/v2/KEY"
+```
+
+```bash
+./target/release/evmmonitor --config evmmonitor.toml
+```
+
+### Connection Modes
+
+| Mode | Config | Latency | Use Case |
+|------|--------|---------|----------|
+| **WebSocket** | `rpc_ws` + `rpc_http` | Real-time (~1s) | Production |
+| **HTTP Polling** | `rpc_http` only | Block time interval | Fallback |
+
+WebSocket uses `eth_subscribe("newHeads")` for instant block notifications. HTTP polling is automatic fallback if WebSocket fails.
+
+### Events
+
+Published to Redis channel `evmmonitor:events`:
+
+- `PaymentDetected` - Payment received (unconfirmed)
+- `PaymentConfirmed` - Payment reached required confirmations
+- `ReorgDetected` - Chain reorganization detected
+- `MonitorStarted` / `MonitorStopped` - Lifecycle events
+
+### API Server Integration
+
+```rust
+use evm::monitor::{BridgeConfig, EventBridge, MonitorEvent};
+use tokio_stream::StreamExt;
+
+let bridge = BridgeConfig::redis("redis://localhost:6379").build().await?;
+let mut events = bridge.subscribe().await?;
+
+while let Some(event) = events.next().await {
+    match event {
+        MonitorEvent::PaymentDetected(p) => { /* update invoice */ }
+        MonitorEvent::PaymentConfirmed(p) => { /* complete payment */ }
+        MonitorEvent::ReorgDetected(r) => { /* re-evaluate payments */ }
+        _ => {}
+    }
+}
+```
 
 ## Token Standards
 

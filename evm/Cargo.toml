@@ -6,9 +6,16 @@ rust-version.workspace = true
 description = "EVM blockchain interaction layer for ethpayserver"
 license = "MIT"
 
+[[bin]]
+name = "evmmonitor"
+path = "src/bin/evmmonitor.rs"
+required-features = ["monitor-bin"]
+
 [features]
 default = []
 api = ["axum", "utoipa", "types", "data-service", "auth"]
+redis = ["dep:redis"]
+monitor-bin = ["redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "tokio/full"]
 
 [dependencies]
 # Ethereum/EVM - alloy ecosystem
@@ -51,6 +58,16 @@ url = { version = "2.5", features = ["serde"] }
 hex = "0.4"
 rand = "0.9"
 uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# Event bridge - Redis (optional)
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
+
+# Binary dependencies (optional)
+toml = { version = "0.8", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
+dotenvy = { version = "0.15", optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+anyhow = { version = "1.0", optional = true }
 
 # API (optional)
 axum = { version = "0.8", optional = true }

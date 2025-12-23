@@ -57,6 +57,14 @@ pub enum EvmError {
     #[error("config error: {0}")]
     Config(String),
 
+    /// Subscription error.
+    #[error("subscription error: {0}")]
+    Subscription(String),
+
+    /// Monitor error.
+    #[error("monitor error: {0}")]
+    Monitor(String),
+
     /// Generic internal error.
     #[error("internal error: {0}")]
     Internal(String),
