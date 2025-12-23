@@ -1927,11 +1927,13 @@ dependencies = [
  "auth",
  "chrono",
  "crypto",
+ "redis",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.17",
  "tokio",
+ "tracing",
  "types",
  "uuid",
 ]

@@ -46,6 +46,7 @@
 
 use chrono::Utc;
 use clap::Parser;
+use data_service::{RedisDataService, WatchedAddressReader, WatchedAddressWriter};
 use evm::error::{EvmError, EvmResult};
 use evm::monitor::bridge::{EventBridge, RedisBridge};
 use evm::monitor::events::{AddressUnwatched, AddressWatched, StatusReport, WatchedAddressInfo};
@@ -61,6 +62,7 @@ use tokio::signal;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use types::{InvoiceId, Network};
 
 #[derive(Parser, Debug)]
 #[command(name = "evmmonitor")]
@@ -141,6 +143,40 @@ impl EventHandler for BridgeHandler {
     }
 }
 
+/// Convert chain_id to types::Network.
+fn chain_id_to_network(chain_id: u64) -> Option<Network> {
+    match chain_id {
+        1 => Some(Network::Ethereum),
+        137 => Some(Network::Polygon),
+        42161 => Some(Network::Arbitrum),
+        10 => Some(Network::Optimism),
+        8453 => Some(Network::Base),
+        43114 => Some(Network::Avalanche),
+        56 => Some(Network::BinanceSmartChain),
+        324 => Some(Network::ZkSync),
+        59144 => Some(Network::Linea),
+        534352 => Some(Network::Scroll),
+        _ => None,
+    }
+}
+
+/// Convert types::Network to chain_id.
+fn network_to_chain_id(network: Network) -> Option<u64> {
+    match network {
+        Network::Ethereum => Some(1),
+        Network::Polygon => Some(137),
+        Network::Arbitrum => Some(42161),
+        Network::Optimism => Some(10),
+        Network::Base => Some(8453),
+        Network::Avalanche => Some(43114),
+        Network::BinanceSmartChain => Some(56),
+        Network::ZkSync => Some(324),
+        Network::Linea => Some(59144),
+        Network::Scroll => Some(534352),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file if present
@@ -192,7 +228,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Health check
     bridge.health_check().await?;
-    info!("redis health check passed");
+    info!("redis bridge health check passed");
+
+    // Create Redis persistence service
+    let persistence = Arc::new(RedisDataService::new(&redis_url).await?);
+    persistence.health_check().await?;
+    info!("redis persistence connected");
 
     // Create coordinator
     let coordinator = Arc::new(MonitorCoordinator::new(CoordinatorConfig::new()));
@@ -206,8 +247,9 @@ async fn main() -> anyhow::Result<()> {
         .await;
 
     // Add chain monitors
-    for chain_config in chain_configs {
-        match create_chain_monitor(&chain_config).await {
+    let monitored_chain_ids: Vec<u64> = chain_configs.iter().map(|c| c.chain_id).collect();
+    for chain_config in &chain_configs {
+        match create_chain_monitor(chain_config).await {
             Ok(monitor) => {
                 coordinator.add_chain(monitor).await?;
                 info!(chain_id = chain_config.chain_id, "chain monitor started");
@@ -222,6 +264,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Restore watched addresses from Redis persistence
+    restore_watched_addresses(&coordinator, &persistence, &monitored_chain_ids).await;
+
     // Start coordinator
     coordinator.clone().start().await?;
     info!("monitor coordinator started");
@@ -233,8 +278,9 @@ async fn main() -> anyhow::Result<()> {
     // Spawn command handler task
     let command_coordinator = coordinator.clone();
     let command_bridge = bridge.clone();
+    let command_persistence = persistence.clone();
     let command_handle = tokio::spawn(async move {
-        handle_commands(commands_stream, command_coordinator, command_bridge).await;
+        handle_commands(commands_stream, command_coordinator, command_bridge, command_persistence).await;
     });
 
     // Wait for shutdown signal
@@ -251,11 +297,76 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Restore watched addresses from Redis on startup.
+async fn restore_watched_addresses(
+    coordinator: &Arc<MonitorCoordinator<RpcBlockSource>>,
+    persistence: &Arc<RedisDataService>,
+    monitored_chain_ids: &[u64],
+) {
+    match WatchedAddressReader::get_active(persistence.as_ref()).await {
+        Ok(addresses) => {
+            let mut restored_count = 0;
+            for (address, invoice_id, network) in addresses {
+                // Convert types::Network to chain_id
+                let chain_id = match network_to_chain_id(network) {
+                    Some(id) => id,
+                    None => {
+                        warn!(network = ?network, "non-EVM network in watched addresses");
+                        continue;
+                    }
+                };
+
+                // Only restore addresses for chains we're monitoring
+                if !monitored_chain_ids.contains(&chain_id) {
+                    debug!(chain_id, address = %address, "skipping address for unmonitored chain");
+                    continue;
+                }
+
+                if let Some(monitor) = coordinator.get_chain(chain_id).await {
+                    // Parse address - it's stored as lowercase hex string
+                    let parsed_address = match address.parse() {
+                        Ok(addr) => addr,
+                        Err(e) => {
+                            warn!(address = %address, error = %e, "failed to parse address");
+                            continue;
+                        }
+                    };
+
+                    // Parse invoice_id as UUID
+                    let uuid = match uuid::Uuid::parse_str(invoice_id.as_str()) {
+                        Ok(u) => u,
+                        Err(e) => {
+                            warn!(invoice_id = %invoice_id, error = %e, "failed to parse invoice_id as UUID");
+                            continue;
+                        }
+                    };
+
+                    let watched = WatchedAddress {
+                        address: parsed_address,
+                        invoice_id: uuid,
+                        expected_amount: None,
+                        token_contract: None,
+                        created_at: Utc::now(),
+                        last_known_balance: alloy::primitives::U256::ZERO,
+                    };
+                    monitor.watch(watched).await;
+                    restored_count += 1;
+                }
+            }
+            info!(count = restored_count, "restored watched addresses from persistence");
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to restore watched addresses from persistence");
+        }
+    }
+}
+
 /// Handle incoming commands from the API server.
 async fn handle_commands(
     mut commands: evm::monitor::bridge::CommandStream,
     coordinator: Arc<MonitorCoordinator<RpcBlockSource>>,
     bridge: Arc<dyn EventBridge>,
+    persistence: Arc<RedisDataService>,
 ) {
     while let Some(command) = commands.next().await {
         debug!(?command, "received command");
@@ -269,11 +380,25 @@ async fn handle_commands(
                     "watch address command"
                 );
 
+                // Persist to Redis first
+                if let Some(network) = chain_id_to_network(cmd.chain_id) {
+                    let invoice_id = InvoiceId::from_string(cmd.invoice_id.to_string());
+                    let address_str = cmd.address.to_string().to_lowercase();
+                    if let Err(e) = WatchedAddressWriter::upsert(
+                        persistence.as_ref(),
+                        &address_str,
+                        &invoice_id,
+                        network,
+                    ).await {
+                        error!(error = %e, "failed to persist watched address");
+                    }
+                }
+
                 // Find the chain monitor
                 if let Some(monitor) = coordinator.get_chain(cmd.chain_id).await {
                     let watched = WatchedAddress {
                         address: cmd.address,
-                        invoice_id: cmd.invoice_id,
+                        invoice_id: cmd.invoice_id.clone(),
                         expected_amount: cmd.expected_amount,
                         token_contract: cmd.token_contract,
                         created_at: Utc::now(),
@@ -307,6 +432,19 @@ async fn handle_commands(
                     address = %cmd.address,
                     "unwatch address command"
                 );
+
+                // Remove from persistence
+                if let Some(network) = chain_id_to_network(cmd.chain_id) {
+                    let address_str = cmd.address.to_string().to_lowercase();
+                    if let Err(e) = WatchedAddressWriter::remove(
+                        persistence.as_ref(),
+                        &address_str,
+                        network,
+                    ).await {
+                        // NotFound is acceptable - address might not exist in persistence
+                        debug!(error = %e, "failed to remove watched address from persistence");
+                    }
+                }
 
                 if let Some(monitor) = coordinator.get_chain(cmd.chain_id).await {
                     let removed = monitor.unwatch(&cmd.address).await;

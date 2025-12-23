@@ -23,6 +23,12 @@ pub mod postgres;
 #[cfg(feature = "postgres")]
 pub use postgres::PgDataService;
 
+#[cfg(feature = "redis")]
+pub mod redis;
+
+#[cfg(feature = "redis")]
+pub use redis::RedisDataService;
+
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 

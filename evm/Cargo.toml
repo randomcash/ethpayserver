@@ -15,7 +15,7 @@ required-features = ["monitor-bin"]
 default = []
 api = ["axum", "utoipa", "types", "data-service", "auth"]
 redis = ["dep:redis"]
-monitor-bin = ["redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "tokio/full"]
+monitor-bin = ["redis", "types", "data-service", "data-service/redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "tokio/full"]
 
 [dependencies]
 # Ethereum/EVM - alloy ecosystem
