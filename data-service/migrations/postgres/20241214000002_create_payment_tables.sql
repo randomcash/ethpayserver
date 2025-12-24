@@ -212,6 +212,7 @@ CREATE TABLE watched_addresses (
     -- Monitoring state
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     last_checked_block BIGINT,
+    monitor_notified BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -225,6 +226,8 @@ CREATE INDEX idx_watched_active ON watched_addresses(is_active, network) WHERE i
 CREATE INDEX idx_watched_invoice ON watched_addresses(invoice_id);
 CREATE INDEX idx_watched_address ON watched_addresses(address, network);
 CREATE INDEX idx_watched_expires ON watched_addresses(expires_at);
+CREATE INDEX idx_watched_pending ON watched_addresses(monitor_notified, is_active)
+    WHERE monitor_notified = FALSE AND is_active = TRUE;
 
 -- =============================================================================
 -- Payment events table (audit log)

@@ -11,6 +11,7 @@ mod token;
 mod watched_address;
 
 pub use store_wallet::StoreWallet;
+pub use watched_address::PendingWatch;
 
 #[cfg(test)]
 mod tests;

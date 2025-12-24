@@ -21,7 +21,7 @@
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
-pub use postgres::{PgDataService, StoreWallet};
+pub use postgres::{PgDataService, StoreWallet, PendingWatch};
 
 #[cfg(feature = "redis")]
 pub mod redis;

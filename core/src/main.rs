@@ -14,7 +14,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::AuthService;
-use core::{api, config::Config, AppState, RedisEVMMonitor};
+use core::{api, config::Config, AppState, RedisEVMMonitor, WatchRetryConfig, WatchRetryService};
 use data_service::PgDataService;
 
 #[tokio::main]
@@ -57,8 +57,18 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Start background watch retry service if EVM monitor is configured
+    if let Some(ref monitor) = evm_monitor {
+        let retry_service = WatchRetryService::new(
+            Arc::clone(&data_service),
+            Arc::clone(monitor),
+            WatchRetryConfig::default(),
+        );
+        tokio::spawn(retry_service.run());
+    }
+
     // Create application state
-    let state = AppState::new(data_service, auth_service, evm_monitor);
+    let state = AppState::new(Arc::clone(&data_service), auth_service, evm_monitor);
 
     // Build router with middleware
     let app = api::router(state, config.enable_swagger)

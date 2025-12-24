@@ -97,11 +97,11 @@ impl WatchedAddressWriter for PgDataService {
         .map_err(sqlx_to_repo_error)?;
 
         if existing.is_some() {
-            // Update existing row
+            // Update existing row - reset monitor_notified since invoice changed
             sqlx::query(
                 r#"
                 UPDATE watched_addresses
-                SET invoice_id = $1, is_active = TRUE, expires_at = $2
+                SET invoice_id = $1, is_active = TRUE, expires_at = $2, monitor_notified = FALSE
                 WHERE address = $3 AND network = $4::network AND token_address IS NULL
                 "#,
             )
@@ -117,9 +117,9 @@ impl WatchedAddressWriter for PgDataService {
             sqlx::query(
                 r#"
                 INSERT INTO watched_addresses (
-                    address, invoice_id, network, asset_type, is_active, expires_at
+                    address, invoice_id, network, asset_type, is_active, expires_at, monitor_notified
                 ) VALUES (
-                    $1, $2, $3::network, 'native'::asset_type, TRUE, $4
+                    $1, $2, $3::network, 'native'::asset_type, TRUE, $4, FALSE
                 )
                 "#,
             )
@@ -157,6 +157,77 @@ impl WatchedAddressWriter for PgDataService {
                 address, network
             )));
         }
+
+        Ok(())
+    }
+}
+
+/// Data for a watched address pending monitor notification.
+#[derive(Debug, Clone)]
+pub struct PendingWatch {
+    pub address: String,
+    pub invoice_id: String,
+    pub network: Network,
+    pub expected_amount: Option<String>,
+    pub token_address: Option<String>,
+}
+
+impl PgDataService {
+    /// Get watched addresses that haven't been notified to evmmonitor yet.
+    ///
+    /// Returns active, non-expired addresses where monitor_notified = FALSE.
+    pub async fn get_pending_watches(&self) -> RepositoryResult<Vec<PendingWatch>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                wa.address,
+                wa.invoice_id,
+                wa.network::text,
+                wa.token_address,
+                i.amount_value::text as expected_amount
+            FROM watched_addresses wa
+            JOIN invoices i ON wa.invoice_id = i.id
+            WHERE wa.is_active = TRUE
+              AND wa.monitor_notified = FALSE
+              AND wa.expires_at > NOW()
+            ORDER BY wa.created_at ASC
+            LIMIT 100
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let network = try_db_to_network(r.get("network"))?;
+            result.push(PendingWatch {
+                address: r.get("address"),
+                invoice_id: r.get("invoice_id"),
+                network,
+                expected_amount: r.get("expected_amount"),
+                token_address: r.get("token_address"),
+            });
+        }
+        Ok(result)
+    }
+
+    /// Mark a watched address as notified to evmmonitor.
+    pub async fn mark_watch_notified(&self, address: &str, network: Network) -> RepositoryResult<()> {
+        let network_db = try_network_to_db(network)?;
+
+        sqlx::query(
+            r#"
+            UPDATE watched_addresses
+            SET monitor_notified = TRUE
+            WHERE address = $1 AND network = $2::network
+            "#,
+        )
+        .bind(address)
+        .bind(network_db)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
 
         Ok(())
     }

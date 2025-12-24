@@ -17,6 +17,7 @@ use evm::{Address, XpubDeriver, U256};
 use types::{
     InvoiceId, InvoiceStatus, Network, StoreId,
     InvoiceReader, InvoiceWriter, InvoiceQueryParams,
+    WatchedAddressWriter,
     traits::InvoiceData,
 };
 
@@ -285,6 +286,24 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Save watched address to database (required for payment detection & retry mechanism)
+    WatchedAddressWriter::upsert(
+        &*state.data_service,
+        &payment_address,
+        &invoice.id,
+        network,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            address = %payment_address,
+            invoice_id = %invoice.id.0,
+            error = %e,
+            "Failed to save watched address - invoice creation aborted"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
     // Send WatchAddress command to EVM monitor if configured
     if let Some(ref monitor) = state.evm_monitor {
         // Parse invoice ID as UUID
@@ -299,18 +318,34 @@ where
         // TODO: Handle token contract for ERC20 payments
         let token_contract: Option<Address> = None;
 
-        if let Err(e) = monitor
+        match monitor
             .watch_address(network, address, invoice_uuid, expected_amount, token_contract)
             .await
         {
-            // Log the error but don't fail invoice creation
-            // The address is recorded in the database and can be retried
-            tracing::warn!(
-                invoice_id = %invoice_uuid,
-                address = %address,
-                error = %e,
-                "Failed to send WatchAddress command to EVM monitor"
-            );
+            Ok(()) => {
+                // Mark as notified in database
+                if let Err(e) = state
+                    .data_service
+                    .mark_watch_notified(&payment_address, network)
+                    .await
+                {
+                    tracing::warn!(
+                        address = %payment_address,
+                        error = %e,
+                        "Failed to mark watch as notified"
+                    );
+                }
+            }
+            Err(e) => {
+                // Log the error but don't fail invoice creation
+                // The address is recorded in the database and retry service will handle it
+                tracing::warn!(
+                    invoice_id = %invoice_uuid,
+                    address = %address,
+                    error = %e,
+                    "Failed to send WatchAddress command, will be retried"
+                );
+            }
         }
     }
 

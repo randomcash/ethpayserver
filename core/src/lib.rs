@@ -40,5 +40,5 @@ pub mod services;
 pub mod state;
 
 pub use config::Config;
-pub use services::{EVMMonitor, EVMMonitorError, RedisEVMMonitor};
+pub use services::{EVMMonitor, EVMMonitorError, RedisEVMMonitor, WatchRetryConfig, WatchRetryService};
 pub use state::AppState;
