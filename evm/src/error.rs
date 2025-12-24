@@ -33,6 +33,10 @@ pub enum EvmError {
     #[error("invalid derivation path: {0}")]
     InvalidDerivationPath(String),
 
+    /// Invalid extended public key.
+    #[error("invalid xpub: {0}")]
+    InvalidXpub(String),
+
     /// Address parsing error.
     #[error("invalid address: {0}")]
     InvalidAddress(String),

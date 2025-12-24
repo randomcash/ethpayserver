@@ -41,6 +41,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::add_store_member,
         stores::update_store_member,
         stores::remove_store_member,
+        stores::get_store_wallet,
+        stores::configure_store_wallet,
+        stores::delete_store_wallet,
         // Invoices
         invoices::list_invoices,
         invoices::create_invoice,
@@ -56,6 +59,8 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::AddMemberRequest,
         stores::UpdateMemberRequest,
         stores::MemberResponse,
+        stores::ConfigureWalletRequest,
+        stores::WalletResponse,
         invoices::CreateInvoiceRequest,
         invoices::InvoiceResponse,
         invoices::InvoiceListResponse,
@@ -109,6 +114,9 @@ where
             "/{store_id}/members/{user_id}",
             delete(stores::remove_store_member::<R>),
         )
+        .route("/{store_id}/wallet", get(stores::get_store_wallet::<R>))
+        .route("/{store_id}/wallet", put(stores::configure_store_wallet::<R>))
+        .route("/{store_id}/wallet", delete(stores::delete_store_wallet::<R>))
         .with_state(state.clone());
 
     // Invoice endpoints

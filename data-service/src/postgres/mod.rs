@@ -6,8 +6,11 @@ mod auth;
 mod conversions;
 mod invoice;
 mod payment;
+mod store_wallet;
 mod token;
 mod watched_address;
+
+pub use store_wallet::StoreWallet;
 
 #[cfg(test)]
 mod tests;

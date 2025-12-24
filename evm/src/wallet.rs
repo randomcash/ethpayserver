@@ -18,7 +18,11 @@
 
 use crate::error::{EvmError, EvmResult};
 use alloy::primitives::Address;
-use coins_bip32::{path::DerivationPath, prelude::*};
+use coins_bip32::{
+    enc::{MainnetEncoder, XKeyEncoder},
+    path::DerivationPath,
+    prelude::*,
+};
 use coins_bip39::{English, Mnemonic};
 use std::str::FromStr;
 
@@ -207,6 +211,61 @@ pub fn validate_mnemonic(phrase: &str) -> bool {
     Mnemonic::<English>::new_from_phrase(phrase).is_ok()
 }
 
+/// Address deriver from an extended public key.
+///
+/// Allows deriving payment addresses without access to private keys.
+/// Merchants provide their xpub and the server derives unique addresses
+/// for each invoice.
+#[derive(Clone)]
+pub struct XpubDeriver {
+    /// The account-level extended public key (at path m/44'/60'/0')
+    account_xpub: XPub,
+}
+
+impl XpubDeriver {
+    /// Create a new deriver from a base58-encoded xpub string.
+    ///
+    /// The xpub should be at the account level (m/44'/60'/0').
+    pub fn from_xpub(xpub_str: &str) -> EvmResult<Self> {
+        let account_xpub = MainnetEncoder::xpub_from_base58(xpub_str)
+            .map_err(|e| EvmError::InvalidXpub(format!("failed to parse xpub: {}", e)))?;
+
+        Ok(Self { account_xpub })
+    }
+
+    /// Derive an Ethereum address at the given index.
+    ///
+    /// Derives at path: 0/{index} (relative to account xpub)
+    /// Full path would be: m/44'/60'/0'/0/{index}
+    pub fn derive_address(&self, index: u32) -> EvmResult<Address> {
+        // Derive external chain (0) then index
+        let external = self
+            .account_xpub
+            .derive_child(0)
+            .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
+
+        let derived = external
+            .derive_child(index)
+            .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
+
+        Ok(public_key_to_address(&derived))
+    }
+
+    /// Get the xpub as a base58-encoded string.
+    pub fn xpub_string(&self) -> EvmResult<String> {
+        MainnetEncoder::xpub_to_base58(&self.account_xpub)
+            .map_err(|e| EvmError::WalletDerivation(e.to_string()))
+    }
+}
+
+/// Validate an extended public key string.
+pub fn validate_xpub(xpub_str: &str) -> bool {
+    if xpub_str.is_empty() || xpub_str.len() < 10 {
+        return false;
+    }
+    MainnetEncoder::xpub_from_base58(xpub_str).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +361,32 @@ mod tests {
 
         // Should be the same
         assert_eq!(addr1, addr2);
+    }
+
+    #[test]
+    fn test_xpub_deriver_matches_wallet() {
+        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
+        let xpub = wallet.account_xpub().unwrap();
+        let xpub_str = MainnetEncoder::xpub_to_base58(&xpub).unwrap();
+        let deriver = XpubDeriver::from_xpub(&xpub_str).unwrap();
+
+        // XpubDeriver should derive the same addresses as HdWallet
+        for i in 0..5 {
+            assert_eq!(
+                wallet.derive_address(i).unwrap(),
+                deriver.derive_address(i).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_xpub_validation() {
+        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
+        let xpub = wallet.account_xpub().unwrap();
+        let xpub_str = MainnetEncoder::xpub_to_base58(&xpub).unwrap();
+
+        assert!(validate_xpub(&xpub_str));
+        assert!(!validate_xpub("invalid-xpub"));
+        assert!(!validate_xpub(""));
     }
 }

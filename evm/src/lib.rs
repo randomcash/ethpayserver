@@ -44,7 +44,7 @@ pub use error::{EvmError, EvmResult};
 pub use alloy::providers::RootProvider;
 pub use provider::EvmProvider;
 pub use tokens::{discover_token, get_token_balance, get_token_info, EvmTokenStandard, Token};
-pub use wallet::{generate_mnemonic, validate_mnemonic, HdWallet};
+pub use wallet::{generate_mnemonic, validate_mnemonic, validate_xpub, HdWallet, XpubDeriver};
 
 // Re-export alloy primitives that users will commonly need
 pub use alloy::primitives::{Address, U256};

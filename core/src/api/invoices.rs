@@ -13,6 +13,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use auth::{AuthRepository, repository::UserStoreRepository};
+use evm::XpubDeriver;
 use types::{
     InvoiceId, InvoiceStatus, Network, StoreId,
     InvoiceReader, InvoiceWriter, InvoiceQueryParams,
@@ -235,6 +236,34 @@ where
     let expiration_secs = req.expiration_seconds.unwrap_or(3600);
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
+    // Get store wallet - required for invoice creation
+    let wallet = state
+        .data_service
+        .get_store_wallet(req.store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or_else(|| {
+            tracing::error!("Store {} has no wallet configured", req.store_id);
+            StatusCode::BAD_REQUEST
+        })?;
+
+    // Get and increment derivation index
+    let index = state
+        .data_service
+        .get_next_derivation_index(req.store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Derive payment address from xpub
+    let deriver = XpubDeriver::from_xpub(&wallet.xpub)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let address = deriver
+        .derive_address(index as u32)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let payment_address = address.to_string();
+    let payment_request = generate_payment_uri(&payment_address, &req.amount, &req.asset_symbol);
+
     // Create invoice data
     let invoice = InvoiceData {
         id: InvoiceId::new(),
@@ -244,8 +273,8 @@ where
         amount: req.amount,
         amount_received: "0".to_string(),
         asset_symbol: req.asset_symbol,
-        payment_address: None, // TODO: Generate from HD wallet
-        payment_request: None, // TODO: Generate payment URI
+        payment_address: Some(payment_address),
+        payment_request: Some(payment_request),
         created_at: chrono::Utc::now(),
         expires_at,
         metadata: req.metadata,
@@ -399,4 +428,19 @@ where
 pub struct ExpireResponse {
     /// Number of invoices that were expired.
     pub expired_count: u64,
+}
+
+/// Generate an EIP-681 payment URI.
+///
+/// Format: ethereum:{address}?value={amount_in_wei}
+/// For ERC20: ethereum:{token_contract}/transfer?address={recipient}&uint256={amount}
+fn generate_payment_uri(address: &str, amount: &str, asset_symbol: &str) -> String {
+    // For native ETH, use simple format
+    if asset_symbol == "ETH" {
+        format!("ethereum:{}?value={}", address, amount)
+    } else {
+        // For tokens, we'd need the contract address
+        // For now, just use the basic format
+        format!("ethereum:{}?value={}", address, amount)
+    }
 }

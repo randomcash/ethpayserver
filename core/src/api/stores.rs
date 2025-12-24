@@ -16,6 +16,7 @@ use auth::{
     AuthRepository, Store, StoreId, UserStore, UserId,
     repository::{StoreRepository, StoreRoleRepository, UserStoreRepository},
 };
+use evm::validate_xpub;
 
 use crate::state::AppState;
 use super::extractors::AuthenticatedUser;
@@ -577,6 +578,220 @@ where
         .remove_user_from_store(UserId(target_user_id), StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// =============================================================================
+// Store Wallet Configuration
+// =============================================================================
+
+/// Request to configure a store wallet.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConfigureWalletRequest {
+    /// Extended public key (xpub) for address derivation.
+    pub xpub: String,
+    /// Optional wallet name.
+    pub name: Option<String>,
+}
+
+/// Store wallet response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WalletResponse {
+    /// Wallet ID.
+    pub id: Uuid,
+    /// Store ID.
+    pub store_id: Uuid,
+    /// Extended public key (masked for security).
+    pub xpub_masked: String,
+    /// Current derivation index.
+    pub derivation_index: i32,
+    /// Wallet name.
+    pub name: Option<String>,
+    /// Creation timestamp.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Mask an xpub for display (show first 8 and last 8 chars).
+fn mask_xpub(xpub: &str) -> String {
+    if xpub.len() <= 20 {
+        return "****".to_string();
+    }
+    format!("{}...{}", &xpub[..8], &xpub[xpub.len() - 8..])
+}
+
+/// Get wallet configuration for a store.
+#[utoipa::path(
+    get,
+    path = "/stores/{store_id}/wallet",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID")
+    ),
+    responses(
+        (status = 200, description = "Wallet configuration", body = WalletResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Store or wallet not found"),
+    )
+)]
+pub async fn get_store_wallet<R>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<AppState<R>>,
+    Path(store_id): Path<Uuid>,
+) -> Result<Json<WalletResponse>, StatusCode>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
+    // Check permission
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(user.id, StoreId(store_id), "ethpay.store.canviewstoresettings")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !has_permission {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let wallet = state
+        .data_service
+        .get_store_wallet(store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(WalletResponse {
+        id: wallet.id,
+        store_id: wallet.store_id,
+        xpub_masked: mask_xpub(&wallet.xpub),
+        derivation_index: wallet.derivation_index,
+        name: wallet.name,
+        created_at: wallet.created_at,
+    }))
+}
+
+/// Configure wallet for a store.
+///
+/// Provide an extended public key (xpub) to enable payment address derivation.
+#[utoipa::path(
+    put,
+    path = "/stores/{store_id}/wallet",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID")
+    ),
+    request_body = ConfigureWalletRequest,
+    responses(
+        (status = 200, description = "Wallet configured", body = WalletResponse),
+        (status = 400, description = "Invalid xpub"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Store not found"),
+    )
+)]
+pub async fn configure_store_wallet<R>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<AppState<R>>,
+    Path(store_id): Path<Uuid>,
+    Json(req): Json<ConfigureWalletRequest>,
+) -> Result<Json<WalletResponse>, StatusCode>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
+    // Check permission
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(store_id),
+            "ethpay.store.canmodifystoresettings",
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !has_permission {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Validate xpub
+    if !validate_xpub(&req.xpub) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Verify store exists
+    let _ = state
+        .data_service
+        .get_store(StoreId(store_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let wallet = state
+        .data_service
+        .upsert_store_wallet(store_id, &req.xpub, req.name.as_deref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(WalletResponse {
+        id: wallet.id,
+        store_id: wallet.store_id,
+        xpub_masked: mask_xpub(&wallet.xpub),
+        derivation_index: wallet.derivation_index,
+        name: wallet.name,
+        created_at: wallet.created_at,
+    }))
+}
+
+/// Delete wallet configuration for a store.
+#[utoipa::path(
+    delete,
+    path = "/stores/{store_id}/wallet",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID")
+    ),
+    responses(
+        (status = 204, description = "Wallet deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Wallet not found"),
+    )
+)]
+pub async fn delete_store_wallet<R>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<AppState<R>>,
+    Path(store_id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
+    // Check permission
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(store_id),
+            "ethpay.store.canmodifystoresettings",
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !has_permission {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    state
+        .data_service
+        .delete_store_wallet(store_id)
+        .await
+        .map_err(|e| match e {
+            data_service::RepositoryError::NotFound(_) => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
