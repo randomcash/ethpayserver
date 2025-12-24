@@ -17,7 +17,7 @@ use evm::{Address, XpubDeriver, U256};
 use types::{
     InvoiceId, InvoiceStatus, Network, StoreId,
     InvoiceReader, InvoiceWriter, InvoiceQueryParams,
-    WatchedAddressWriter,
+    TokenReader,
     traits::InvoiceData,
 };
 
@@ -263,6 +263,14 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let payment_address = address.to_string();
+
+    // Look up token contract for ERC20 payments (if in tokens table → ERC20, else native)
+    let token_contract: Option<Address> = TokenReader::find_by_symbol(&*state.data_service, network, &req.asset_symbol)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|t| t.address.parse().ok());
+
     let payment_request = generate_payment_uri(&payment_address, &req.amount, &req.asset_symbol);
 
     // Create invoice data
@@ -287,22 +295,25 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Save watched address to database (required for payment detection & retry mechanism)
-    WatchedAddressWriter::upsert(
-        &*state.data_service,
-        &payment_address,
-        &invoice.id,
-        network,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(
-            address = %payment_address,
-            invoice_id = %invoice.id.0,
-            error = %e,
-            "Failed to save watched address - invoice creation aborted"
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let token_address_str = token_contract.map(|a| a.to_string());
+    state
+        .data_service
+        .upsert_watch(
+            &payment_address,
+            &invoice.id,
+            network,
+            token_address_str.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                address = %payment_address,
+                invoice_id = %invoice.id.0,
+                error = %e,
+                "Failed to save watched address - invoice creation aborted"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     // Send WatchAddress command to EVM monitor if configured
     if let Some(ref monitor) = state.evm_monitor {
@@ -314,9 +325,6 @@ where
 
         // Parse amount as U256 (optional - only if we can parse it)
         let expected_amount = invoice.amount.parse::<U256>().ok();
-
-        // TODO: Handle token contract for ERC20 payments
-        let token_contract: Option<Address> = None;
 
         match monitor
             .watch_address(network, address, invoice_uuid, expected_amount, token_contract)

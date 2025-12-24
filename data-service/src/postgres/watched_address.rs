@@ -173,6 +173,65 @@ pub struct PendingWatch {
 }
 
 impl PgDataService {
+    /// Upsert a watched address with optional token contract (for ERC20).
+    pub async fn upsert_watch(
+        &self,
+        address: &str,
+        invoice_id: &InvoiceId,
+        network: Network,
+        token_address: Option<&str>,
+    ) -> RepositoryResult<()> {
+        let invoice_row = sqlx::query("SELECT expires_at FROM invoices WHERE id = $1")
+            .bind(invoice_id.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+
+        let expires_at = invoice_row
+            .map(|r| r.get("expires_at"))
+            .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(24));
+
+        let network_db = try_network_to_db(network)?;
+
+        // PostgreSQL unique constraints don't match NULLs, so we need separate queries
+        if let Some(token) = token_address {
+            sqlx::query(
+                r#"
+                INSERT INTO watched_addresses (address, invoice_id, network, asset_type, token_address, is_active, expires_at, monitor_notified)
+                VALUES ($1, $2, $3::network, 'erc20'::asset_type, $4, TRUE, $5, FALSE)
+                ON CONFLICT (address, network, token_address) DO UPDATE
+                SET invoice_id = $2, is_active = TRUE, expires_at = $5, monitor_notified = FALSE
+                "#,
+            )
+            .bind(address)
+            .bind(invoice_id.as_str())
+            .bind(network_db)
+            .bind(token)
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO watched_addresses (address, invoice_id, network, asset_type, is_active, expires_at, monitor_notified)
+                VALUES ($1, $2, $3::network, 'native'::asset_type, TRUE, $4, FALSE)
+                ON CONFLICT (address, network) WHERE token_address IS NULL DO UPDATE
+                SET invoice_id = $2, is_active = TRUE, expires_at = $4, monitor_notified = FALSE
+                "#,
+            )
+            .bind(address)
+            .bind(invoice_id.as_str())
+            .bind(network_db)
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+        }
+
+        Ok(())
+    }
+
     /// Get watched addresses that haven't been notified to evmmonitor yet.
     ///
     /// Returns active, non-expired addresses where monitor_notified = FALSE.
