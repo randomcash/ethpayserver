@@ -8,6 +8,9 @@ pub struct Config {
     /// Database connection URL.
     pub database_url: String,
 
+    /// Redis connection URL for monitor communication.
+    pub redis_url: Option<String>,
+
     /// HTTP server host.
     pub host: String,
 
@@ -28,6 +31,7 @@ impl Config {
     /// - `DATABASE_URL` - PostgreSQL connection string
     ///
     /// Optional:
+    /// - `REDIS_URL` - Redis connection URL for monitor communication
     /// - `HOST` - Server host (default: 127.0.0.1)
     /// - `PORT` - Server port (default: 3000)
     /// - `LOG_LEVEL` - Log level (default: info)
@@ -35,6 +39,8 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let database_url = env::var("DATABASE_URL")
             .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?;
+
+        let redis_url = env::var("REDIS_URL").ok();
 
         let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port = env::var("PORT")
@@ -50,6 +56,7 @@ impl Config {
 
         Ok(Self {
             database_url,
+            redis_url,
             host,
             port,
             log_level,

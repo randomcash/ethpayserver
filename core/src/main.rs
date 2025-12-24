@@ -14,7 +14,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::AuthService;
-use core::{api, config::Config, AppState};
+use core::{api, config::Config, AppState, RedisEVMMonitor};
 use data_service::PgDataService;
 
 #[tokio::main]
@@ -39,8 +39,26 @@ async fn main() -> Result<()> {
     // Note: PgDataService implements AuthRepository (all required traits)
     let auth_service = Arc::new(AuthService::new(Arc::clone(&data_service)));
 
+    // Connect to Redis for EVM monitor communication (optional)
+    let evm_monitor: Option<Arc<dyn core::EVMMonitor>> = if let Some(ref redis_url) = config.redis_url {
+        tracing::info!("Connecting to Redis for EVM monitor...");
+        match RedisEVMMonitor::connect(redis_url).await {
+            Ok(monitor) => {
+                tracing::info!("Redis connected for EVM monitor");
+                Some(Arc::new(monitor))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect to Redis: {}. EVM monitor disabled.", e);
+                None
+            }
+        }
+    } else {
+        tracing::info!("No REDIS_URL configured, EVM monitor disabled");
+        None
+    };
+
     // Create application state
-    let state = AppState::new(data_service, auth_service);
+    let state = AppState::new(data_service, auth_service, evm_monitor);
 
     // Build router with middleware
     let app = api::router(state, config.enable_swagger)

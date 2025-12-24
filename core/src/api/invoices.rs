@@ -13,7 +13,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use auth::{AuthRepository, repository::UserStoreRepository};
-use evm::XpubDeriver;
+use evm::{Address, XpubDeriver, U256};
 use types::{
     InvoiceId, InvoiceStatus, Network, StoreId,
     InvoiceReader, InvoiceWriter, InvoiceQueryParams,
@@ -273,7 +273,7 @@ where
         amount: req.amount,
         amount_received: "0".to_string(),
         asset_symbol: req.asset_symbol,
-        payment_address: Some(payment_address),
+        payment_address: Some(payment_address.clone()),
         payment_request: Some(payment_request),
         created_at: chrono::Utc::now(),
         expires_at,
@@ -284,6 +284,41 @@ where
     InvoiceWriter::upsert(&*state.data_service, &invoice)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Send WatchAddress command to EVM monitor if configured
+    if let Some(ref monitor) = state.evm_monitor {
+        // Parse invoice ID as UUID
+        let invoice_uuid = Uuid::parse_str(&invoice.id.0).map_err(|e| {
+            tracing::error!("Failed to parse invoice ID as UUID: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        // Parse payment address
+        let watch_address: Address = payment_address.parse().map_err(|e| {
+            tracing::error!("Failed to parse payment address: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        // Parse amount as U256 (optional - only if we can parse it)
+        let expected_amount = invoice.amount.parse::<U256>().ok();
+
+        // TODO: Handle token contract for ERC20 payments
+        let token_contract: Option<Address> = None;
+
+        if let Err(e) = monitor
+            .watch_address(network, watch_address, invoice_uuid, expected_amount, token_contract)
+            .await
+        {
+            // Log the error but don't fail invoice creation
+            // The address is recorded in the database and can be retried
+            tracing::warn!(
+                invoice_id = %invoice_uuid,
+                address = %payment_address,
+                error = %e,
+                "Failed to send WatchAddress command to EVM monitor"
+            );
+        }
+    }
 
     Ok((StatusCode::CREATED, Json(invoice.into())))
 }
@@ -375,6 +410,22 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Send UnwatchAddress command to EVM monitor if configured
+    if let Some(ref monitor) = state.evm_monitor {
+        if let Some(ref addr_str) = invoice.payment_address {
+            if let Ok(address) = addr_str.parse::<Address>() {
+                if let Err(e) = monitor.unwatch_address(invoice.network, address).await {
+                    tracing::warn!(
+                        invoice_id = %invoice.id.0,
+                        address = %addr_str,
+                        error = %e,
+                        "Failed to send UnwatchAddress command"
+                    );
+                }
+            }
+        }
+    }
+
     // Re-fetch to get updated status
     let updated = InvoiceReader::get(&*state.data_service, &id)
         .await
@@ -418,6 +469,22 @@ where
             InvoiceStatus::Expired,
         )
         .await;
+
+        // Send UnwatchAddress command to EVM monitor if configured
+        if let Some(ref monitor) = state.evm_monitor {
+            if let Some(ref addr_str) = invoice.payment_address {
+                if let Ok(address) = addr_str.parse::<Address>() {
+                    if let Err(e) = monitor.unwatch_address(invoice.network, address).await {
+                        tracing::warn!(
+                            invoice_id = %invoice.id.0,
+                            address = %addr_str,
+                            error = %e,
+                            "Failed to send UnwatchAddress command for expired invoice"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     Ok(Json(ExpireResponse { expired_count: count as u64 }))

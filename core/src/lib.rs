@@ -36,7 +36,9 @@
 
 pub mod api;
 pub mod config;
+pub mod services;
 pub mod state;
 
 pub use config::Config;
+pub use services::{EVMMonitor, EVMMonitorError, RedisEVMMonitor};
 pub use state::AppState;
