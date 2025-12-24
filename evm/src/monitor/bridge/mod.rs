@@ -6,6 +6,11 @@
 //! - **Events** flow from monitors to API servers (PaymentDetected, etc.)
 //! - **Commands** flow from API servers to monitors (WatchAddress, etc.)
 
+/// Default Redis channel for events (monitor -> API server).
+pub const EVENTS_CHANNEL: &str = "evmmonitor:events";
+/// Default Redis channel for commands (API server -> monitor).
+pub const COMMANDS_CHANNEL: &str = "evmmonitor:commands";
+
 mod memory;
 #[cfg(feature = "redis")]
 mod redis;
@@ -104,8 +109,8 @@ impl BridgeConfig {
     pub fn redis(url: impl Into<String>) -> Self {
         Self::Redis {
             url: url.into(),
-            events_channel: "evmmonitor:events".to_string(),
-            commands_channel: "evmmonitor:commands".to_string(),
+            events_channel: EVENTS_CHANNEL.to_string(),
+            commands_channel: COMMANDS_CHANNEL.to_string(),
         }
     }
 

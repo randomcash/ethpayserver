@@ -293,12 +293,6 @@ where
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-        // Parse payment address
-        let watch_address: Address = payment_address.parse().map_err(|e| {
-            tracing::error!("Failed to parse payment address: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
         // Parse amount as U256 (optional - only if we can parse it)
         let expected_amount = invoice.amount.parse::<U256>().ok();
 
@@ -306,14 +300,14 @@ where
         let token_contract: Option<Address> = None;
 
         if let Err(e) = monitor
-            .watch_address(network, watch_address, invoice_uuid, expected_amount, token_contract)
+            .watch_address(network, address, invoice_uuid, expected_amount, token_contract)
             .await
         {
             // Log the error but don't fail invoice creation
             // The address is recorded in the database and can be retried
             tracing::warn!(
                 invoice_id = %invoice_uuid,
-                address = %payment_address,
+                address = %address,
                 error = %e,
                 "Failed to send WatchAddress command to EVM monitor"
             );

@@ -321,6 +321,48 @@ pub fn get_chain_config_by_id(chain_id: u64) -> Option<&'static ChainConfig> {
     ALL_CHAINS.iter().find(|c| c.chain_id == chain_id)
 }
 
+/// Convert `types::Network` to EVM chain ID.
+///
+/// Returns `None` for non-EVM networks (e.g., Bitcoin).
+#[cfg(feature = "types")]
+pub fn network_to_chain_id(network: types::Network) -> Option<u64> {
+    use types::Network;
+    match network {
+        Network::Ethereum => Some(1),
+        Network::Polygon => Some(137),
+        Network::Arbitrum => Some(42161),
+        Network::Optimism => Some(10),
+        Network::Base => Some(8453),
+        Network::BinanceSmartChain => Some(56),
+        Network::Avalanche => Some(43114),
+        Network::ZkSync => Some(324),
+        Network::Linea => Some(59144),
+        Network::Scroll => Some(534352),
+        _ => None,
+    }
+}
+
+/// Convert EVM chain ID to `types::Network`.
+///
+/// Returns `None` for unknown chain IDs.
+#[cfg(feature = "types")]
+pub fn chain_id_to_network(chain_id: u64) -> Option<types::Network> {
+    use types::Network;
+    match chain_id {
+        1 => Some(Network::Ethereum),
+        137 => Some(Network::Polygon),
+        42161 => Some(Network::Arbitrum),
+        10 => Some(Network::Optimism),
+        8453 => Some(Network::Base),
+        56 => Some(Network::BinanceSmartChain),
+        43114 => Some(Network::Avalanche),
+        324 => Some(Network::ZkSync),
+        59144 => Some(Network::Linea),
+        534352 => Some(Network::Scroll),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

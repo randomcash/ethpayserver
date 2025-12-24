@@ -40,6 +40,8 @@ pub mod wallet;
 
 // Re-export commonly used items
 pub use network::{get_chain_config, get_chain_config_by_id, ChainConfig, EvmNetwork, ALL_CHAINS};
+#[cfg(feature = "types")]
+pub use network::{chain_id_to_network, network_to_chain_id};
 pub use error::{EvmError, EvmResult};
 pub use alloy::providers::RootProvider;
 pub use provider::EvmProvider;

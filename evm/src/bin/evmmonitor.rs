@@ -54,7 +54,7 @@ use evm::monitor::{
     ChainMonitor, ChainMonitorConfig, CoordinatorConfig, EventHandler, LoggingHandler,
     MonitorCommand, MonitorCoordinator, MonitorEvent, RpcBlockSource, WatchedAddress,
 };
-use evm::network::get_chain_config_by_id;
+use evm::network::{get_chain_config_by_id, network_to_chain_id, chain_id_to_network};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -143,39 +143,6 @@ impl EventHandler for BridgeHandler {
     }
 }
 
-/// Convert chain_id to types::Network.
-fn chain_id_to_network(chain_id: u64) -> Option<Network> {
-    match chain_id {
-        1 => Some(Network::Ethereum),
-        137 => Some(Network::Polygon),
-        42161 => Some(Network::Arbitrum),
-        10 => Some(Network::Optimism),
-        8453 => Some(Network::Base),
-        43114 => Some(Network::Avalanche),
-        56 => Some(Network::BinanceSmartChain),
-        324 => Some(Network::ZkSync),
-        59144 => Some(Network::Linea),
-        534352 => Some(Network::Scroll),
-        _ => None,
-    }
-}
-
-/// Convert types::Network to chain_id.
-fn network_to_chain_id(network: Network) -> Option<u64> {
-    match network {
-        Network::Ethereum => Some(1),
-        Network::Polygon => Some(137),
-        Network::Arbitrum => Some(42161),
-        Network::Optimism => Some(10),
-        Network::Base => Some(8453),
-        Network::Avalanche => Some(43114),
-        Network::BinanceSmartChain => Some(56),
-        Network::ZkSync => Some(324),
-        Network::Linea => Some(59144),
-        Network::Scroll => Some(534352),
-        _ => None,
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

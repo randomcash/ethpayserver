@@ -5,22 +5,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use evm::monitor::{EventBridge, RedisBridge};
+use evm::monitor::{EventBridge, RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
 use evm::monitor::events::{MonitorCommand, UnwatchAddressCommand, WatchAddressCommand};
-use evm::Address;
+use evm::{network_to_chain_id, Address};
 use types::Network;
 use uuid::Uuid;
-
-/// Default Redis channel for commands.
-pub const COMMANDS_CHANNEL: &str = "evmmonitor:commands";
-/// Default Redis channel for events.
-pub const EVENTS_CHANNEL: &str = "evmmonitor:events";
 
 /// Error type for EVM monitor operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EVMMonitorError {
-    #[error("unsupported network: {0}")]
-    UnsupportedNetwork(String),
+    #[error("unsupported network: {0:?}")]
+    UnsupportedNetwork(Network),
 
     #[error("bridge error: {0}")]
     Bridge(#[from] evm::EvmError),
@@ -91,7 +86,8 @@ impl EVMMonitor for RedisEVMMonitor {
         expected_amount: Option<evm::U256>,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
-        let chain_id = network_to_chain_id(network)?;
+        let chain_id = network_to_chain_id(network)
+            .ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
 
         let command = MonitorCommand::WatchAddress(WatchAddressCommand {
             chain_id,
@@ -117,7 +113,8 @@ impl EVMMonitor for RedisEVMMonitor {
         network: Network,
         address: Address,
     ) -> Result<(), EVMMonitorError> {
-        let chain_id = network_to_chain_id(network)?;
+        let chain_id = network_to_chain_id(network)
+            .ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
 
         let command = MonitorCommand::UnwatchAddress(UnwatchAddressCommand { chain_id, address });
 
@@ -134,25 +131,5 @@ impl EVMMonitor for RedisEVMMonitor {
     async fn health_check(&self) -> Result<(), EVMMonitorError> {
         self.bridge.health_check().await?;
         Ok(())
-    }
-}
-
-/// Convert Network to chain ID.
-fn network_to_chain_id(network: Network) -> Result<u64, EVMMonitorError> {
-    match network {
-        Network::Ethereum => Ok(1),
-        Network::Polygon => Ok(137),
-        Network::Arbitrum => Ok(42161),
-        Network::Optimism => Ok(10),
-        Network::Base => Ok(8453),
-        Network::BinanceSmartChain => Ok(56),
-        Network::Avalanche => Ok(43114),
-        Network::ZkSync => Ok(324),
-        Network::Linea => Ok(59144),
-        Network::Scroll => Ok(534352),
-        _ => Err(EVMMonitorError::UnsupportedNetwork(format!(
-            "{:?} is not an EVM network",
-            network
-        ))),
     }
 }

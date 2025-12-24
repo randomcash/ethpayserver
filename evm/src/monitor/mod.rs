@@ -71,7 +71,7 @@ pub use source::rpc::{RpcBlockSource, RpcSourceConfig};
 // pub use source::alchemy::AlchemyBlockSource;
 // pub use source::infura::InfuraBlockSource;
 
-pub use bridge::{CommandStream, EventBridge, EventStream, BridgeConfig, MemoryBridge};
+pub use bridge::{CommandStream, EventBridge, EventStream, BridgeConfig, MemoryBridge, EVENTS_CHANNEL, COMMANDS_CHANNEL};
 #[cfg(feature = "redis")]
 pub use bridge::RedisBridge;
 
