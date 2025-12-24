@@ -14,8 +14,9 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::AuthService;
-use core::{api, config::Config, AppState, RedisEVMMonitor, WatchRetryConfig, WatchRetryService};
+use core::{api, config::Config, AppState, EventConsumer, RedisEVMMonitor, WatchRetryConfig, WatchRetryService};
 use data_service::PgDataService;
+use evm::monitor::bridge::{RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,33 +40,39 @@ async fn main() -> Result<()> {
     // Note: PgDataService implements AuthRepository (all required traits)
     let auth_service = Arc::new(AuthService::new(Arc::clone(&data_service)));
 
-    // Connect to Redis for EVM monitor communication (optional)
-    let evm_monitor: Option<Arc<dyn core::EVMMonitor>> = if let Some(ref redis_url) = config.redis_url {
-        tracing::info!("Connecting to Redis for EVM monitor...");
-        match RedisEVMMonitor::connect(redis_url).await {
-            Ok(monitor) => {
-                tracing::info!("Redis connected for EVM monitor");
-                Some(Arc::new(monitor))
-            }
-            Err(e) => {
-                tracing::warn!("Failed to connect to Redis: {}. EVM monitor disabled.", e);
-                None
-            }
-        }
-    } else {
-        tracing::info!("No REDIS_URL configured, EVM monitor disabled");
-        None
-    };
+    // Connect to Redis (REQUIRED for event processing)
+    let redis_url = config.redis_url.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("REDIS_URL is required for event processing"))?;
 
-    // Start background watch retry service if EVM monitor is configured
-    if let Some(ref monitor) = evm_monitor {
-        let retry_service = WatchRetryService::new(
-            Arc::clone(&data_service),
-            Arc::clone(monitor),
-            WatchRetryConfig::default(),
-        );
-        tokio::spawn(retry_service.run());
-    }
+    tracing::info!("Connecting to Redis...");
+    let bridge = Arc::new(
+        RedisBridge::new(redis_url, EVENTS_CHANNEL, COMMANDS_CHANNEL).await?
+    );
+    tracing::info!("Redis connected");
+
+    // Create EVM monitor using shared bridge
+    let evm_monitor: Arc<dyn core::EVMMonitor> = Arc::new(
+        RedisEVMMonitor::new(Arc::clone(&bridge))
+    );
+
+    // Start background services
+    // 1. Event consumer - processes PaymentDetected/Confirmed events
+    let bridge_dyn: Arc<dyn evm::monitor::bridge::EventBridge> = bridge.clone();
+    let event_consumer = EventConsumer::new(bridge_dyn, Arc::clone(&data_service));
+    tokio::spawn(event_consumer.run());
+    tracing::info!("Event consumer started");
+
+    // 2. Watch retry service - retries failed WatchAddress commands
+    let retry_service = WatchRetryService::new(
+        Arc::clone(&data_service),
+        Arc::clone(&evm_monitor),
+        WatchRetryConfig::default(),
+    );
+    tokio::spawn(retry_service.run());
+    tracing::info!("Watch retry service started");
+
+    // Wrap in Option for AppState compatibility
+    let evm_monitor: Option<Arc<dyn core::EVMMonitor>> = Some(evm_monitor);
 
     // Create application state
     let state = AppState::new(Arc::clone(&data_service), auth_service, evm_monitor);

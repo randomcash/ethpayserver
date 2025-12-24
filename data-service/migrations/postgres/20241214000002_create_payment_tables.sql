@@ -183,6 +183,9 @@ CREATE TABLE payments (
     detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     confirmed_at TIMESTAMPTZ,
 
+    -- Reorg handling
+    reorged BOOLEAN NOT NULL DEFAULT FALSE,
+
     -- Chain-specific extra data
     extra JSONB,
 
@@ -327,7 +330,9 @@ INSERT INTO tokens (token_type, network, address, symbol, name, decimals) VALUES
 -- Helper functions
 -- =============================================================================
 
--- Function to update invoice status and amount_received when payment is added
+-- Function to update invoice amount_received and set status to processing when payment is detected
+-- Note: Status transitions to 'paid' are handled by the application after confirmations are verified
+-- Reorged payments are excluded from amount_received calculation
 CREATE OR REPLACE FUNCTION update_invoice_on_payment()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -335,13 +340,11 @@ BEGIN
     SET amount_received = (
         SELECT COALESCE(SUM(amount_value), 0)
         FROM payments
-        WHERE invoice_id = NEW.invoice_id
+        WHERE invoice_id = NEW.invoice_id AND reorged = FALSE
     ),
+    -- Only transition pending -> processing; paid is set by app after confirmations
     status = CASE
-        WHEN (SELECT COALESCE(SUM(amount_value), 0) FROM payments WHERE invoice_id = NEW.invoice_id) >= amount_value
-            THEN 'paid'::invoice_status
-        WHEN (SELECT COALESCE(SUM(amount_value), 0) FROM payments WHERE invoice_id = NEW.invoice_id) > 0
-            THEN 'partially_paid'::invoice_status
+        WHEN status = 'pending' AND NEW.reorged = FALSE THEN 'processing'::invoice_status
         ELSE status
     END
     WHERE id = NEW.invoice_id;

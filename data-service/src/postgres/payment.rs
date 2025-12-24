@@ -151,6 +151,45 @@ impl PaymentWriter for PgDataService {
     }
 }
 
+impl PgDataService {
+    /// Mark all non-reorged payments for an invoice as reorged.
+    ///
+    /// Returns the number of payments marked as reorged.
+    pub async fn mark_payments_reorged(&self, invoice_id: &InvoiceId) -> RepositoryResult<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE payments
+            SET reorged = TRUE, confirmed_at = NULL
+            WHERE invoice_id = $1 AND reorged = FALSE
+            "#,
+        )
+        .bind(invoice_id.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Check if an invoice has any valid (non-reorged) payments.
+    pub async fn has_valid_payments(&self, invoice_id: &InvoiceId) -> RepositoryResult<bool> {
+        let row = sqlx::query(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM payments
+                WHERE invoice_id = $1 AND reorged = FALSE
+            ) as has_payments
+            "#,
+        )
+        .bind(invoice_id.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(row.get("has_payments"))
+    }
+}
+
 /// Convert a database row to PaymentData.
 fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentData> {
     let block_number: Option<i64> = row.get("block_number");

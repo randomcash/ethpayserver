@@ -29,6 +29,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Async runtime
 tokio = { version = "1.42", features = ["full"] }
+tokio-stream = "0.1"
 async-trait = "0.1"
 
 # Serialization
@@ -49,6 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
+rust_decimal = "1.36"
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["test-util"] }
