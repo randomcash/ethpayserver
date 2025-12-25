@@ -6,13 +6,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use data_service::PgDataService;
 use evm::{network_to_chain_id, Address, U256};
 use tokio::time::interval;
 use types::{WatchedAddressReader, WatchedAddressWriter};
 use uuid::Uuid;
 
 use crate::services::EVMMonitor;
+
+/// Trait for data service requirements in WatchRetryService.
+pub trait WatchRetryDataService: WatchedAddressReader + WatchedAddressWriter + Send + Sync {}
+
+impl<T> WatchRetryDataService for T where T: WatchedAddressReader + WatchedAddressWriter + Send + Sync {}
 
 /// Configuration for the watch retry service.
 #[derive(Debug, Clone)]
@@ -53,17 +57,17 @@ impl WatchRetryConfig {
 }
 
 /// Background service that retries failed WatchAddress commands.
-pub struct WatchRetryService {
-    data_service: Arc<PgDataService>,
-    evm_monitor: Arc<dyn EVMMonitor>,
+pub struct WatchRetryService<D: WatchRetryDataService, E: EVMMonitor> {
+    data_service: Arc<D>,
+    evm_monitor: Arc<E>,
     config: WatchRetryConfig,
 }
 
-impl WatchRetryService {
+impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryService<D, E> {
     /// Create a new watch retry service.
     pub fn new(
-        data_service: Arc<PgDataService>,
-        evm_monitor: Arc<dyn EVMMonitor>,
+        data_service: Arc<D>,
+        evm_monitor: Arc<E>,
         config: WatchRetryConfig,
     ) -> Self {
         Self {

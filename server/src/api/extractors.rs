@@ -9,7 +9,7 @@ use axum::{
 
 use auth::{AuthRepository, Permission, Role, SessionId, UserInfo, UserId};
 
-use crate::state::AppState;
+use crate::state::PgAppState;
 
 /// Extractor that validates any authenticated user.
 ///
@@ -61,7 +61,7 @@ fn extract_session_id(parts: &Parts) -> Result<SessionId, (StatusCode, &'static 
 /// Common helper used by all authentication extractors.
 async fn validate_session<R>(
     parts: &Parts,
-    state: &AppState<R>,
+    state: &PgAppState<R>,
 ) -> Result<UserInfo, (StatusCode, &'static str)>
 where
     R: AuthRepository + Send + Sync + 'static,
@@ -77,7 +77,7 @@ where
     Ok(user_info)
 }
 
-impl<R> FromRequestParts<AppState<R>> for AuthenticatedUser
+impl<R> FromRequestParts<PgAppState<R>> for AuthenticatedUser
 where
     R: AuthRepository + Send + Sync + 'static,
 {
@@ -85,14 +85,14 @@ where
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &AppState<R>,
+        state: &PgAppState<R>,
     ) -> Result<Self, Self::Rejection> {
         let user_info = validate_session(parts, state).await?;
         Ok(AuthenticatedUser(user_info))
     }
 }
 
-impl<R> FromRequestParts<AppState<R>> for AdminAuth
+impl<R> FromRequestParts<PgAppState<R>> for AdminAuth
 where
     R: AuthRepository + Send + Sync + 'static,
 {
@@ -100,7 +100,7 @@ where
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &AppState<R>,
+        state: &PgAppState<R>,
     ) -> Result<Self, Self::Rejection> {
         let user_info = validate_session(parts, state).await?;
 

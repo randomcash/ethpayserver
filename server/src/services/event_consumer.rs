@@ -20,7 +20,8 @@ use uuid::Uuid;
 use super::evm_monitor::EVMMonitor;
 use super::invoice_cleanup::{CleanupDataService, InvoiceCleanupService};
 use super::webhook::{
-    WebhookEventType, WebhookJob, WebhookPayload, WebhookPaymentInfo, WebhookService,
+    WebhookDataService, WebhookEventType, WebhookJob, WebhookPayload, WebhookPaymentInfo,
+    WebhookService,
 };
 
 /// Trait for data service requirements in EventConsumer.
@@ -53,20 +54,20 @@ impl<T> EventConsumerDataService for T where
 /// Event consumer that processes monitor events and updates database state.
 ///
 /// Optionally sends webhook notifications when invoice status changes.
-pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor> {
+pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookDataService = D> {
     bridge: Arc<dyn EventBridge>,
     data_service: Arc<D>,
     cleanup_service: Option<Arc<InvoiceCleanupService<D, M>>>,
-    webhook_service: Option<Arc<WebhookService>>,
+    webhook_service: Option<Arc<WebhookService<W>>>,
 }
 
-impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static> EventConsumer<D, M> {
+impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookDataService + 'static> EventConsumer<D, M, W> {
     /// Create a new event consumer with optional services.
     pub fn new(
         bridge: Arc<dyn EventBridge>,
         data_service: Arc<D>,
         cleanup_service: Option<Arc<InvoiceCleanupService<D, M>>>,
-        webhook_service: Option<Arc<WebhookService>>,
+        webhook_service: Option<Arc<WebhookService<W>>>,
     ) -> Self {
         Self {
             bridge,

@@ -8,9 +8,9 @@ use chrono::{DateTime, Utc};
 use futures::stream::{self, BoxStream, StreamExt};
 use types::{
     CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
-    InvoiceWriter, Network, PaymentData, PaymentReader, PaymentWriter, PendingWatchInfo,
-    RepositoryResult, StoreId, StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams,
-    TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
+    InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentReader, PaymentWriter,
+    PendingWatchInfo, RepositoryResult, StoreId, StoreWebhook, StoreWebhookReader, TokenData,
+    TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
 
@@ -567,6 +567,20 @@ impl StoreWebhookReader for InMemoryDataService {
             .get(&store_id)
             .filter(|w| w.enabled)
             .cloned())
+    }
+}
+
+#[async_trait]
+impl PaymentEventWriter for InMemoryDataService {
+    async fn create_event(
+        &self,
+        _invoice_id: &InvoiceId,
+        _payment_id: Option<Uuid>,
+        _event_type: &str,
+        _event_data: Option<serde_json::Value>,
+    ) -> RepositoryResult<Uuid> {
+        // No-op for tests - just return a new UUID
+        Ok(Uuid::new_v4())
     }
 }
 

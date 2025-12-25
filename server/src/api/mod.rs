@@ -8,7 +8,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use auth::AuthRepository;
 
-use crate::state::AppState;
+use crate::state::PgAppState;
 
 pub mod extractors;
 pub mod health;
@@ -84,7 +84,7 @@ pub struct ApiDoc;
 /// - `/evm` - EVM operations (tokens, networks)
 /// - `/auth` - Authentication
 /// - `/stores` - Store management
-pub fn router<R>(state: AppState<R>, enable_swagger: bool) -> Router
+pub fn router<R>(state: PgAppState<R>, enable_swagger: bool) -> Router
 where
     R: AuthRepository + Send + Sync + 'static,
 {

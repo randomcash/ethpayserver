@@ -19,7 +19,7 @@ use auth::{
 use data_service::{StoreWalletReader, StoreWalletWriter};
 use evm::validate_xpub;
 
-use crate::state::AppState;
+use crate::state::PgAppState;
 use super::extractors::AuthenticatedUser;
 
 /// Request to create a new store.
@@ -114,7 +114,7 @@ pub struct MemberResponse {
 )]
 pub async fn list_stores<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
 ) -> Result<Json<Vec<StoreResponse>>, StatusCode>
 where
     R: AuthRepository + Send + Sync + 'static,
@@ -144,7 +144,7 @@ where
 )]
 pub async fn create_store<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Json(req): Json<CreateStoreRequest>,
 ) -> Result<(StatusCode, Json<StoreResponse>), StatusCode>
 where
@@ -199,7 +199,7 @@ where
 )]
 pub async fn get_store<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<StoreResponse>, StatusCode>
 where
@@ -247,7 +247,7 @@ where
 )]
 pub async fn update_store<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<UpdateStoreRequest>,
 ) -> Result<Json<StoreResponse>, StatusCode>
@@ -305,7 +305,7 @@ where
 )]
 pub async fn delete_store<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode>
 where
@@ -350,7 +350,7 @@ where
 )]
 pub async fn list_store_members<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<Vec<MemberResponse>>, StatusCode>
 where
@@ -409,7 +409,7 @@ where
 )]
 pub async fn add_store_member<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<AddMemberRequest>,
 ) -> Result<(StatusCode, Json<MemberResponse>), StatusCode>
@@ -482,7 +482,7 @@ where
 )]
 pub async fn update_store_member<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path((store_id, target_user_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateMemberRequest>,
 ) -> Result<Json<MemberResponse>, StatusCode>
@@ -548,7 +548,7 @@ where
 )]
 pub async fn remove_store_member<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path((store_id, target_user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, StatusCode>
 where
@@ -639,7 +639,7 @@ fn mask_xpub(xpub: &str) -> String {
 )]
 pub async fn get_store_wallet<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<WalletResponse>, StatusCode>
 where
@@ -693,7 +693,7 @@ where
 )]
 pub async fn configure_store_wallet<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<ConfigureWalletRequest>,
 ) -> Result<Json<WalletResponse>, StatusCode>
@@ -765,7 +765,7 @@ where
 )]
 pub async fn delete_store_wallet<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode>
 where

@@ -7,9 +7,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use data_service::{PaymentEventWriter, PgDataService};
+use data_service::PaymentEventWriter;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Trait for data service requirements in WebhookService.
+pub trait WebhookDataService: PaymentEventWriter + Send + Sync {}
+
+impl<T> WebhookDataService for T where T: PaymentEventWriter + Send + Sync {}
 
 /// Webhook event types that trigger notifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,17 +215,17 @@ impl WebhookConfig {
 /// 2. Runs a background loop that delivers webhooks from the Redis queue
 /// 3. Retries failed deliveries with exponential backoff
 /// 4. Records delivery status in the payment_events table
-pub struct WebhookService {
-    data_service: Arc<PgDataService>,
+pub struct WebhookService<D: WebhookDataService> {
+    data_service: Arc<D>,
     redis_client: redis::Client,
     http_client: reqwest::Client,
     config: WebhookConfig,
 }
 
-impl WebhookService {
+impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// Create a new webhook service.
     pub fn new(
-        data_service: Arc<PgDataService>,
+        data_service: Arc<D>,
         redis_url: &str,
         config: WebhookConfig,
     ) -> Result<Self, WebhookError> {

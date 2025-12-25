@@ -100,13 +100,12 @@ async fn main() -> Result<()> {
     tracing::info!("Event consumer started");
 
     // 4. Watch retry service - retries failed WatchAddress commands
-    let evm_monitor_dyn: Arc<dyn server::EVMMonitor> = evm_monitor.clone();
     let retry_config = WatchRetryConfig::from_env();
     tracing::debug!(?retry_config, "Watch retry config loaded");
     if retry_config.enabled {
         let retry_service = WatchRetryService::new(
             Arc::clone(&data_service),
-            evm_monitor_dyn.clone(),
+            Arc::clone(&evm_monitor),
             retry_config,
         );
         tokio::spawn(retry_service.run());
@@ -115,11 +114,8 @@ async fn main() -> Result<()> {
         tracing::info!("Watch retry service disabled");
     }
 
-    // Wrap in Option for AppState compatibility
-    let evm_monitor: Option<Arc<dyn server::EVMMonitor>> = Some(evm_monitor_dyn);
-
     // Create application state
-    let state = AppState::new(Arc::clone(&data_service), auth_service, evm_monitor);
+    let state = AppState::new(Arc::clone(&data_service), auth_service, Some(evm_monitor));
 
     // Build router with middleware
     let app = api::router(state, config.enable_swagger)

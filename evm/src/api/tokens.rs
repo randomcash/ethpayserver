@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use types::{Network, TokenData, TokenQueryParams, TokenReader, TokenWriter};
 use utoipa::{IntoParams, ToSchema};
 
-use super::{extractors::AdminAuth, EvmState};
+use super::{extractors::AdminAuth, EvmDataService, EvmState};
 use crate::EvmTokenStandard;
 
 /// Request to create a new token.
@@ -153,12 +153,13 @@ fn validate_token_standard(
         (status = 403, description = "Admin access required"),
     )
 )]
-pub async fn list_tokens<R>(
+pub async fn list_tokens<D, R>(
     _admin: AdminAuth,
-    State(state): State<EvmState<R>>,
+    State(state): State<EvmState<D, R>>,
     Query(query): Query<ListTokensQuery>,
 ) -> ApiResult<TokenListResponse>
 where
+    D: EvmDataService + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     let mut params = TokenQueryParams::default()
@@ -202,12 +203,13 @@ where
         (status = 404, description = "Token not found"),
     )
 )]
-pub async fn get_token<R>(
+pub async fn get_token<D, R>(
     _admin: AdminAuth,
-    State(state): State<EvmState<R>>,
+    State(state): State<EvmState<D, R>>,
     Path(id): Path<i64>,
 ) -> ApiResult<TokenResponse>
 where
+    D: EvmDataService + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     let token = TokenReader::get(&*state.data_service, id)
@@ -231,12 +233,13 @@ where
         (status = 403, description = "Admin access required"),
     )
 )]
-pub async fn create_token<R>(
+pub async fn create_token<D, R>(
     _admin: AdminAuth,
-    State(state): State<EvmState<R>>,
+    State(state): State<EvmState<D, R>>,
     Json(req): Json<CreateTokenRequest>,
 ) -> Result<(StatusCode, Json<TokenResponse>), (StatusCode, String)>
 where
+    D: EvmDataService + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     // Validate network
@@ -292,13 +295,14 @@ where
         (status = 404, description = "Token not found"),
     )
 )]
-pub async fn update_token<R>(
+pub async fn update_token<D, R>(
     _admin: AdminAuth,
-    State(state): State<EvmState<R>>,
+    State(state): State<EvmState<D, R>>,
     Path(id): Path<i64>,
     Json(req): Json<UpdateTokenRequest>,
 ) -> ApiResult<TokenResponse>
 where
+    D: EvmDataService + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     // Get existing token
@@ -342,12 +346,13 @@ where
         (status = 404, description = "Token not found"),
     )
 )]
-pub async fn delete_token<R>(
+pub async fn delete_token<D, R>(
     _admin: AdminAuth,
-    State(state): State<EvmState<R>>,
+    State(state): State<EvmState<D, R>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, (StatusCode, String)>
 where
+    D: EvmDataService + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     TokenWriter::delete(&*state.data_service, id)
@@ -371,13 +376,14 @@ where
         (status = 404, description = "Token not found"),
     )
 )]
-pub async fn set_token_enabled<R>(
+pub async fn set_token_enabled<D, R>(
     _admin: AdminAuth,
-    State(state): State<EvmState<R>>,
+    State(state): State<EvmState<D, R>>,
     Path(id): Path<i64>,
     Json(req): Json<SetEnabledRequest>,
 ) -> Result<StatusCode, (StatusCode, String)>
 where
+    D: EvmDataService + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     TokenWriter::set_enabled(&*state.data_service, id, req.enabled)

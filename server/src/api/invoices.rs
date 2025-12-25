@@ -22,7 +22,8 @@ use types::{
     traits::InvoiceData,
 };
 
-use crate::state::AppState;
+use crate::services::EVMMonitor;
+use crate::state::PgAppState;
 use super::extractors::{AuthenticatedUser, AdminAuth};
 
 /// Request to create a new invoice.
@@ -134,7 +135,7 @@ pub struct InvoiceListResponse {
 )]
 pub async fn list_invoices<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Query(query): Query<ListInvoicesQuery>,
 ) -> Result<Json<InvoiceListResponse>, StatusCode>
 where
@@ -219,7 +220,7 @@ where
 )]
 pub async fn create_invoice<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Json(req): Json<CreateInvoiceRequest>,
 ) -> Result<(StatusCode, Json<InvoiceResponse>), StatusCode>
 where
@@ -379,7 +380,7 @@ where
 )]
 pub async fn get_invoice<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<InvoiceResponse>, StatusCode>
 where
@@ -429,7 +430,7 @@ where
 )]
 pub async fn cancel_invoice<R>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<InvoiceResponse>, StatusCode>
 where
@@ -504,7 +505,7 @@ where
 )]
 pub async fn expire_invoices<R>(
     AdminAuth(_admin): AdminAuth,
-    State(state): State<AppState<R>>,
+    State(state): State<PgAppState<R>>,
 ) -> Result<Json<ExpireResponse>, StatusCode>
 where
     R: AuthRepository + Send + Sync + 'static,

@@ -11,7 +11,7 @@ use auth::AuthRepository;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use super::EvmState;
+use super::{EvmDataService, EvmState};
 use crate::network::{ChainConfig, ALL_CHAINS};
 use crate::EvmNetwork;
 
@@ -64,10 +64,11 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
         (status = 200, body = NetworkListResponse),
     )
 )]
-pub async fn list_networks<R>(
-    State(_state): State<EvmState<R>>,
+pub async fn list_networks<D, R>(
+    State(_state): State<EvmState<D, R>>,
 ) -> ApiResult<NetworkListResponse>
 where
+    D: EvmDataService + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     let networks = ALL_CHAINS.iter().map(NetworkInfo::from).collect();
@@ -84,11 +85,12 @@ where
         (status = 404, description = "Network not found"),
     )
 )]
-pub async fn get_network<R>(
-    State(_state): State<EvmState<R>>,
+pub async fn get_network<D, R>(
+    State(_state): State<EvmState<D, R>>,
     Path(network): Path<String>,
 ) -> ApiResult<NetworkInfo>
 where
+    D: EvmDataService + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     let evm_network: EvmNetwork = network

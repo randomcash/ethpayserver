@@ -4,7 +4,8 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::state::AppState;
+use crate::services::EVMMonitor;
+use crate::state::PgAppState;
 
 /// Health check response.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -36,7 +37,7 @@ pub struct HealthResponse {
         (status = 503, description = "Service is unhealthy", body = HealthResponse),
     )
 )]
-pub async fn health_check<R>(State(state): State<AppState<R>>) -> (StatusCode, Json<HealthResponse>)
+pub async fn health_check<R>(State(state): State<PgAppState<R>>) -> (StatusCode, Json<HealthResponse>)
 where
     R: auth::AuthRepository + Send + Sync + 'static,
 {
@@ -95,7 +96,7 @@ pub async fn liveness() -> StatusCode {
         (status = 503, description = "Service is not ready"),
     )
 )]
-pub async fn readiness<R>(State(state): State<AppState<R>>) -> StatusCode
+pub async fn readiness<R>(State(state): State<PgAppState<R>>) -> StatusCode
 where
     R: auth::AuthRepository + Send + Sync + 'static,
 {

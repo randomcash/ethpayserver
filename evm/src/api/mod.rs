@@ -20,8 +20,8 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use data_service::PgDataService;
 use auth::{AuthRepository, AuthService};
+use types::{TokenReader, TokenWriter};
 use utoipa::OpenApi;
 
 mod extractors;
@@ -30,15 +30,20 @@ pub mod tokens;
 
 pub use extractors::AdminAuth;
 
+/// Trait for data service requirements in EVM API.
+pub trait EvmDataService: TokenReader + TokenWriter + Send + Sync {}
+
+impl<T> EvmDataService for T where T: TokenReader + TokenWriter + Send + Sync {}
+
 /// Shared state for EVM API handlers.
 ///
-/// Generic over the auth repository type `R`.
-pub struct EvmState<R: AuthRepository> {
-    pub data_service: Arc<PgDataService>,
+/// Generic over the data service type `D` and auth repository type `R`.
+pub struct EvmState<D: EvmDataService, R: AuthRepository> {
+    pub data_service: Arc<D>,
     pub auth_service: Arc<AuthService<R>>,
 }
 
-impl<R: AuthRepository> Clone for EvmState<R> {
+impl<D: EvmDataService, R: AuthRepository> Clone for EvmState<D, R> {
     fn clone(&self) -> Self {
         Self {
             data_service: Arc::clone(&self.data_service),
@@ -47,8 +52,8 @@ impl<R: AuthRepository> Clone for EvmState<R> {
     }
 }
 
-impl<R: AuthRepository> EvmState<R> {
-    pub fn new(data_service: Arc<PgDataService>, auth_service: Arc<AuthService<R>>) -> Self {
+impl<D: EvmDataService, R: AuthRepository> EvmState<D, R> {
+    pub fn new(data_service: Arc<D>, auth_service: Arc<AuthService<R>>) -> Self {
         Self { data_service, auth_service }
     }
 }
@@ -89,20 +94,21 @@ pub struct EvmApiDoc;
 ///
 /// All token management endpoints require admin authentication.
 /// Network info endpoints are public (no auth required).
-pub fn router<R>(state: EvmState<R>) -> Router
+pub fn router<D, R>(state: EvmState<D, R>) -> Router
 where
+    D: EvmDataService + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     Router::new()
         // Token endpoints (admin only)
-        .route("/tokens", get(tokens::list_tokens::<R>))
-        .route("/tokens", post(tokens::create_token::<R>))
-        .route("/tokens/{id}", get(tokens::get_token::<R>))
-        .route("/tokens/{id}", put(tokens::update_token::<R>))
-        .route("/tokens/{id}", delete(tokens::delete_token::<R>))
-        .route("/tokens/{id}/enabled", put(tokens::set_token_enabled::<R>))
+        .route("/tokens", get(tokens::list_tokens::<D, R>))
+        .route("/tokens", post(tokens::create_token::<D, R>))
+        .route("/tokens/{id}", get(tokens::get_token::<D, R>))
+        .route("/tokens/{id}", put(tokens::update_token::<D, R>))
+        .route("/tokens/{id}", delete(tokens::delete_token::<D, R>))
+        .route("/tokens/{id}/enabled", put(tokens::set_token_enabled::<D, R>))
         // Network endpoints (public)
-        .route("/networks", get(networks::list_networks::<R>))
-        .route("/networks/{network}", get(networks::get_network::<R>))
+        .route("/networks", get(networks::list_networks::<D, R>))
+        .route("/networks/{network}", get(networks::get_network::<D, R>))
         .with_state(state)
 }
