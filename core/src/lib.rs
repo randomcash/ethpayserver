@@ -41,8 +41,8 @@ pub mod state;
 
 pub use config::Config;
 pub use services::{
+    CleanupConfig, CleanupError, CleanupStats, InvoiceCleanupService,
     EVMMonitor, EVMMonitorError, EventConsumer, EventConsumerError,
-    ExpirationConfig, ExpirationError, InvoiceExpirationService,
     RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
     WebhookConfig, WebhookService,
 };

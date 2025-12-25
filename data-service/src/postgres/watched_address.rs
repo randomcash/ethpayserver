@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
-use crate::{PendingWatchInfo, RepositoryError, RepositoryResult, WatchedAddressReader, WatchedAddressWriter, sqlx_to_repo_error};
+use crate::{
+    CleanupAddressInfo, PendingWatchInfo, RepositoryError, RepositoryResult,
+    WatchedAddressCleanup, WatchedAddressReader, WatchedAddressWriter, sqlx_to_repo_error,
+};
 use types::{InvoiceId, Network};
 
 use super::conversions::{try_db_to_network, try_network_to_db};
@@ -278,3 +281,120 @@ impl WatchedAddressWriter for PgDataService {
 /// Legacy type alias for backwards compatibility.
 /// Use `PendingWatchInfo` from the types crate instead.
 pub type PendingWatch = PendingWatchInfo;
+
+// =============================================================================
+// Cleanup Implementation
+// =============================================================================
+
+#[async_trait]
+impl WatchedAddressCleanup for PgDataService {
+    async fn get_expired_addresses_for_cleanup(
+        &self,
+        grace_period_secs: i64,
+    ) -> RepositoryResult<Vec<CleanupAddressInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT wa.address, wa.network::text, wa.invoice_id
+            FROM watched_addresses wa
+            JOIN invoices i ON wa.invoice_id = i.id
+            WHERE wa.is_active = TRUE
+              AND i.status = 'expired'
+              AND i.expires_at < NOW() - make_interval(secs => $1)
+            ORDER BY i.expires_at ASC
+            LIMIT 100
+            "#,
+        )
+        .bind(grace_period_secs as f64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let network = try_db_to_network(r.get("network"))?;
+            result.push(CleanupAddressInfo {
+                address: r.get("address"),
+                network,
+                invoice_id: r.get("invoice_id"),
+            });
+        }
+        Ok(result)
+    }
+
+    async fn get_paid_addresses_for_cleanup(&self) -> RepositoryResult<Vec<CleanupAddressInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT wa.address, wa.network::text, wa.invoice_id
+            FROM watched_addresses wa
+            JOIN invoices i ON wa.invoice_id = i.id
+            WHERE wa.is_active = TRUE
+              AND i.status = 'paid'
+            ORDER BY i.created_at ASC
+            LIMIT 100
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let network = try_db_to_network(r.get("network"))?;
+            result.push(CleanupAddressInfo {
+                address: r.get("address"),
+                network,
+                invoice_id: r.get("invoice_id"),
+            });
+        }
+        Ok(result)
+    }
+
+    async fn get_cancelled_addresses_for_cleanup(&self) -> RepositoryResult<Vec<CleanupAddressInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT wa.address, wa.network::text, wa.invoice_id
+            FROM watched_addresses wa
+            JOIN invoices i ON wa.invoice_id = i.id
+            WHERE wa.is_active = TRUE
+              AND i.status = 'cancelled'
+            ORDER BY i.created_at ASC
+            LIMIT 100
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let network = try_db_to_network(r.get("network"))?;
+            result.push(CleanupAddressInfo {
+                address: r.get("address"),
+                network,
+                invoice_id: r.get("invoice_id"),
+            });
+        }
+        Ok(result)
+    }
+
+    async fn deactivate_watched_address(
+        &self,
+        address: &str,
+        network: Network,
+    ) -> RepositoryResult<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE watched_addresses
+            SET is_active = FALSE
+            WHERE address = $1 AND network = $2::network AND is_active = TRUE
+            "#,
+        )
+        .bind(address)
+        .bind(try_network_to_db(network)?)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+}

@@ -17,33 +17,34 @@ use types::{
 };
 use uuid::Uuid;
 
+use super::evm_monitor::EVMMonitor;
+use super::invoice_cleanup::InvoiceCleanupService;
 use super::webhook::{
     WebhookEventType, WebhookJob, WebhookPayload, WebhookPaymentInfo, WebhookService,
 };
-use super::InvoiceExpirationService;
 
 /// Event consumer that processes monitor events and updates database state.
 ///
 /// Optionally sends webhook notifications when invoice status changes.
-pub struct EventConsumer {
+pub struct EventConsumer<M: EVMMonitor> {
     bridge: Arc<dyn EventBridge>,
     data_service: Arc<PgDataService>,
-    expiration_service: Option<Arc<InvoiceExpirationService>>,
+    cleanup_service: Option<Arc<InvoiceCleanupService<M>>>,
     webhook_service: Option<Arc<WebhookService>>,
 }
 
-impl EventConsumer {
+impl<M: EVMMonitor + 'static> EventConsumer<M> {
     /// Create a new event consumer with optional services.
     pub fn new(
         bridge: Arc<dyn EventBridge>,
         data_service: Arc<PgDataService>,
-        expiration_service: Option<Arc<InvoiceExpirationService>>,
+        cleanup_service: Option<Arc<InvoiceCleanupService<M>>>,
         webhook_service: Option<Arc<WebhookService>>,
     ) -> Self {
         Self {
             bridge,
             data_service,
-            expiration_service,
+            cleanup_service,
             webhook_service,
         }
     }
@@ -292,7 +293,7 @@ impl EventConsumer {
     /// Called when block events are received. This is a non-blocking operation -
     /// errors are logged but don't stop event processing.
     async fn trigger_expiration_check(&self, chain_id: u64) {
-        let Some(expiration_service) = &self.expiration_service else {
+        let Some(cleanup_service) = &self.cleanup_service else {
             return;
         };
 
@@ -301,7 +302,7 @@ impl EventConsumer {
             return;
         };
 
-        match expiration_service.check_network(network).await {
+        match cleanup_service.check_network(network).await {
             Ok(count) => {
                 if count > 0 {
                     tracing::debug!(

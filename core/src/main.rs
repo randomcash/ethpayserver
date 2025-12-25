@@ -15,8 +15,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::AuthService;
 use core::{
-    api, config::Config, AppState, EventConsumer, ExpirationConfig,
-    InvoiceExpirationService, RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
+    api, config::Config, AppState, CleanupConfig, EventConsumer,
+    InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
     WebhookConfig, WebhookService,
 };
 use data_service::PgDataService;
@@ -54,19 +54,18 @@ async fn main() -> Result<()> {
     );
     tracing::info!("Redis connected");
 
-    // Create EVM monitor using shared bridge
-    let evm_monitor: Arc<dyn core::EVMMonitor> = Arc::new(
-        RedisEVMMonitor::new(Arc::clone(&bridge))
-    );
+    // Create EVM monitor using shared bridge (concrete type for generics)
+    let evm_monitor = Arc::new(RedisEVMMonitor::new(Arc::clone(&bridge)));
 
     // Start background services
-    // 1. Invoice expiration service - expires pending invoices
-    let expiration_service = Arc::new(InvoiceExpirationService::new(
+    // 1. Invoice cleanup service - expires invoices and unwatches addresses
+    let cleanup_service = Arc::new(InvoiceCleanupService::new(
         Arc::clone(&data_service),
-        ExpirationConfig::default(),
+        Arc::clone(&evm_monitor),
+        CleanupConfig::default(),
     ));
-    tokio::spawn(Arc::clone(&expiration_service).run());
-    tracing::info!("Invoice expiration service started");
+    tokio::spawn(Arc::clone(&cleanup_service).run());
+    tracing::info!("Invoice cleanup service started");
 
     // 2. Webhook delivery service - sends webhook notifications
     let webhook_service = Arc::new(
@@ -85,23 +84,24 @@ async fn main() -> Result<()> {
     let event_consumer = EventConsumer::new(
         bridge_dyn,
         Arc::clone(&data_service),
-        Some(expiration_service),
+        Some(cleanup_service),
         Some(webhook_service),
     );
     tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
 
     // 4. Watch retry service - retries failed WatchAddress commands
+    let evm_monitor_dyn: Arc<dyn core::EVMMonitor> = evm_monitor.clone();
     let retry_service = WatchRetryService::new(
         Arc::clone(&data_service),
-        Arc::clone(&evm_monitor),
+        evm_monitor_dyn.clone(),
         WatchRetryConfig::default(),
     );
     tokio::spawn(retry_service.run());
     tracing::info!("Watch retry service started");
 
     // Wrap in Option for AppState compatibility
-    let evm_monitor: Option<Arc<dyn core::EVMMonitor>> = Some(evm_monitor);
+    let evm_monitor: Option<Arc<dyn core::EVMMonitor>> = Some(evm_monitor_dyn);
 
     // Create application state
     let state = AppState::new(Arc::clone(&data_service), auth_service, evm_monitor);
