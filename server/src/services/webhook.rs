@@ -485,3 +485,222 @@ pub enum WebhookError {
     #[error("database error: {0}")]
     Database(#[from] types::RepositoryError),
 }
+
+/// Sign a payload with HMAC-SHA256.
+///
+/// Returns a signature in the format `sha256=<hex>`.
+pub fn sign_webhook_payload(payload: &str, secret: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(payload.as_bytes());
+    let result = mac.finalize();
+
+    format!("sha256={}", hex::encode(result.into_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_webhook_event_type_display() {
+        assert_eq!(WebhookEventType::PaymentDetected.to_string(), "payment_detected");
+        assert_eq!(WebhookEventType::PaymentConfirmed.to_string(), "payment_confirmed");
+        assert_eq!(WebhookEventType::InvoiceExpired.to_string(), "invoice_expired");
+        assert_eq!(WebhookEventType::InvoiceCancelled.to_string(), "invoice_cancelled");
+    }
+
+    #[test]
+    fn test_webhook_config_default() {
+        let config = WebhookConfig::default();
+        assert_eq!(config.queue_key, "ethpayserver:webhooks");
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.poll_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_webhook_job_new() {
+        let payload = WebhookPayload {
+            event_id: Uuid::new_v4(),
+            event_type: WebhookEventType::PaymentDetected,
+            timestamp: Utc::now(),
+            invoice_id: "test-invoice".to_string(),
+            store_id: Uuid::new_v4(),
+            status: "processing".to_string(),
+            amount: "1000".to_string(),
+            amount_received: "1000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            network: "ethereum".to_string(),
+            payment: None,
+        };
+
+        let job = WebhookJob::new(
+            "https://example.com/webhook".to_string(),
+            "secret123".to_string(),
+            payload,
+        );
+
+        assert_eq!(job.attempts, 0);
+        assert_eq!(job.max_attempts, 3);
+        assert_eq!(job.webhook_url, "https://example.com/webhook");
+        assert!(!job.is_exhausted());
+    }
+
+    #[test]
+    fn test_webhook_job_retry_delay() {
+        let payload = WebhookPayload {
+            event_id: Uuid::new_v4(),
+            event_type: WebhookEventType::PaymentDetected,
+            timestamp: Utc::now(),
+            invoice_id: "test-invoice".to_string(),
+            store_id: Uuid::new_v4(),
+            status: "processing".to_string(),
+            amount: "1000".to_string(),
+            amount_received: "1000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            network: "ethereum".to_string(),
+            payment: None,
+        };
+
+        let mut job = WebhookJob::new(
+            "https://example.com/webhook".to_string(),
+            "secret123".to_string(),
+            payload,
+        );
+
+        // Attempt 0: 10 * 3^0 = 10 seconds
+        assert_eq!(job.retry_delay(), Duration::from_secs(10));
+
+        job.attempts = 1;
+        // Attempt 1: 10 * 3^1 = 30 seconds
+        assert_eq!(job.retry_delay(), Duration::from_secs(30));
+
+        job.attempts = 2;
+        // Attempt 2: 10 * 3^2 = 90 seconds
+        assert_eq!(job.retry_delay(), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn test_webhook_job_is_exhausted() {
+        let payload = WebhookPayload {
+            event_id: Uuid::new_v4(),
+            event_type: WebhookEventType::PaymentDetected,
+            timestamp: Utc::now(),
+            invoice_id: "test-invoice".to_string(),
+            store_id: Uuid::new_v4(),
+            status: "processing".to_string(),
+            amount: "1000".to_string(),
+            amount_received: "1000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            network: "ethereum".to_string(),
+            payment: None,
+        };
+
+        let mut job = WebhookJob::new(
+            "https://example.com/webhook".to_string(),
+            "secret123".to_string(),
+            payload,
+        );
+
+        assert!(!job.is_exhausted()); // 0 attempts
+        job.attempts = 1;
+        assert!(!job.is_exhausted()); // 1 attempt
+        job.attempts = 2;
+        assert!(!job.is_exhausted()); // 2 attempts
+        job.attempts = 3;
+        assert!(job.is_exhausted()); // 3 attempts = max
+    }
+
+    #[test]
+    fn test_sign_webhook_payload() {
+        let payload = r#"{"test":"data"}"#;
+        let secret = "my-secret-key";
+
+        let signature = sign_webhook_payload(payload, secret);
+
+        // Signature should start with "sha256="
+        assert!(signature.starts_with("sha256="));
+
+        // Signature should be deterministic
+        let signature2 = sign_webhook_payload(payload, secret);
+        assert_eq!(signature, signature2);
+
+        // Different secret should produce different signature
+        let signature3 = sign_webhook_payload(payload, "different-secret");
+        assert_ne!(signature, signature3);
+
+        // Different payload should produce different signature
+        let signature4 = sign_webhook_payload(r#"{"test":"other"}"#, secret);
+        assert_ne!(signature, signature4);
+    }
+
+    #[test]
+    fn test_webhook_payload_serialization() {
+        let payload = WebhookPayload {
+            event_id: Uuid::new_v4(),
+            event_type: WebhookEventType::PaymentConfirmed,
+            timestamp: Utc::now(),
+            invoice_id: "inv_123".to_string(),
+            store_id: Uuid::new_v4(),
+            status: "paid".to_string(),
+            amount: "1000000000000000000".to_string(),
+            amount_received: "1000000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            network: "ethereum".to_string(),
+            payment: Some(WebhookPaymentInfo {
+                tx_hash: "0x1234".to_string(),
+                from_address: Some("0xabcd".to_string()),
+                block_number: Some(12345),
+                confirmed: true,
+            }),
+        };
+
+        // Should serialize to JSON
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("payment_confirmed"));
+        assert!(json.contains("inv_123"));
+
+        // Should deserialize back
+        let deserialized: WebhookPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.invoice_id, payload.invoice_id);
+        assert!(deserialized.payment.is_some());
+    }
+
+    #[test]
+    fn test_webhook_job_serialization() {
+        let payload = WebhookPayload {
+            event_id: Uuid::new_v4(),
+            event_type: WebhookEventType::InvoiceExpired,
+            timestamp: Utc::now(),
+            invoice_id: "inv_456".to_string(),
+            store_id: Uuid::new_v4(),
+            status: "expired".to_string(),
+            amount: "500".to_string(),
+            amount_received: "0".to_string(),
+            asset_symbol: "USDC".to_string(),
+            network: "polygon".to_string(),
+            payment: None,
+        };
+
+        let job = WebhookJob::new(
+            "https://example.com/hook".to_string(),
+            "secret".to_string(),
+            payload,
+        );
+
+        // Should serialize to JSON
+        let json = serde_json::to_string(&job).unwrap();
+        assert!(json.contains("inv_456"));
+        assert!(json.contains("https://example.com/hook"));
+
+        // Should deserialize back
+        let deserialized: WebhookJob = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.webhook_url, job.webhook_url);
+        assert_eq!(deserialized.payload.invoice_id, job.payload.invoice_id);
+    }
+}

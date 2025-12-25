@@ -32,6 +32,9 @@ pub use redis::RedisDataService;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::InMemoryDataService;
+
 // Re-export repository traits and types from the types crate for convenience.
 pub use types::{
     // Combined traits

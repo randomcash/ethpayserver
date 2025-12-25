@@ -49,4 +49,4 @@ pub use tokens::{discover_token, get_token_balance, get_token_info, EvmTokenStan
 pub use wallet::{generate_mnemonic, validate_mnemonic, validate_xpub, HdWallet, XpubDeriver};
 
 // Re-export alloy primitives that users will commonly need
-pub use alloy::primitives::{Address, U256};
+pub use alloy::primitives::{Address, B256, U256};

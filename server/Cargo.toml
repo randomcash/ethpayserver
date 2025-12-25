@@ -62,3 +62,4 @@ hex = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["test-util"] }
+data-service = { path = "../data-service", features = ["test-utils"] }

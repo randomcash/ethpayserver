@@ -9,8 +9,8 @@ use futures::stream::{self, BoxStream, StreamExt};
 use types::{
     CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
     InvoiceWriter, Network, PaymentData, PaymentReader, PaymentWriter, PendingWatchInfo,
-    RepositoryResult, StoreId, TokenData, TokenQueryParams, TokenReader, TokenWriter,
-    WatchedAddressReader, WatchedAddressWriter,
+    RepositoryResult, StoreId, StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams,
+    TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
 
@@ -22,11 +22,29 @@ pub struct InMemoryDataService {
     addresses: RwLock<HashMap<(String, Network), InvoiceId>>,
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
+    webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
 }
 
 impl InMemoryDataService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set up a webhook for a store (for testing).
+    pub fn set_webhook(&self, store_id: Uuid, url: &str, secret: &str) {
+        let mut webhooks = self.webhooks.write().unwrap();
+        webhooks.insert(
+            store_id,
+            StoreWebhook {
+                id: Uuid::new_v4(),
+                store_id,
+                webhook_url: url.to_string(),
+                webhook_secret: secret.to_string(),
+                enabled: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        );
     }
 }
 
@@ -538,6 +556,17 @@ impl TokenWriter for InMemoryDataService {
                 id
             )))
         }
+    }
+}
+
+#[async_trait]
+impl StoreWebhookReader for InMemoryDataService {
+    async fn get_enabled_webhook(&self, store_id: Uuid) -> RepositoryResult<Option<StoreWebhook>> {
+        let webhooks = self.webhooks.read().unwrap();
+        Ok(webhooks
+            .get(&store_id)
+            .filter(|w| w.enabled)
+            .cloned())
     }
 }
 
