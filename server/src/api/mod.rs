@@ -6,7 +6,7 @@ use axum::{Router, routing::get};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use auth::AuthRepository;
+use auth::AuthenticationService;
 
 use crate::state::PgAppState;
 
@@ -84,48 +84,48 @@ pub struct ApiDoc;
 /// - `/evm` - EVM operations (tokens, networks)
 /// - `/auth` - Authentication
 /// - `/stores` - Store management
-pub fn router<R>(state: PgAppState<R>, enable_swagger: bool) -> Router
+pub fn router<A>(state: PgAppState<A>, enable_swagger: bool) -> Router
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: AuthenticationService + 'static,
 {
     use axum::routing::{delete, post, put};
 
     // Health endpoints with AppState
     let health_routes = Router::new()
-        .route("/health", get(health::health_check::<R>))
+        .route("/health", get(health::health_check::<A>))
         .route("/health/live", get(health::liveness))
-        .route("/health/ready", get(health::readiness::<R>))
+        .route("/health/ready", get(health::readiness::<A>))
         .with_state(state.clone());
 
     // Store endpoints
     let store_routes = Router::new()
-        .route("/", get(stores::list_stores::<R>))
-        .route("/", post(stores::create_store::<R>))
-        .route("/{store_id}", get(stores::get_store::<R>))
-        .route("/{store_id}", put(stores::update_store::<R>))
-        .route("/{store_id}", delete(stores::delete_store::<R>))
-        .route("/{store_id}/members", get(stores::list_store_members::<R>))
-        .route("/{store_id}/members", post(stores::add_store_member::<R>))
+        .route("/", get(stores::list_stores::<A>))
+        .route("/", post(stores::create_store::<A>))
+        .route("/{store_id}", get(stores::get_store::<A>))
+        .route("/{store_id}", put(stores::update_store::<A>))
+        .route("/{store_id}", delete(stores::delete_store::<A>))
+        .route("/{store_id}/members", get(stores::list_store_members::<A>))
+        .route("/{store_id}/members", post(stores::add_store_member::<A>))
         .route(
             "/{store_id}/members/{user_id}",
-            put(stores::update_store_member::<R>),
+            put(stores::update_store_member::<A>),
         )
         .route(
             "/{store_id}/members/{user_id}",
-            delete(stores::remove_store_member::<R>),
+            delete(stores::remove_store_member::<A>),
         )
-        .route("/{store_id}/wallet", get(stores::get_store_wallet::<R>))
-        .route("/{store_id}/wallet", put(stores::configure_store_wallet::<R>))
-        .route("/{store_id}/wallet", delete(stores::delete_store_wallet::<R>))
+        .route("/{store_id}/wallet", get(stores::get_store_wallet::<A>))
+        .route("/{store_id}/wallet", put(stores::configure_store_wallet::<A>))
+        .route("/{store_id}/wallet", delete(stores::delete_store_wallet::<A>))
         .with_state(state.clone());
 
     // Invoice endpoints
     let invoice_routes = Router::new()
-        .route("/", get(invoices::list_invoices::<R>))
-        .route("/", post(invoices::create_invoice::<R>))
-        .route("/expire", post(invoices::expire_invoices::<R>))
-        .route("/{invoice_id}", get(invoices::get_invoice::<R>))
-        .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<R>))
+        .route("/", get(invoices::list_invoices::<A>))
+        .route("/", post(invoices::create_invoice::<A>))
+        .route("/expire", post(invoices::expire_invoices::<A>))
+        .route("/{invoice_id}", get(invoices::get_invoice::<A>))
+        .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
         .with_state(state.clone());
 
     // Auth API from auth crate

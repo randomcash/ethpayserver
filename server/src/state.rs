@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use auth::{AuthRepository, AuthService, StoreRoleRepository};
+use auth::StoreRoleRepository;
 use data_service::{
     InvoiceReader, InvoiceWriter, PaymentReader, PaymentWriter, StoreWalletReader,
     StoreWalletWriter, StoreWebhookReader, TokenReader, TokenWriter, WatchedAddressReader,
@@ -47,15 +47,15 @@ pub trait AppDataService:
 
 /// Shared application state for all API handlers.
 ///
-/// Generic over the data service type `D`, auth repository type `R`,
-/// and EVM monitor type `E`. Only `R` has a trait bound (required by AuthService);
-/// `D` and `E` bounds are placed on handlers to allow read-only vs read-write separation.
-pub struct AppState<D, R: AuthRepository, E> {
+/// Generic over the data service type `D`, auth service type `A`,
+/// and EVM monitor type `E`. `D` and `E` bounds are placed on handlers
+/// to allow read-only vs read-write separation.
+pub struct AppState<D, A, E> {
     /// Data service for database operations.
     pub data_service: Arc<D>,
 
     /// Authentication service.
-    pub auth_service: Arc<AuthService<R>>,
+    pub auth_service: Arc<A>,
 
     /// EVM monitor for sending commands to evmmonitor.
     /// None if Redis is not configured.
@@ -63,7 +63,7 @@ pub struct AppState<D, R: AuthRepository, E> {
 }
 
 // Manual Clone impl since we only need Arc::clone
-impl<D, R: AuthRepository, E> Clone for AppState<D, R, E> {
+impl<D, A, E> Clone for AppState<D, A, E> {
     fn clone(&self) -> Self {
         Self {
             data_service: Arc::clone(&self.data_service),
@@ -73,11 +73,11 @@ impl<D, R: AuthRepository, E> Clone for AppState<D, R, E> {
     }
 }
 
-impl<D, R: AuthRepository, E> AppState<D, R, E> {
+impl<D, A, E> AppState<D, A, E> {
     /// Create a new application state.
     pub fn new(
         data_service: Arc<D>,
-        auth_service: Arc<AuthService<R>>,
+        auth_service: Arc<A>,
         evm_monitor: Option<Arc<E>>,
     ) -> Self {
         Self {
@@ -88,9 +88,9 @@ impl<D, R: AuthRepository, E> AppState<D, R, E> {
     }
 }
 
-impl<D: EvmDataService, R: AuthRepository, E> AppState<D, R, E> {
+impl<D: EvmDataService, A, E> AppState<D, A, E> {
     /// Convert to EVM API state.
-    pub fn to_evm_state(&self) -> evm::api::EvmState<D, R> {
+    pub fn to_evm_state(&self) -> evm::api::EvmState<D, A> {
         evm::api::EvmState::new(
             Arc::clone(&self.data_service),
             Arc::clone(&self.auth_service),
@@ -113,6 +113,6 @@ impl AppDataService for data_service::PgDataService {}
 ///
 /// Use this in handlers to avoid specifying the full generic types:
 /// ```rust,ignore
-/// async fn handler(State(state): State<PgAppState<R>>) -> ...
+/// async fn handler(State(state): State<PgAppState<A>>) -> ...
 /// ```
-pub type PgAppState<R> = AppState<data_service::PgDataService, R, crate::services::RedisEVMMonitor>;
+pub type PgAppState<A> = AppState<data_service::PgDataService, A, crate::services::RedisEVMMonitor>;

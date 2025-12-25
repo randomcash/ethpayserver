@@ -37,9 +37,9 @@ pub struct HealthResponse {
         (status = 503, description = "Service is unhealthy", body = HealthResponse),
     )
 )]
-pub async fn health_check<R>(State(state): State<PgAppState<R>>) -> (StatusCode, Json<HealthResponse>)
+pub async fn health_check<A>(State(state): State<PgAppState<A>>) -> (StatusCode, Json<HealthResponse>)
 where
-    R: auth::AuthRepository + Send + Sync + 'static,
+    A: Send + Sync + 'static,
 {
     let db_healthy = state.data_service.health_check().await.is_ok();
 
@@ -96,9 +96,9 @@ pub async fn liveness() -> StatusCode {
         (status = 503, description = "Service is not ready"),
     )
 )]
-pub async fn readiness<R>(State(state): State<PgAppState<R>>) -> StatusCode
+pub async fn readiness<A>(State(state): State<PgAppState<A>>) -> StatusCode
 where
-    R: auth::AuthRepository + Send + Sync + 'static,
+    A: Send + Sync + 'static,
 {
     let db_ok = state.data_service.health_check().await.is_ok();
 

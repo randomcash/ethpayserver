@@ -7,7 +7,7 @@ use axum::{
     http::{header::AUTHORIZATION, request::Parts, StatusCode},
 };
 
-use auth::{AuthRepository, Permission, Role, SessionId, UserInfo, UserId};
+use auth::{Permission, Role, SessionId, SessionService, UserInfo, UserId};
 
 use crate::state::PgAppState;
 
@@ -59,12 +59,12 @@ fn extract_session_id(parts: &Parts) -> Result<SessionId, (StatusCode, &'static 
 /// Validate session and return user info.
 ///
 /// Common helper used by all authentication extractors.
-async fn validate_session<R>(
+async fn validate_session<A>(
     parts: &Parts,
-    state: &PgAppState<R>,
+    state: &PgAppState<A>,
 ) -> Result<UserInfo, (StatusCode, &'static str)>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     let session_id = extract_session_id(parts)?;
 
@@ -77,30 +77,30 @@ where
     Ok(user_info)
 }
 
-impl<R> FromRequestParts<PgAppState<R>> for AuthenticatedUser
+impl<A> FromRequestParts<PgAppState<A>> for AuthenticatedUser
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     type Rejection = (StatusCode, &'static str);
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &PgAppState<R>,
+        state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
         let user_info = validate_session(parts, state).await?;
         Ok(AuthenticatedUser(user_info))
     }
 }
 
-impl<R> FromRequestParts<PgAppState<R>> for AdminAuth
+impl<A> FromRequestParts<PgAppState<A>> for AdminAuth
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     type Rejection = (StatusCode, &'static str);
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &PgAppState<R>,
+        state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
         let user_info = validate_session(parts, state).await?;
 

@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::{
-    AuthRepository, Store, StoreId, UserStore, UserId,
+    SessionService, Store, StoreId, UserStore, UserId,
     repository::{StoreRepository, StoreRoleRepository, UserStoreRepository},
 };
 use data_service::{StoreWalletReader, StoreWalletWriter};
@@ -112,12 +112,12 @@ pub struct MemberResponse {
         (status = 401, description = "Unauthorized"),
     )
 )]
-pub async fn list_stores<R>(
+pub async fn list_stores<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
 ) -> Result<Json<Vec<StoreResponse>>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     let stores = state.data_service
         .get_stores_for_user(user.id)
@@ -142,13 +142,13 @@ where
         (status = 401, description = "Unauthorized"),
     )
 )]
-pub async fn create_store<R>(
+pub async fn create_store<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Json(req): Json<CreateStoreRequest>,
 ) -> Result<(StatusCode, Json<StoreResponse>), StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     let owner_id = user.id;
 
@@ -197,13 +197,13 @@ where
         (status = 404, description = "Store not found"),
     )
 )]
-pub async fn get_store<R>(
+pub async fn get_store<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<StoreResponse>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     let store = state.data_service
         .get_store(StoreId(store_id))
@@ -245,14 +245,14 @@ where
         (status = 404, description = "Store not found"),
     )
 )]
-pub async fn update_store<R>(
+pub async fn update_store<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<UpdateStoreRequest>,
 ) -> Result<Json<StoreResponse>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Check permission
     let has_permission = state.data_service
@@ -303,13 +303,13 @@ where
         (status = 404, description = "Store not found"),
     )
 )]
-pub async fn delete_store<R>(
+pub async fn delete_store<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Only owner can delete
     let store = state.data_service
@@ -348,13 +348,13 @@ where
         (status = 404, description = "Store not found"),
     )
 )]
-pub async fn list_store_members<R>(
+pub async fn list_store_members<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<Vec<MemberResponse>>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Check permission
     let has_permission = state.data_service
@@ -407,14 +407,14 @@ where
         (status = 404, description = "Store or role not found"),
     )
 )]
-pub async fn add_store_member<R>(
+pub async fn add_store_member<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<AddMemberRequest>,
 ) -> Result<(StatusCode, Json<MemberResponse>), StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Check permission
     let has_permission = state.data_service
@@ -480,14 +480,14 @@ where
         (status = 404, description = "Member not found"),
     )
 )]
-pub async fn update_store_member<R>(
+pub async fn update_store_member<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path((store_id, target_user_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateMemberRequest>,
 ) -> Result<Json<MemberResponse>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Check permission
     let has_permission = state.data_service
@@ -546,13 +546,13 @@ where
         (status = 404, description = "Member not found"),
     )
 )]
-pub async fn remove_store_member<R>(
+pub async fn remove_store_member<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path((store_id, target_user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Check permission
     let has_permission = state.data_service
@@ -637,13 +637,13 @@ fn mask_xpub(xpub: &str) -> String {
         (status = 404, description = "Store or wallet not found"),
     )
 )]
-pub async fn get_store_wallet<R>(
+pub async fn get_store_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<WalletResponse>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Check permission
     let has_permission = state
@@ -691,14 +691,14 @@ where
         (status = 404, description = "Store not found"),
     )
 )]
-pub async fn configure_store_wallet<R>(
+pub async fn configure_store_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<ConfigureWalletRequest>,
 ) -> Result<Json<WalletResponse>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Check permission
     let has_permission = state
@@ -763,13 +763,13 @@ where
         (status = 404, description = "Wallet not found"),
     )
 )]
-pub async fn delete_store_wallet<R>(
+pub async fn delete_store_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Check permission
     let has_permission = state

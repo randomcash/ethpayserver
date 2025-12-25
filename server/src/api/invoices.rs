@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use auth::{AuthRepository, repository::UserStoreRepository};
+use auth::{SessionService, repository::UserStoreRepository};
 use evm::{Address, XpubDeriver, U256};
 use data_service::{StoreWalletReader, StoreWalletWriter};
 use types::{
@@ -133,13 +133,13 @@ pub struct InvoiceListResponse {
         (status = 403, description = "Not a member of the store"),
     )
 )]
-pub async fn list_invoices<R>(
+pub async fn list_invoices<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Query(query): Query<ListInvoicesQuery>,
 ) -> Result<Json<InvoiceListResponse>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // For non-admins, store_id is required
     let store_id = match query.store_id {
@@ -218,13 +218,13 @@ where
         (status = 403, description = "Insufficient permissions"),
     )
 )]
-pub async fn create_invoice<R>(
+pub async fn create_invoice<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Json(req): Json<CreateInvoiceRequest>,
 ) -> Result<(StatusCode, Json<InvoiceResponse>), StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     // Check permission on the store
     let has_permission = state.data_service
@@ -378,13 +378,13 @@ where
         (status = 404, description = "Invoice not found"),
     )
 )]
-pub async fn get_invoice<R>(
+pub async fn get_invoice<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<InvoiceResponse>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     let id = InvoiceId::from_string(invoice_id);
 
@@ -428,13 +428,13 @@ where
         (status = 409, description = "Invoice cannot be cancelled"),
     )
 )]
-pub async fn cancel_invoice<R>(
+pub async fn cancel_invoice<A>(
     AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<InvoiceResponse>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     let id = InvoiceId::from_string(invoice_id);
 
@@ -503,12 +503,12 @@ where
         (status = 403, description = "Admin access required"),
     )
 )]
-pub async fn expire_invoices<R>(
+pub async fn expire_invoices<A>(
     AdminAuth(_admin): AdminAuth,
-    State(state): State<PgAppState<R>>,
+    State(state): State<PgAppState<A>>,
 ) -> Result<Json<ExpireResponse>, StatusCode>
 where
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     let expired = InvoiceReader::get_expired(&*state.data_service)
         .await

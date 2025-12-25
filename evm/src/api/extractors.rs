@@ -8,7 +8,7 @@ use axum::{
     http::{header::AUTHORIZATION, request::Parts, StatusCode},
 };
 
-use auth::{AuthRepository, Permission, SessionId, UserInfo};
+use auth::{Permission, SessionId, SessionService, UserInfo};
 
 use super::{EvmDataServiceReader, EvmState};
 
@@ -58,16 +58,16 @@ fn extract_session_id(parts: &Parts) -> Result<SessionId, (StatusCode, String)> 
     Ok(SessionId(uuid))
 }
 
-impl<D, R> FromRequestParts<EvmState<D, R>> for AdminAuth
+impl<D, A> FromRequestParts<EvmState<D, A>> for AdminAuth
 where
     D: EvmDataServiceReader + 'static,
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &EvmState<D, R>,
+        state: &EvmState<D, A>,
     ) -> Result<Self, Self::Rejection> {
         // Extract session ID from header
         let session_id = extract_session_id(parts)?;
@@ -88,16 +88,16 @@ where
     }
 }
 
-impl<D, R> FromRequestParts<EvmState<D, R>> for AuthenticatedUser
+impl<D, A> FromRequestParts<EvmState<D, A>> for AuthenticatedUser
 where
     D: EvmDataServiceReader + 'static,
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     type Rejection = (StatusCode, String);
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &EvmState<D, R>,
+        state: &EvmState<D, A>,
     ) -> Result<Self, Self::Rejection> {
         // Extract session ID from header
         let session_id = extract_session_id(parts)?;

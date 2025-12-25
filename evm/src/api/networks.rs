@@ -7,7 +7,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use auth::AuthRepository;
+use auth::SessionService;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -64,12 +64,12 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
         (status = 200, body = NetworkListResponse),
     )
 )]
-pub async fn list_networks<D, R>(
-    State(_state): State<EvmState<D, R>>,
+pub async fn list_networks<D, A>(
+    State(_state): State<EvmState<D, A>>,
 ) -> ApiResult<NetworkListResponse>
 where
     D: EvmDataServiceReader + 'static,
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     let networks = ALL_CHAINS.iter().map(NetworkInfo::from).collect();
     Ok(Json(NetworkListResponse { networks }))
@@ -85,13 +85,13 @@ where
         (status = 404, description = "Network not found"),
     )
 )]
-pub async fn get_network<D, R>(
-    State(_state): State<EvmState<D, R>>,
+pub async fn get_network<D, A>(
+    State(_state): State<EvmState<D, A>>,
     Path(network): Path<String>,
 ) -> ApiResult<NetworkInfo>
 where
     D: EvmDataServiceReader + 'static,
-    R: AuthRepository + Send + Sync + 'static,
+    A: SessionService + 'static,
 {
     let evm_network: EvmNetwork = network
         .parse()
