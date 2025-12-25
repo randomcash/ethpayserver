@@ -14,7 +14,7 @@ use std::sync::Arc;
 use data_service::PgDataService;
 use evm::Address;
 use futures::StreamExt;
-use types::{ExpiredInvoiceStreamer, InvoiceWriter, Network, WatchedAddressCleanup};
+use types::{InvoiceReader, InvoiceWriter, Network, WatchedAddressReader, WatchedAddressWriter};
 
 use super::evm_monitor::EVMMonitor;
 
@@ -79,7 +79,7 @@ impl<M: EVMMonitor> InvoiceCleanupService<M> {
         tracing::debug!(?network, "Checking expired invoices for network");
 
         let mut expired_count = 0u64;
-        let mut stream = pin!(self.data_service.stream_expired_pending_for_network(network));
+        let mut stream = pin!(InvoiceReader::stream_expired_pending_for_network(&*self.data_service, network));
 
         while let Some(result) = stream.next().await {
             match result {
@@ -134,7 +134,7 @@ impl<M: EVMMonitor> InvoiceCleanupService<M> {
         tracing::debug!("Checking expired invoices for all networks");
 
         let mut expired_count = 0u64;
-        let mut stream = pin!(self.data_service.stream_all_expired_pending());
+        let mut stream = pin!(InvoiceReader::stream_all_expired_pending(&*self.data_service));
 
         while let Some(result) = stream.next().await {
             match result {
@@ -204,10 +204,11 @@ impl<M: EVMMonitor> InvoiceCleanupService<M> {
 
     /// Cleanup addresses for expired invoices past grace period.
     async fn cleanup_expired_addresses(&self) -> Result<u64, CleanupError> {
-        let addresses = self
-            .data_service
-            .get_expired_addresses_for_cleanup(self.config.unwatch_grace_period_secs as i64)
-            .await?;
+        let addresses = WatchedAddressReader::get_expired_for_cleanup(
+            &*self.data_service,
+            self.config.unwatch_grace_period_secs as i64,
+        )
+        .await?;
 
         let mut count = 0u64;
         for info in addresses {
@@ -234,7 +235,7 @@ impl<M: EVMMonitor> InvoiceCleanupService<M> {
 
     /// Cleanup addresses for paid invoices.
     async fn cleanup_paid_addresses(&self) -> Result<u64, CleanupError> {
-        let addresses = self.data_service.get_paid_addresses_for_cleanup().await?;
+        let addresses = WatchedAddressReader::get_paid_for_cleanup(&*self.data_service).await?;
 
         let mut count = 0u64;
         for info in addresses {
@@ -261,7 +262,7 @@ impl<M: EVMMonitor> InvoiceCleanupService<M> {
 
     /// Cleanup addresses for cancelled invoices.
     async fn cleanup_cancelled_addresses(&self) -> Result<u64, CleanupError> {
-        let addresses = self.data_service.get_cancelled_addresses_for_cleanup().await?;
+        let addresses = WatchedAddressReader::get_cancelled_for_cleanup(&*self.data_service).await?;
 
         let mut count = 0u64;
         for info in addresses {
@@ -301,7 +302,7 @@ impl<M: EVMMonitor> InvoiceCleanupService<M> {
         self.evm_monitor.unwatch_address(network, addr).await?;
 
         // Deactivate in database
-        self.data_service.deactivate_watched_address(address, network).await?;
+        WatchedAddressWriter::deactivate(&*self.data_service, address, network).await?;
 
         Ok(())
     }

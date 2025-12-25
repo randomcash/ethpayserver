@@ -5,11 +5,12 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::stream::{self, BoxStream, StreamExt};
 use types::{
-    InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter,
-    Network, PaymentData, PaymentReader, PaymentWriter, PendingWatchInfo, RepositoryResult,
-    StoreId, TokenData, TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader,
-    WatchedAddressWriter,
+    CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
+    InvoiceWriter, Network, PaymentData, PaymentReader, PaymentWriter, PendingWatchInfo,
+    RepositoryResult, StoreId, TokenData, TokenQueryParams, TokenReader, TokenWriter,
+    WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
 
@@ -82,6 +83,35 @@ impl InvoiceReader for InMemoryDataService {
             .filter(|inv| inv.status == InvoiceStatus::Pending && inv.expires_at < now)
             .cloned()
             .collect())
+    }
+
+    fn stream_expired_pending_for_network(
+        &self,
+        network: Network,
+    ) -> BoxStream<'_, RepositoryResult<InvoiceId>> {
+        let invoices = self.invoices.read().unwrap();
+        let now = Utc::now();
+        let ids: Vec<RepositoryResult<InvoiceId>> = invoices
+            .values()
+            .filter(|inv| {
+                inv.status == InvoiceStatus::Pending
+                    && inv.network == network
+                    && inv.expires_at < now
+            })
+            .map(|inv| Ok(inv.id.clone()))
+            .collect();
+        stream::iter(ids).boxed()
+    }
+
+    fn stream_all_expired_pending(&self) -> BoxStream<'_, RepositoryResult<(Network, InvoiceId)>> {
+        let invoices = self.invoices.read().unwrap();
+        let now = Utc::now();
+        let ids: Vec<RepositoryResult<(Network, InvoiceId)>> = invoices
+            .values()
+            .filter(|inv| inv.status == InvoiceStatus::Pending && inv.expires_at < now)
+            .map(|inv| Ok((inv.network, inv.id.clone())))
+            .collect();
+        stream::iter(ids).boxed()
     }
 }
 
@@ -236,6 +266,78 @@ impl WatchedAddressReader for InMemoryDataService {
             })
             .collect())
     }
+
+    async fn get_expired_for_cleanup(
+        &self,
+        _grace_period_secs: i64,
+    ) -> RepositoryResult<Vec<CleanupAddressInfo>> {
+        // For in-memory testing, we would need to join with invoices.
+        // Return empty for simplicity - real DB implementation handles this.
+        let addresses = self.addresses.read().unwrap();
+        let invoices = self.invoices.read().unwrap();
+        let now = Utc::now();
+
+        Ok(addresses
+            .iter()
+            .filter_map(|((addr, network), invoice_id)| {
+                invoices.get(&invoice_id.0).and_then(|inv| {
+                    if inv.status == InvoiceStatus::Expired && inv.expires_at < now {
+                        Some(CleanupAddressInfo {
+                            address: addr.clone(),
+                            network: *network,
+                            invoice_id: invoice_id.as_str().to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect())
+    }
+
+    async fn get_paid_for_cleanup(&self) -> RepositoryResult<Vec<CleanupAddressInfo>> {
+        let addresses = self.addresses.read().unwrap();
+        let invoices = self.invoices.read().unwrap();
+
+        Ok(addresses
+            .iter()
+            .filter_map(|((addr, network), invoice_id)| {
+                invoices.get(&invoice_id.0).and_then(|inv| {
+                    if inv.status == InvoiceStatus::Paid {
+                        Some(CleanupAddressInfo {
+                            address: addr.clone(),
+                            network: *network,
+                            invoice_id: invoice_id.as_str().to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect())
+    }
+
+    async fn get_cancelled_for_cleanup(&self) -> RepositoryResult<Vec<CleanupAddressInfo>> {
+        let addresses = self.addresses.read().unwrap();
+        let invoices = self.invoices.read().unwrap();
+
+        Ok(addresses
+            .iter()
+            .filter_map(|((addr, network), invoice_id)| {
+                invoices.get(&invoice_id.0).and_then(|inv| {
+                    if inv.status == InvoiceStatus::Cancelled {
+                        Some(CleanupAddressInfo {
+                            address: addr.clone(),
+                            network: *network,
+                            invoice_id: invoice_id.as_str().to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -273,6 +375,16 @@ impl WatchedAddressWriter for InMemoryDataService {
     async fn mark_notified(&self, _address: &str, _network: Network) -> RepositoryResult<()> {
         // No-op for in-memory testing
         Ok(())
+    }
+
+    async fn deactivate(&self, address: &str, network: Network) -> RepositoryResult<bool> {
+        let mut addresses = self.addresses.write().unwrap();
+        let key = (address.to_string(), network);
+        if addresses.remove(&key).is_some() {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 

@@ -8,8 +8,8 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 
 use crate::{
-    ExpiredInvoiceStreamer, InvoiceQueryParams, InvoiceReader, InvoiceWriter, RepositoryError,
-    RepositoryResult, sqlx_to_repo_error,
+    InvoiceQueryParams, InvoiceReader, InvoiceWriter, RepositoryError, RepositoryResult,
+    sqlx_to_repo_error,
 };
 use types::{InvoiceData, InvoiceId, InvoiceStatus, Network, StoreId};
 
@@ -167,6 +167,57 @@ impl InvoiceReader for PgDataService {
 
         invoices
     }
+
+    fn stream_expired_pending_for_network(
+        &self,
+        network: Network,
+    ) -> BoxStream<'_, RepositoryResult<InvoiceId>> {
+        let network_str = match try_network_to_db(network) {
+            Ok(s) => s,
+            Err(e) => return Box::pin(futures::stream::once(async move { Err(e) })),
+        };
+
+        Box::pin(
+            sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT id
+                FROM invoices
+                WHERE status = 'pending'
+                  AND network = $1::network
+                  AND expires_at < NOW()
+                "#,
+            )
+            .bind(network_str)
+            .fetch(&self.pool)
+            .map(|result| {
+                result
+                    .map(InvoiceId::from_string)
+                    .map_err(sqlx_to_repo_error)
+            }),
+        )
+    }
+
+    fn stream_all_expired_pending(&self) -> BoxStream<'_, RepositoryResult<(Network, InvoiceId)>> {
+        Box::pin(
+            sqlx::query(
+                r#"
+                SELECT id, network::text
+                FROM invoices
+                WHERE status = 'pending'
+                  AND expires_at < NOW()
+                "#,
+            )
+            .fetch(&self.pool)
+            .map(|result| {
+                result.map_err(sqlx_to_repo_error).and_then(|row| {
+                    let id: String = row.get("id");
+                    let network_str: String = row.get("network");
+                    let network = try_db_to_network(&network_str)?;
+                    Ok((network, InvoiceId::from_string(id)))
+                })
+            }),
+        )
+    }
 }
 
 #[async_trait]
@@ -262,59 +313,6 @@ impl InvoiceWriter for PgDataService {
         .map_err(sqlx_to_repo_error)?;
 
         Ok(result.rows_affected() > 0)
-    }
-}
-
-impl ExpiredInvoiceStreamer for PgDataService {
-    fn stream_expired_pending_for_network(
-        &self,
-        network: Network,
-    ) -> BoxStream<'_, RepositoryResult<InvoiceId>> {
-        let network_str = match try_network_to_db(network) {
-            Ok(s) => s,
-            Err(e) => return Box::pin(futures::stream::once(async move { Err(e) })),
-        };
-
-        Box::pin(
-            sqlx::query_scalar::<_, String>(
-                r#"
-                SELECT id
-                FROM invoices
-                WHERE status = 'pending'
-                  AND network = $1::network
-                  AND expires_at < NOW()
-                "#,
-            )
-            .bind(network_str)
-            .fetch(&self.pool)
-            .map(|result| {
-                result
-                    .map(InvoiceId::from_string)
-                    .map_err(sqlx_to_repo_error)
-            }),
-        )
-    }
-
-    fn stream_all_expired_pending(&self) -> BoxStream<'_, RepositoryResult<(Network, InvoiceId)>> {
-        Box::pin(
-            sqlx::query(
-                r#"
-                SELECT id, network::text
-                FROM invoices
-                WHERE status = 'pending'
-                  AND expires_at < NOW()
-                "#,
-            )
-            .fetch(&self.pool)
-            .map(|result| {
-                result.map_err(sqlx_to_repo_error).and_then(|row| {
-                    let id: String = row.get("id");
-                    let network_str: String = row.get("network");
-                    let network = try_db_to_network(&network_str)?;
-                    Ok((network, InvoiceId::from_string(id)))
-                })
-            }),
-        )
     }
 }
 

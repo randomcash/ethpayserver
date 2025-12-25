@@ -36,8 +36,6 @@ pub mod test_utils;
 pub use types::{
     // Combined traits
     DataService, DataServiceReader, DataServiceWriter,
-    // Expired Invoice Streaming
-    ExpiredInvoiceStreamer,
     // Invoice
     InvoiceQueryParams, InvoiceReader, InvoiceRepository, InvoiceWriter,
     // Payment
@@ -51,8 +49,8 @@ pub use types::{
     // Token
     TokenData, TokenQueryParams, TokenReader, TokenRepository, TokenWriter,
     // Watched Address
-    CleanupAddressInfo, PendingWatchInfo, WatchedAddressCleanup, WatchedAddressReader,
-    WatchedAddressRepository, WatchedAddressWriter,
+    CleanupAddressInfo, PendingWatchInfo, WatchedAddressReader, WatchedAddressRepository,
+    WatchedAddressWriter,
     // Errors
     RepositoryError, RepositoryResult,
 };
