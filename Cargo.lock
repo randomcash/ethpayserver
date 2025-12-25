@@ -1118,7 +1118,6 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "auth"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/random.cash/payserver-commons.git#5568528e9bec9b351672f9308f6f923a5396b42a"
 dependencies = [
  "alloy-primitives 0.8.26",
  "async-trait",
@@ -1796,7 +1795,6 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 [[package]]
 name = "crypto"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/random.cash/payserver-commons.git#5568528e9bec9b351672f9308f6f923a5396b42a"
 dependencies = [
  "aes",
  "argon2",
@@ -5413,7 +5411,6 @@ checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
 [[package]]
 name = "types"
 version = "0.1.0"
-source = "git+ssh://git@gitlab.com/random.cash/payserver-commons.git#5568528e9bec9b351672f9308f6f923a5396b42a"
 dependencies = [
  "async-trait",
  "chrono",

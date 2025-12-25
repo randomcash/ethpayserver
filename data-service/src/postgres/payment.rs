@@ -6,10 +6,26 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{PaymentReader, PaymentWriter, RepositoryError, RepositoryResult, sqlx_to_repo_error};
-use types::{InvoiceId, PaymentData};
+use types::{AssetType, InvoiceId, PaymentData};
 
-use super::conversions::{try_db_to_network, try_network_to_db};
 use super::PgDataService;
+use super::conversions::{try_db_to_network, try_network_to_db};
+
+/// Convert AssetType to database string.
+fn asset_type_to_db(asset_type: AssetType) -> &'static str {
+    match asset_type {
+        AssetType::Native => "native",
+        AssetType::ERC20 => "erc20",
+    }
+}
+
+/// Convert database string to AssetType.
+fn db_to_asset_type(s: &str) -> AssetType {
+    match s {
+        "erc20" => AssetType::ERC20,
+        _ => AssetType::Native,
+    }
+}
 
 #[async_trait]
 impl PaymentReader for PgDataService {
@@ -17,9 +33,10 @@ impl PaymentReader for PgDataService {
         let row = sqlx::query(
             r#"
             SELECT
-                id, invoice_id, network::text, amount_value::text,
-                asset_symbol, tx_hash, block_number, confirmations,
-                detected_at, confirmed_at, from_address, extra
+                id, invoice_id, network::text, asset_type::text,
+                amount_value::text, asset_symbol, tx_hash, block_number,
+                confirmations, detected_at, confirmed_at, from_address,
+                reorged, extra
             FROM payments
             WHERE id = $1
             "#,
@@ -39,9 +56,10 @@ impl PaymentReader for PgDataService {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, invoice_id, network::text, amount_value::text,
-                asset_symbol, tx_hash, block_number, confirmations,
-                detected_at, confirmed_at, from_address, extra
+                id, invoice_id, network::text, asset_type::text,
+                amount_value::text, asset_symbol, tx_hash, block_number,
+                confirmations, detected_at, confirmed_at, from_address,
+                reorged, extra
             FROM payments
             WHERE invoice_id = $1
             ORDER BY detected_at DESC
@@ -61,11 +79,12 @@ impl PaymentReader for PgDataService {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, invoice_id, network::text, amount_value::text,
-                asset_symbol, tx_hash, block_number, confirmations,
-                detected_at, confirmed_at, from_address, extra
+                id, invoice_id, network::text, asset_type::text,
+                amount_value::text, asset_symbol, tx_hash, block_number,
+                confirmations, detected_at, confirmed_at, from_address,
+                reorged, extra
             FROM payments
-            WHERE confirmations < $1
+            WHERE confirmations < $1 AND reorged = FALSE
             ORDER BY detected_at ASC
             "#,
         )
@@ -83,27 +102,42 @@ impl PaymentReader for PgDataService {
 #[async_trait]
 impl PaymentWriter for PgDataService {
     async fn upsert(&self, payment: &PaymentData) -> RepositoryResult<()> {
+        // Store token_address in extra if present
+        let extra = match (&payment.extra, &payment.token_address) {
+            (Some(existing), Some(addr)) => {
+                let mut obj = existing.clone();
+                if let Some(map) = obj.as_object_mut() {
+                    map.insert("token_address".to_string(), serde_json::json!(addr));
+                }
+                Some(obj)
+            }
+            (None, Some(addr)) => Some(serde_json::json!({ "token_address": addr })),
+            (extra, None) => extra.clone(),
+        };
+
+        // Use ON CONFLICT (tx_hash, network) to handle duplicate PaymentDetected events
+        // (e.g., after service restart). This is the unique constraint in the DB.
         sqlx::query(
             r#"
             INSERT INTO payments (
-                id, invoice_id, network, amount_value, asset_symbol,
+                id, invoice_id, network, asset_type, amount_value, asset_symbol,
                 tx_hash, block_number, confirmations, detected_at,
-                confirmed_at, from_address, extra, asset_type
+                confirmed_at, from_address, extra
             ) VALUES (
-                $1, $2, $3::network, $4::numeric, $5,
-                $6, $7, $8, $9, $10, $11, $12, 'native'::asset_type
+                $1, $2, $3::network, $4::asset_type, $5::numeric, $6,
+                $7, $8, $9, $10, $11, $12, $13
             )
-            ON CONFLICT (id) DO UPDATE SET
-                amount_value = EXCLUDED.amount_value,
-                block_number = EXCLUDED.block_number,
-                confirmations = EXCLUDED.confirmations,
-                confirmed_at = EXCLUDED.confirmed_at,
-                extra = EXCLUDED.extra
+            ON CONFLICT (tx_hash, network) DO UPDATE SET
+                block_number = COALESCE(EXCLUDED.block_number, payments.block_number),
+                confirmations = GREATEST(EXCLUDED.confirmations, payments.confirmations),
+                confirmed_at = COALESCE(EXCLUDED.confirmed_at, payments.confirmed_at),
+                extra = COALESCE(EXCLUDED.extra, payments.extra)
             "#,
         )
         .bind(payment.id)
         .bind(payment.invoice_id.as_str())
         .bind(try_network_to_db(payment.network)?)
+        .bind(asset_type_to_db(payment.asset_type))
         .bind(&payment.amount)
         .bind(&payment.asset_symbol)
         .bind(&payment.tx_hash)
@@ -112,7 +146,7 @@ impl PaymentWriter for PgDataService {
         .bind(payment.detected_at)
         .bind(payment.confirmed_at)
         .bind(&payment.from_address)
-        .bind(&payment.extra)
+        .bind(&extra)
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;
@@ -152,6 +186,36 @@ impl PaymentWriter for PgDataService {
 }
 
 impl PgDataService {
+    /// Get valid (non-reorged) payments for an invoice.
+    ///
+    /// Use this method when you only care about valid payments.
+    /// The standard `get_for_invoice` returns all payments including reorged ones.
+    pub async fn get_valid_payments_for_invoice(
+        &self,
+        invoice_id: &InvoiceId,
+    ) -> RepositoryResult<Vec<PaymentData>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, invoice_id, network::text, asset_type::text,
+                amount_value::text, asset_symbol, tx_hash, block_number,
+                confirmations, detected_at, confirmed_at, from_address,
+                reorged, extra
+            FROM payments
+            WHERE invoice_id = $1 AND reorged = FALSE
+            ORDER BY detected_at DESC
+            "#,
+        )
+        .bind(invoice_id.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        let payments: Result<Vec<PaymentData>, _> = rows.iter().map(try_row_to_payment).collect();
+
+        payments
+    }
+
     /// Mark all non-reorged payments for an invoice as reorged.
     ///
     /// Returns the number of payments marked as reorged.
@@ -194,19 +258,31 @@ impl PgDataService {
 fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentData> {
     let block_number: Option<i64> = row.get("block_number");
     let confirmations: i32 = row.get("confirmations");
+    let asset_type_str: String = row.get("asset_type");
+    let extra: Option<serde_json::Value> = row.get("extra");
+
+    // Extract token_address from extra if present
+    let token_address = extra.as_ref().and_then(|e| {
+        e.get("token_address")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
 
     Ok(PaymentData {
         id: row.get("id"),
         invoice_id: InvoiceId::from_string(row.get("invoice_id")),
         network: try_db_to_network(row.get("network"))?,
+        asset_type: db_to_asset_type(&asset_type_str),
         amount: row.get("amount_value"),
         asset_symbol: row.get("asset_symbol"),
+        token_address,
         tx_hash: row.get("tx_hash"),
         block_number: block_number.map(|n| n as u64),
         confirmations: confirmations as u32,
         detected_at: row.get("detected_at"),
         confirmed_at: row.get("confirmed_at"),
         from_address: row.get("from_address"),
-        extra: row.get("extra"),
+        reorged: row.get("reorged"),
+        extra,
     })
 }

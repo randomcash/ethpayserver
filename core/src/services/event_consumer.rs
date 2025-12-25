@@ -11,7 +11,10 @@ use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::{MonitorEvent, PaymentConfirmed, PaymentDetected, ReorgDetected};
 use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
-use types::{InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentData, PaymentReader, PaymentWriter};
+use types::{
+    AssetType, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter,
+    PaymentData, PaymentWriter, TokenReader,
+};
 use uuid::Uuid;
 
 /// Event consumer that processes monitor events and updates database state.
@@ -118,27 +121,49 @@ impl EventConsumer {
                 format!("Unknown chain_id: {}", event.chain_id)
             ))?;
 
-        // Determine asset symbol based on whether it's native or token
-        let asset_symbol = if event.is_native {
-            network_native_symbol(network)
+        // Determine asset type and symbol based on whether it's native or token
+        let (asset_type, asset_symbol, token_address) = if event.is_native {
+            (AssetType::Native, network_native_symbol(network), None)
         } else {
-            // For tokens, we'd need to look up the symbol from the token address
-            // For now, use a placeholder - this should be enhanced
-            "ERC20".to_string()
+            // Look up the token symbol from the database
+            let token_addr = event.token_address.ok_or_else(|| {
+                EventConsumerError::InvalidData(
+                    "ERC20 payment missing token_address".to_string()
+                )
+            })?;
+            let token_addr_str = format!("{:#x}", token_addr);
+
+            let symbol = match TokenReader::get_by_address(&*self.data_service, network, &token_addr_str).await? {
+                Some(token) => token.symbol.unwrap_or_else(|| "ERC20".to_string()),
+                None => {
+                    tracing::warn!(
+                        token_address = %token_addr_str,
+                        network = ?network,
+                        "Unknown token, using address as symbol"
+                    );
+                    // Use shortened address as fallback
+                    format!("0x{}...", &token_addr_str[2..8])
+                }
+            };
+
+            (AssetType::ERC20, symbol, Some(token_addr_str))
         };
 
         let payment = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: InvoiceId::from_string(event.invoice_id.to_string()),
             network,
+            asset_type,
             amount: event.amount.to_string(),
             asset_symbol,
+            token_address,
             tx_hash: format!("{:#x}", event.tx_hash),
             block_number: Some(event.block_number),
             confirmations: event.confirmations as u32,
             detected_at: event.detected_at,
             confirmed_at: None,
             from_address: Some(format!("{:#x}", event.from_address)),
+            reorged: false,
             extra: None,
         };
 
@@ -147,6 +172,7 @@ impl EventConsumer {
             tx_hash = %payment.tx_hash,
             amount = %payment.amount,
             network = ?network,
+            asset_type = ?asset_type,
             confirmations = event.confirmations,
             "Payment detected"
         );
@@ -164,14 +190,20 @@ impl EventConsumer {
         let invoice_id = InvoiceId::from_string(event.invoice_id.to_string());
         let tx_hash = format!("{:#x}", event.tx_hash);
 
-        // Find the payment by invoice_id + tx_hash
-        let payments = PaymentReader::get_for_invoice(&*self.data_service, &invoice_id).await?;
-        let payment = payments
-            .iter()
-            .find(|p| p.tx_hash == tx_hash)
-            .ok_or_else(|| EventConsumerError::InvalidData(
-                format!("Payment not found: invoice={}, tx={}", event.invoice_id, tx_hash)
-            ))?;
+        // Find the payment by invoice_id + tx_hash (only non-reorged payments)
+        let payments = self.data_service.get_valid_payments_for_invoice(&invoice_id).await?;
+        let payment = match payments.iter().find(|p| p.tx_hash == tx_hash) {
+            Some(p) => p,
+            None => {
+                // Payment not found or was reorged - log and skip
+                tracing::debug!(
+                    invoice_id = %event.invoice_id,
+                    tx_hash = %tx_hash,
+                    "Payment not found or reorged, skipping confirmation"
+                );
+                return Ok(());
+            }
+        };
 
         // Update payment confirmations and confirmed_at
         PaymentWriter::update_confirmations(
@@ -194,6 +226,17 @@ impl EventConsumer {
             .ok_or_else(|| EventConsumerError::InvalidData(
                 format!("Invoice not found: {}", event.invoice_id)
             ))?;
+
+        // Only transition to paid if invoice is in a valid state
+        // Don't mark cancelled/expired/refunded invoices as paid
+        if !matches!(invoice.status, InvoiceStatus::Processing | InvoiceStatus::PartiallyPaid) {
+            tracing::debug!(
+                invoice_id = %event.invoice_id,
+                status = ?invoice.status,
+                "Invoice not in payable state, skipping status update"
+            );
+            return Ok(());
+        }
 
         // Compare amounts using rust_decimal
         let amount_received: Decimal = invoice.amount_received.parse()
@@ -224,8 +267,14 @@ impl EventConsumer {
     /// - If other valid payments exist → `processing`
     /// - If no valid payments → `pending`
     async fn handle_reorg_detected(&self, event: ReorgDetected) -> Result<(), EventConsumerError> {
+        let network = chain_id_to_network(event.chain_id)
+            .ok_or_else(|| EventConsumerError::InvalidData(
+                format!("Unknown chain_id: {}", event.chain_id)
+            ))?;
+
         tracing::warn!(
             chain_id = event.chain_id,
+            network = ?network,
             fork_block = event.fork_block,
             depth = event.depth,
             affected_invoices = event.affected_invoices.len(),
@@ -235,17 +284,24 @@ impl EventConsumer {
         for invoice_uuid in &event.affected_invoices {
             let invoice_id = InvoiceId::from_string(invoice_uuid.to_string());
 
-            // Mark all payments for this invoice as reorged
-            let reorged_count = self.data_service.mark_payments_reorged(&invoice_id).await?;
+            // Mark payments from this chain at or after the fork block as reorged
+            let reorged_count = self.data_service
+                .mark_payments_reorged(&invoice_id, network, event.fork_block)
+                .await?;
 
             if reorged_count == 0 {
-                tracing::debug!(invoice_id = %invoice_uuid, "No payments to mark as reorged");
+                tracing::debug!(
+                    invoice_id = %invoice_uuid,
+                    fork_block = event.fork_block,
+                    "No payments affected by reorg"
+                );
                 continue;
             }
 
             tracing::info!(
                 invoice_id = %invoice_uuid,
                 reorged_count,
+                fork_block = event.fork_block,
                 "Marked payments as reorged"
             );
 

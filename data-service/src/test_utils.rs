@@ -378,14 +378,17 @@ pub fn create_test_payment(invoice_id: &InvoiceId) -> PaymentData {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         network: Network::Ethereum,
+        asset_type: types::AssetType::Native,
         amount: "1000000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
+        token_address: None,
         tx_hash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
         block_number: Some(12345678),
         confirmations: 0,
         detected_at: Utc::now(),
         confirmed_at: None,
         from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".to_string()),
+        reorged: false,
         extra: None,
     }
 }
