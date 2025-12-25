@@ -30,6 +30,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 # Async runtime
 tokio = { version = "1.42", features = ["full"] }
 tokio-stream = "0.1"
+futures = "0.3"
 async-trait = "0.1"
 
 # Serialization

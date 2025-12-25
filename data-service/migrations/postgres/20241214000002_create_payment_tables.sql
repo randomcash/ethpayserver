@@ -33,7 +33,8 @@ CREATE TYPE invoice_status AS ENUM (
     'paid',
     'expired',
     'cancelled',
-    'refunded'
+    'refunded',
+    'late_paid'
 );
 
 -- =============================================================================

@@ -17,6 +17,8 @@ use types::{
 };
 use uuid::Uuid;
 
+use super::InvoiceExpirationService;
+
 /// Event consumer that processes monitor events and updates database state.
 ///
 /// Future extensions:
@@ -25,12 +27,29 @@ use uuid::Uuid;
 pub struct EventConsumer {
     bridge: Arc<dyn EventBridge>,
     data_service: Arc<PgDataService>,
+    expiration_service: Option<Arc<InvoiceExpirationService>>,
 }
 
 impl EventConsumer {
     /// Create a new event consumer.
     pub fn new(bridge: Arc<dyn EventBridge>, data_service: Arc<PgDataService>) -> Self {
-        Self { bridge, data_service }
+        Self { bridge, data_service, expiration_service: None }
+    }
+
+    /// Create a new event consumer with invoice expiration service.
+    ///
+    /// When an expiration service is provided, the consumer will trigger
+    /// expiration checks when block events are received for each network.
+    pub fn with_expiration_service(
+        bridge: Arc<dyn EventBridge>,
+        data_service: Arc<PgDataService>,
+        expiration_service: Arc<InvoiceExpirationService>,
+    ) -> Self {
+        Self {
+            bridge,
+            data_service,
+            expiration_service: Some(expiration_service),
+        }
     }
 
     /// Run the event consumer as a background task.
@@ -105,6 +124,8 @@ impl EventConsumer {
                     current_block = report.current_block,
                     "Status report"
                 );
+                // Trigger invoice expiration check for this network
+                self.trigger_expiration_check(report.chain_id).await;
                 Ok(())
             }
         }
@@ -259,6 +280,40 @@ impl EventConsumer {
         }
 
         Ok(())
+    }
+
+    /// Trigger invoice expiration check for a network.
+    ///
+    /// Called when block events are received. This is a non-blocking operation -
+    /// errors are logged but don't stop event processing.
+    async fn trigger_expiration_check(&self, chain_id: u64) {
+        let Some(expiration_service) = &self.expiration_service else {
+            return;
+        };
+
+        let Some(network) = chain_id_to_network(chain_id) else {
+            tracing::trace!(chain_id, "Unknown chain_id for expiration check");
+            return;
+        };
+
+        match expiration_service.check_network(network).await {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::debug!(
+                        ?network,
+                        expired_count = count,
+                        "Expired invoices on block event"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    ?network,
+                    error = %e,
+                    "Failed to check expired invoices"
+                );
+            }
+        }
     }
 
     /// Handle ReorgDetected event.

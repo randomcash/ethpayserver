@@ -42,6 +42,7 @@ pub mod state;
 pub use config::Config;
 pub use services::{
     EVMMonitor, EVMMonitorError, EventConsumer, EventConsumerError,
+    ExpirationConfig, ExpirationError, InvoiceExpirationService,
     RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
 };
 pub use state::AppState;

@@ -216,18 +216,34 @@ impl PgDataService {
         payments
     }
 
-    /// Mark all non-reorged payments for an invoice as reorged.
+    /// Mark payments as reorged for a specific invoice, network, and fork block.
+    ///
+    /// Only marks payments where:
+    /// - invoice_id matches
+    /// - network matches (from chain_id)
+    /// - block_number >= fork_block (affected by the reorg)
+    /// - not already reorged
     ///
     /// Returns the number of payments marked as reorged.
-    pub async fn mark_payments_reorged(&self, invoice_id: &InvoiceId) -> RepositoryResult<u64> {
+    pub async fn mark_payments_reorged(
+        &self,
+        invoice_id: &InvoiceId,
+        network: types::Network,
+        fork_block: u64,
+    ) -> RepositoryResult<u64> {
         let result = sqlx::query(
             r#"
             UPDATE payments
-            SET reorged = TRUE, confirmed_at = NULL
-            WHERE invoice_id = $1 AND reorged = FALSE
+            SET reorged = TRUE, confirmed_at = NULL, confirmations = 0
+            WHERE invoice_id = $1
+              AND network = $2::network
+              AND block_number >= $3
+              AND reorged = FALSE
             "#,
         )
         .bind(invoice_id.as_str())
+        .bind(try_network_to_db(network)?)
+        .bind(fork_block as i64)
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;

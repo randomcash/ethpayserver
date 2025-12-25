@@ -14,7 +14,10 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::AuthService;
-use core::{api, config::Config, AppState, EventConsumer, RedisEVMMonitor, WatchRetryConfig, WatchRetryService};
+use core::{
+    api, config::Config, AppState, EventConsumer, ExpirationConfig,
+    InvoiceExpirationService, RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
+};
 use data_service::PgDataService;
 use evm::monitor::bridge::{RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
 
@@ -56,13 +59,26 @@ async fn main() -> Result<()> {
     );
 
     // Start background services
-    // 1. Event consumer - processes PaymentDetected/Confirmed events
+    // 1. Invoice expiration service - expires pending invoices
+    let expiration_service = Arc::new(InvoiceExpirationService::new(
+        Arc::clone(&data_service),
+        ExpirationConfig::default(),
+    ));
+    tokio::spawn(Arc::clone(&expiration_service).run());
+    tracing::info!("Invoice expiration service started");
+
+    // 2. Event consumer - processes PaymentDetected/Confirmed events
+    //    Also triggers expiration checks on block events
     let bridge_dyn: Arc<dyn evm::monitor::bridge::EventBridge> = bridge.clone();
-    let event_consumer = EventConsumer::new(bridge_dyn, Arc::clone(&data_service));
+    let event_consumer = EventConsumer::with_expiration_service(
+        bridge_dyn,
+        Arc::clone(&data_service),
+        expiration_service,
+    );
     tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
 
-    // 2. Watch retry service - retries failed WatchAddress commands
+    // 3. Watch retry service - retries failed WatchAddress commands
     let retry_service = WatchRetryService::new(
         Arc::clone(&data_service),
         Arc::clone(&evm_monitor),
