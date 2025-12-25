@@ -1,23 +1,11 @@
 //! Store webhook repository implementation.
 
-use chrono::{DateTime, Utc};
+use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{RepositoryResult, sqlx_to_repo_error};
+use crate::{RepositoryResult, StoreWebhook, StoreWebhookReader, StoreWebhookWriter, sqlx_to_repo_error};
 use super::PgDataService;
-
-/// Store webhook configuration for invoice notifications.
-#[derive(Debug, Clone)]
-pub struct StoreWebhook {
-    pub id: Uuid,
-    pub store_id: Uuid,
-    pub webhook_url: String,
-    pub webhook_secret: String,
-    pub enabled: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
 
 fn row_to_webhook(row: &sqlx::postgres::PgRow) -> StoreWebhook {
     StoreWebhook {
@@ -31,10 +19,9 @@ fn row_to_webhook(row: &sqlx::postgres::PgRow) -> StoreWebhook {
     }
 }
 
-impl PgDataService {
-    /// Get enabled webhook configuration for a store.
-    /// Returns None if webhook is not configured or is disabled.
-    pub async fn get_enabled_store_webhook(&self, store_id: Uuid) -> RepositoryResult<Option<StoreWebhook>> {
+#[async_trait]
+impl StoreWebhookReader for PgDataService {
+    async fn get_enabled_webhook(&self, store_id: Uuid) -> RepositoryResult<Option<StoreWebhook>> {
         let row = sqlx::query(
             "SELECT * FROM store_webhooks WHERE store_id = $1 AND enabled = true",
         )
@@ -45,9 +32,11 @@ impl PgDataService {
 
         Ok(row.as_ref().map(row_to_webhook))
     }
+}
 
-    /// Create or update webhook configuration for a store.
-    pub async fn upsert_store_webhook(
+#[async_trait]
+impl StoreWebhookWriter for PgDataService {
+    async fn upsert_webhook(
         &self,
         store_id: Uuid,
         webhook_url: &str,
@@ -77,8 +66,7 @@ impl PgDataService {
         Ok(row_to_webhook(&row))
     }
 
-    /// Delete webhook configuration for a store.
-    pub async fn delete_store_webhook(&self, store_id: Uuid) -> RepositoryResult<bool> {
+    async fn delete_webhook(&self, store_id: Uuid) -> RepositoryResult<bool> {
         let result = sqlx::query("DELETE FROM store_webhooks WHERE store_id = $1")
             .bind(store_id)
             .execute(&self.pool)

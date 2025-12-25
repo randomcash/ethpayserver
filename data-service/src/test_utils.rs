@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use types::{
     InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter,
-    Network, PaymentData, PaymentReader, PaymentWriter, RepositoryResult, StoreId, TokenData,
-    TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
+    Network, PaymentData, PaymentReader, PaymentWriter, PendingWatchInfo, RepositoryResult,
+    StoreId, TokenData, TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader,
+    WatchedAddressWriter,
 };
 use uuid::Uuid;
 
@@ -107,6 +108,17 @@ impl InvoiceWriter for InMemoryDataService {
         }
         Ok(())
     }
+
+    async fn expire(&self, id: &InvoiceId) -> RepositoryResult<bool> {
+        let mut invoices = self.invoices.write().unwrap();
+        if let Some(invoice) = invoices.get_mut(&id.0) {
+            if invoice.status == InvoiceStatus::Pending {
+                invoice.status = InvoiceStatus::Expired;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[async_trait]
@@ -129,9 +141,25 @@ impl PaymentReader for InMemoryDataService {
         let payments = self.payments.read().unwrap();
         Ok(payments
             .values()
-            .filter(|p| p.confirmations < min_confirmations)
+            .filter(|p| p.confirmations < min_confirmations && !p.reorged)
             .cloned()
             .collect())
+    }
+
+    async fn get_valid_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentData>> {
+        let payments = self.payments.read().unwrap();
+        Ok(payments
+            .values()
+            .filter(|p| p.invoice_id == *invoice_id && !p.reorged)
+            .cloned()
+            .collect())
+    }
+
+    async fn has_valid_payments(&self, invoice_id: &InvoiceId) -> RepositoryResult<bool> {
+        let payments = self.payments.read().unwrap();
+        Ok(payments
+            .values()
+            .any(|p| p.invoice_id == *invoice_id && !p.reorged))
     }
 }
 
@@ -158,6 +186,29 @@ impl PaymentWriter for InMemoryDataService {
         }
         Ok(())
     }
+
+    async fn mark_reorged(
+        &self,
+        invoice_id: &InvoiceId,
+        network: Network,
+        fork_block: u64,
+    ) -> RepositoryResult<u64> {
+        let mut payments = self.payments.write().unwrap();
+        let mut count = 0u64;
+        for payment in payments.values_mut() {
+            if payment.invoice_id == *invoice_id
+                && payment.network == network
+                && payment.block_number.is_some_and(|b| b >= fork_block)
+                && !payment.reorged
+            {
+                payment.reorged = true;
+                payment.confirmed_at = None;
+                payment.confirmations = 0;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
 }
 
 #[async_trait]
@@ -178,6 +229,20 @@ impl WatchedAddressReader for InMemoryDataService {
             .map(|((addr, network), id)| (addr.clone(), id.clone(), *network))
             .collect())
     }
+
+    async fn get_pending(&self) -> RepositoryResult<Vec<PendingWatchInfo>> {
+        let addresses = self.addresses.read().unwrap();
+        Ok(addresses
+            .iter()
+            .map(|((addr, network), id)| PendingWatchInfo {
+                address: addr.clone(),
+                invoice_id: id.as_str().to_string(),
+                network: *network,
+                expected_amount: None,
+                asset_id: None,
+            })
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -196,6 +261,24 @@ impl WatchedAddressWriter for InMemoryDataService {
     async fn remove(&self, address: &str, network: Network) -> RepositoryResult<()> {
         let mut addresses = self.addresses.write().unwrap();
         addresses.remove(&(address.to_string(), network));
+        Ok(())
+    }
+
+    async fn upsert_with_asset(
+        &self,
+        address: &str,
+        invoice_id: &InvoiceId,
+        network: Network,
+        _asset_id: Option<&str>,
+    ) -> RepositoryResult<()> {
+        // Simplified: ignore asset_id for in-memory testing
+        let mut addresses = self.addresses.write().unwrap();
+        addresses.insert((address.to_string(), network), invoice_id.clone());
+        Ok(())
+    }
+
+    async fn mark_notified(&self, _address: &str, _network: Network) -> RepositoryResult<()> {
+        // No-op for in-memory testing
         Ok(())
     }
 }

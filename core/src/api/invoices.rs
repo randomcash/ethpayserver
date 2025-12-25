@@ -14,10 +14,11 @@ use uuid::Uuid;
 
 use auth::{AuthRepository, repository::UserStoreRepository};
 use evm::{Address, XpubDeriver, U256};
+use data_service::{StoreWalletReader, StoreWalletWriter};
 use types::{
     InvoiceId, InvoiceStatus, Network, StoreId,
     InvoiceReader, InvoiceWriter, InvoiceQueryParams,
-    TokenReader,
+    TokenReader, WatchedAddressWriter,
     traits::InvoiceData,
 };
 
@@ -238,9 +239,7 @@ where
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
     // Get store wallet - required for invoice creation
-    let wallet = state
-        .data_service
-        .get_store_wallet(req.store_id)
+    let wallet = StoreWalletReader::get_wallet(&*state.data_service, req.store_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or_else(|| {
@@ -249,9 +248,7 @@ where
         })?;
 
     // Get and increment derivation index
-    let index = state
-        .data_service
-        .get_next_derivation_index(req.store_id)
+    let index = StoreWalletWriter::next_derivation_index(&*state.data_service, req.store_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -296,9 +293,8 @@ where
 
     // Save watched address to database (required for payment detection & retry mechanism)
     let token_address_str = token_contract.map(|a| a.to_string());
-    state
-        .data_service
-        .upsert_watch(
+    WatchedAddressWriter::upsert_with_asset(
+            &*state.data_service,
             &payment_address,
             &invoice.id,
             network,
@@ -332,10 +328,11 @@ where
         {
             Ok(()) => {
                 // Mark as notified in database
-                if let Err(e) = state
-                    .data_service
-                    .mark_watch_notified(&payment_address, network)
-                    .await
+                if let Err(e) = WatchedAddressWriter::mark_notified(
+                    &*state.data_service,
+                    &payment_address,
+                    network,
+                ).await
                 {
                     tracing::warn!(
                         address = %payment_address,

@@ -97,6 +97,44 @@ impl PaymentReader for PgDataService {
 
         payments
     }
+
+    async fn get_valid_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentData>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, invoice_id, network::text, asset_type::text,
+                amount_value::text, asset_symbol, tx_hash, block_number,
+                confirmations, detected_at, confirmed_at, from_address,
+                reorged, extra
+            FROM payments
+            WHERE invoice_id = $1 AND reorged = FALSE
+            ORDER BY detected_at DESC
+            "#,
+        )
+        .bind(invoice_id.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        rows.iter().map(try_row_to_payment).collect()
+    }
+
+    async fn has_valid_payments(&self, invoice_id: &InvoiceId) -> RepositoryResult<bool> {
+        let row = sqlx::query(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM payments
+                WHERE invoice_id = $1 AND reorged = FALSE
+            ) as has_payments
+            "#,
+        )
+        .bind(invoice_id.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(row.get("has_payments"))
+    }
 }
 
 #[async_trait]
@@ -183,49 +221,8 @@ impl PaymentWriter for PgDataService {
 
         Ok(())
     }
-}
 
-impl PgDataService {
-    /// Get valid (non-reorged) payments for an invoice.
-    ///
-    /// Use this method when you only care about valid payments.
-    /// The standard `get_for_invoice` returns all payments including reorged ones.
-    pub async fn get_valid_payments_for_invoice(
-        &self,
-        invoice_id: &InvoiceId,
-    ) -> RepositoryResult<Vec<PaymentData>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                id, invoice_id, network::text, asset_type::text,
-                amount_value::text, asset_symbol, tx_hash, block_number,
-                confirmations, detected_at, confirmed_at, from_address,
-                reorged, extra
-            FROM payments
-            WHERE invoice_id = $1 AND reorged = FALSE
-            ORDER BY detected_at DESC
-            "#,
-        )
-        .bind(invoice_id.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
-        let payments: Result<Vec<PaymentData>, _> = rows.iter().map(try_row_to_payment).collect();
-
-        payments
-    }
-
-    /// Mark payments as reorged for a specific invoice, network, and fork block.
-    ///
-    /// Only marks payments where:
-    /// - invoice_id matches
-    /// - network matches (from chain_id)
-    /// - block_number >= fork_block (affected by the reorg)
-    /// - not already reorged
-    ///
-    /// Returns the number of payments marked as reorged.
-    pub async fn mark_payments_reorged(
+    async fn mark_reorged(
         &self,
         invoice_id: &InvoiceId,
         network: types::Network,
@@ -249,24 +246,6 @@ impl PgDataService {
         .map_err(sqlx_to_repo_error)?;
 
         Ok(result.rows_affected())
-    }
-
-    /// Check if an invoice has any valid (non-reorged) payments.
-    pub async fn has_valid_payments(&self, invoice_id: &InvoiceId) -> RepositoryResult<bool> {
-        let row = sqlx::query(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 FROM payments
-                WHERE invoice_id = $1 AND reorged = FALSE
-            ) as has_payments
-            "#,
-        )
-        .bind(invoice_id.as_str())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
-        Ok(row.get("has_payments"))
     }
 }
 
@@ -307,9 +286,11 @@ fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentDa
 // Payment Events
 // =============================================================================
 
-impl PgDataService {
-    /// Create a payment event for audit logging.
-    pub async fn create_payment_event(
+use crate::PaymentEventWriter;
+
+#[async_trait]
+impl PaymentEventWriter for PgDataService {
+    async fn create_event(
         &self,
         invoice_id: &InvoiceId,
         payment_id: Option<Uuid>,

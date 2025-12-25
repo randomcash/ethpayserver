@@ -4,11 +4,14 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
+use futures::stream::BoxStream;
+use futures::StreamExt;
+
 use crate::{
-    InvoiceQueryParams, InvoiceReader, InvoiceWriter, RepositoryError, RepositoryResult,
-    sqlx_to_repo_error,
+    ExpiredInvoiceStreamer, InvoiceQueryParams, InvoiceReader, InvoiceWriter, RepositoryError,
+    RepositoryResult, sqlx_to_repo_error,
 };
-use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
+use types::{InvoiceData, InvoiceId, InvoiceStatus, Network, StoreId};
 
 use super::conversions::{status_to_db, try_db_to_network, try_db_to_status, try_network_to_db};
 use super::PgDataService;
@@ -244,85 +247,8 @@ impl InvoiceWriter for PgDataService {
 
         Ok(())
     }
-}
 
-impl PgDataService {
-    /// Stream expired pending invoice IDs for a specific network.
-    ///
-    /// Only returns invoices where:
-    /// - status = 'pending' (no payments detected)
-    /// - network matches
-    /// - expires_at < NOW()
-    ///
-    /// Returns a stream of invoice IDs for minimal memory usage.
-    pub fn stream_expired_pending_invoices(
-        &self,
-        network: types::Network,
-    ) -> impl futures::Stream<Item = Result<InvoiceId, RepositoryError>> + '_ {
-        use futures::StreamExt;
-
-        let network_str = match try_network_to_db(network) {
-            Ok(s) => s,
-            Err(e) => return futures::stream::once(async move { Err(e) }).left_stream(),
-        };
-
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT id
-            FROM invoices
-            WHERE status = 'pending'
-              AND network = $1::network
-              AND expires_at < NOW()
-            "#,
-        )
-        .bind(network_str)
-        .fetch(&self.pool)
-        .map(|result| {
-            result
-                .map(InvoiceId::from_string)
-                .map_err(sqlx_to_repo_error)
-        })
-        .right_stream()
-    }
-
-    /// Stream all expired pending invoice IDs across all networks.
-    ///
-    /// Only returns invoices where:
-    /// - status = 'pending' (no payments detected)
-    /// - expires_at < NOW()
-    ///
-    /// Returns a stream of (network, invoice_id) for minimal memory usage.
-    pub fn stream_all_expired_pending_invoices(
-        &self,
-    ) -> impl futures::Stream<Item = Result<(types::Network, InvoiceId), RepositoryError>> + '_ {
-        use futures::StreamExt;
-
-        sqlx::query(
-            r#"
-            SELECT id, network::text
-            FROM invoices
-            WHERE status = 'pending'
-              AND expires_at < NOW()
-            "#,
-        )
-        .fetch(&self.pool)
-        .map(|result| {
-            result
-                .map_err(sqlx_to_repo_error)
-                .and_then(|row| {
-                    let id: String = row.get("id");
-                    let network_str: String = row.get("network");
-                    let network = try_db_to_network(&network_str)?;
-                    Ok((network, InvoiceId::from_string(id)))
-                })
-        })
-    }
-
-    /// Expire a single invoice by ID.
-    ///
-    /// Updates status to 'expired'. Returns true if the invoice was expired,
-    /// false if it was already in a different status.
-    pub async fn expire_invoice(&self, id: &InvoiceId) -> RepositoryResult<bool> {
+    async fn expire(&self, id: &InvoiceId) -> RepositoryResult<bool> {
         let result = sqlx::query(
             r#"
             UPDATE invoices
@@ -336,6 +262,59 @@ impl PgDataService {
         .map_err(sqlx_to_repo_error)?;
 
         Ok(result.rows_affected() > 0)
+    }
+}
+
+impl ExpiredInvoiceStreamer for PgDataService {
+    fn stream_expired_pending_for_network(
+        &self,
+        network: Network,
+    ) -> BoxStream<'_, RepositoryResult<InvoiceId>> {
+        let network_str = match try_network_to_db(network) {
+            Ok(s) => s,
+            Err(e) => return Box::pin(futures::stream::once(async move { Err(e) })),
+        };
+
+        Box::pin(
+            sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT id
+                FROM invoices
+                WHERE status = 'pending'
+                  AND network = $1::network
+                  AND expires_at < NOW()
+                "#,
+            )
+            .bind(network_str)
+            .fetch(&self.pool)
+            .map(|result| {
+                result
+                    .map(InvoiceId::from_string)
+                    .map_err(sqlx_to_repo_error)
+            }),
+        )
+    }
+
+    fn stream_all_expired_pending(&self) -> BoxStream<'_, RepositoryResult<(Network, InvoiceId)>> {
+        Box::pin(
+            sqlx::query(
+                r#"
+                SELECT id, network::text
+                FROM invoices
+                WHERE status = 'pending'
+                  AND expires_at < NOW()
+                "#,
+            )
+            .fetch(&self.pool)
+            .map(|result| {
+                result.map_err(sqlx_to_repo_error).and_then(|row| {
+                    let id: String = row.get("id");
+                    let network_str: String = row.get("network");
+                    let network = try_db_to_network(&network_str)?;
+                    Ok((network, InvoiceId::from_string(id)))
+                })
+            }),
+        )
     }
 }
 

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use data_service::PgDataService;
 use futures::StreamExt;
-use types::Network;
+use types::{ExpiredInvoiceStreamer, InvoiceWriter, Network};
 
 /// Configuration for the invoice expiration service.
 #[derive(Debug, Clone)]
@@ -54,12 +54,12 @@ impl InvoiceExpirationService {
         tracing::debug!(?network, "Checking expired invoices for network");
 
         let mut expired_count = 0u64;
-        let mut stream = pin!(self.data_service.stream_expired_pending_invoices(network));
+        let mut stream = pin!(self.data_service.stream_expired_pending_for_network(network));
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(invoice_id) => {
-                    match self.data_service.expire_invoice(&invoice_id).await {
+                    match InvoiceWriter::expire(&*self.data_service, &invoice_id).await {
                         Ok(true) => {
                             expired_count += 1;
                             tracing::debug!(
@@ -109,12 +109,12 @@ impl InvoiceExpirationService {
         tracing::debug!("Checking expired invoices for all networks");
 
         let mut expired_count = 0u64;
-        let mut stream = pin!(self.data_service.stream_all_expired_pending_invoices());
+        let mut stream = pin!(self.data_service.stream_all_expired_pending());
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok((network, invoice_id)) => {
-                    match self.data_service.expire_invoice(&invoice_id).await {
+                    match InvoiceWriter::expire(&*self.data_service, &invoice_id).await {
                         Ok(true) => {
                             expired_count += 1;
                             tracing::debug!(

@@ -9,6 +9,7 @@ use std::time::Duration;
 use data_service::PgDataService;
 use evm::{network_to_chain_id, Address, U256};
 use tokio::time::interval;
+use types::{WatchedAddressReader, WatchedAddressWriter};
 use uuid::Uuid;
 
 use crate::services::EVMMonitor;
@@ -79,7 +80,7 @@ impl WatchRetryService {
 
     /// Retry all pending watched addresses.
     async fn retry_pending_watches(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let pending = self.data_service.get_pending_watches().await?;
+        let pending = WatchedAddressReader::get_pending(&*self.data_service).await?;
 
         if pending.is_empty() {
             return Ok(());
@@ -132,9 +133,9 @@ impl WatchRetryService {
                 .as_ref()
                 .and_then(|s| s.parse::<U256>().ok());
 
-            // Parse token contract if present
+            // Parse token contract if present (asset_id is token address for ERC20)
             let token_contract: Option<Address> = watch
-                .token_address
+                .asset_id
                 .as_ref()
                 .and_then(|s| s.parse().ok());
 
@@ -146,11 +147,11 @@ impl WatchRetryService {
             {
                 Ok(()) => {
                     // Mark as notified
-                    if let Err(e) = self
-                        .data_service
-                        .mark_watch_notified(&watch.address, watch.network)
-                        .await
-                    {
+                    if let Err(e) = WatchedAddressWriter::mark_notified(
+                        &*self.data_service,
+                        &watch.address,
+                        watch.network,
+                    ).await {
                         tracing::error!(
                             address = %watch.address,
                             error = %e,

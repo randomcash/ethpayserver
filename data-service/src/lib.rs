@@ -21,7 +21,7 @@
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
-pub use postgres::{PgDataService, PendingWatch, StoreWallet, StoreWebhook};
+pub use postgres::{PgDataService, PendingWatch};
 
 #[cfg(feature = "redis")]
 pub mod redis;
@@ -36,14 +36,22 @@ pub mod test_utils;
 pub use types::{
     // Combined traits
     DataService, DataServiceReader, DataServiceWriter,
+    // Expired Invoice Streaming
+    ExpiredInvoiceStreamer,
     // Invoice
     InvoiceQueryParams, InvoiceReader, InvoiceRepository, InvoiceWriter,
     // Payment
     PaymentQueryParams, PaymentReader, PaymentRepository, PaymentWriter,
+    // Payment Event
+    PaymentEventWriter,
+    // Store Wallet
+    StoreWallet, StoreWalletReader, StoreWalletRepository, StoreWalletWriter,
+    // Store Webhook
+    StoreWebhook, StoreWebhookReader, StoreWebhookRepository, StoreWebhookWriter,
     // Token
     TokenData, TokenQueryParams, TokenReader, TokenRepository, TokenWriter,
     // Watched Address
-    WatchedAddressReader, WatchedAddressRepository, WatchedAddressWriter,
+    PendingWatchInfo, WatchedAddressReader, WatchedAddressRepository, WatchedAddressWriter,
     // Errors
     RepositoryError, RepositoryResult,
 };

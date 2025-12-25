@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use data_service::PgDataService;
+use data_service::{PaymentEventWriter, PgDataService};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -427,7 +427,8 @@ impl WebhookService {
 
         let invoice_id = types::InvoiceId::from_string(job.payload.invoice_id.clone());
 
-        if let Err(e) = self.data_service.create_payment_event(
+        if let Err(e) = PaymentEventWriter::create_event(
+            &*self.data_service,
             &invoice_id,
             None,
             event_type,

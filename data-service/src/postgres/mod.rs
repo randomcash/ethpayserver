@@ -11,8 +11,6 @@ mod store_webhook;
 mod token;
 mod watched_address;
 
-pub use store_wallet::StoreWallet;
-pub use store_webhook::StoreWebhook;
 pub use watched_address::PendingWatch;
 
 #[cfg(test)]

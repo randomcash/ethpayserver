@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::Row;
 
-use crate::{RepositoryError, RepositoryResult, WatchedAddressReader, WatchedAddressWriter, sqlx_to_repo_error};
+use crate::{PendingWatchInfo, RepositoryError, RepositoryResult, WatchedAddressReader, WatchedAddressWriter, sqlx_to_repo_error};
 use types::{InvoiceId, Network};
 
 use super::conversions::{try_db_to_network, try_network_to_db};
@@ -51,6 +51,42 @@ impl WatchedAddressReader for PgDataService {
             let invoice_id = InvoiceId::from_string(r.get("invoice_id"));
             let network = try_db_to_network(r.get("network"))?;
             result.push((address, invoice_id, network));
+        }
+        Ok(result)
+    }
+
+    async fn get_pending(&self) -> RepositoryResult<Vec<PendingWatchInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                wa.address,
+                wa.invoice_id,
+                wa.network::text,
+                wa.token_address,
+                i.amount_value::text as expected_amount
+            FROM watched_addresses wa
+            JOIN invoices i ON wa.invoice_id = i.id
+            WHERE wa.is_active = TRUE
+              AND wa.monitor_notified = FALSE
+              AND wa.expires_at > NOW()
+            ORDER BY wa.created_at ASC
+            LIMIT 100
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let network = try_db_to_network(r.get("network"))?;
+            result.push(PendingWatchInfo {
+                address: r.get("address"),
+                invoice_id: r.get("invoice_id"),
+                network,
+                expected_amount: r.get("expected_amount"),
+                asset_id: r.get("token_address"),
+            });
         }
         Ok(result)
     }
@@ -137,49 +173,12 @@ impl WatchedAddressWriter for PgDataService {
         Ok(())
     }
 
-    async fn remove(&self, address: &str, network: Network) -> RepositoryResult<()> {
-        let result = sqlx::query(
-            r#"
-            UPDATE watched_addresses
-            SET is_active = FALSE
-            WHERE address = $1 AND network = $2::network
-            "#,
-        )
-        .bind(address)
-        .bind(try_network_to_db(network)?)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
-        if result.rows_affected() == 0 {
-            return Err(RepositoryError::NotFound(format!(
-                "Watched address not found: {} on {:?}",
-                address, network
-            )));
-        }
-
-        Ok(())
-    }
-}
-
-/// Data for a watched address pending monitor notification.
-#[derive(Debug, Clone)]
-pub struct PendingWatch {
-    pub address: String,
-    pub invoice_id: String,
-    pub network: Network,
-    pub expected_amount: Option<String>,
-    pub token_address: Option<String>,
-}
-
-impl PgDataService {
-    /// Upsert a watched address with optional token contract (for ERC20).
-    pub async fn upsert_watch(
+    async fn upsert_with_asset(
         &self,
         address: &str,
         invoice_id: &InvoiceId,
         network: Network,
-        token_address: Option<&str>,
+        asset_id: Option<&str>,
     ) -> RepositoryResult<()> {
         let invoice_row = sqlx::query("SELECT expires_at FROM invoices WHERE id = $1")
             .bind(invoice_id.as_str())
@@ -194,7 +193,7 @@ impl PgDataService {
         let network_db = try_network_to_db(network)?;
 
         // PostgreSQL unique constraints don't match NULLs, so we need separate queries
-        if let Some(token) = token_address {
+        if let Some(token) = asset_id {
             sqlx::query(
                 r#"
                 INSERT INTO watched_addresses (address, invoice_id, network, asset_type, token_address, is_active, expires_at, monitor_notified)
@@ -232,47 +231,31 @@ impl PgDataService {
         Ok(())
     }
 
-    /// Get watched addresses that haven't been notified to evmmonitor yet.
-    ///
-    /// Returns active, non-expired addresses where monitor_notified = FALSE.
-    pub async fn get_pending_watches(&self) -> RepositoryResult<Vec<PendingWatch>> {
-        let rows = sqlx::query(
+    async fn remove(&self, address: &str, network: Network) -> RepositoryResult<()> {
+        let result = sqlx::query(
             r#"
-            SELECT
-                wa.address,
-                wa.invoice_id,
-                wa.network::text,
-                wa.token_address,
-                i.amount_value::text as expected_amount
-            FROM watched_addresses wa
-            JOIN invoices i ON wa.invoice_id = i.id
-            WHERE wa.is_active = TRUE
-              AND wa.monitor_notified = FALSE
-              AND wa.expires_at > NOW()
-            ORDER BY wa.created_at ASC
-            LIMIT 100
+            UPDATE watched_addresses
+            SET is_active = FALSE
+            WHERE address = $1 AND network = $2::network
             "#,
         )
-        .fetch_all(&self.pool)
+        .bind(address)
+        .bind(try_network_to_db(network)?)
+        .execute(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;
 
-        let mut result = Vec::with_capacity(rows.len());
-        for r in &rows {
-            let network = try_db_to_network(r.get("network"))?;
-            result.push(PendingWatch {
-                address: r.get("address"),
-                invoice_id: r.get("invoice_id"),
-                network,
-                expected_amount: r.get("expected_amount"),
-                token_address: r.get("token_address"),
-            });
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::NotFound(format!(
+                "Watched address not found: {} on {:?}",
+                address, network
+            )));
         }
-        Ok(result)
+
+        Ok(())
     }
 
-    /// Mark a watched address as notified to evmmonitor.
-    pub async fn mark_watch_notified(&self, address: &str, network: Network) -> RepositoryResult<()> {
+    async fn mark_notified(&self, address: &str, network: Network) -> RepositoryResult<()> {
         let network_db = try_network_to_db(network)?;
 
         sqlx::query(
@@ -291,3 +274,7 @@ impl PgDataService {
         Ok(())
     }
 }
+
+/// Legacy type alias for backwards compatibility.
+/// Use `PendingWatchInfo` from the types crate instead.
+pub type PendingWatch = PendingWatchInfo;

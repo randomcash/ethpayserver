@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use data_service::PgDataService;
+use data_service::{PgDataService, StoreWebhookReader};
 use evm::chain_id_to_network;
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::{MonitorEvent, PaymentConfirmed, PaymentDetected, ReorgDetected};
@@ -13,7 +13,7 @@ use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
 use types::{
     AssetType, InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter,
-    PaymentData, PaymentWriter, TokenReader,
+    PaymentData, PaymentReader, PaymentWriter, TokenReader,
 };
 use uuid::Uuid;
 
@@ -214,7 +214,7 @@ impl EventConsumer {
         let tx_hash = format!("{:#x}", event.tx_hash);
 
         // Find the payment by invoice_id + tx_hash (only non-reorged payments)
-        let payments = self.data_service.get_valid_payments_for_invoice(&invoice_id).await?;
+        let payments = PaymentReader::get_valid_for_invoice(&*self.data_service, &invoice_id).await?;
         let payment = match payments.iter().find(|p| p.tx_hash == tx_hash) {
             Some(p) => p,
             None => {
@@ -338,10 +338,10 @@ impl EventConsumer {
         };
 
         // Look up webhook config for the store
-        let webhook_config = match self.data_service
-            .get_enabled_store_webhook(invoice.store_id.0)
-            .await
-        {
+        let webhook_config = match StoreWebhookReader::get_enabled_webhook(
+            &*self.data_service,
+            invoice.store_id.0,
+        ).await {
             Ok(Some(config)) => config,
             Ok(None) => {
                 tracing::trace!(
@@ -421,7 +421,7 @@ impl EventConsumer {
 
             // Mark payments from this chain at or after the fork block as reorged
             let reorged_count = self.data_service
-                .mark_payments_reorged(&invoice_id, network, event.fork_block)
+                .mark_reorged(&invoice_id, network, event.fork_block)
                 .await?;
 
             if reorged_count == 0 {
@@ -441,7 +441,7 @@ impl EventConsumer {
             );
 
             // Determine new invoice status based on remaining valid payments
-            let has_valid = self.data_service.has_valid_payments(&invoice_id).await?;
+            let has_valid = PaymentReader::has_valid_payments(&*self.data_service, &invoice_id).await?;
             let new_status = if has_valid {
                 InvoiceStatus::Processing
             } else {

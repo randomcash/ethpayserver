@@ -16,6 +16,7 @@ use auth::{
     AuthRepository, Store, StoreId, UserStore, UserId,
     repository::{StoreRepository, StoreRoleRepository, UserStoreRepository},
 };
+use data_service::{StoreWalletReader, StoreWalletWriter};
 use evm::validate_xpub;
 
 use crate::state::AppState;
@@ -655,9 +656,7 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let wallet = state
-        .data_service
-        .get_store_wallet(store_id)
+    let wallet = StoreWalletReader::get_wallet(&*state.data_service, store_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -729,9 +728,12 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let wallet = state
-        .data_service
-        .upsert_store_wallet(store_id, &req.xpub, req.name.as_deref())
+    let wallet = StoreWalletWriter::upsert_wallet(
+        &*state.data_service,
+        store_id,
+        &req.xpub,
+        req.name.as_deref(),
+    )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -784,9 +786,7 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    state
-        .data_service
-        .delete_store_wallet(store_id)
+    StoreWalletWriter::delete_wallet(&*state.data_service, store_id)
         .await
         .map_err(|e| match e {
             data_service::RepositoryError::NotFound(_) => StatusCode::NOT_FOUND,
