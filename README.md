@@ -84,7 +84,7 @@ cargo build --release
 cargo test
 
 # Start the API server
-cargo run --release -p core
+cargo run --release -p server
 ```
 
 ### Running the Monitor
@@ -141,7 +141,11 @@ docker run -p 5001:5001 -p 5002:5002 \
 
 ```
 ethpayserver/
-├── core/              # Main API server binary
+├── server/            # Main API server binary
+│   └── src/
+│       ├── api/              # REST API endpoints
+│       ├── services/         # Background services (event consumer, webhooks, cleanup)
+│       └── config.rs         # Configuration management
 ├── data-service/      # PostgreSQL data access layer
 ├── evm/               # EVM blockchain interaction + monitor binary
 │   └── src/
@@ -159,7 +163,7 @@ ethpayserver/
 
 | Crate | Binary | Description |
 |-------|--------|-------------|
-| core | `ethpayserver` | Main API server: REST API, Swagger UI |
+| server | `ethpayserver` | Main API server: REST API, Swagger UI, background services |
 | evm | `evmmonitor` | Chain monitor: watches blocks, publishes events to Redis |
 | data-service | - | PostgreSQL repository implementations |
 
@@ -175,9 +179,9 @@ Shared libraries from [payserver-commons](https://gitlab.com/random.cash/payserv
 
 ## Development Status
 
-**Current Phase:** Payment Monitoring
+**Current Phase:** Payment Flow Integration Complete
 
-This project is in active development. See the [project overview](./memos/project-overview.md) for detailed technical specifications and roadmap.
+This project is in active development. See the [implementation status](../docs/src/development/implementation-status.md) for detailed technical specifications and roadmap.
 
 ### What's Implemented
 
@@ -185,7 +189,7 @@ This project is in active development. See the [project overview](./memos/projec
 - [x] Workspace structure with modular crates
 - [x] PostgreSQL database with migrations
 - [x] Repository pattern (Reader/Writer traits)
-- [x] Unified API server (`core` crate)
+- [x] Unified API server (`server` crate)
 - [x] Health check endpoints
 - [x] Swagger UI / OpenAPI documentation
 - [x] Shared libraries extracted to `payserver-commons`
@@ -201,6 +205,7 @@ This project is in active development. See the [project overview](./memos/projec
 #### EVM Support (`evm` crate)
 - [x] 10 EVM networks configured (Ethereum, Polygon, Arbitrum, etc.)
 - [x] HD wallet derivation (BIP-32/44)
+- [x] XpubDeriver for address derivation from extended public key
 - [x] RPC provider abstraction (Alloy)
 - [x] Token management API (CRUD + enable/disable)
 - [x] Admin authentication on API endpoints
@@ -215,31 +220,41 @@ This project is in active development. See the [project overview](./memos/projec
 - [x] Native ETH and ERC20 transfer detection
 - [x] Confirmation tracking
 - [x] Reorg detection
+- [x] Bidirectional commands (WatchAddress, UnwatchAddress, GetStatus)
+
+#### Payment Flow (`server` crate services)
+- [x] Event consumer - processes PaymentDetected/Confirmed events from Redis
+- [x] Invoice status updates from monitor events (pending → processing → paid)
+- [x] Invoice creation with payment address derivation
+- [x] Store wallet configuration (xpub-based address derivation)
+- [x] Invoice expiration service (background task)
+- [x] Invoice cleanup service (unwatches expired/paid/cancelled addresses)
+- [x] Webhook notifications with HMAC-SHA256 signatures
+- [x] Webhook retry with exponential backoff
+- [x] Watch retry service for failed WatchAddress commands
 
 #### Database Schema
 - [x] Users, sessions, devices, credentials
 - [x] Stores, store_roles, user_stores
+- [x] Store wallets (xpub, derivation_index)
+- [x] Store webhooks (webhook_url, webhook_secret)
 - [x] Invoices, payments, watched_addresses
-- [x] Tokens table
+- [x] Tokens table with common ERC20s seeded
+- [x] Payment events table (audit logging)
 
 ### What's Remaining
 
-#### Payment Processing
-- [ ] API server event subscription (consume Redis events)
-- [ ] Invoice status updates from monitor events
-- [ ] Gas estimator (EIP-1559 dynamic pricing)
-
 #### API & Integration
 - [ ] gRPC API for gateway integration
-- [ ] Invoice creation workflow
-- [ ] Webhook notifications
 - [ ] Exchange rate feeds
+- [ ] Payment status WebSocket endpoint
 
 #### Production Readiness
 - [ ] Prometheus metrics
 - [ ] Health checks per chain
 - [ ] Load testing
 - [ ] Security audit
+- [ ] Gas estimator (EIP-1559 dynamic pricing)
 
 ## Documentation
 

@@ -37,6 +37,25 @@ impl Default for CleanupConfig {
     }
 }
 
+impl CleanupConfig {
+    /// Load configuration from environment variables.
+    ///
+    /// - `CLEANUP_FALLBACK_INTERVAL_SECS` - Fallback check interval (default: 60)
+    /// - `CLEANUP_UNWATCH_GRACE_PERIOD_SECS` - Grace period before unwatching (default: 60)
+    pub fn from_env() -> Self {
+        Self {
+            fallback_interval_secs: std::env::var("CLEANUP_FALLBACK_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            unwatch_grace_period_secs: std::env::var("CLEANUP_UNWATCH_GRACE_PERIOD_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+        }
+    }
+}
+
 /// Service that handles invoice cleanup tasks.
 ///
 /// This service:

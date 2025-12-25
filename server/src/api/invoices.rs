@@ -186,8 +186,10 @@ where
         params = params.with_offset(offset);
     }
 
-    // TODO: Add store_id filter to params when implemented
-    // params = params.with_store_id(store_id);
+    // Add store_id filter if provided (nil means admin querying all)
+    if store_id != uuid::Uuid::nil() {
+        params = params.with_store_id(StoreId(store_id));
+    }
 
     let (total, invoices) = InvoiceReader::query(&*state.data_service, &params)
         .await
@@ -390,9 +392,18 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // TODO: Check user has access to the invoice's store when store_id is on invoice
-    // For now, allow any authenticated user (will be fixed when invoices have store_id)
-    let _ = user;
+    // Check user has access to the invoice's store (unless admin)
+    if user.role != auth::Role::ServerAdmin {
+        let is_member = state.data_service
+            .get_user_store(user.id, invoice.store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_some();
+
+        if !is_member {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
 
     Ok(Json(invoice.into()))
 }
@@ -431,9 +442,17 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // TODO: Check user has canmodifyinvoice permission on the invoice's store
-    // For now, allow any authenticated user (will be fixed when invoices have store_id)
-    let _ = user;
+    // Check user has canmodifyinvoice permission on the invoice's store (unless admin)
+    if user.role != auth::Role::ServerAdmin {
+        let has_permission = state.data_service
+            .user_has_store_permission(user.id, invoice.store_id, "ethpay.store.canmodifyinvoice")
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if !has_permission {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
 
     // Can only cancel pending invoices
     if invoice.status != InvoiceStatus::Pending {

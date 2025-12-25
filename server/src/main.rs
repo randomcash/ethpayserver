@@ -49,8 +49,13 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("REDIS_URL is required for event processing"))?;
 
     tracing::info!("Connecting to Redis...");
+    let events_channel = std::env::var("REDIS_EVENTS_CHANNEL")
+        .unwrap_or_else(|_| EVENTS_CHANNEL.to_string());
+    let commands_channel = std::env::var("REDIS_COMMANDS_CHANNEL")
+        .unwrap_or_else(|_| COMMANDS_CHANNEL.to_string());
+    tracing::debug!(events_channel, commands_channel, "Redis channels configured");
     let bridge = Arc::new(
-        RedisBridge::new(redis_url, EVENTS_CHANNEL, COMMANDS_CHANNEL).await?
+        RedisBridge::new(redis_url, &events_channel, &commands_channel).await?
     );
     tracing::info!("Redis connected");
 
@@ -59,20 +64,24 @@ async fn main() -> Result<()> {
 
     // Start background services
     // 1. Invoice cleanup service - expires invoices and unwatches addresses
+    let cleanup_config = CleanupConfig::from_env();
+    tracing::debug!(?cleanup_config, "Cleanup config loaded");
     let cleanup_service = Arc::new(InvoiceCleanupService::new(
         Arc::clone(&data_service),
         Arc::clone(&evm_monitor),
-        CleanupConfig::default(),
+        cleanup_config,
     ));
     tokio::spawn(Arc::clone(&cleanup_service).run());
     tracing::info!("Invoice cleanup service started");
 
     // 2. Webhook delivery service - sends webhook notifications
+    let webhook_config = WebhookConfig::from_env();
+    tracing::debug!(?webhook_config, "Webhook config loaded");
     let webhook_service = Arc::new(
         WebhookService::new(
             Arc::clone(&data_service),
             redis_url,
-            WebhookConfig::default(),
+            webhook_config,
         )?
     );
     tokio::spawn(Arc::clone(&webhook_service).run());
@@ -92,13 +101,19 @@ async fn main() -> Result<()> {
 
     // 4. Watch retry service - retries failed WatchAddress commands
     let evm_monitor_dyn: Arc<dyn server::EVMMonitor> = evm_monitor.clone();
-    let retry_service = WatchRetryService::new(
-        Arc::clone(&data_service),
-        evm_monitor_dyn.clone(),
-        WatchRetryConfig::default(),
-    );
-    tokio::spawn(retry_service.run());
-    tracing::info!("Watch retry service started");
+    let retry_config = WatchRetryConfig::from_env();
+    tracing::debug!(?retry_config, "Watch retry config loaded");
+    if retry_config.enabled {
+        let retry_service = WatchRetryService::new(
+            Arc::clone(&data_service),
+            evm_monitor_dyn.clone(),
+            retry_config,
+        );
+        tokio::spawn(retry_service.run());
+        tracing::info!("Watch retry service started");
+    } else {
+        tracing::info!("Watch retry service disabled");
+    }
 
     // Wrap in Option for AppState compatibility
     let evm_monitor: Option<Arc<dyn server::EVMMonitor>> = Some(evm_monitor_dyn);

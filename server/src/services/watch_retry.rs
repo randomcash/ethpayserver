@@ -32,6 +32,26 @@ impl Default for WatchRetryConfig {
     }
 }
 
+impl WatchRetryConfig {
+    /// Load configuration from environment variables.
+    ///
+    /// - `WATCH_RETRY_INTERVAL_SECS` - Retry interval in seconds (default: 30)
+    /// - `WATCH_RETRY_ENABLED` - Enable/disable retry service (default: true)
+    pub fn from_env() -> Self {
+        Self {
+            retry_interval: Duration::from_secs(
+                std::env::var("WATCH_RETRY_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(30),
+            ),
+            enabled: std::env::var("WATCH_RETRY_ENABLED")
+                .map(|v| v != "false" && v != "0")
+                .unwrap_or(true),
+        }
+    }
+}
+
 /// Background service that retries failed WatchAddress commands.
 pub struct WatchRetryService {
     data_service: Arc<PgDataService>,

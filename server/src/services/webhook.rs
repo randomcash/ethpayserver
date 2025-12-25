@@ -177,6 +177,32 @@ impl Default for WebhookConfig {
     }
 }
 
+impl WebhookConfig {
+    /// Load configuration from environment variables.
+    ///
+    /// - `WEBHOOK_QUEUE_KEY` - Redis queue key (default: "ethpayserver:webhooks")
+    /// - `WEBHOOK_REQUEST_TIMEOUT_SECS` - HTTP request timeout (default: 30)
+    /// - `WEBHOOK_POLL_INTERVAL_SECS` - Queue poll interval (default: 5)
+    pub fn from_env() -> Self {
+        Self {
+            queue_key: std::env::var("WEBHOOK_QUEUE_KEY")
+                .unwrap_or_else(|_| "ethpayserver:webhooks".to_string()),
+            request_timeout: Duration::from_secs(
+                std::env::var("WEBHOOK_REQUEST_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(30),
+            ),
+            poll_interval: Duration::from_secs(
+                std::env::var("WEBHOOK_POLL_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5),
+            ),
+        }
+    }
+}
+
 /// Webhook delivery service.
 ///
 /// This service:

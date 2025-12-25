@@ -1,4 +1,33 @@
 //! Server configuration.
+//!
+//! # Environment Variables
+//!
+//! ## Required
+//! - `DATABASE_URL` - PostgreSQL connection string
+//! - `REDIS_URL` - Redis connection URL for monitor communication
+//!
+//! ## Server
+//! - `HOST` - Server host (default: 127.0.0.1)
+//! - `PORT` - Server port (default: 3000)
+//! - `LOG_LEVEL` - Log level: trace, debug, info, warn, error (default: info)
+//! - `ENABLE_SWAGGER` - Enable Swagger UI at /swagger-ui (default: true)
+//!
+//! ## Redis Channels
+//! - `REDIS_EVENTS_CHANNEL` - Redis channel for events (default: evmmonitor:events)
+//! - `REDIS_COMMANDS_CHANNEL` - Redis channel for commands (default: evmmonitor:commands)
+//!
+//! ## Invoice Cleanup Service
+//! - `CLEANUP_FALLBACK_INTERVAL_SECS` - Fallback check interval (default: 60)
+//! - `CLEANUP_UNWATCH_GRACE_PERIOD_SECS` - Grace period before unwatching (default: 60)
+//!
+//! ## Webhook Service
+//! - `WEBHOOK_QUEUE_KEY` - Redis queue key (default: ethpayserver:webhooks)
+//! - `WEBHOOK_REQUEST_TIMEOUT_SECS` - HTTP request timeout (default: 30)
+//! - `WEBHOOK_POLL_INTERVAL_SECS` - Queue poll interval (default: 5)
+//!
+//! ## Watch Retry Service
+//! - `WATCH_RETRY_INTERVAL_SECS` - Retry interval in seconds (default: 30)
+//! - `WATCH_RETRY_ENABLED` - Enable/disable retry service (default: true)
 
 use std::env;
 
@@ -23,6 +52,9 @@ pub struct Config {
     /// Enable Swagger UI at /swagger-ui.
     pub enable_swagger: bool,
 }
+
+/// Valid log levels.
+const VALID_LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
 
 impl Config {
     /// Load configuration from environment variables.
@@ -54,14 +86,54 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(true);
 
-        Ok(Self {
+        let config = Self {
             database_url,
             redis_url,
             host,
             port,
             log_level,
             enable_swagger,
-        })
+        };
+
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate configuration values.
+    fn validate(&self) -> anyhow::Result<()> {
+        // Validate DATABASE_URL format
+        if !self.database_url.starts_with("postgres://")
+            && !self.database_url.starts_with("postgresql://")
+        {
+            anyhow::bail!(
+                "DATABASE_URL must start with 'postgres://' or 'postgresql://'"
+            );
+        }
+
+        // Validate REDIS_URL format (if provided)
+        if let Some(ref redis_url) = self.redis_url {
+            if !redis_url.starts_with("redis://") && !redis_url.starts_with("rediss://") {
+                anyhow::bail!(
+                    "REDIS_URL must start with 'redis://' or 'rediss://'"
+                );
+            }
+        }
+
+        // Validate LOG_LEVEL
+        let log_level_lower = self.log_level.to_lowercase();
+        if !VALID_LOG_LEVELS.contains(&log_level_lower.as_str()) {
+            anyhow::bail!(
+                "LOG_LEVEL must be one of: {}",
+                VALID_LOG_LEVELS.join(", ")
+            );
+        }
+
+        // Validate PORT range
+        if self.port == 0 {
+            anyhow::bail!("PORT must be between 1 and 65535");
+        }
+
+        Ok(())
     }
 
     /// Get the server bind address.

@@ -56,6 +56,27 @@ fn extract_session_id(parts: &Parts) -> Result<SessionId, (StatusCode, &'static 
     Ok(SessionId(uuid))
 }
 
+/// Validate session and return user info.
+///
+/// Common helper used by all authentication extractors.
+async fn validate_session<R>(
+    parts: &Parts,
+    state: &AppState<R>,
+) -> Result<UserInfo, (StatusCode, &'static str)>
+where
+    R: AuthRepository + Send + Sync + 'static,
+{
+    let session_id = extract_session_id(parts)?;
+
+    let (user_info, _session) = state
+        .auth_service
+        .validate_session(session_id)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
+
+    Ok(user_info)
+}
+
 impl<R> FromRequestParts<AppState<R>> for AuthenticatedUser
 where
     R: AuthRepository + Send + Sync + 'static,
@@ -66,14 +87,7 @@ where
         parts: &mut Parts,
         state: &AppState<R>,
     ) -> Result<Self, Self::Rejection> {
-        let session_id = extract_session_id(parts)?;
-
-        let (user_info, _session) = state
-            .auth_service
-            .validate_session(session_id)
-            .await
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
-
+        let user_info = validate_session(parts, state).await?;
         Ok(AuthenticatedUser(user_info))
     }
 }
@@ -88,13 +102,7 @@ where
         parts: &mut Parts,
         state: &AppState<R>,
     ) -> Result<Self, Self::Rejection> {
-        let session_id = extract_session_id(parts)?;
-
-        let (user_info, _session) = state
-            .auth_service
-            .validate_session(session_id)
-            .await
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
+        let user_info = validate_session(parts, state).await?;
 
         // Check for ServerAdmin role
         if user_info.role != Role::ServerAdmin {
