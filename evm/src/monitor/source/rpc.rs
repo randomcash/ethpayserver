@@ -5,7 +5,7 @@
 
 use super::{BlockNotification, BlockSource, BlockStream, LogFilter, SourceStatus};
 use crate::error::{EvmError, EvmResult};
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::{Block, BlockNumberOrTag, Filter, Log};
 use async_trait::async_trait;

@@ -32,6 +32,7 @@ pub struct AdminAuth(pub UserInfo);
 /// Extractor that validates any authenticated user.
 ///
 /// Similar to AdminAuth but doesn't require admin permissions.
+#[allow(dead_code)]
 pub struct AuthenticatedUser(pub UserInfo);
 
 /// Extract session ID from Authorization header.

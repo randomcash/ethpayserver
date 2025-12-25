@@ -24,11 +24,13 @@ pub type EventHandlerFn =
     Arc<dyn Fn(&MonitorEvent) -> Pin<Box<dyn Future<Output = EvmResult<()>> + Send>> + Send + Sync>;
 
 /// Wrapper to use a function as an EventHandler.
+#[allow(dead_code)]
 pub struct FnHandler {
     name: String,
     handler: EventHandlerFn,
 }
 
+#[allow(dead_code)]
 impl FnHandler {
     /// Create a new function handler.
     pub fn new(name: impl Into<String>, handler: EventHandlerFn) -> Self {
@@ -141,11 +143,13 @@ impl EventHandler for LoggingHandler {
 }
 
 /// Handler that filters events by chain ID.
+#[allow(dead_code)]
 pub struct ChainFilter<H: EventHandler> {
     chain_ids: Vec<u64>,
     inner: H,
 }
 
+#[allow(dead_code)]
 impl<H: EventHandler> ChainFilter<H> {
     pub fn new(chain_ids: Vec<u64>, inner: H) -> Self {
         Self { chain_ids, inner }
@@ -180,10 +184,12 @@ impl<H: EventHandler> EventHandler for ChainFilter<H> {
 }
 
 /// Handler that only processes payment events (not lifecycle events).
+#[allow(dead_code)]
 pub struct PaymentOnlyFilter<H: EventHandler> {
     inner: H,
 }
 
+#[allow(dead_code)]
 impl<H: EventHandler> PaymentOnlyFilter<H> {
     pub fn new(inner: H) -> Self {
         Self { inner }

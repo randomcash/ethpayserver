@@ -1704,41 +1704,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "auth",
- "axum",
- "chrono",
- "crypto",
- "data-service",
- "dotenvy",
- "evm",
- "futures",
- "hex",
- "hmac",
- "redis",
- "reqwest",
- "rust_decimal",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.17",
- "tokio",
- "tokio-stream",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "types",
- "utoipa",
- "utoipa-swagger-ui",
- "uuid",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4631,6 +4596,41 @@ checksum = "a84f14a19e9a014bb9f4512488d9829a68e04ecabffb0f9904cd1ace94598177"
 dependencies = [
  "base16ct",
  "serde",
+]
+
+[[package]]
+name = "server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "auth",
+ "axum",
+ "chrono",
+ "crypto",
+ "data-service",
+ "dotenvy",
+ "evm",
+ "futures",
+ "hex",
+ "hmac",
+ "redis",
+ "reqwest",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "types",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "uuid",
 ]
 
 [[package]]

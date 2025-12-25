@@ -51,6 +51,7 @@ pub struct MonitorCoordinator<S: BlockSource + 'static> {
 
 /// Handle to a running chain monitor.
 struct MonitorHandle<S: BlockSource + 'static> {
+    #[allow(dead_code)]
     chain_id: u64,
     chain_name: String,
     /// Reference to the actual monitor for command handling.

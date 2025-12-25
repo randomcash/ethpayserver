@@ -70,6 +70,7 @@ pub struct WatchedAddress {
 #[derive(Debug, Clone)]
 struct PendingPayment {
     event: PaymentDetected,
+    #[allow(dead_code)]
     last_check_block: u64,
 }
 

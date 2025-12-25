@@ -14,12 +14,12 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::AuthService;
-use core::{
+use data_service::PgDataService;
+use server::{
     api, config::Config, AppState, CleanupConfig, EventConsumer,
     InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
     WebhookConfig, WebhookService,
 };
-use data_service::PgDataService;
 use evm::monitor::bridge::{RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
 
 #[tokio::main]
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     tracing::info!("Event consumer started");
 
     // 4. Watch retry service - retries failed WatchAddress commands
-    let evm_monitor_dyn: Arc<dyn core::EVMMonitor> = evm_monitor.clone();
+    let evm_monitor_dyn: Arc<dyn server::EVMMonitor> = evm_monitor.clone();
     let retry_service = WatchRetryService::new(
         Arc::clone(&data_service),
         evm_monitor_dyn.clone(),
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
     tracing::info!("Watch retry service started");
 
     // Wrap in Option for AppState compatibility
-    let evm_monitor: Option<Arc<dyn core::EVMMonitor>> = Some(evm_monitor_dyn);
+    let evm_monitor: Option<Arc<dyn server::EVMMonitor>> = Some(evm_monitor_dyn);
 
     // Create application state
     let state = AppState::new(Arc::clone(&data_service), auth_service, evm_monitor);

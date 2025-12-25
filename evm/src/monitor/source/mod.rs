@@ -53,7 +53,7 @@ pub struct LogFilter {
 
 impl LogFilter {
     /// Create a filter for ERC20 Transfer events to specific addresses.
-    pub fn erc20_transfers_to(addresses: Vec<Address>) -> Self {
+    pub fn erc20_transfers_to(_addresses: Vec<Address>) -> Self {
         // Transfer(address indexed from, address indexed to, uint256 value)
         // topic0 = keccak256("Transfer(address,address,uint256)")
         let transfer_topic: B256 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
