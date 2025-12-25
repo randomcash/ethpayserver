@@ -176,13 +176,12 @@ CREATE TABLE payments (
 
     -- Transaction details
     tx_hash VARCHAR(66) NOT NULL,          -- 0x + 64 hex chars
-    block_number BIGINT,
-    confirmations INTEGER NOT NULL DEFAULT 0,
+    block_number BIGINT,                   -- Confirmations computed as: current_block - block_number + 1
     from_address VARCHAR(42),              -- Checksummed EVM address
 
     -- Timestamps
     detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    confirmed_at TIMESTAMPTZ,
+    confirmed_at TIMESTAMPTZ,              -- NULL = awaiting confirmation, set when threshold reached
 
     -- Reorg handling
     reorged BOOLEAN NOT NULL DEFAULT FALSE,
@@ -197,8 +196,8 @@ CREATE TABLE payments (
 CREATE INDEX idx_payments_invoice_id ON payments(invoice_id);
 CREATE INDEX idx_payments_tx_hash ON payments(tx_hash);
 CREATE INDEX idx_payments_network ON payments(network);
-CREATE INDEX idx_payments_confirmations ON payments(confirmations);
 CREATE INDEX idx_payments_detected_at ON payments(detected_at);
+CREATE INDEX idx_payments_awaiting_confirmation ON payments(confirmed_at) WHERE confirmed_at IS NULL AND reorged = FALSE;
 
 -- =============================================================================
 -- Watched addresses table (for payment monitoring)

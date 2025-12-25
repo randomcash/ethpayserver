@@ -176,7 +176,6 @@ impl EventConsumer {
             token_address,
             tx_hash: format!("{:#x}", event.tx_hash),
             block_number: Some(event.block_number),
-            confirmations: event.confirmations as u32,
             detected_at: event.detected_at,
             confirmed_at: None,
             from_address: Some(format!("{:#x}", event.from_address)),
@@ -190,7 +189,7 @@ impl EventConsumer {
             amount = %payment.amount,
             network = ?network,
             asset_type = ?asset_type,
-            confirmations = event.confirmations,
+            block_number = event.block_number,
             "Payment detected"
         );
 
@@ -228,18 +227,16 @@ impl EventConsumer {
             }
         };
 
-        // Update payment confirmations and confirmed_at
-        PaymentWriter::update_confirmations(
+        // Mark payment as confirmed
+        PaymentWriter::mark_confirmed(
             &*self.data_service,
             payment.id,
-            event.confirmations as u32,
-            Some(event.confirmed_at),
+            event.confirmed_at,
         ).await?;
 
         tracing::info!(
             invoice_id = %event.invoice_id,
             tx_hash = %tx_hash,
-            confirmations = event.confirmations,
             "Payment confirmed"
         );
 
@@ -374,9 +371,9 @@ impl EventConsumer {
             network: invoice.network.to_string(),
             payment: payment.map(|p| WebhookPaymentInfo {
                 tx_hash: p.tx_hash.clone(),
-                confirmations: p.confirmations,
                 from_address: p.from_address.clone(),
                 block_number: p.block_number,
+                confirmed: p.confirmed_at.is_some(),
             }),
         };
 

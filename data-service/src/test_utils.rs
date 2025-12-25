@@ -137,11 +137,11 @@ impl PaymentReader for InMemoryDataService {
             .collect())
     }
 
-    async fn get_unconfirmed(&self, min_confirmations: u32) -> RepositoryResult<Vec<PaymentData>> {
+    async fn get_awaiting_confirmation(&self) -> RepositoryResult<Vec<PaymentData>> {
         let payments = self.payments.read().unwrap();
         Ok(payments
             .values()
-            .filter(|p| p.confirmations < min_confirmations && !p.reorged)
+            .filter(|p| p.confirmed_at.is_none() && !p.reorged)
             .cloned()
             .collect())
     }
@@ -171,17 +171,11 @@ impl PaymentWriter for InMemoryDataService {
         Ok(())
     }
 
-    async fn update_confirmations(
-        &self,
-        id: Uuid,
-        confirmations: u32,
-        confirmed_at: Option<DateTime<Utc>>,
-    ) -> RepositoryResult<()> {
+    async fn mark_confirmed(&self, id: Uuid, confirmed_at: DateTime<Utc>) -> RepositoryResult<()> {
         let mut payments = self.payments.write().unwrap();
         if let Some(payment) = payments.get_mut(&id) {
-            payment.confirmations = confirmations;
-            if confirmed_at.is_some() {
-                payment.confirmed_at = confirmed_at;
+            if payment.confirmed_at.is_none() {
+                payment.confirmed_at = Some(confirmed_at);
             }
         }
         Ok(())
@@ -203,7 +197,6 @@ impl PaymentWriter for InMemoryDataService {
             {
                 payment.reorged = true;
                 payment.confirmed_at = None;
-                payment.confirmations = 0;
                 count += 1;
             }
         }
@@ -467,7 +460,6 @@ pub fn create_test_payment(invoice_id: &InvoiceId) -> PaymentData {
         token_address: None,
         tx_hash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
         block_number: Some(12345678),
-        confirmations: 0,
         detected_at: Utc::now(),
         confirmed_at: None,
         from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".to_string()),

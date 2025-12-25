@@ -50,7 +50,6 @@ pub(super) fn test_payment(invoice_id: &InvoiceId) -> PaymentData {
         token_address: None,
         tx_hash: format!("0x{:064x}", Uuid::new_v4().as_u128()),
         block_number: Some(12345678),
-        confirmations: 0,
         detected_at: Utc::now(),
         confirmed_at: None,
         from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".to_string()),

@@ -184,12 +184,11 @@ async fn integration_payment_crud() {
         .unwrap();
     assert_eq!(fetched.id, payment.id);
     assert_eq!(fetched.invoice_id, invoice.id);
-    assert_eq!(fetched.confirmations, 0);
     assert!(fetched.confirmed_at.is_none());
 
-    // Update confirmations
+    // Mark as confirmed
     let confirmed_at = Utc::now();
-    PaymentWriter::update_confirmations(&service, payment.id, 12, Some(confirmed_at))
+    PaymentWriter::mark_confirmed(&service, payment.id, confirmed_at)
         .await
         .unwrap();
 
@@ -197,7 +196,6 @@ async fn integration_payment_crud() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fetched.confirmations, 12);
     assert!(fetched.confirmed_at.is_some());
 }
 
@@ -226,30 +224,29 @@ async fn integration_payment_get_for_invoice() {
 
 #[tokio::test]
 #[ignore]
-async fn integration_payment_get_unconfirmed() {
+async fn integration_payment_get_awaiting_confirmation() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice
     let invoice = test_invoice();
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
-    // Create unconfirmed payment
-    let mut unconfirmed = test_payment(&invoice.id);
-    unconfirmed.confirmations = 2;
+    // Create unconfirmed payment (confirmed_at = None)
+    let unconfirmed = test_payment(&invoice.id);
     PaymentWriter::upsert(&service, &unconfirmed).await.unwrap();
 
-    // Create confirmed payment
+    // Create confirmed payment (confirmed_at = Some)
     let mut confirmed = test_payment(&invoice.id);
-    confirmed.confirmations = 15;
+    confirmed.confirmed_at = Some(Utc::now());
     PaymentWriter::upsert(&service, &confirmed).await.unwrap();
 
-    // Get unconfirmed (min 12 confirmations)
-    let unconfirmed_payments = PaymentReader::get_unconfirmed(&service, 12).await.unwrap();
+    // Get awaiting confirmation
+    let awaiting = PaymentReader::get_awaiting_confirmation(&service).await.unwrap();
 
     // Should include our unconfirmed payment
-    assert!(unconfirmed_payments.iter().any(|p| p.id == unconfirmed.id));
+    assert!(awaiting.iter().any(|p| p.id == unconfirmed.id));
     // Should not include our confirmed payment
-    assert!(!unconfirmed_payments.iter().any(|p| p.id == confirmed.id));
+    assert!(!awaiting.iter().any(|p| p.id == confirmed.id));
 }
 
 #[tokio::test]
@@ -261,14 +258,12 @@ async fn integration_payment_upsert_update() {
     let invoice = test_invoice();
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
-    // Create payment
+    // Create payment with no block_number initially
     let mut payment = test_payment(&invoice.id);
-    payment.confirmations = 0;
     payment.block_number = None;
     PaymentWriter::upsert(&service, &payment).await.unwrap();
 
     // Upsert with updated data
-    payment.confirmations = 6;
     payment.block_number = Some(12345680);
     payment.confirmed_at = Some(Utc::now());
     PaymentWriter::upsert(&service, &payment).await.unwrap();
@@ -278,7 +273,6 @@ async fn integration_payment_upsert_update() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fetched.confirmations, 6);
     assert_eq!(fetched.block_number, Some(12345680));
     assert!(fetched.confirmed_at.is_some());
 }

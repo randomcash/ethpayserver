@@ -80,16 +80,17 @@ pub struct WebhookPaymentInfo {
     /// Transaction hash.
     pub tx_hash: String,
 
-    /// Number of confirmations.
-    pub confirmations: u32,
-
     /// Sender address.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_address: Option<String>,
 
-    /// Block number.
+    /// Block number where payment was included.
+    /// Confirmations can be computed as: current_block - block_number + 1
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_number: Option<u64>,
+
+    /// Whether the payment has reached required confirmations.
+    pub confirmed: bool,
 }
 
 /// A queued webhook job waiting for delivery.
