@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use types::{Network, TokenData, TokenQueryParams, TokenReader, TokenWriter};
 use utoipa::{IntoParams, ToSchema};
 
-use super::{extractors::AdminAuth, EvmDataService, EvmState};
+use super::{extractors::AdminAuth, EvmDataService, EvmDataServiceReader, EvmState};
 use crate::EvmTokenStandard;
 
 /// Request to create a new token.
@@ -159,7 +159,7 @@ pub async fn list_tokens<D, R>(
     Query(query): Query<ListTokensQuery>,
 ) -> ApiResult<TokenListResponse>
 where
-    D: EvmDataService + 'static,
+    D: EvmDataServiceReader + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     let mut params = TokenQueryParams::default()
@@ -209,7 +209,7 @@ pub async fn get_token<D, R>(
     Path(id): Path<i64>,
 ) -> ApiResult<TokenResponse>
 where
-    D: EvmDataService + 'static,
+    D: EvmDataServiceReader + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     let token = TokenReader::get(&*state.data_service, id)

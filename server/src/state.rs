@@ -11,27 +11,18 @@ use data_service::{
 };
 use evm::api::EvmDataService;
 
-use crate::services::EVMMonitor;
-
-/// Trait for data service requirements in the application.
+/// Read-only data service trait for the application.
 ///
-/// This trait combines all repository traits needed by the API handlers,
-/// plus a health check method for monitoring.
+/// Use this bound for handlers that only read from the database.
 #[async_trait]
-pub trait AppDataService:
+pub trait AppDataServiceReader:
     InvoiceReader
-    + InvoiceWriter
     + PaymentReader
-    + PaymentWriter
     + TokenReader
-    + TokenWriter
     + WatchedAddressReader
-    + WatchedAddressWriter
     + StoreWalletReader
-    + StoreWalletWriter
     + StoreWebhookReader
     + StoreRoleRepository
-    + EvmDataService
     + Send
     + Sync
 {
@@ -39,11 +30,27 @@ pub trait AppDataService:
     async fn health_check(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
+/// Full data service trait for the application (read + write).
+///
+/// Use this bound for handlers that modify the database.
+#[async_trait]
+pub trait AppDataService:
+    AppDataServiceReader
+    + InvoiceWriter
+    + PaymentWriter
+    + TokenWriter
+    + WatchedAddressWriter
+    + StoreWalletWriter
+    + EvmDataService
+{
+}
+
 /// Shared application state for all API handlers.
 ///
 /// Generic over the data service type `D`, auth repository type `R`,
-/// and EVM monitor type `E`.
-pub struct AppState<D: AppDataService, R: AuthRepository, E: EVMMonitor> {
+/// and EVM monitor type `E`. Only `R` has a trait bound (required by AuthService);
+/// `D` and `E` bounds are placed on handlers to allow read-only vs read-write separation.
+pub struct AppState<D, R: AuthRepository, E> {
     /// Data service for database operations.
     pub data_service: Arc<D>,
 
@@ -56,7 +63,7 @@ pub struct AppState<D: AppDataService, R: AuthRepository, E: EVMMonitor> {
 }
 
 // Manual Clone impl since we only need Arc::clone
-impl<D: AppDataService, R: AuthRepository, E: EVMMonitor> Clone for AppState<D, R, E> {
+impl<D, R: AuthRepository, E> Clone for AppState<D, R, E> {
     fn clone(&self) -> Self {
         Self {
             data_service: Arc::clone(&self.data_service),
@@ -66,7 +73,7 @@ impl<D: AppDataService, R: AuthRepository, E: EVMMonitor> Clone for AppState<D, 
     }
 }
 
-impl<D: AppDataService, R: AuthRepository, E: EVMMonitor> AppState<D, R, E> {
+impl<D, R: AuthRepository, E> AppState<D, R, E> {
     /// Create a new application state.
     pub fn new(
         data_service: Arc<D>,
@@ -79,7 +86,9 @@ impl<D: AppDataService, R: AuthRepository, E: EVMMonitor> AppState<D, R, E> {
             evm_monitor,
         }
     }
+}
 
+impl<D: EvmDataService, R: AuthRepository, E> AppState<D, R, E> {
     /// Convert to EVM API state.
     pub fn to_evm_state(&self) -> evm::api::EvmState<D, R> {
         evm::api::EvmState::new(
@@ -89,13 +98,16 @@ impl<D: AppDataService, R: AuthRepository, E: EVMMonitor> AppState<D, R, E> {
     }
 }
 
-// Implement AppDataService for PgDataService
+// Implement AppDataServiceReader for PgDataService
 #[async_trait]
-impl AppDataService for data_service::PgDataService {
+impl AppDataServiceReader for data_service::PgDataService {
     async fn health_check(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.health_check().await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }
+
+// Implement AppDataService for PgDataService (marker trait, extends reader)
+impl AppDataService for data_service::PgDataService {}
 
 /// Convenient type alias for AppState with PgDataService and RedisEVMMonitor.
 ///

@@ -10,7 +10,7 @@ use axum::{
 
 use auth::{AuthRepository, Permission, SessionId, UserInfo};
 
-use super::{EvmDataService, EvmState};
+use super::{EvmDataServiceReader, EvmState};
 
 /// Extractor that validates admin authentication.
 ///
@@ -60,7 +60,7 @@ fn extract_session_id(parts: &Parts) -> Result<SessionId, (StatusCode, String)> 
 
 impl<D, R> FromRequestParts<EvmState<D, R>> for AdminAuth
 where
-    D: EvmDataService + 'static,
+    D: EvmDataServiceReader + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     type Rejection = (StatusCode, String);
@@ -90,7 +90,7 @@ where
 
 impl<D, R> FromRequestParts<EvmState<D, R>> for AuthenticatedUser
 where
-    D: EvmDataService + 'static,
+    D: EvmDataServiceReader + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     type Rejection = (StatusCode, String);

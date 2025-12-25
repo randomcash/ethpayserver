@@ -46,4 +46,4 @@ pub use services::{
     RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
     WebhookConfig, WebhookService,
 };
-pub use state::AppState;
+pub use state::{AppState, AppDataService, AppDataServiceReader};

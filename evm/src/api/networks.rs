@@ -11,7 +11,7 @@ use auth::AuthRepository;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use super::{EvmDataService, EvmState};
+use super::{EvmDataServiceReader, EvmState};
 use crate::network::{ChainConfig, ALL_CHAINS};
 use crate::EvmNetwork;
 
@@ -68,7 +68,7 @@ pub async fn list_networks<D, R>(
     State(_state): State<EvmState<D, R>>,
 ) -> ApiResult<NetworkListResponse>
 where
-    D: EvmDataService + 'static,
+    D: EvmDataServiceReader + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     let networks = ALL_CHAINS.iter().map(NetworkInfo::from).collect();
@@ -90,7 +90,7 @@ pub async fn get_network<D, R>(
     Path(network): Path<String>,
 ) -> ApiResult<NetworkInfo>
 where
-    D: EvmDataService + 'static,
+    D: EvmDataServiceReader + 'static,
     R: AuthRepository + Send + Sync + 'static,
 {
     let evm_network: EvmNetwork = network

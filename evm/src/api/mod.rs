@@ -30,20 +30,31 @@ pub mod tokens;
 
 pub use extractors::AdminAuth;
 
-/// Trait for data service requirements in EVM API.
-pub trait EvmDataService: TokenReader + TokenWriter + Send + Sync {}
+/// Read-only data service trait for EVM API.
+///
+/// Use this bound for handlers that only read from the database.
+pub trait EvmDataServiceReader: TokenReader + Send + Sync {}
 
-impl<T> EvmDataService for T where T: TokenReader + TokenWriter + Send + Sync {}
+impl<T> EvmDataServiceReader for T where T: TokenReader + Send + Sync {}
+
+/// Full data service trait for EVM API (read + write).
+///
+/// Use this bound for handlers that modify the database.
+pub trait EvmDataService: EvmDataServiceReader + TokenWriter {}
+
+impl<T> EvmDataService for T where T: EvmDataServiceReader + TokenWriter {}
 
 /// Shared state for EVM API handlers.
 ///
 /// Generic over the data service type `D` and auth repository type `R`.
-pub struct EvmState<D: EvmDataService, R: AuthRepository> {
+/// Only `R` has a trait bound (required by AuthService); `D` bounds are placed
+/// on handlers to allow read-only vs read-write separation.
+pub struct EvmState<D, R: AuthRepository> {
     pub data_service: Arc<D>,
     pub auth_service: Arc<AuthService<R>>,
 }
 
-impl<D: EvmDataService, R: AuthRepository> Clone for EvmState<D, R> {
+impl<D, R: AuthRepository> Clone for EvmState<D, R> {
     fn clone(&self) -> Self {
         Self {
             data_service: Arc::clone(&self.data_service),
@@ -52,7 +63,7 @@ impl<D: EvmDataService, R: AuthRepository> Clone for EvmState<D, R> {
     }
 }
 
-impl<D: EvmDataService, R: AuthRepository> EvmState<D, R> {
+impl<D, R: AuthRepository> EvmState<D, R> {
     pub fn new(data_service: Arc<D>, auth_service: Arc<AuthService<R>>) -> Self {
         Self { data_service, auth_service }
     }
