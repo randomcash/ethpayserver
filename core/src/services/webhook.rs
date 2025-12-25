@@ -1,0 +1,459 @@
+//! Webhook notification service.
+//!
+//! Delivers webhook notifications to merchants when invoice status changes.
+//! Uses Redis as a job queue with exponential backoff retries.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use data_service::PgDataService;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Webhook event types that trigger notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookEventType {
+    /// Payment detected (pending → processing)
+    PaymentDetected,
+    /// Payment confirmed (processing → paid)
+    PaymentConfirmed,
+    /// Invoice expired (pending → expired)
+    InvoiceExpired,
+    /// Invoice cancelled
+    InvoiceCancelled,
+}
+
+impl std::fmt::Display for WebhookEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PaymentDetected => write!(f, "payment_detected"),
+            Self::PaymentConfirmed => write!(f, "payment_confirmed"),
+            Self::InvoiceExpired => write!(f, "invoice_expired"),
+            Self::InvoiceCancelled => write!(f, "invoice_cancelled"),
+        }
+    }
+}
+
+/// Webhook payload sent to merchant endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookPayload {
+    /// Unique event ID for idempotency.
+    pub event_id: Uuid,
+
+    /// Event type.
+    pub event_type: WebhookEventType,
+
+    /// Timestamp when the event occurred.
+    pub timestamp: DateTime<Utc>,
+
+    /// Invoice ID.
+    pub invoice_id: String,
+
+    /// Store ID.
+    pub store_id: Uuid,
+
+    /// Current invoice status.
+    pub status: String,
+
+    /// Amount requested (in smallest unit).
+    pub amount: String,
+
+    /// Amount received so far (in smallest unit).
+    pub amount_received: String,
+
+    /// Asset symbol (e.g., "ETH", "USDT").
+    pub asset_symbol: String,
+
+    /// Network name.
+    pub network: String,
+
+    /// Payment details (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment: Option<WebhookPaymentInfo>,
+}
+
+/// Payment information included in webhook payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookPaymentInfo {
+    /// Transaction hash.
+    pub tx_hash: String,
+
+    /// Number of confirmations.
+    pub confirmations: u32,
+
+    /// Sender address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_address: Option<String>,
+
+    /// Block number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_number: Option<u64>,
+}
+
+/// A queued webhook job waiting for delivery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookJob {
+    /// Unique job ID.
+    pub id: Uuid,
+
+    /// Webhook URL to deliver to.
+    pub webhook_url: String,
+
+    /// Secret for HMAC signing.
+    pub webhook_secret: String,
+
+    /// The payload to deliver.
+    pub payload: WebhookPayload,
+
+    /// Number of delivery attempts so far.
+    pub attempts: u32,
+
+    /// Maximum number of attempts.
+    pub max_attempts: u32,
+
+    /// When this job was created.
+    pub created_at: DateTime<Utc>,
+
+    /// When to attempt delivery (for delayed retries).
+    pub scheduled_at: DateTime<Utc>,
+}
+
+impl WebhookJob {
+    /// Create a new webhook job.
+    pub fn new(webhook_url: String, webhook_secret: String, payload: WebhookPayload) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            webhook_url,
+            webhook_secret,
+            payload,
+            attempts: 0,
+            max_attempts: 3,
+            created_at: now,
+            scheduled_at: now,
+        }
+    }
+
+    /// Calculate delay for next retry using exponential backoff.
+    ///
+    /// Attempt 1: 10 seconds
+    /// Attempt 2: 30 seconds
+    /// Attempt 3: 90 seconds (then give up)
+    pub fn retry_delay(&self) -> Duration {
+        let base_delay = 10u64; // seconds
+        let multiplier = 3u64.pow(self.attempts);
+        Duration::from_secs(base_delay * multiplier)
+    }
+
+    /// Check if job has exceeded max attempts.
+    pub fn is_exhausted(&self) -> bool {
+        self.attempts >= self.max_attempts
+    }
+}
+
+/// Configuration for the webhook service.
+#[derive(Debug, Clone)]
+pub struct WebhookConfig {
+    /// Redis key for the webhook job queue.
+    pub queue_key: String,
+
+    /// HTTP request timeout.
+    pub request_timeout: Duration,
+
+    /// How often to poll the queue when idle.
+    pub poll_interval: Duration,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            queue_key: "ethpayserver:webhooks".to_string(),
+            request_timeout: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Webhook delivery service.
+///
+/// This service:
+/// 1. Accepts webhook jobs via `queue_webhook()`
+/// 2. Runs a background loop that delivers webhooks from the Redis queue
+/// 3. Retries failed deliveries with exponential backoff
+/// 4. Records delivery status in the payment_events table
+pub struct WebhookService {
+    data_service: Arc<PgDataService>,
+    redis_client: redis::Client,
+    http_client: reqwest::Client,
+    config: WebhookConfig,
+}
+
+impl WebhookService {
+    /// Create a new webhook service.
+    pub fn new(
+        data_service: Arc<PgDataService>,
+        redis_url: &str,
+        config: WebhookConfig,
+    ) -> Result<Self, WebhookError> {
+        let redis_client = redis::Client::open(redis_url)
+            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+
+        let http_client = reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+            .map_err(|e| WebhookError::Http(e.to_string()))?;
+
+        Ok(Self {
+            data_service,
+            redis_client,
+            http_client,
+            config,
+        })
+    }
+
+    /// Queue a webhook for delivery.
+    ///
+    /// This pushes the job to Redis for async processing.
+    pub async fn queue_webhook(&self, job: WebhookJob) -> Result<(), WebhookError> {
+        let mut conn = self.redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+
+        let job_json = serde_json::to_string(&job)
+            .map_err(|e| WebhookError::Serialization(e.to_string()))?;
+
+        redis::cmd("RPUSH")
+            .arg(&self.config.queue_key)
+            .arg(&job_json)
+            .query_async::<i64>(&mut conn)
+            .await
+            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+
+        tracing::debug!(
+            job_id = %job.id,
+            event_type = %job.payload.event_type,
+            invoice_id = %job.payload.invoice_id,
+            "Queued webhook job"
+        );
+
+        Ok(())
+    }
+
+    /// Run the webhook delivery service as a background task.
+    ///
+    /// This should be spawned with `tokio::spawn(service.run())`.
+    pub async fn run(self: Arc<Self>) {
+        tracing::info!(
+            queue_key = %self.config.queue_key,
+            "Starting webhook delivery service"
+        );
+
+        loop {
+            match self.process_next_job().await {
+                Ok(true) => {
+                    // Processed a job, immediately check for more
+                    continue;
+                }
+                Ok(false) => {
+                    // No jobs in queue, wait before polling again
+                    tokio::time::sleep(self.config.poll_interval).await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Error processing webhook job");
+                    tokio::time::sleep(self.config.poll_interval).await;
+                }
+            }
+        }
+    }
+
+    /// Process the next job from the queue.
+    ///
+    /// Returns Ok(true) if a job was processed, Ok(false) if queue was empty.
+    async fn process_next_job(&self) -> Result<bool, WebhookError> {
+        let mut conn = self.redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+
+        // Pop job from queue (LPOP for FIFO)
+        let job_json: Option<String> = redis::cmd("LPOP")
+            .arg(&self.config.queue_key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+
+        let Some(json) = job_json else {
+            return Ok(false);
+        };
+
+        let mut job: WebhookJob = serde_json::from_str(&json)
+            .map_err(|e| WebhookError::Serialization(e.to_string()))?;
+
+        // Check if job is scheduled for later
+        if job.scheduled_at > Utc::now() {
+            // Re-queue the job for later
+            redis::cmd("RPUSH")
+                .arg(&self.config.queue_key)
+                .arg(&json)
+                .query_async::<i64>(&mut conn)
+                .await
+                .map_err(|e| WebhookError::Redis(e.to_string()))?;
+            return Ok(false);
+        }
+
+        // Attempt delivery
+        job.attempts += 1;
+        let result = self.deliver_webhook(&job).await;
+
+        match result {
+            Ok(()) => {
+                tracing::info!(
+                    job_id = %job.id,
+                    invoice_id = %job.payload.invoice_id,
+                    attempts = job.attempts,
+                    "Webhook delivered successfully"
+                );
+                self.record_delivery_event(&job, true, None).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job.id,
+                    invoice_id = %job.payload.invoice_id,
+                    attempts = job.attempts,
+                    error = %e,
+                    "Webhook delivery failed"
+                );
+
+                if job.is_exhausted() {
+                    tracing::error!(
+                        job_id = %job.id,
+                        invoice_id = %job.payload.invoice_id,
+                        "Webhook delivery exhausted, giving up"
+                    );
+                    self.record_delivery_event(&job, false, Some(e.to_string())).await;
+                } else {
+                    // Schedule retry
+                    job.scheduled_at = Utc::now() + chrono::Duration::from_std(job.retry_delay()).unwrap();
+
+                    let job_json = serde_json::to_string(&job)
+                        .map_err(|e| WebhookError::Serialization(e.to_string()))?;
+
+                    redis::cmd("RPUSH")
+                        .arg(&self.config.queue_key)
+                        .arg(&job_json)
+                        .query_async::<i64>(&mut conn)
+                        .await
+                        .map_err(|e| WebhookError::Redis(e.to_string()))?;
+
+                    tracing::debug!(
+                        job_id = %job.id,
+                        next_attempt = job.attempts + 1,
+                        scheduled_at = %job.scheduled_at,
+                        "Webhook scheduled for retry"
+                    );
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Deliver a webhook to the merchant endpoint.
+    async fn deliver_webhook(&self, job: &WebhookJob) -> Result<(), WebhookError> {
+        // Serialize payload
+        let payload_json = serde_json::to_string(&job.payload)
+            .map_err(|e| WebhookError::Serialization(e.to_string()))?;
+
+        // Sign payload with HMAC-SHA256
+        let signature = self.sign_payload(&payload_json, &job.webhook_secret);
+
+        // Send request
+        let response = self.http_client
+            .post(&job.webhook_url)
+            .header("Content-Type", "application/json")
+            .header("X-Webhook-Signature", &signature)
+            .header("X-Webhook-Event", job.payload.event_type.to_string())
+            .header("X-Webhook-Id", job.payload.event_id.to_string())
+            .body(payload_json)
+            .send()
+            .await
+            .map_err(|e| WebhookError::Http(e.to_string()))?;
+
+        // Check response status
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(WebhookError::Http(format!(
+                "HTTP {} from webhook endpoint",
+                response.status()
+            )))
+        }
+    }
+
+    /// Sign payload with HMAC-SHA256.
+    fn sign_payload(&self, payload: &str, secret: &str) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .expect("HMAC can take key of any size");
+        mac.update(payload.as_bytes());
+        let result = mac.finalize();
+
+        // Return as hex string with sha256= prefix
+        format!("sha256={}", hex::encode(result.into_bytes()))
+    }
+
+    /// Record webhook delivery event in payment_events table.
+    async fn record_delivery_event(&self, job: &WebhookJob, success: bool, error: Option<String>) {
+        let event_type = if success {
+            "webhook_delivered"
+        } else {
+            "webhook_failed"
+        };
+
+        let event_data = serde_json::json!({
+            "webhook_id": job.id,
+            "event_type": job.payload.event_type.to_string(),
+            "attempts": job.attempts,
+            "success": success,
+            "error": error,
+        });
+
+        let invoice_id = types::InvoiceId::from_string(job.payload.invoice_id.clone());
+
+        if let Err(e) = self.data_service.create_payment_event(
+            &invoice_id,
+            None,
+            event_type,
+            Some(event_data),
+        ).await {
+            tracing::warn!(
+                error = %e,
+                invoice_id = %job.payload.invoice_id,
+                "Failed to record webhook delivery event"
+            );
+        }
+    }
+}
+
+/// Error type for webhook operations.
+#[derive(Debug, thiserror::Error)]
+pub enum WebhookError {
+    #[error("redis error: {0}")]
+    Redis(String),
+
+    #[error("http error: {0}")]
+    Http(String),
+
+    #[error("serialization error: {0}")]
+    Serialization(String),
+
+    #[error("database error: {0}")]
+    Database(#[from] types::RepositoryError),
+}

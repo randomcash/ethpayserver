@@ -302,3 +302,35 @@ fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentDa
         extra,
     })
 }
+
+// =============================================================================
+// Payment Events
+// =============================================================================
+
+impl PgDataService {
+    /// Create a payment event for audit logging.
+    pub async fn create_payment_event(
+        &self,
+        invoice_id: &InvoiceId,
+        payment_id: Option<Uuid>,
+        event_type: &str,
+        event_data: Option<serde_json::Value>,
+    ) -> RepositoryResult<Uuid> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO payment_events (invoice_id, payment_id, event_type, event_data)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+            "#,
+        )
+        .bind(invoice_id.as_str())
+        .bind(payment_id)
+        .bind(event_type)
+        .bind(&event_data)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(row.get("id"))
+    }
+}

@@ -12,43 +12,39 @@ use evm::monitor::events::{MonitorEvent, PaymentConfirmed, PaymentDetected, Reor
 use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
 use types::{
-    AssetType, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter,
+    AssetType, InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter,
     PaymentData, PaymentWriter, TokenReader,
 };
 use uuid::Uuid;
 
+use super::webhook::{
+    WebhookEventType, WebhookJob, WebhookPayload, WebhookPaymentInfo, WebhookService,
+};
 use super::InvoiceExpirationService;
 
 /// Event consumer that processes monitor events and updates database state.
 ///
-/// Future extensions:
-/// - Webhook notifications on status changes
-/// - WebSocket push to connected clients
+/// Optionally sends webhook notifications when invoice status changes.
 pub struct EventConsumer {
     bridge: Arc<dyn EventBridge>,
     data_service: Arc<PgDataService>,
     expiration_service: Option<Arc<InvoiceExpirationService>>,
+    webhook_service: Option<Arc<WebhookService>>,
 }
 
 impl EventConsumer {
-    /// Create a new event consumer.
-    pub fn new(bridge: Arc<dyn EventBridge>, data_service: Arc<PgDataService>) -> Self {
-        Self { bridge, data_service, expiration_service: None }
-    }
-
-    /// Create a new event consumer with invoice expiration service.
-    ///
-    /// When an expiration service is provided, the consumer will trigger
-    /// expiration checks when block events are received for each network.
-    pub fn with_expiration_service(
+    /// Create a new event consumer with optional services.
+    pub fn new(
         bridge: Arc<dyn EventBridge>,
         data_service: Arc<PgDataService>,
-        expiration_service: Arc<InvoiceExpirationService>,
+        expiration_service: Option<Arc<InvoiceExpirationService>>,
+        webhook_service: Option<Arc<WebhookService>>,
     ) -> Self {
         Self {
             bridge,
             data_service,
-            expiration_service: Some(expiration_service),
+            expiration_service,
+            webhook_service,
         }
     }
 
@@ -200,6 +196,12 @@ impl EventConsumer {
 
         PaymentWriter::upsert(&*self.data_service, &payment).await?;
 
+        // Queue webhook notification
+        let invoice_id = InvoiceId::from_string(event.invoice_id.to_string());
+        if let Ok(Some(invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
+            self.queue_webhook(WebhookEventType::PaymentDetected, &invoice, Some(&payment)).await;
+        }
+
         Ok(())
     }
 
@@ -277,6 +279,12 @@ impl EventConsumer {
                 amount_expected = %amount_expected,
                 "Invoice fully paid"
             );
+
+            // Queue webhook notification for payment confirmed
+            // Re-fetch invoice to get updated status
+            if let Ok(Some(updated_invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
+                self.queue_webhook(WebhookEventType::PaymentConfirmed, &updated_invoice, Some(payment)).await;
+            }
         }
 
         Ok(())
@@ -313,6 +321,78 @@ impl EventConsumer {
                     "Failed to check expired invoices"
                 );
             }
+        }
+    }
+
+    /// Queue a webhook notification for an invoice status change.
+    ///
+    /// This is a non-blocking operation - errors are logged but don't stop event processing.
+    async fn queue_webhook(
+        &self,
+        event_type: WebhookEventType,
+        invoice: &InvoiceData,
+        payment: Option<&PaymentData>,
+    ) {
+        let Some(webhook_service) = &self.webhook_service else {
+            return;
+        };
+
+        // Look up webhook config for the store
+        let webhook_config = match self.data_service
+            .get_enabled_store_webhook(invoice.store_id.0)
+            .await
+        {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                tracing::trace!(
+                    store_id = %invoice.store_id.0,
+                    "No webhook configured for store"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    store_id = %invoice.store_id.0,
+                    error = %e,
+                    "Failed to get webhook config"
+                );
+                return;
+            }
+        };
+
+        // Create webhook payload
+        let payload = WebhookPayload {
+            event_id: Uuid::new_v4(),
+            event_type,
+            timestamp: chrono::Utc::now(),
+            invoice_id: invoice.id.as_str().to_string(),
+            store_id: invoice.store_id.0,
+            status: invoice.status.to_string(),
+            amount: invoice.amount.clone(),
+            amount_received: invoice.amount_received.clone(),
+            asset_symbol: invoice.asset_symbol.clone(),
+            network: invoice.network.to_string(),
+            payment: payment.map(|p| WebhookPaymentInfo {
+                tx_hash: p.tx_hash.clone(),
+                confirmations: p.confirmations,
+                from_address: p.from_address.clone(),
+                block_number: p.block_number,
+            }),
+        };
+
+        // Create job and queue it
+        let job = WebhookJob::new(
+            webhook_config.webhook_url,
+            webhook_config.webhook_secret,
+            payload,
+        );
+
+        if let Err(e) = webhook_service.queue_webhook(job).await {
+            tracing::warn!(
+                invoice_id = %invoice.id.as_str(),
+                error = %e,
+                "Failed to queue webhook"
+            );
         }
     }
 

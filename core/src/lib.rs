@@ -44,5 +44,6 @@ pub use services::{
     EVMMonitor, EVMMonitorError, EventConsumer, EventConsumerError,
     ExpirationConfig, ExpirationError, InvoiceExpirationService,
     RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
+    WebhookConfig, WebhookService,
 };
 pub use state::AppState;
