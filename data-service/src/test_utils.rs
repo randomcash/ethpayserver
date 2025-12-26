@@ -561,6 +561,11 @@ impl TokenWriter for InMemoryDataService {
 
 #[async_trait]
 impl StoreWebhookReader for InMemoryDataService {
+    async fn get_webhook(&self, store_id: Uuid) -> RepositoryResult<Option<StoreWebhook>> {
+        let webhooks = self.webhooks.read().unwrap();
+        Ok(webhooks.get(&store_id).cloned())
+    }
+
     async fn get_enabled_webhook(&self, store_id: Uuid) -> RepositoryResult<Option<StoreWebhook>> {
         let webhooks = self.webhooks.read().unwrap();
         Ok(webhooks

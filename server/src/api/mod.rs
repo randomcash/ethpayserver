@@ -44,10 +44,15 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::get_store_wallet,
         stores::configure_store_wallet,
         stores::delete_store_wallet,
+        stores::get_store_webhook,
+        stores::configure_store_webhook,
+        stores::delete_store_webhook,
         // Invoices
         invoices::list_invoices,
         invoices::create_invoice,
         invoices::get_invoice,
+        invoices::get_invoice_payments,
+        invoices::get_invoice_status,
         invoices::cancel_invoice,
         invoices::expire_invoices,
     ),
@@ -61,9 +66,13 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::MemberResponse,
         stores::ConfigureWalletRequest,
         stores::WalletResponse,
+        stores::ConfigureWebhookRequest,
+        stores::WebhookResponse,
         invoices::CreateInvoiceRequest,
         invoices::InvoiceResponse,
         invoices::InvoiceListResponse,
+        invoices::PaymentResponse,
+        invoices::InvoiceStatusResponse,
         invoices::ExpireResponse,
     )),
     tags(
@@ -117,6 +126,9 @@ where
         .route("/{store_id}/wallet", get(stores::get_store_wallet::<A>))
         .route("/{store_id}/wallet", put(stores::configure_store_wallet::<A>))
         .route("/{store_id}/wallet", delete(stores::delete_store_wallet::<A>))
+        .route("/{store_id}/webhook", get(stores::get_store_webhook::<A>))
+        .route("/{store_id}/webhook", put(stores::configure_store_webhook::<A>))
+        .route("/{store_id}/webhook", delete(stores::delete_store_webhook::<A>))
         .with_state(state.clone());
 
     // Invoice endpoints
@@ -125,6 +137,8 @@ where
         .route("/", post(invoices::create_invoice::<A>))
         .route("/expire", post(invoices::expire_invoices::<A>))
         .route("/{invoice_id}", get(invoices::get_invoice::<A>))
+        .route("/{invoice_id}/payments", get(invoices::get_invoice_payments::<A>))
+        .route("/{invoice_id}/status", get(invoices::get_invoice_status::<A>))
         .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
         .with_state(state.clone());
 

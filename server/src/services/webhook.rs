@@ -28,6 +28,9 @@ pub enum WebhookEventType {
     InvoiceExpired,
     /// Invoice cancelled
     InvoiceCancelled,
+    /// Late payment received (expired → late_paid)
+    /// Requires merchant review before fulfillment.
+    LatePaid,
 }
 
 impl std::fmt::Display for WebhookEventType {
@@ -37,6 +40,7 @@ impl std::fmt::Display for WebhookEventType {
             Self::PaymentConfirmed => write!(f, "payment_confirmed"),
             Self::InvoiceExpired => write!(f, "invoice_expired"),
             Self::InvoiceCancelled => write!(f, "invoice_cancelled"),
+            Self::LatePaid => write!(f, "late_paid"),
         }
     }
 }
@@ -518,6 +522,7 @@ mod tests {
         assert_eq!(WebhookEventType::PaymentConfirmed.to_string(), "payment_confirmed");
         assert_eq!(WebhookEventType::InvoiceExpired.to_string(), "invoice_expired");
         assert_eq!(WebhookEventType::InvoiceCancelled.to_string(), "invoice_cancelled");
+        assert_eq!(WebhookEventType::LatePaid.to_string(), "late_paid");
     }
 
     #[test]

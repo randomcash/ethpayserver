@@ -3,6 +3,7 @@
 //! Handles invoice lifecycle cleanup:
 //! - Expires pending invoices that have passed their expiration time
 //! - Unwatches addresses for completed invoices (expired, paid, cancelled)
+//! - Sends webhook notifications when invoices expire
 //!
 //! Triggered by:
 //! - Block events from any chain (via EventConsumer)
@@ -11,23 +12,28 @@
 use std::pin::pin;
 use std::sync::Arc;
 
+use data_service::StoreWebhookReader;
 use evm::Address;
 use futures::StreamExt;
 use types::{InvoiceReader, InvoiceWriter, Network, WatchedAddressReader, WatchedAddressWriter};
+use uuid::Uuid;
 
 use super::evm_monitor::EVMMonitor;
+use super::webhook::{
+    WebhookDataService, WebhookEventType, WebhookJob, WebhookPayload, WebhookService,
+};
 
 /// Trait alias for data service requirements.
 ///
 /// A data service must implement all repository traits needed by the cleanup service.
 pub trait CleanupDataService:
-    InvoiceReader + InvoiceWriter + WatchedAddressReader + WatchedAddressWriter + Send + Sync
+    InvoiceReader + InvoiceWriter + WatchedAddressReader + WatchedAddressWriter + StoreWebhookReader + Send + Sync
 {
 }
 
 /// Blanket implementation for any type implementing the required traits.
 impl<T> CleanupDataService for T where
-    T: InvoiceReader + InvoiceWriter + WatchedAddressReader + WatchedAddressWriter + Send + Sync
+    T: InvoiceReader + InvoiceWriter + WatchedAddressReader + WatchedAddressWriter + StoreWebhookReader + Send + Sync
 {
 }
 
@@ -76,27 +82,31 @@ impl CleanupConfig {
 /// 2. Unwatches addresses for expired invoices (after grace period)
 /// 3. Unwatches addresses for paid invoices
 /// 4. Unwatches addresses for cancelled invoices
+/// 5. Sends webhook notifications when invoices expire
 ///
 /// Can be triggered in two ways:
 /// 1. Event-triggered: Call `check_network()` when block events arrive
 /// 2. Timer-triggered: The `run()` loop checks all networks periodically
-pub struct InvoiceCleanupService<D: CleanupDataService, M: EVMMonitor> {
+pub struct InvoiceCleanupService<D: CleanupDataService, M: EVMMonitor, W: WebhookDataService = D> {
     data_service: Arc<D>,
     evm_monitor: Arc<M>,
     config: CleanupConfig,
+    webhook_service: Option<Arc<WebhookService<W>>>,
 }
 
-impl<D: CleanupDataService + 'static, M: EVMMonitor> InvoiceCleanupService<D, M> {
+impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'static> InvoiceCleanupService<D, M, W> {
     /// Create a new invoice cleanup service.
     pub fn new(
         data_service: Arc<D>,
         evm_monitor: Arc<M>,
         config: CleanupConfig,
+        webhook_service: Option<Arc<WebhookService<W>>>,
     ) -> Self {
         Self {
             data_service,
             evm_monitor,
             config,
+            webhook_service,
         }
     }
 
@@ -124,6 +134,8 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor> InvoiceCleanupService<D, M>
                                 ?network,
                                 "Expired invoice"
                             );
+                            // Queue webhook notification for expiration
+                            self.queue_expiration_webhook(&invoice_id).await;
                         }
                         Ok(false) => {
                             // Invoice was already expired or status changed
@@ -179,6 +191,8 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor> InvoiceCleanupService<D, M>
                                 ?network,
                                 "Expired invoice"
                             );
+                            // Queue webhook notification for expiration
+                            self.queue_expiration_webhook(&invoice_id).await;
                         }
                         Ok(false) => {
                             tracing::trace!(
@@ -202,6 +216,81 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor> InvoiceCleanupService<D, M>
         }
 
         Ok(expired_count)
+    }
+
+    /// Queue a webhook notification for an expired invoice.
+    ///
+    /// This is a non-blocking operation - errors are logged but don't stop expiration processing.
+    async fn queue_expiration_webhook(&self, invoice_id: &types::InvoiceId) {
+        let Some(webhook_service) = &self.webhook_service else {
+            return;
+        };
+
+        // Fetch the invoice to get store_id and details
+        let invoice = match InvoiceReader::get(&*self.data_service, invoice_id).await {
+            Ok(Some(inv)) => inv,
+            Ok(None) => {
+                tracing::warn!(invoice_id = %invoice_id.as_str(), "Invoice not found for webhook");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(invoice_id = %invoice_id.as_str(), error = %e, "Failed to fetch invoice for webhook");
+                return;
+            }
+        };
+
+        // Look up webhook config for the store
+        let webhook_config = match StoreWebhookReader::get_enabled_webhook(
+            &*self.data_service,
+            invoice.store_id.0,
+        ).await {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                tracing::trace!(
+                    store_id = %invoice.store_id.0,
+                    "No webhook configured for store"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    store_id = %invoice.store_id.0,
+                    error = %e,
+                    "Failed to get webhook config"
+                );
+                return;
+            }
+        };
+
+        // Create webhook payload
+        let payload = WebhookPayload {
+            event_id: Uuid::new_v4(),
+            event_type: WebhookEventType::InvoiceExpired,
+            timestamp: chrono::Utc::now(),
+            invoice_id: invoice.id.as_str().to_string(),
+            store_id: invoice.store_id.0,
+            status: invoice.status.to_string(),
+            amount: invoice.amount.clone(),
+            amount_received: invoice.amount_received.clone(),
+            asset_symbol: invoice.asset_symbol.clone(),
+            network: invoice.network.to_string(),
+            payment: None,
+        };
+
+        // Create job and queue it
+        let job = WebhookJob::new(
+            webhook_config.webhook_url,
+            webhook_config.webhook_secret,
+            payload,
+        );
+
+        if let Err(e) = webhook_service.queue_webhook(job).await {
+            tracing::warn!(
+                invoice_id = %invoice.id.as_str(),
+                error = %e,
+                "Failed to queue expiration webhook"
+            );
+        }
     }
 
     /// Cleanup addresses for completed invoices.
@@ -531,10 +620,11 @@ mod tests {
             .await
             .unwrap();
 
-        let service = InvoiceCleanupService::new(
+        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
             Arc::clone(&data_service),
             Arc::clone(&monitor),
             config,
+            None,
         );
 
         // Check for expired invoices
@@ -561,10 +651,11 @@ mod tests {
             .await
             .unwrap();
 
-        let service = InvoiceCleanupService::new(
+        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
             Arc::clone(&data_service),
             Arc::clone(&monitor),
             config,
+            None,
         );
 
         // Check for expired invoices - should not expire paid invoices
@@ -591,10 +682,11 @@ mod tests {
             .await
             .unwrap();
 
-        let service = InvoiceCleanupService::new(
+        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
             Arc::clone(&data_service),
             Arc::clone(&monitor),
             config,
+            None,
         );
 
         // Check for expired invoices - should not expire non-expired invoices
@@ -624,10 +716,11 @@ mod tests {
         .await
         .unwrap();
 
-        let service = InvoiceCleanupService::new(
+        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
             Arc::clone(&data_service),
             Arc::clone(&monitor),
             config,
+            None,
         );
 
         // Cleanup addresses
@@ -662,10 +755,11 @@ mod tests {
         .await
         .unwrap();
 
-        let service = InvoiceCleanupService::new(
+        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
             Arc::clone(&data_service),
             Arc::clone(&monitor),
             config,
+            None,
         );
 
         // Cleanup addresses

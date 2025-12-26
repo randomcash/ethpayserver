@@ -63,18 +63,8 @@ async fn main() -> Result<()> {
     let evm_monitor = Arc::new(RedisEVMMonitor::new(Arc::clone(&bridge)));
 
     // Start background services
-    // 1. Invoice cleanup service - expires invoices and unwatches addresses
-    let cleanup_config = CleanupConfig::from_env();
-    tracing::debug!(?cleanup_config, "Cleanup config loaded");
-    let cleanup_service = Arc::new(InvoiceCleanupService::new(
-        Arc::clone(&data_service),
-        Arc::clone(&evm_monitor),
-        cleanup_config,
-    ));
-    tokio::spawn(Arc::clone(&cleanup_service).run());
-    tracing::info!("Invoice cleanup service started");
-
-    // 2. Webhook delivery service - sends webhook notifications
+    // 1. Webhook delivery service - sends webhook notifications
+    //    Created first because cleanup service needs it for expiration webhooks
     let webhook_config = WebhookConfig::from_env();
     tracing::debug!(?webhook_config, "Webhook config loaded");
     let webhook_service = Arc::new(
@@ -86,6 +76,19 @@ async fn main() -> Result<()> {
     );
     tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
+
+    // 2. Invoice cleanup service - expires invoices and unwatches addresses
+    //    Also queues webhook notifications when invoices expire
+    let cleanup_config = CleanupConfig::from_env();
+    tracing::debug!(?cleanup_config, "Cleanup config loaded");
+    let cleanup_service = Arc::new(InvoiceCleanupService::new(
+        Arc::clone(&data_service),
+        Arc::clone(&evm_monitor),
+        cleanup_config,
+        Some(Arc::clone(&webhook_service)),
+    ));
+    tokio::spawn(Arc::clone(&cleanup_service).run());
+    tracing::info!("Invoice cleanup service started");
 
     // 3. Event consumer - processes PaymentDetected/Confirmed events
     //    Also triggers expiration checks on block events and queues webhooks

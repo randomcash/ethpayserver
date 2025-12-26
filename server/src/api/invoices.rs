@@ -4,27 +4,54 @@
 //! for stores they are members of.
 
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use auth::{SessionService, repository::UserStoreRepository};
-use evm::{Address, XpubDeriver, U256};
 use data_service::{StoreWalletReader, StoreWalletWriter};
+use evm::{Address, U256, XpubDeriver};
 use types::{
-    InvoiceId, InvoiceStatus, Network, StoreId,
-    InvoiceReader, InvoiceWriter, InvoiceQueryParams,
-    TokenReader, WatchedAddressWriter,
-    traits::InvoiceData,
+    InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter, Network,
+    PaymentReader, StoreId, TokenReader, WatchedAddressWriter,
+    traits::{InvoiceData, PaymentData},
 };
 
+use super::extractors::{AdminAuth, AuthenticatedUser};
 use crate::services::EVMMonitor;
 use crate::state::PgAppState;
-use super::extractors::{AuthenticatedUser, AdminAuth};
+
+/// Fetch invoice and verify user has access (admin or store member).
+/// Returns NOT_FOUND for both missing invoices and permission denied (prevents enumeration).
+async fn get_invoice_with_permission<A: SessionService>(
+    state: &PgAppState<A>,
+    user: &auth::UserInfo,
+    invoice_id: &InvoiceId,
+) -> Result<InvoiceData, StatusCode> {
+    let invoice = InvoiceReader::get(&*state.data_service, invoice_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if user.role != auth::Role::ServerAdmin {
+        let is_member = state
+            .data_service
+            .get_user_store(user.id, invoice.store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_some();
+
+        if !is_member {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    Ok(invoice)
+}
 
 /// Request to create a new invoice.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -92,6 +119,77 @@ impl From<InvoiceData> for InvoiceResponse {
     }
 }
 
+/// Payment response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PaymentResponse {
+    /// Payment ID.
+    pub id: String,
+    /// Transaction hash.
+    pub tx_hash: String,
+    /// Amount received.
+    pub amount: String,
+    /// Asset symbol.
+    pub asset_symbol: String,
+    /// Token contract address (for ERC20).
+    pub token_address: Option<String>,
+    /// Block number.
+    pub block_number: Option<u64>,
+    /// Sender address.
+    pub from_address: Option<String>,
+    /// When the payment was detected.
+    pub detected_at: chrono::DateTime<chrono::Utc>,
+    /// When the payment was confirmed (None = awaiting confirmation).
+    pub confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether this payment was invalidated by a chain reorg.
+    pub reorged: bool,
+}
+
+impl From<PaymentData> for PaymentResponse {
+    fn from(p: PaymentData) -> Self {
+        Self {
+            id: p.id.to_string(),
+            tx_hash: p.tx_hash,
+            amount: p.amount,
+            asset_symbol: p.asset_symbol,
+            token_address: p.token_address,
+            block_number: p.block_number,
+            from_address: p.from_address,
+            detected_at: p.detected_at,
+            confirmed_at: p.confirmed_at,
+            reorged: p.reorged,
+        }
+    }
+}
+
+/// Invoice status response with payment details.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InvoiceStatusResponse {
+    /// Invoice ID.
+    pub id: String,
+    /// Current status.
+    pub status: String,
+    /// Requested amount.
+    pub amount: String,
+    /// Amount received so far.
+    pub amount_received: String,
+    /// Asset symbol.
+    pub asset_symbol: String,
+    /// Payment address.
+    pub payment_address: Option<String>,
+    /// Expiration timestamp.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Number of payments received.
+    pub payment_count: usize,
+    /// Number of confirmed payments.
+    pub confirmed_count: usize,
+    /// Whether the invoice is fully paid.
+    pub is_paid: bool,
+    /// Whether the invoice is expired.
+    pub is_expired: bool,
+    /// Payments received for this invoice.
+    pub payments: Vec<PaymentResponse>,
+}
+
 /// Query parameters for listing invoices.
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct ListInvoicesQuery {
@@ -156,7 +254,8 @@ where
 
     // Check user has access to the store (unless admin or no store filter)
     if store_id != uuid::Uuid::nil() {
-        let is_member = state.data_service
+        let is_member = state
+            .data_service
             .get_user_store(user.id, StoreId(store_id))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -227,8 +326,13 @@ where
     A: SessionService + 'static,
 {
     // Check permission on the store
-    let has_permission = state.data_service
-        .user_has_store_permission(user.id, StoreId(req.store_id), "ethpay.store.cancreateinvoice")
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(req.store_id),
+            "ethpay.store.cancreateinvoice",
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -256,8 +360,8 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Derive payment address from xpub
-    let deriver = XpubDeriver::from_xpub(&wallet.xpub)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let deriver =
+        XpubDeriver::from_xpub(&wallet.xpub).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let address = deriver
         .derive_address(index as u32)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -265,11 +369,12 @@ where
     let payment_address = address.to_string();
 
     // Look up token contract for ERC20 payments (if in tokens table → ERC20, else native)
-    let token_contract: Option<Address> = TokenReader::find_by_symbol(&*state.data_service, network, &req.asset_symbol)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|t| t.address.parse().ok());
+    let token_contract: Option<Address> =
+        TokenReader::find_by_symbol(&*state.data_service, network, &req.asset_symbol)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|t| t.address.parse().ok());
 
     let payment_request = generate_payment_uri(&payment_address, &req.amount, &req.asset_symbol);
 
@@ -297,22 +402,22 @@ where
     // Save watched address to database (required for payment detection & retry mechanism)
     let token_address_str = token_contract.map(|a| a.to_string());
     WatchedAddressWriter::upsert_with_asset(
-            &*state.data_service,
-            &payment_address,
-            &invoice.id,
-            network,
-            token_address_str.as_deref(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                address = %payment_address,
-                invoice_id = %invoice.id.0,
-                error = %e,
-                "Failed to save watched address - invoice creation aborted"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        &*state.data_service,
+        &payment_address,
+        &invoice.id,
+        network,
+        token_address_str.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            address = %payment_address,
+            invoice_id = %invoice.id.0,
+            error = %e,
+            "Failed to save watched address - invoice creation aborted"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Send WatchAddress command to EVM monitor if configured
     if let Some(ref monitor) = state.evm_monitor {
@@ -326,7 +431,13 @@ where
         let expected_amount = invoice.amount.parse::<U256>().ok();
 
         match monitor
-            .watch_address(network, address, invoice_uuid, expected_amount, token_contract)
+            .watch_address(
+                network,
+                address,
+                invoice_uuid,
+                expected_amount,
+                token_contract,
+            )
             .await
         {
             Ok(()) => {
@@ -335,7 +446,8 @@ where
                     &*state.data_service,
                     &payment_address,
                     network,
-                ).await
+                )
+                .await
                 {
                     tracing::warn!(
                         address = %payment_address,
@@ -395,7 +507,8 @@ where
 
     // Check user has access to the invoice's store (unless admin)
     if user.role != auth::Role::ServerAdmin {
-        let is_member = state.data_service
+        let is_member = state
+            .data_service
             .get_user_store(user.id, invoice.store_id)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -407,6 +520,101 @@ where
     }
 
     Ok(Json(invoice.into()))
+}
+
+/// Get payments for an invoice.
+///
+/// Returns all payments received for the invoice, including unconfirmed and reorged ones.
+#[utoipa::path(
+    get,
+    path = "/invoices/{invoice_id}/payments",
+    tag = "invoices",
+    security(("bearer_auth" = [])),
+    params(
+        ("invoice_id" = String, Path, description = "Invoice ID")
+    ),
+    responses(
+        (status = 200, description = "List of payments", body = Vec<PaymentResponse>),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Invoice not found or not accessible"),
+    )
+)]
+pub async fn get_invoice_payments<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(invoice_id): Path<String>,
+) -> Result<Json<Vec<PaymentResponse>>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let id = InvoiceId::from_string(invoice_id);
+    let invoice = get_invoice_with_permission(&state, &user, &id).await?;
+
+    let payments = PaymentReader::get_for_invoice(&*state.data_service, &invoice.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(payments.into_iter().map(|p| p.into()).collect()))
+}
+
+/// Get invoice status with payment details.
+///
+/// Returns the current invoice status along with all payments and confirmation progress.
+#[utoipa::path(
+    get,
+    path = "/invoices/{invoice_id}/status",
+    tag = "invoices",
+    security(("bearer_auth" = [])),
+    params(
+        ("invoice_id" = String, Path, description = "Invoice ID")
+    ),
+    responses(
+        (status = 200, description = "Invoice status with payments", body = InvoiceStatusResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Invoice not found or not accessible"),
+    )
+)]
+pub async fn get_invoice_status<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(invoice_id): Path<String>,
+) -> Result<Json<InvoiceStatusResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let id = InvoiceId::from_string(invoice_id);
+    let invoice = get_invoice_with_permission(&state, &user, &id).await?;
+
+    // Get all payments (including reorged for transparency)
+    let payments = PaymentReader::get_for_invoice(&*state.data_service, &invoice.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Count valid (non-reorged) payments
+    let valid_payments: Vec<_> = payments.iter().filter(|p| !p.reorged).collect();
+    let confirmed_count = valid_payments
+        .iter()
+        .filter(|p| p.confirmed_at.is_some())
+        .count();
+
+    let is_paid = invoice.status == InvoiceStatus::Paid;
+    let is_expired = invoice.status == InvoiceStatus::Expired
+        || (invoice.status == InvoiceStatus::Pending && invoice.expires_at < chrono::Utc::now());
+
+    Ok(Json(InvoiceStatusResponse {
+        id: invoice.id.0,
+        status: invoice.status.to_string(),
+        amount: invoice.amount,
+        amount_received: invoice.amount_received,
+        asset_symbol: invoice.asset_symbol,
+        payment_address: invoice.payment_address,
+        expires_at: invoice.expires_at,
+        payment_count: valid_payments.len(),
+        confirmed_count,
+        is_paid,
+        is_expired,
+        payments: payments.into_iter().map(|p| p.into()).collect(),
+    }))
 }
 
 /// Cancel an invoice.
@@ -445,7 +653,8 @@ where
 
     // Check user has canmodifyinvoice permission on the invoice's store (unless admin)
     if user.role != auth::Role::ServerAdmin {
-        let has_permission = state.data_service
+        let has_permission = state
+            .data_service
             .user_has_store_permission(user.id, invoice.store_id, "ethpay.store.canmodifyinvoice")
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -517,12 +726,9 @@ where
     let count = expired.len();
 
     for invoice in expired {
-        let _ = InvoiceWriter::update_status(
-            &*state.data_service,
-            &invoice.id,
-            InvoiceStatus::Expired,
-        )
-        .await;
+        let _ =
+            InvoiceWriter::update_status(&*state.data_service, &invoice.id, InvoiceStatus::Expired)
+                .await;
 
         // Send UnwatchAddress command to EVM monitor if configured
         if let Some(ref monitor) = state.evm_monitor {
@@ -541,7 +747,9 @@ where
         }
     }
 
-    Ok(Json(ExpireResponse { expired_count: count as u64 }))
+    Ok(Json(ExpireResponse {
+        expired_count: count as u64,
+    }))
 }
 
 /// Response for expire operation.

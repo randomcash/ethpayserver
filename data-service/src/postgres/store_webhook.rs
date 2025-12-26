@@ -21,6 +21,18 @@ fn row_to_webhook(row: &sqlx::postgres::PgRow) -> StoreWebhook {
 
 #[async_trait]
 impl StoreWebhookReader for PgDataService {
+    async fn get_webhook(&self, store_id: Uuid) -> RepositoryResult<Option<StoreWebhook>> {
+        let row = sqlx::query(
+            "SELECT * FROM store_webhooks WHERE store_id = $1",
+        )
+        .bind(store_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(row.as_ref().map(row_to_webhook))
+    }
+
     async fn get_enabled_webhook(&self, store_id: Uuid) -> RepositoryResult<Option<StoreWebhook>> {
         let row = sqlx::query(
             "SELECT * FROM store_webhooks WHERE store_id = $1 AND enabled = true",

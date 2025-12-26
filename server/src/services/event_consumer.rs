@@ -57,7 +57,7 @@ impl<T> EventConsumerDataService for T where
 pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookDataService = D> {
     bridge: Arc<dyn EventBridge>,
     data_service: Arc<D>,
-    cleanup_service: Option<Arc<InvoiceCleanupService<D, M>>>,
+    cleanup_service: Option<Arc<InvoiceCleanupService<D, M, W>>>,
     webhook_service: Option<Arc<WebhookService<W>>>,
 }
 
@@ -66,7 +66,7 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
     pub fn new(
         bridge: Arc<dyn EventBridge>,
         data_service: Arc<D>,
-        cleanup_service: Option<Arc<InvoiceCleanupService<D, M>>>,
+        cleanup_service: Option<Arc<InvoiceCleanupService<D, M, W>>>,
         webhook_service: Option<Arc<WebhookService<W>>>,
     ) -> Self {
         Self {
@@ -276,17 +276,6 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
                 format!("Invoice not found: {}", event.invoice_id)
             ))?;
 
-        // Only transition to paid if invoice is in a valid state
-        // Don't mark cancelled/expired/refunded invoices as paid
-        if !matches!(invoice.status, InvoiceStatus::Processing | InvoiceStatus::PartiallyPaid) {
-            tracing::debug!(
-                invoice_id = %event.invoice_id,
-                status = ?invoice.status,
-                "Invoice not in payable state, skipping status update"
-            );
-            return Ok(());
-        }
-
         // Compare amounts using rust_decimal
         let amount_received: Decimal = invoice.amount_received.parse()
             .map_err(|e| EventConsumerError::InvalidData(
@@ -297,19 +286,52 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
                 format!("Invalid amount '{}': {}", invoice.amount, e)
             ))?;
 
-        if amount_received >= amount_expected {
-            InvoiceWriter::update_status(&*self.data_service, &invoice_id, InvoiceStatus::Paid).await?;
-            tracing::info!(
-                invoice_id = %event.invoice_id,
-                amount_received = %amount_received,
-                amount_expected = %amount_expected,
-                "Invoice fully paid"
-            );
+        let is_fully_paid = amount_received >= amount_expected;
 
-            // Queue webhook notification for payment confirmed
-            // Re-fetch invoice to get updated status
-            if let Ok(Some(updated_invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
-                self.queue_webhook(WebhookEventType::PaymentConfirmed, &updated_invoice, Some(payment)).await;
+        // Handle based on invoice status
+        match invoice.status {
+            InvoiceStatus::Processing | InvoiceStatus::PartiallyPaid => {
+                // Normal flow: transition to paid if fully paid
+                if is_fully_paid {
+                    InvoiceWriter::update_status(&*self.data_service, &invoice_id, InvoiceStatus::Paid).await?;
+                    tracing::info!(
+                        invoice_id = %event.invoice_id,
+                        amount_received = %amount_received,
+                        amount_expected = %amount_expected,
+                        "Invoice fully paid"
+                    );
+
+                    // Queue webhook notification for payment confirmed
+                    if let Ok(Some(updated_invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
+                        self.queue_webhook(WebhookEventType::PaymentConfirmed, &updated_invoice, Some(payment)).await;
+                    }
+                }
+            }
+            InvoiceStatus::Expired => {
+                // Late payment: invoice expired but payment still came through
+                // Transition to LatePaid for merchant review
+                if is_fully_paid {
+                    InvoiceWriter::update_status(&*self.data_service, &invoice_id, InvoiceStatus::LatePaid).await?;
+                    tracing::warn!(
+                        invoice_id = %event.invoice_id,
+                        amount_received = %amount_received,
+                        amount_expected = %amount_expected,
+                        "Late payment received on expired invoice - requires merchant review"
+                    );
+
+                    // Queue webhook notification for late payment
+                    if let Ok(Some(updated_invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
+                        self.queue_webhook(WebhookEventType::LatePaid, &updated_invoice, Some(payment)).await;
+                    }
+                }
+            }
+            _ => {
+                // Cancelled, Refunded, LatePaid, or already Paid - don't modify
+                tracing::debug!(
+                    invoice_id = %event.invoice_id,
+                    status = ?invoice.status,
+                    "Invoice in final state, skipping status update"
+                );
             }
         }
 
@@ -989,6 +1011,83 @@ mod tests {
         // Invoice should be processing (still has valid payments)
         let invoice = InvoiceReader::get(&*ds, &invoice_id).await.unwrap().unwrap();
         assert_eq!(invoice.status, InvoiceStatus::Processing);
+    }
+
+    #[tokio::test]
+    async fn test_handle_payment_confirmed_late_payment_on_expired_invoice() {
+        let ds = Arc::new(InMemoryDataService::new());
+        let bridge = Arc::new(MemoryBridge::new());
+
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+        );
+
+        let invoice_id = InvoiceId::new();
+        let store_id = StoreId::new();
+
+        // Create an expired invoice (with full amount received - late payment scenario)
+        let invoice = InvoiceData {
+            id: invoice_id.clone(),
+            store_id,
+            network: Network::Ethereum,
+            status: InvoiceStatus::Expired,
+            amount: "1000000000000000000".to_string(), // 1 ETH
+            amount_received: "1000000000000000000".to_string(), // Full amount received after expiry
+            asset_symbol: "ETH".to_string(),
+            payment_address: Some("0x1234567890abcdef1234567890abcdef12345678".to_string()),
+            payment_request: None,
+            created_at: Utc::now() - chrono::Duration::hours(2),
+            expires_at: Utc::now() - chrono::Duration::hours(1), // Expired an hour ago
+            metadata: None,
+            extra: None,
+        };
+        InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
+
+        // Create a payment record (detected after expiry)
+        let tx_hash = B256::repeat_byte(0xcc);
+        let payment = PaymentData {
+            id: Uuid::new_v4(),
+            invoice_id: invoice_id.clone(),
+            network: Network::Ethereum,
+            asset_type: types::AssetType::Native,
+            amount: "1000000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            tx_hash: format!("{:#x}", tx_hash),
+            block_number: Some(12345700),
+            detected_at: Utc::now(),
+            confirmed_at: None,
+            from_address: Some("0xcccccccccccccccccccccccccccccccccccccccc".to_string()),
+            reorged: false,
+            extra: None,
+        };
+        PaymentWriter::upsert(&*ds, &payment).await.unwrap();
+
+        // Create PaymentConfirmed event for the late payment
+        let event = PaymentConfirmed {
+            chain_id: 1,
+            invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+            payment_address: Address::ZERO,
+            amount: U256::from(1000000000000000000u64),
+            tx_hash,
+            block_number: 12345700,
+            confirmations: 12,
+            confirmed_at: Utc::now(),
+        };
+
+        // Handle the event
+        consumer.handle_payment_confirmed(event).await.unwrap();
+
+        // Verify invoice was marked as LatePaid (not Paid)
+        let invoice = InvoiceReader::get(&*ds, &invoice_id).await.unwrap().unwrap();
+        assert_eq!(invoice.status, InvoiceStatus::LatePaid);
+
+        // Verify payment was marked as confirmed
+        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id).await.unwrap();
+        assert!(payments[0].confirmed_at.is_some());
     }
 
     #[test]
