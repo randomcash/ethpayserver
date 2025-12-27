@@ -234,7 +234,9 @@ pub async fn discover_token(
     contract_address: Address,
 ) -> EvmResult<Token> {
     let (name, symbol, decimals) = get_token_info(provider, contract_address).await?;
-    let network = provider.chain_config().network;
+    let network = provider.chain_config().network.ok_or_else(|| {
+        EvmError::Contract("Token discovery not supported on testnets".to_string())
+    })?;
 
     Ok(Token::new(
         symbol,

@@ -46,7 +46,7 @@
 
 use chrono::Utc;
 use clap::Parser;
-use data_service::{RedisDataService, WatchedAddressReader, WatchedAddressWriter};
+use data_service::RedisDataService;
 use evm::error::{EvmError, EvmResult};
 use evm::monitor::bridge::{EventBridge, RedisBridge};
 use evm::monitor::events::{AddressUnwatched, AddressWatched, StatusReport, WatchedAddressInfo};
@@ -54,7 +54,7 @@ use evm::monitor::{
     ChainMonitor, ChainMonitorConfig, CoordinatorConfig, EventHandler, LoggingHandler,
     MonitorCommand, MonitorCoordinator, MonitorEvent, RpcBlockSource, WatchedAddress,
 };
-use evm::network::{get_chain_config_by_id, network_to_chain_id, chain_id_to_network};
+use evm::network::get_any_chain_config;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ use tokio::signal;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use types::{InvoiceId, Network};
+use types::InvoiceId;
 
 #[derive(Parser, Debug)]
 #[command(name = "evmmonitor")]
@@ -270,19 +270,10 @@ async fn restore_watched_addresses(
     persistence: &Arc<RedisDataService>,
     monitored_chain_ids: &[u64],
 ) {
-    match WatchedAddressReader::get_active(persistence.as_ref()).await {
+    match persistence.get_active_by_chain().await {
         Ok(addresses) => {
             let mut restored_count = 0;
-            for (address, invoice_id, network) in addresses {
-                // Convert types::Network to chain_id
-                let chain_id = match network_to_chain_id(network) {
-                    Some(id) => id,
-                    None => {
-                        warn!(network = ?network, "non-EVM network in watched addresses");
-                        continue;
-                    }
-                };
-
+            for (address, invoice_id, chain_id) in addresses {
                 // Only restore addresses for chains we're monitoring
                 if !monitored_chain_ids.contains(&chain_id) {
                     debug!(chain_id, address = %address, "skipping address for unmonitored chain");
@@ -347,18 +338,15 @@ async fn handle_commands(
                     "watch address command"
                 );
 
-                // Persist to Redis first
-                if let Some(network) = chain_id_to_network(cmd.chain_id) {
-                    let invoice_id = InvoiceId::from_string(cmd.invoice_id.to_string());
-                    let address_str = cmd.address.to_string().to_lowercase();
-                    if let Err(e) = WatchedAddressWriter::upsert(
-                        persistence.as_ref(),
-                        &address_str,
-                        &invoice_id,
-                        network,
-                    ).await {
-                        error!(error = %e, "failed to persist watched address");
-                    }
+                // Persist to Redis first (using chain_id directly for testnet support)
+                let invoice_id = InvoiceId::from_string(cmd.invoice_id.to_string());
+                let address_str = cmd.address.to_string().to_lowercase();
+                if let Err(e) = persistence.upsert_by_chain(
+                    &address_str,
+                    &invoice_id,
+                    cmd.chain_id,
+                ).await {
+                    error!(error = %e, "failed to persist watched address");
                 }
 
                 // Find the chain monitor
@@ -400,17 +388,14 @@ async fn handle_commands(
                     "unwatch address command"
                 );
 
-                // Remove from persistence
-                if let Some(network) = chain_id_to_network(cmd.chain_id) {
-                    let address_str = cmd.address.to_string().to_lowercase();
-                    if let Err(e) = WatchedAddressWriter::remove(
-                        persistence.as_ref(),
-                        &address_str,
-                        network,
-                    ).await {
-                        // NotFound is acceptable - address might not exist in persistence
-                        debug!(error = %e, "failed to remove watched address from persistence");
-                    }
+                // Remove from persistence (using chain_id directly for testnet support)
+                let address_str = cmd.address.to_string().to_lowercase();
+                if let Err(e) = persistence.remove_by_chain(
+                    &address_str,
+                    cmd.chain_id,
+                ).await {
+                    // NotFound is acceptable - address might not exist in persistence
+                    debug!(error = %e, "failed to remove watched address from persistence");
                 }
 
                 if let Some(monitor) = coordinator.get_chain(cmd.chain_id).await {
@@ -555,7 +540,7 @@ fn get_chain_configs(
 async fn create_chain_monitor(rpc_config: &ChainRpcConfig) -> EvmResult<Arc<ChainMonitor<RpcBlockSource>>> {
     use evm::monitor::RpcSourceConfig;
 
-    let chain_config = get_chain_config_by_id(rpc_config.chain_id)
+    let chain_config = get_any_chain_config(rpc_config.chain_id)
         .ok_or_else(|| EvmError::Monitor(format!("unknown chain id: {}", rpc_config.chain_id)))?;
 
     let source_config = match &rpc_config.rpc_ws {

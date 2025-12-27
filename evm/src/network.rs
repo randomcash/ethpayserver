@@ -143,8 +143,8 @@ impl std::str::FromStr for EvmNetwork {
 /// Configuration for an EVM-compatible chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainConfig {
-    /// The network identifier.
-    pub network: EvmNetwork,
+    /// The network identifier (None for testnets).
+    pub network: Option<EvmNetwork>,
     /// EIP-155 chain ID.
     pub chain_id: u64,
     /// Human-readable chain name.
@@ -176,7 +176,7 @@ impl ChainConfig {
 
 /// Ethereum Mainnet configuration.
 pub const ETHEREUM: ChainConfig = ChainConfig {
-    network: EvmNetwork::Ethereum,
+    network: Some(EvmNetwork::Ethereum),
     chain_id: 1,
     name: "Ethereum",
     native_symbol: "ETH",
@@ -188,7 +188,7 @@ pub const ETHEREUM: ChainConfig = ChainConfig {
 
 /// Polygon (formerly Matic) configuration.
 pub const POLYGON: ChainConfig = ChainConfig {
-    network: EvmNetwork::Polygon,
+    network: Some(EvmNetwork::Polygon),
     chain_id: 137,
     name: "Polygon",
     native_symbol: "POL",
@@ -200,7 +200,7 @@ pub const POLYGON: ChainConfig = ChainConfig {
 
 /// Arbitrum One configuration.
 pub const ARBITRUM: ChainConfig = ChainConfig {
-    network: EvmNetwork::Arbitrum,
+    network: Some(EvmNetwork::Arbitrum),
     chain_id: 42161,
     name: "Arbitrum One",
     native_symbol: "ETH",
@@ -212,7 +212,7 @@ pub const ARBITRUM: ChainConfig = ChainConfig {
 
 /// Optimism configuration.
 pub const OPTIMISM: ChainConfig = ChainConfig {
-    network: EvmNetwork::Optimism,
+    network: Some(EvmNetwork::Optimism),
     chain_id: 10,
     name: "Optimism",
     native_symbol: "ETH",
@@ -224,7 +224,7 @@ pub const OPTIMISM: ChainConfig = ChainConfig {
 
 /// Base (Coinbase L2) configuration.
 pub const BASE: ChainConfig = ChainConfig {
-    network: EvmNetwork::Base,
+    network: Some(EvmNetwork::Base),
     chain_id: 8453,
     name: "Base",
     native_symbol: "ETH",
@@ -236,7 +236,7 @@ pub const BASE: ChainConfig = ChainConfig {
 
 /// Avalanche C-Chain configuration.
 pub const AVALANCHE: ChainConfig = ChainConfig {
-    network: EvmNetwork::Avalanche,
+    network: Some(EvmNetwork::Avalanche),
     chain_id: 43114,
     name: "Avalanche C-Chain",
     native_symbol: "AVAX",
@@ -248,7 +248,7 @@ pub const AVALANCHE: ChainConfig = ChainConfig {
 
 /// BNB Smart Chain configuration.
 pub const BINANCE_SMART_CHAIN: ChainConfig = ChainConfig {
-    network: EvmNetwork::BinanceSmartChain,
+    network: Some(EvmNetwork::BinanceSmartChain),
     chain_id: 56,
     name: "BNB Smart Chain",
     native_symbol: "BNB",
@@ -260,7 +260,7 @@ pub const BINANCE_SMART_CHAIN: ChainConfig = ChainConfig {
 
 /// zkSync Era configuration.
 pub const ZKSYNC: ChainConfig = ChainConfig {
-    network: EvmNetwork::ZkSync,
+    network: Some(EvmNetwork::ZkSync),
     chain_id: 324,
     name: "zkSync Era",
     native_symbol: "ETH",
@@ -272,7 +272,7 @@ pub const ZKSYNC: ChainConfig = ChainConfig {
 
 /// Linea configuration.
 pub const LINEA: ChainConfig = ChainConfig {
-    network: EvmNetwork::Linea,
+    network: Some(EvmNetwork::Linea),
     chain_id: 59144,
     name: "Linea",
     native_symbol: "ETH",
@@ -284,7 +284,7 @@ pub const LINEA: ChainConfig = ChainConfig {
 
 /// Scroll configuration.
 pub const SCROLL: ChainConfig = ChainConfig {
-    network: EvmNetwork::Scroll,
+    network: Some(EvmNetwork::Scroll),
     chain_id: 534352,
     name: "Scroll",
     native_symbol: "ETH",
@@ -312,13 +312,25 @@ pub const ALL_CHAINS: &[ChainConfig] = &[
 pub fn get_chain_config(network: EvmNetwork) -> &'static ChainConfig {
     ALL_CHAINS
         .iter()
-        .find(|c| c.network == network)
+        .find(|c| c.network == Some(network))
         .expect("all networks have configs")
 }
 
 /// Get chain configuration by chain ID.
 pub fn get_chain_config_by_id(chain_id: u64) -> Option<&'static ChainConfig> {
     ALL_CHAINS.iter().find(|c| c.chain_id == chain_id)
+}
+
+/// Get chain configuration by chain ID, including testnets.
+///
+/// This function first checks mainnet chains, then falls back to testnets.
+pub fn get_any_chain_config(chain_id: u64) -> Option<&'static ChainConfig> {
+    // Try mainnets first
+    if let Some(config) = get_chain_config_by_id(chain_id) {
+        return Some(config);
+    }
+    // Fall back to testnets
+    crate::testnet::get_testnet_config(chain_id)
 }
 
 /// Convert `types::Network` to EVM chain ID.
@@ -377,7 +389,7 @@ mod tests {
     #[test]
     fn test_get_chain_config_by_id() {
         let config = get_chain_config_by_id(137).unwrap();
-        assert_eq!(config.network, EvmNetwork::Polygon);
+        assert_eq!(config.network, Some(EvmNetwork::Polygon));
         assert_eq!(config.native_symbol, "POL");
     }
 
@@ -405,7 +417,9 @@ mod tests {
     #[test]
     fn test_network_chain_id_matches_config() {
         for config in ALL_CHAINS {
-            assert_eq!(config.network.chain_id(), config.chain_id);
+            if let Some(network) = config.network {
+                assert_eq!(network.chain_id(), config.chain_id);
+            }
         }
     }
 }

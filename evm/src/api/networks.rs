@@ -36,8 +36,14 @@ pub struct NetworkInfo {
 
 impl From<&ChainConfig> for NetworkInfo {
     fn from(c: &ChainConfig) -> Self {
+        // For mainnets, use network name; for testnets, use chain ID
+        let id = c
+            .network
+            .map(|n| n.as_str().to_string())
+            .unwrap_or_else(|| c.chain_id.to_string());
+
         Self {
-            id: c.network.as_str().to_string(),
+            id,
             name: c.name.to_string(),
             chain_id: c.chain_id,
             native_symbol: c.native_symbol.to_string(),
