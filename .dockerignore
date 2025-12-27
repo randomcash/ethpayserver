@@ -1,0 +1,38 @@
+# Build artifacts
+target/
+build/
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Docker
+docker/
+.dockerignore
+Dockerfile*
+
+# Documentation and memos
+memos/
+*.md
+LICENSE
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.log
+coverage/

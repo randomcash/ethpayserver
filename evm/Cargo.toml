@@ -72,9 +72,9 @@ anyhow = { version = "1.0", optional = true }
 # API (optional)
 axum = { version = "0.8", optional = true }
 utoipa = { version = "5", features = ["axum_extras"], optional = true }
-types = { git = "ssh://git@gitlab.com/random.cash/payserver-commons.git", optional = true }
+types = { git = "https://gitlab.com/random.cash/payserver-commons.git", optional = true }
 data-service = { path = "../data-service", optional = true }
-auth = { git = "ssh://git@gitlab.com/random.cash/payserver-commons.git", optional = true }
+auth = { git = "https://gitlab.com/random.cash/payserver-commons.git", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["full", "test-util"] }

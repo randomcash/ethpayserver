@@ -38,9 +38,11 @@ cd ethpayserver
 ### 2. Start Services
 
 ```bash
-# Start PostgreSQL and Redis (example with Docker)
-docker run -d --name postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
-docker run -d --name redis -p 6379:6379 redis:7-alpine
+# Start PostgreSQL and Redis with docker-compose
+docker compose -f docker-compose.local.yml up -d
+
+# Verify services are running
+docker compose -f docker-compose.local.yml ps
 ```
 
 ### 3. Database Setup
@@ -49,10 +51,7 @@ docker run -d --name redis -p 6379:6379 redis:7-alpine
 # Install sqlx-cli
 cargo install sqlx-cli --no-default-features --features postgres
 
-# Create database
-createdb ethpayserver
-
-# Run migrations
+# Run migrations (database is auto-created by docker-compose)
 DATABASE_URL="postgres://postgres:postgres@localhost/ethpayserver" \
 sqlx migrate run --source data-service/migrations/postgres
 ```
@@ -443,15 +442,85 @@ cargo test -p data-service
 
 ## Docker
 
-```bash
-# Build image
-docker build -t ethpayserver .
+Dockerfiles are located in `/docker`:
 
-# Run container
+| File | Description |
+|------|-------------|
+| `ethpayserver.Dockerfile` | API server (ethpayserver) |
+| `evmmonitor.Dockerfile` | Chain monitor (evmmonitor) |
+| `docker-compose.local.yml` | Local development (default credentials, exposed ports) |
+| `docker-compose.prod.yml` | Production (isolated networks, required secrets) |
+| `.env.example` | Environment variable template |
+
+### Build Individual Images
+
+Build from ethpayserver directory:
+
+```bash
+cd ./ethpayserver
+
+# Build API server
+docker build -f docker/ethpayserver.Dockerfile -t ethpayserver .
+
+# Build chain monitor
+docker build -f docker/evmmonitor.Dockerfile -t evmmonitor .
+```
+
+### Run Local Development Stack
+
+```bash
+cd ./ethpayserver
+
+# Copy and configure environment
+cp docker/.env.example docker/.env
+# Edit .env with your RPC URLs
+
+# Start all services (postgres, redis, server, evmmonitor)
+docker compose -f docker/docker-compose.local.yml up --build
+
+# Or run in background
+docker compose -f docker/docker-compose.local.yml up -d --build
+```
+
+### Run Production Stack
+
+```bash
+cd ./ethpayserver
+
+# Copy and configure environment
+cp docker/.env.example docker/.env
+# Edit .env with production credentials and RPC URLs
+
+# Start all services
+docker compose -f docker/docker-compose.prod.yml up --build -d
+
+# View logs
+docker compose -f docker/docker-compose.prod.yml logs -f
+```
+
+Production differences from local:
+- Requires `POSTGRES_PASSWORD` and `EVMMONITOR_CHAINS` (will fail without)
+- Swagger UI disabled by default
+- Internal services (postgres, redis) not exposed to host
+- Isolated networks (internal for services, external for API only)
+- Redis persistence enabled (`appendonly yes`)
+
+### Run Individual Containers
+
+```bash
+# API server
 docker run -p 3000:3000 \
-  -e DATABASE_URL=postgres://... \
-  -e REDIS_URL=redis://... \
+  -e DATABASE_URL=postgres://user:pass@host/ethpayserver \
+  -e REDIS_URL=redis://host:6379 \
   ethpayserver
+
+# Chain monitor
+docker run \
+  -e EVMMONITOR_REDIS_URL=redis://host:6379 \
+  -e EVMMONITOR_CHAINS=1,137 \
+  -e EVMMONITOR_CHAIN_1_RPC_HTTP=https://eth-mainnet.g.alchemy.com/v2/KEY \
+  -e EVMMONITOR_CHAIN_1_RPC_WS=wss://eth-mainnet.g.alchemy.com/v2/KEY \
+  evmmonitor
 ```
 
 ## Security

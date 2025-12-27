@@ -6,7 +6,7 @@ resolver = "3"
 rust-version = "1.90.0"
 
 # Use local payserver-commons instead of Git during development
-[patch."ssh://git@gitlab.com/random.cash/payserver-commons.git"]
+[patch."https://gitlab.com/random.cash/payserver-commons.git"]
 types = { path = "../payserver-commons/types" }
 auth = { path = "../payserver-commons/auth" }
 crypto = { path = "../payserver-commons/crypto" }

@@ -1,0 +1,80 @@
+# Local development docker-compose with all services
+#
+# Build and run from parent directory (random.cash):
+#   docker compose -f ethpayserver/docker/docker-compose.local.yml up --build
+#
+# Required: Create .env file with RPC URLs (copy from .env.example)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ethpayserver_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ethpayserver
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ethpayserver_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: ..
+      dockerfile: docker/ethpayserver.Dockerfile
+    container_name: ethpayserver_server
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres/ethpayserver
+      REDIS_URL: redis://redis:6379
+      HOST: 0.0.0.0
+      PORT: 3000
+      RUST_LOG: info
+      ENABLE_SWAGGER: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  evmmonitor:
+    build:
+      context: ..
+      dockerfile: docker/evmmonitor.Dockerfile
+    container_name: ethpayserver_evmmonitor
+    environment:
+      EVMMONITOR_REDIS_URL: redis://redis:6379
+      EVMMONITOR_CHAINS: ${EVMMONITOR_CHAINS:-11155111}
+      EVMMONITOR_CHAIN_11155111_RPC_HTTP: ${EVMMONITOR_CHAIN_11155111_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_11155111_RPC_WS: ${EVMMONITOR_CHAIN_11155111_RPC_WS:-}
+      EVMMONITOR_CHAIN_1_RPC_HTTP: ${EVMMONITOR_CHAIN_1_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_1_RPC_WS: ${EVMMONITOR_CHAIN_1_RPC_WS:-}
+      EVMMONITOR_CHAIN_137_RPC_HTTP: ${EVMMONITOR_CHAIN_137_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_137_RPC_WS: ${EVMMONITOR_CHAIN_137_RPC_WS:-}
+      RUST_LOG: info
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,115 @@
+# Production docker-compose for ethpayserver
+#
+# Usage:
+#   1. Copy .env.example to .env and configure all required variables
+#   2. Run: docker compose -f ethpayserver/docker/docker-compose.prod.yml up -d --build
+#
+# Required environment variables in .env:
+#   - POSTGRES_PASSWORD (strong password)
+#   - EVMMONITOR_CHAINS (chain IDs to monitor)
+#   - EVMMONITOR_CHAIN_{ID}_RPC_HTTP (for each chain)
+#   - EVMMONITOR_CHAIN_{ID}_RPC_WS (for each chain)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ethpayserver_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ethpayserver}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ethpayserver}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ethpayserver}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: ethpayserver_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - internal
+
+  server:
+    build:
+      context: ..
+      dockerfile: docker/ethpayserver.Dockerfile
+    container_name: ethpayserver_server
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ethpayserver}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-ethpayserver}
+      REDIS_URL: redis://redis:6379
+      HOST: 0.0.0.0
+      PORT: 3000
+      RUST_LOG: ${RUST_LOG:-info}
+      ENABLE_SWAGGER: "false"
+    ports:
+      - "${SERVER_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+      - external
+
+  evmmonitor:
+    build:
+      context: ..
+      dockerfile: docker/evmmonitor.Dockerfile
+    container_name: ethpayserver_evmmonitor
+    environment:
+      EVMMONITOR_REDIS_URL: redis://redis:6379
+      EVMMONITOR_CHAINS: ${EVMMONITOR_CHAINS:?EVMMONITOR_CHAINS is required}
+      # Mainnet RPC URLs
+      EVMMONITOR_CHAIN_1_RPC_HTTP: ${EVMMONITOR_CHAIN_1_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_1_RPC_WS: ${EVMMONITOR_CHAIN_1_RPC_WS:-}
+      EVMMONITOR_CHAIN_137_RPC_HTTP: ${EVMMONITOR_CHAIN_137_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_137_RPC_WS: ${EVMMONITOR_CHAIN_137_RPC_WS:-}
+      EVMMONITOR_CHAIN_42161_RPC_HTTP: ${EVMMONITOR_CHAIN_42161_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_42161_RPC_WS: ${EVMMONITOR_CHAIN_42161_RPC_WS:-}
+      EVMMONITOR_CHAIN_10_RPC_HTTP: ${EVMMONITOR_CHAIN_10_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_10_RPC_WS: ${EVMMONITOR_CHAIN_10_RPC_WS:-}
+      EVMMONITOR_CHAIN_8453_RPC_HTTP: ${EVMMONITOR_CHAIN_8453_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_8453_RPC_WS: ${EVMMONITOR_CHAIN_8453_RPC_WS:-}
+      EVMMONITOR_CHAIN_56_RPC_HTTP: ${EVMMONITOR_CHAIN_56_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_56_RPC_WS: ${EVMMONITOR_CHAIN_56_RPC_WS:-}
+      EVMMONITOR_CHAIN_43114_RPC_HTTP: ${EVMMONITOR_CHAIN_43114_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_43114_RPC_WS: ${EVMMONITOR_CHAIN_43114_RPC_WS:-}
+      # Testnet RPC URLs
+      EVMMONITOR_CHAIN_11155111_RPC_HTTP: ${EVMMONITOR_CHAIN_11155111_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_11155111_RPC_WS: ${EVMMONITOR_CHAIN_11155111_RPC_WS:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+  external:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
