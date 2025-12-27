@@ -46,7 +46,9 @@
 
 use chrono::Utc;
 use clap::Parser;
-use data_service::RedisDataService;
+use data_service::{
+    LiveWatchedAddressReader, LiveWatchedAddressWriter, RedisDataService,
+};
 use evm::error::{EvmError, EvmResult};
 use evm::monitor::bridge::{EventBridge, RedisBridge};
 use evm::monitor::events::{AddressUnwatched, AddressWatched, StatusReport, WatchedAddressInfo};
@@ -270,7 +272,7 @@ async fn restore_watched_addresses(
     persistence: &Arc<RedisDataService>,
     monitored_chain_ids: &[u64],
 ) {
-    match persistence.get_active_by_chain().await {
+    match persistence.get_all_watched().await {
         Ok(addresses) => {
             let mut restored_count = 0;
             for (address, invoice_id, chain_id) in addresses {
@@ -341,7 +343,7 @@ async fn handle_commands(
                 // Persist to Redis first (using chain_id directly for testnet support)
                 let invoice_id = InvoiceId::from_string(cmd.invoice_id.to_string());
                 let address_str = cmd.address.to_string().to_lowercase();
-                if let Err(e) = persistence.upsert_by_chain(
+                if let Err(e) = persistence.watch_address(
                     &address_str,
                     &invoice_id,
                     cmd.chain_id,
@@ -390,11 +392,7 @@ async fn handle_commands(
 
                 // Remove from persistence (using chain_id directly for testnet support)
                 let address_str = cmd.address.to_string().to_lowercase();
-                if let Err(e) = persistence.remove_by_chain(
-                    &address_str,
-                    cmd.chain_id,
-                ).await {
-                    // NotFound is acceptable - address might not exist in persistence
+                if let Err(e) = persistence.unwatch_address(&address_str, cmd.chain_id).await {
                     debug!(error = %e, "failed to remove watched address from persistence");
                 }
 

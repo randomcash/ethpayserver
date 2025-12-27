@@ -41,6 +41,8 @@ pub use types::{
     DataService, DataServiceReader, DataServiceWriter,
     // Invoice
     InvoiceQueryParams, InvoiceReader, InvoiceRepository, InvoiceWriter,
+    // Live Watched Address (for evmmonitor/Redis)
+    LiveWatchedAddressReader, LiveWatchedAddressRepository, LiveWatchedAddressWriter,
     // Payment
     PaymentQueryParams, PaymentReader, PaymentRepository, PaymentWriter,
     // Payment Event
@@ -51,7 +53,7 @@ pub use types::{
     StoreWebhook, StoreWebhookReader, StoreWebhookRepository, StoreWebhookWriter,
     // Token
     TokenData, TokenQueryParams, TokenReader, TokenRepository, TokenWriter,
-    // Watched Address
+    // Watched Address (for PostgreSQL persistence)
     CleanupAddressInfo, PendingWatchInfo, WatchedAddressReader, WatchedAddressRepository,
     WatchedAddressWriter,
     // Errors
