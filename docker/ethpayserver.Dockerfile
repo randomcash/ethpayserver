@@ -24,7 +24,8 @@ RUN \
         echo "https://x-access-token:${TOKEN}@gitlab.com" > ~/.git-credentials && \
         git config --global url."https://x-access-token:${TOKEN}@gitlab.com/".insteadOf "https://gitlab.com/" ; \
     fi && \
-    cargo install --root build --path server --bin ethpayserver
+    cargo install --root build --path server --bin ethpayserver && \
+    cargo install --root build --path server --bin migrate_postgres
 
 FROM debian:bookworm-slim AS runtime
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
@@ -32,6 +33,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     rm -rf /var/lib/apt/lists/*
 RUN useradd -r -s /bin/false ethpayserver
 COPY --from=builder /usr/local/server/build/bin/ethpayserver /usr/local/bin/
+COPY --from=builder /usr/local/server/build/bin/migrate_postgres /usr/local/bin/
 USER ethpayserver
 
 # Required: DATABASE_URL, REDIS_URL

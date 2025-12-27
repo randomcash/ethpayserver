@@ -101,10 +101,23 @@ pub const BSC_TESTNET: ChainConfig = ChainConfig {
     explorer_url: "https://testnet.bscscan.com/tx/{tx}",
 };
 
+/// Ethereum Hoodi testnet.
+pub const HOODI: ChainConfig = ChainConfig {
+    network: None,
+    chain_id: 560048,
+    name: "Hoodi",
+    native_symbol: "ETH",
+    native_decimals: 18,
+    block_time_secs: 12,
+    confirmations_required: 3,
+    explorer_url: "https://hoodi.etherscan.io/tx/{tx}",
+};
+
 /// All testnet chains.
 pub const ALL_TESTNETS: &[ChainConfig] = &[
     SEPOLIA,
     HOLESKY,
+    HOODI,
     POLYGON_AMOY,
     ARBITRUM_SEPOLIA,
     OPTIMISM_SEPOLIA,

@@ -46,6 +46,21 @@ services:
     networks:
       - internal
 
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/ethpayserver.Dockerfile
+    container_name: ethpayserver_migrate
+    entrypoint: ["migrate_postgres"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ethpayserver}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-ethpayserver}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+
   server:
     build:
       context: ..
@@ -61,8 +76,8 @@ services:
     ports:
       - "${SERVER_PORT:-3000}:3000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     restart: unless-stopped

@@ -8,7 +8,11 @@ license = "MIT"
 
 [[bin]]
 name = "ethpayserver"
-path = "src/main.rs"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "migrate_postgres"
+path = "src/bin/migrate_postgres.rs"
 
 [dependencies]
 # Internal crates
@@ -59,6 +63,9 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+
+# Database migrations
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "migrate"] }
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["test-util"] }

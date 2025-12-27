@@ -36,6 +36,19 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/ethpayserver.Dockerfile
+    container_name: ethpayserver_migrate
+    entrypoint: ["migrate_postgres"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres/ethpayserver
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   server:
     build:
       context: ..
@@ -51,8 +64,8 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
@@ -61,15 +74,10 @@ services:
       context: ..
       dockerfile: docker/evmmonitor.Dockerfile
     container_name: ethpayserver_evmmonitor
+    env_file:
+      - .env
     environment:
       EVMMONITOR_REDIS_URL: redis://redis:6379
-      EVMMONITOR_CHAINS: ${EVMMONITOR_CHAINS:-11155111}
-      EVMMONITOR_CHAIN_11155111_RPC_HTTP: ${EVMMONITOR_CHAIN_11155111_RPC_HTTP:-}
-      EVMMONITOR_CHAIN_11155111_RPC_WS: ${EVMMONITOR_CHAIN_11155111_RPC_WS:-}
-      EVMMONITOR_CHAIN_1_RPC_HTTP: ${EVMMONITOR_CHAIN_1_RPC_HTTP:-}
-      EVMMONITOR_CHAIN_1_RPC_WS: ${EVMMONITOR_CHAIN_1_RPC_WS:-}
-      EVMMONITOR_CHAIN_137_RPC_HTTP: ${EVMMONITOR_CHAIN_137_RPC_HTTP:-}
-      EVMMONITOR_CHAIN_137_RPC_WS: ${EVMMONITOR_CHAIN_137_RPC_WS:-}
       RUST_LOG: info
     depends_on:
       redis:
