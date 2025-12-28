@@ -15,10 +15,11 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::AuthService;
 use data_service::PgDataService;
+use rates::RateProviderConfig;
 use server::{
     api, config::Config, AppState, CleanupConfig, EventConsumer,
-    InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
-    WebhookConfig, WebhookService,
+    InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig,
+    WatchRetryService, WebhookConfig, WebhookService,
 };
 use evm::monitor::bridge::{RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
 
@@ -117,8 +118,18 @@ async fn main() -> Result<()> {
         tracing::info!("Watch retry service disabled");
     }
 
+    // Create rate provider
+    let rate_config = RateProviderConfig::from_env();
+    tracing::info!(provider = rate_config.provider, "Rate provider configured");
+    let rate_provider = rate_config.create_provider();
+
     // Create application state
-    let state = AppState::new(Arc::clone(&data_service), auth_service, Some(evm_monitor));
+    let state = AppState::new(
+        Arc::clone(&data_service),
+        auth_service,
+        Some(evm_monitor),
+        rate_provider,
+    );
 
     // Build router with middleware
     let app = api::router(state, config.enable_swagger)

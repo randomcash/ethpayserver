@@ -6,6 +6,8 @@ mod auth;
 mod conversions;
 mod invoice;
 mod payment;
+mod payment_option;
+mod store_payment_method;
 mod store_wallet;
 mod store_webhook;
 mod token;

@@ -74,6 +74,10 @@ struct PendingPayment {
     last_check_block: u64,
 }
 
+/// Key for watched address map: (address, token_contract).
+/// token_contract is None for native asset, Some(addr) for ERC20.
+pub type WatchKey = (Address, Option<Address>);
+
 /// Monitor for a single EVM chain.
 pub struct ChainMonitor<S: BlockSource> {
     /// Chain configuration.
@@ -82,8 +86,9 @@ pub struct ChainMonitor<S: BlockSource> {
     config: ChainMonitorConfig,
     /// Block source.
     source: Arc<S>,
-    /// Addresses being watched.
-    watched: RwLock<HashMap<Address, WatchedAddress>>,
+    /// Addresses being watched, keyed by (address, token_contract).
+    /// This allows the same address to be watched for different tokens.
+    watched: RwLock<HashMap<WatchKey, WatchedAddress>>,
     /// Payments pending confirmation.
     pending: RwLock<HashMap<B256, PendingPayment>>,
     /// Last processed block.
@@ -134,16 +139,30 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
 
     /// Add an address to watch.
     pub async fn watch(&self, watched: WatchedAddress) {
+        let key = (watched.address, watched.token_contract);
         let address = watched.address;
-        self.watched.write().await.insert(address, watched);
-        debug!(chain_id = self.chain_id(), %address, "watching address");
+        let token = watched.token_contract;
+        self.watched.write().await.insert(key, watched);
+        debug!(
+            chain_id = self.chain_id(),
+            %address,
+            token = ?token,
+            "watching address"
+        );
     }
 
     /// Remove an address from watch list.
-    pub async fn unwatch(&self, address: &Address) -> Option<WatchedAddress> {
-        let removed = self.watched.write().await.remove(address);
+    /// token_contract should be None for native, Some(addr) for ERC20.
+    pub async fn unwatch(&self, address: &Address, token_contract: Option<Address>) -> Option<WatchedAddress> {
+        let key = (*address, token_contract);
+        let removed = self.watched.write().await.remove(&key);
         if removed.is_some() {
-            debug!(chain_id = self.chain_id(), %address, "unwatched address");
+            debug!(
+                chain_id = self.chain_id(),
+                %address,
+                token = ?token_contract,
+                "unwatched address"
+            );
         }
         removed
     }
@@ -273,12 +292,12 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// Check for native currency payments.
     async fn check_native_payments(
         &self,
-        watched: &HashMap<Address, WatchedAddress>,
+        watched: &HashMap<WatchKey, WatchedAddress>,
         block: &BlockNotification,
     ) -> EvmResult<()> {
-        for (address, watch) in watched.iter() {
-            // Skip if watching for token only
-            if watch.token_contract.is_some() {
+        for ((address, token), watch) in watched.iter() {
+            // Skip if watching for token (not native)
+            if token.is_some() {
                 continue;
             }
 
@@ -334,11 +353,15 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// Check for ERC20 token payments.
     async fn check_erc20_payments(
         &self,
-        watched: &HashMap<Address, WatchedAddress>,
+        watched: &HashMap<WatchKey, WatchedAddress>,
         block: &BlockNotification,
     ) -> EvmResult<()> {
-        // Collect addresses we're watching
-        let watch_addresses: Vec<Address> = watched.keys().copied().collect();
+        // Collect unique addresses we're watching (for ERC20, token must be Some)
+        let watch_addresses: Vec<Address> = watched
+            .keys()
+            .filter(|(_, token)| token.is_some())
+            .map(|(addr, _)| *addr)
+            .collect();
         if watch_addresses.is_empty() {
             return Ok(());
         }
@@ -361,9 +384,11 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             }
 
             let to_address = Address::from_slice(&log.topics()[2].as_slice()[12..]);
+            let token_address = log.address();
 
-            // Check if this is an address we're watching
-            if let Some(watch) = watched.get(&to_address) {
+            // Check if this is an (address, token) pair we're watching
+            let key = (to_address, Some(token_address));
+            if let Some(watch) = watched.get(&key) {
                 let from_address = Address::from_slice(&log.topics()[1].as_slice()[12..]);
                 let amount = U256::from_be_slice(log.data().data.as_ref());
 

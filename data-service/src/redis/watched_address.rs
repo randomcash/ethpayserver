@@ -1,8 +1,11 @@
 //! Live watched address repository implementation for Redis.
 //!
 //! This module provides runtime address watching for evmmonitor.
-//! It stores simple `(chain_id, address) -> invoice_id` mappings
+//! It stores `(chain_id, address, token) -> invoice_id` mappings
 //! for fast lookups during transaction monitoring.
+//!
+//! The token distinguishes between native assets and ERC20 tokens,
+//! allowing the same address to be watched for different assets.
 //!
 //! Note: This is separate from the PostgreSQL `WatchedAddressReader/Writer`
 //! traits which handle persistence with full invoice metadata.
@@ -16,26 +19,42 @@ use crate::{LiveWatchedAddressReader, LiveWatchedAddressWriter, RepositoryError,
 use types::InvoiceId;
 
 /// Key prefix for watched addresses.
-/// Format: `evmwatch:addr:{chain_id}:{address}` -> `invoice_id`
+/// Format: `evmwatch:addr:{chain_id}:{address}:{token}` -> `invoice_id`
+/// Where token is "native" for native assets or the token contract address for ERC20.
 const KEY_PREFIX: &str = "evmwatch:addr";
+const NATIVE_TOKEN: &str = "native";
 
 impl RedisDataService {
     /// Build the Redis key for a watched address.
-    fn watched_address_key(chain_id: u64, address: &str) -> String {
-        format!("{}:{}:{}", KEY_PREFIX, chain_id, address.to_lowercase())
+    /// token_address is None for native assets, Some(addr) for ERC20 tokens.
+    fn watched_address_key(chain_id: u64, address: &str, token_address: Option<&str>) -> String {
+        let token = token_address.unwrap_or(NATIVE_TOKEN);
+        format!(
+            "{}:{}:{}:{}",
+            KEY_PREFIX,
+            chain_id,
+            address.to_lowercase(),
+            token.to_lowercase()
+        )
     }
 
-    /// Parse a Redis key back into chain_id and address.
-    fn parse_watched_address_key(key: &str) -> Option<(u64, String)> {
+    /// Parse a Redis key back into (chain_id, address, token_address).
+    /// Returns None for native token, Some(addr) for ERC20.
+    fn parse_watched_address_key(key: &str) -> Option<(u64, String, Option<String>)> {
         let parts: Vec<&str> = key.split(':').collect();
-        // Expected format: evmwatch:addr:{chain_id}:{address}
-        if parts.len() != 4 || parts[0] != "evmwatch" || parts[1] != "addr" {
+        // Expected format: evmwatch:addr:{chain_id}:{address}:{token}
+        if parts.len() != 5 || parts[0] != "evmwatch" || parts[1] != "addr" {
             return None;
         }
 
         let chain_id: u64 = parts[2].parse().ok()?;
         let address = parts[3].to_string();
-        Some((chain_id, address))
+        let token = if parts[4] == NATIVE_TOKEN {
+            None
+        } else {
+            Some(parts[4].to_string())
+        };
+        Some((chain_id, address, token))
     }
 }
 
@@ -45,8 +64,9 @@ impl LiveWatchedAddressReader for RedisDataService {
         &self,
         address: &str,
         chain_id: u64,
+        token_address: Option<&str>,
     ) -> RepositoryResult<Option<InvoiceId>> {
-        let key = Self::watched_address_key(chain_id, address);
+        let key = Self::watched_address_key(chain_id, address, token_address);
         let mut conn = self.conn.clone();
 
         let result: Option<String> = conn
@@ -57,7 +77,7 @@ impl LiveWatchedAddressReader for RedisDataService {
         Ok(result.map(InvoiceId::from_string))
     }
 
-    async fn get_all_watched(&self) -> RepositoryResult<Vec<(String, InvoiceId, u64)>> {
+    async fn get_all_watched(&self) -> RepositoryResult<Vec<(String, InvoiceId, u64, Option<String>)>> {
         let mut conn = self.conn.clone();
         let pattern = format!("{}:*", KEY_PREFIX);
         let mut result = Vec::new();
@@ -83,8 +103,8 @@ impl LiveWatchedAddressReader for RedisDataService {
                     .map_err(|e| RepositoryError::Database(format!("redis get failed: {}", e)))?;
 
                 if let Some(invoice_id_str) = value {
-                    if let Some((chain_id, address)) = Self::parse_watched_address_key(&key) {
-                        result.push((address, InvoiceId::from_string(invoice_id_str), chain_id));
+                    if let Some((chain_id, address, token)) = Self::parse_watched_address_key(&key) {
+                        result.push((address, InvoiceId::from_string(invoice_id_str), chain_id, token));
                     } else {
                         warn!(key = %key, "failed to parse watched address key");
                     }
@@ -108,8 +128,9 @@ impl LiveWatchedAddressWriter for RedisDataService {
         address: &str,
         invoice_id: &InvoiceId,
         chain_id: u64,
+        token_address: Option<&str>,
     ) -> RepositoryResult<()> {
-        let key = Self::watched_address_key(chain_id, address);
+        let key = Self::watched_address_key(chain_id, address, token_address);
         let mut conn = self.conn.clone();
 
         conn.set::<_, _, ()>(&key, invoice_id.as_str())
@@ -119,8 +140,13 @@ impl LiveWatchedAddressWriter for RedisDataService {
         Ok(())
     }
 
-    async fn unwatch_address(&self, address: &str, chain_id: u64) -> RepositoryResult<bool> {
-        let key = Self::watched_address_key(chain_id, address);
+    async fn unwatch_address(
+        &self,
+        address: &str,
+        chain_id: u64,
+        token_address: Option<&str>,
+    ) -> RepositoryResult<bool> {
+        let key = Self::watched_address_key(chain_id, address, token_address);
         let mut conn = self.conn.clone();
 
         let deleted: i64 = conn
@@ -137,14 +163,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_watched_address_key() {
+    fn test_watched_address_key_native() {
         let key = RedisDataService::watched_address_key(
             1, // Ethereum mainnet
             "0x1234567890ABCDEF1234567890ABCDEF12345678",
+            None, // Native asset
         );
         assert_eq!(
             key,
-            "evmwatch:addr:1:0x1234567890abcdef1234567890abcdef12345678"
+            "evmwatch:addr:1:0x1234567890abcdef1234567890abcdef12345678:native"
+        );
+    }
+
+    #[test]
+    fn test_watched_address_key_erc20() {
+        let key = RedisDataService::watched_address_key(
+            1, // Ethereum mainnet
+            "0x1234567890ABCDEF1234567890ABCDEF12345678",
+            Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"), // USDC
+        );
+        assert_eq!(
+            key,
+            "evmwatch:addr:1:0x1234567890abcdef1234567890abcdef12345678:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         );
     }
 
@@ -153,37 +193,53 @@ mod tests {
         let key = RedisDataService::watched_address_key(
             11155111, // Sepolia
             "0x1234567890ABCDEF1234567890ABCDEF12345678",
+            None,
         );
         assert_eq!(
             key,
-            "evmwatch:addr:11155111:0x1234567890abcdef1234567890abcdef12345678"
+            "evmwatch:addr:11155111:0x1234567890abcdef1234567890abcdef12345678:native"
         );
     }
 
     #[test]
-    fn test_parse_watched_address_key() {
-        let key = "evmwatch:addr:137:0xabcdef";
+    fn test_parse_watched_address_key_native() {
+        let key = "evmwatch:addr:137:0xabcdef:native";
         let parsed = RedisDataService::parse_watched_address_key(key);
         assert!(parsed.is_some());
-        let (chain_id, address) = parsed.unwrap();
+        let (chain_id, address, token) = parsed.unwrap();
         assert_eq!(chain_id, 137);
         assert_eq!(address, "0xabcdef");
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn test_parse_watched_address_key_erc20() {
+        let key = "evmwatch:addr:1:0xabcdef:0xusdc";
+        let parsed = RedisDataService::parse_watched_address_key(key);
+        assert!(parsed.is_some());
+        let (chain_id, address, token) = parsed.unwrap();
+        assert_eq!(chain_id, 1);
+        assert_eq!(address, "0xabcdef");
+        assert_eq!(token, Some("0xusdc".to_string()));
     }
 
     #[test]
     fn test_parse_watched_address_key_testnet() {
-        let key = "evmwatch:addr:11155111:0xabcdef";
+        let key = "evmwatch:addr:11155111:0xabcdef:native";
         let parsed = RedisDataService::parse_watched_address_key(key);
         assert!(parsed.is_some());
-        let (chain_id, address) = parsed.unwrap();
+        let (chain_id, address, token) = parsed.unwrap();
         assert_eq!(chain_id, 11155111);
         assert_eq!(address, "0xabcdef");
+        assert!(token.is_none());
     }
 
     #[test]
     fn test_parse_invalid_key() {
         assert!(RedisDataService::parse_watched_address_key("invalid").is_none());
-        assert!(RedisDataService::parse_watched_address_key("evmwatch:wrong:1:0x123").is_none());
+        assert!(RedisDataService::parse_watched_address_key("evmwatch:wrong:1:0x123:native").is_none());
         assert!(RedisDataService::parse_watched_address_key("evmwatch:addr").is_none());
+        // Old format without token should fail
+        assert!(RedisDataService::parse_watched_address_key("evmwatch:addr:1:0x123").is_none());
     }
 }

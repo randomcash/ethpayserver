@@ -47,6 +47,12 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::get_store_webhook,
         stores::configure_store_webhook,
         stores::delete_store_webhook,
+        // Payment Methods
+        stores::list_payment_methods,
+        stores::create_payment_method,
+        stores::get_payment_method,
+        stores::update_payment_method,
+        stores::delete_payment_method,
         // Invoices
         invoices::list_invoices,
         invoices::create_invoice,
@@ -54,7 +60,6 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::get_invoice_payments,
         invoices::get_invoice_status,
         invoices::cancel_invoice,
-        invoices::expire_invoices,
     ),
     components(schemas(
         health::HealthResponse,
@@ -68,12 +73,15 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::WalletResponse,
         stores::ConfigureWebhookRequest,
         stores::WebhookResponse,
+        stores::CreatePaymentMethodRequest,
+        stores::UpdatePaymentMethodRequest,
+        stores::PaymentMethodResponse,
         invoices::CreateInvoiceRequest,
         invoices::InvoiceResponse,
         invoices::InvoiceListResponse,
         invoices::PaymentResponse,
+        invoices::PaymentOptionResponse,
         invoices::InvoiceStatusResponse,
-        invoices::ExpireResponse,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -129,13 +137,18 @@ where
         .route("/{store_id}/webhook", get(stores::get_store_webhook::<A>))
         .route("/{store_id}/webhook", put(stores::configure_store_webhook::<A>))
         .route("/{store_id}/webhook", delete(stores::delete_store_webhook::<A>))
+        // Payment methods
+        .route("/{store_id}/payment-methods", get(stores::list_payment_methods::<A>))
+        .route("/{store_id}/payment-methods", post(stores::create_payment_method::<A>))
+        .route("/{store_id}/payment-methods/{method_id}", get(stores::get_payment_method::<A>))
+        .route("/{store_id}/payment-methods/{method_id}", put(stores::update_payment_method::<A>))
+        .route("/{store_id}/payment-methods/{method_id}", delete(stores::delete_payment_method::<A>))
         .with_state(state.clone());
 
     // Invoice endpoints
     let invoice_routes = Router::new()
         .route("/", get(invoices::list_invoices::<A>))
         .route("/", post(invoices::create_invoice::<A>))
-        .route("/expire", post(invoices::expire_invoices::<A>))
         .route("/{invoice_id}", get(invoices::get_invoice::<A>))
         .route("/{invoice_id}/payments", get(invoices::get_invoice_payments::<A>))
         .route("/{invoice_id}/status", get(invoices::get_invoice_status::<A>))

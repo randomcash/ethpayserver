@@ -49,6 +49,18 @@ pub fn try_db_to_network(s: &str) -> Result<Network, RepositoryError> {
     }
 }
 
+/// Convert optional database string to optional Rust Network enum.
+///
+/// Returns None for NULL values or unknown networks (e.g., testnets).
+pub fn db_to_network_opt(s: Option<&str>) -> Option<Network> {
+    s.and_then(|s| try_db_to_network(s).ok())
+}
+
+/// Convert optional Rust Network enum to optional database string.
+pub fn network_to_db_opt(network: Option<Network>) -> Option<&'static str> {
+    network.and_then(|n| try_network_to_db(n).ok())
+}
+
 /// Convert Rust InvoiceStatus enum to database string.
 ///
 /// This is infallible since all InvoiceStatus variants are supported.

@@ -75,8 +75,12 @@ pub struct WebhookPayload {
     /// Asset symbol (e.g., "ETH", "USDT").
     pub asset_symbol: String,
 
-    /// Network name.
-    pub network: String,
+    /// Chain ID (EIP-155).
+    pub chain_id: u64,
+
+    /// Network name (null for testnets/custom chains).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
 
     /// Payment details (if applicable).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -545,7 +549,8 @@ mod tests {
             amount: "1000".to_string(),
             amount_received: "1000".to_string(),
             asset_symbol: "ETH".to_string(),
-            network: "ethereum".to_string(),
+            chain_id: 1,
+            network: Some("ethereum".to_string()),
             payment: None,
         };
 
@@ -573,7 +578,8 @@ mod tests {
             amount: "1000".to_string(),
             amount_received: "1000".to_string(),
             asset_symbol: "ETH".to_string(),
-            network: "ethereum".to_string(),
+            chain_id: 1,
+            network: Some("ethereum".to_string()),
             payment: None,
         };
 
@@ -607,7 +613,8 @@ mod tests {
             amount: "1000".to_string(),
             amount_received: "1000".to_string(),
             asset_symbol: "ETH".to_string(),
-            network: "ethereum".to_string(),
+            chain_id: 1,
+            network: Some("ethereum".to_string()),
             payment: None,
         };
 
@@ -661,7 +668,8 @@ mod tests {
             amount: "1000000000000000000".to_string(),
             amount_received: "1000000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
-            network: "ethereum".to_string(),
+            chain_id: 1,
+            network: Some("ethereum".to_string()),
             payment: Some(WebhookPaymentInfo {
                 tx_hash: "0x1234".to_string(),
                 from_address: Some("0xabcd".to_string()),
@@ -693,7 +701,8 @@ mod tests {
             amount: "500".to_string(),
             amount_received: "0".to_string(),
             asset_symbol: "USDC".to_string(),
-            network: "polygon".to_string(),
+            chain_id: 137,
+            network: Some("polygon".to_string()),
             payment: None,
         };
 

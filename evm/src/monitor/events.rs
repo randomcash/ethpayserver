@@ -45,6 +45,8 @@ pub struct UnwatchAddressCommand {
     pub chain_id: u64,
     /// Address to stop watching.
     pub address: Address,
+    /// Token contract address (None = native currency).
+    pub token_contract: Option<Address>,
 }
 
 /// Request status of watched addresses on a chain.

@@ -8,7 +8,8 @@ use chrono::{DateTime, Utc};
 use futures::stream::{self, BoxStream, StreamExt};
 use types::{
     CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
-    InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentReader, PaymentWriter,
+    InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentMethodId, PaymentOptionData,
+    PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentReader, PaymentWriter,
     PendingWatchInfo, RepositoryResult, StoreId, StoreWebhook, StoreWebhookReader, TokenData,
     TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
 };
@@ -19,7 +20,9 @@ use uuid::Uuid;
 pub struct InMemoryDataService {
     invoices: RwLock<HashMap<String, InvoiceData>>,
     payments: RwLock<HashMap<Uuid, PaymentData>>,
-    addresses: RwLock<HashMap<(String, Network), InvoiceId>>,
+    payment_options: RwLock<HashMap<Uuid, PaymentOptionData>>,
+    // Key: (address, chain_id, token_address) -> payment_option_id
+    addresses: RwLock<HashMap<(String, u64, Option<String>), PaymentOptionId>>,
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
@@ -73,8 +76,8 @@ impl InvoiceReader for InMemoryDataService {
                         return false;
                     }
                 }
-                if let Some(network) = params.network {
-                    if inv.network != network {
+                if let Some(ref currency) = params.currency {
+                    if inv.currency != *currency {
                         return false;
                     }
                 }
@@ -103,31 +106,13 @@ impl InvoiceReader for InMemoryDataService {
             .collect())
     }
 
-    fn stream_expired_pending_for_network(
-        &self,
-        network: Network,
-    ) -> BoxStream<'_, RepositoryResult<InvoiceId>> {
+    fn stream_expired_pending(&self) -> BoxStream<'_, RepositoryResult<InvoiceId>> {
         let invoices = self.invoices.read().unwrap();
         let now = Utc::now();
         let ids: Vec<RepositoryResult<InvoiceId>> = invoices
             .values()
-            .filter(|inv| {
-                inv.status == InvoiceStatus::Pending
-                    && inv.network == network
-                    && inv.expires_at < now
-            })
-            .map(|inv| Ok(inv.id.clone()))
-            .collect();
-        stream::iter(ids).boxed()
-    }
-
-    fn stream_all_expired_pending(&self) -> BoxStream<'_, RepositoryResult<(Network, InvoiceId)>> {
-        let invoices = self.invoices.read().unwrap();
-        let now = Utc::now();
-        let ids: Vec<RepositoryResult<(Network, InvoiceId)>> = invoices
-            .values()
             .filter(|inv| inv.status == InvoiceStatus::Pending && inv.expires_at < now)
-            .map(|inv| Ok((inv.network, inv.id.clone())))
+            .map(|inv| Ok(inv.id.clone()))
             .collect();
         stream::iter(ids).boxed()
     }
@@ -232,14 +217,14 @@ impl PaymentWriter for InMemoryDataService {
     async fn mark_reorged(
         &self,
         invoice_id: &InvoiceId,
-        network: Network,
+        chain_id: u64,
         fork_block: u64,
     ) -> RepositoryResult<u64> {
         let mut payments = self.payments.write().unwrap();
         let mut count = 0u64;
         for payment in payments.values_mut() {
             if payment.invoice_id == *invoice_id
-                && payment.network == network
+                && payment.chain_id == chain_id
                 && payment.block_number.is_some_and(|b| b >= fork_block)
                 && !payment.reorged
             {
@@ -253,34 +238,156 @@ impl PaymentWriter for InMemoryDataService {
 }
 
 #[async_trait]
+impl PaymentOptionReader for InMemoryDataService {
+    async fn get(&self, id: &PaymentOptionId) -> RepositoryResult<Option<PaymentOptionData>> {
+        let options = self.payment_options.read().unwrap();
+        Ok(options.get(&id.0).cloned())
+    }
+
+    async fn get_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentOptionData>> {
+        let options = self.payment_options.read().unwrap();
+        Ok(options
+            .values()
+            .filter(|po| po.invoice_id == *invoice_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_by_payment_method(
+        &self,
+        invoice_id: &InvoiceId,
+        payment_method_id: &PaymentMethodId,
+    ) -> RepositoryResult<Option<PaymentOptionData>> {
+        let options = self.payment_options.read().unwrap();
+        Ok(options
+            .values()
+            .find(|po| po.invoice_id == *invoice_id && po.payment_method_id == *payment_method_id)
+            .cloned())
+    }
+
+    async fn get_active_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentOptionData>> {
+        let options = self.payment_options.read().unwrap();
+        Ok(options
+            .values()
+            .filter(|po| po.invoice_id == *invoice_id && po.is_active)
+            .cloned()
+            .collect())
+    }
+
+    async fn get_by_address(
+        &self,
+        address: &str,
+        chain_id: u64,
+        token_address: Option<&str>,
+    ) -> RepositoryResult<Option<PaymentOptionData>> {
+        let options = self.payment_options.read().unwrap();
+        Ok(options
+            .values()
+            .find(|po| {
+                po.payment_address == address
+                    && po.chain_id == chain_id
+                    && po.token_address.as_deref() == token_address
+            })
+            .cloned())
+    }
+}
+
+#[async_trait]
+impl PaymentOptionWriter for InMemoryDataService {
+    async fn create(&self, option: &PaymentOptionData) -> RepositoryResult<()> {
+        let mut options = self.payment_options.write().unwrap();
+        options.insert(option.id.0, option.clone());
+        Ok(())
+    }
+
+    async fn update(&self, option: &PaymentOptionData) -> RepositoryResult<()> {
+        let mut options = self.payment_options.write().unwrap();
+        if options.contains_key(&option.id.0) {
+            options.insert(option.id.0, option.clone());
+        }
+        Ok(())
+    }
+
+    async fn deactivate(&self, id: &PaymentOptionId) -> RepositoryResult<bool> {
+        let mut options = self.payment_options.write().unwrap();
+        if let Some(po) = options.get_mut(&id.0) {
+            if po.is_active {
+                po.is_active = false;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn deactivate_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<u64> {
+        let mut options = self.payment_options.write().unwrap();
+        let mut count = 0u64;
+        for po in options.values_mut() {
+            if po.invoice_id == *invoice_id && po.is_active {
+                po.is_active = false;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+}
+
+#[async_trait]
 impl WatchedAddressReader for InMemoryDataService {
     async fn get_invoice_id(
         &self,
         address: &str,
-        network: Network,
+        chain_id: u64,
+        token_address: Option<&str>,
     ) -> RepositoryResult<Option<InvoiceId>> {
         let addresses = self.addresses.read().unwrap();
-        Ok(addresses.get(&(address.to_string(), network)).cloned())
+        let options = self.payment_options.read().unwrap();
+
+        if let Some(po_id) = addresses.get(&(address.to_string(), chain_id, token_address.map(String::from))) {
+            if let Some(po) = options.get(&po_id.0) {
+                return Ok(Some(po.invoice_id.clone()));
+            }
+        }
+        Ok(None)
     }
 
-    async fn get_active(&self) -> RepositoryResult<Vec<(String, InvoiceId, Network)>> {
+    async fn get_payment_option_id(
+        &self,
+        address: &str,
+        chain_id: u64,
+        token_address: Option<&str>,
+    ) -> RepositoryResult<Option<PaymentOptionId>> {
+        let addresses = self.addresses.read().unwrap();
+        Ok(addresses
+            .get(&(address.to_string(), chain_id, token_address.map(String::from)))
+            .cloned())
+    }
+
+    async fn get_active(&self) -> RepositoryResult<Vec<(String, PaymentOptionId, u64, Option<String>)>> {
         let addresses = self.addresses.read().unwrap();
         Ok(addresses
             .iter()
-            .map(|((addr, network), id)| (addr.clone(), id.clone(), *network))
+            .map(|((addr, chain_id, token_addr), po_id)| {
+                (addr.clone(), po_id.clone(), *chain_id, token_addr.clone())
+            })
             .collect())
     }
 
     async fn get_pending(&self) -> RepositoryResult<Vec<PendingWatchInfo>> {
         let addresses = self.addresses.read().unwrap();
+        let options = self.payment_options.read().unwrap();
+
         Ok(addresses
             .iter()
-            .map(|((addr, network), id)| PendingWatchInfo {
-                address: addr.clone(),
-                invoice_id: id.as_str().to_string(),
-                network: *network,
-                expected_amount: None,
-                asset_id: None,
+            .filter_map(|((addr, chain_id, token_address), po_id)| {
+                options.get(&po_id.0).map(|po| PendingWatchInfo {
+                    address: addr.clone(),
+                    payment_option_id: po_id.clone(),
+                    invoice_id: po.invoice_id.as_str().to_string(),
+                    chain_id: *chain_id,
+                    expected_amount: Some(po.amount.clone()),
+                    token_address: token_address.clone(),
+                })
             })
             .collect())
     }
@@ -289,25 +396,28 @@ impl WatchedAddressReader for InMemoryDataService {
         &self,
         _grace_period_secs: i64,
     ) -> RepositoryResult<Vec<CleanupAddressInfo>> {
-        // For in-memory testing, we would need to join with invoices.
-        // Return empty for simplicity - real DB implementation handles this.
         let addresses = self.addresses.read().unwrap();
+        let options = self.payment_options.read().unwrap();
         let invoices = self.invoices.read().unwrap();
         let now = Utc::now();
 
         Ok(addresses
             .iter()
-            .filter_map(|((addr, network), invoice_id)| {
-                invoices.get(&invoice_id.0).and_then(|inv| {
-                    if inv.status == InvoiceStatus::Expired && inv.expires_at < now {
-                        Some(CleanupAddressInfo {
-                            address: addr.clone(),
-                            network: *network,
-                            invoice_id: invoice_id.as_str().to_string(),
-                        })
-                    } else {
-                        None
-                    }
+            .filter_map(|((addr, chain_id, token_address), po_id)| {
+                options.get(&po_id.0).and_then(|po| {
+                    invoices.get(&po.invoice_id.0).and_then(|inv| {
+                        if inv.status == InvoiceStatus::Expired && inv.expires_at < now {
+                            Some(CleanupAddressInfo {
+                                address: addr.clone(),
+                                payment_option_id: po_id.clone(),
+                                invoice_id: po.invoice_id.as_str().to_string(),
+                                chain_id: *chain_id,
+                                token_address: token_address.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
                 })
             })
             .collect())
@@ -315,21 +425,26 @@ impl WatchedAddressReader for InMemoryDataService {
 
     async fn get_paid_for_cleanup(&self) -> RepositoryResult<Vec<CleanupAddressInfo>> {
         let addresses = self.addresses.read().unwrap();
+        let options = self.payment_options.read().unwrap();
         let invoices = self.invoices.read().unwrap();
 
         Ok(addresses
             .iter()
-            .filter_map(|((addr, network), invoice_id)| {
-                invoices.get(&invoice_id.0).and_then(|inv| {
-                    if inv.status == InvoiceStatus::Paid {
-                        Some(CleanupAddressInfo {
-                            address: addr.clone(),
-                            network: *network,
-                            invoice_id: invoice_id.as_str().to_string(),
-                        })
-                    } else {
-                        None
-                    }
+            .filter_map(|((addr, chain_id, token_address), po_id)| {
+                options.get(&po_id.0).and_then(|po| {
+                    invoices.get(&po.invoice_id.0).and_then(|inv| {
+                        if inv.status == InvoiceStatus::Paid {
+                            Some(CleanupAddressInfo {
+                                address: addr.clone(),
+                                payment_option_id: po_id.clone(),
+                                invoice_id: po.invoice_id.as_str().to_string(),
+                                chain_id: *chain_id,
+                                token_address: token_address.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
                 })
             })
             .collect())
@@ -337,21 +452,26 @@ impl WatchedAddressReader for InMemoryDataService {
 
     async fn get_cancelled_for_cleanup(&self) -> RepositoryResult<Vec<CleanupAddressInfo>> {
         let addresses = self.addresses.read().unwrap();
+        let options = self.payment_options.read().unwrap();
         let invoices = self.invoices.read().unwrap();
 
         Ok(addresses
             .iter()
-            .filter_map(|((addr, network), invoice_id)| {
-                invoices.get(&invoice_id.0).and_then(|inv| {
-                    if inv.status == InvoiceStatus::Cancelled {
-                        Some(CleanupAddressInfo {
-                            address: addr.clone(),
-                            network: *network,
-                            invoice_id: invoice_id.as_str().to_string(),
-                        })
-                    } else {
-                        None
-                    }
+            .filter_map(|((addr, chain_id, token_address), po_id)| {
+                options.get(&po_id.0).and_then(|po| {
+                    invoices.get(&po.invoice_id.0).and_then(|inv| {
+                        if inv.status == InvoiceStatus::Cancelled {
+                            Some(CleanupAddressInfo {
+                                address: addr.clone(),
+                                payment_option_id: po_id.clone(),
+                                invoice_id: po.invoice_id.as_str().to_string(),
+                                chain_id: *chain_id,
+                                token_address: token_address.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
                 })
             })
             .collect())
@@ -363,46 +483,58 @@ impl WatchedAddressWriter for InMemoryDataService {
     async fn upsert(
         &self,
         address: &str,
-        invoice_id: &InvoiceId,
-        network: Network,
+        payment_option_id: &PaymentOptionId,
+        chain_id: u64,
+        token_address: Option<&str>,
     ) -> RepositoryResult<()> {
         let mut addresses = self.addresses.write().unwrap();
-        addresses.insert((address.to_string(), network), invoice_id.clone());
+        addresses.insert(
+            (address.to_string(), chain_id, token_address.map(String::from)),
+            payment_option_id.clone(),
+        );
         Ok(())
     }
 
-    async fn remove(&self, address: &str, network: Network) -> RepositoryResult<()> {
-        let mut addresses = self.addresses.write().unwrap();
-        addresses.remove(&(address.to_string(), network));
-        Ok(())
-    }
-
-    async fn upsert_with_asset(
+    async fn mark_notified(
         &self,
-        address: &str,
-        invoice_id: &InvoiceId,
-        network: Network,
-        _asset_id: Option<&str>,
+        _address: &str,
+        _chain_id: u64,
+        _token_address: Option<&str>,
     ) -> RepositoryResult<()> {
-        // Simplified: ignore asset_id for in-memory testing
-        let mut addresses = self.addresses.write().unwrap();
-        addresses.insert((address.to_string(), network), invoice_id.clone());
-        Ok(())
-    }
-
-    async fn mark_notified(&self, _address: &str, _network: Network) -> RepositoryResult<()> {
         // No-op for in-memory testing
         Ok(())
     }
 
-    async fn deactivate(&self, address: &str, network: Network) -> RepositoryResult<bool> {
+    async fn deactivate(
+        &self,
+        address: &str,
+        chain_id: u64,
+        token_address: Option<&str>,
+    ) -> RepositoryResult<bool> {
         let mut addresses = self.addresses.write().unwrap();
-        let key = (address.to_string(), network);
+        let key = (address.to_string(), chain_id, token_address.map(String::from));
         if addresses.remove(&key).is_some() {
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    async fn deactivate_for_payment_option(
+        &self,
+        payment_option_id: &PaymentOptionId,
+    ) -> RepositoryResult<u64> {
+        let mut addresses = self.addresses.write().unwrap();
+        let keys_to_remove: Vec<_> = addresses
+            .iter()
+            .filter(|(_, po_id)| **po_id == *payment_option_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let count = keys_to_remove.len() as u64;
+        for key in keys_to_remove {
+            addresses.remove(&key);
+        }
+        Ok(count)
     }
 }
 
@@ -589,18 +721,15 @@ impl PaymentEventWriter for InMemoryDataService {
     }
 }
 
-/// Create a test invoice.
+/// Create a test invoice (network-agnostic).
 pub fn create_test_invoice() -> InvoiceData {
     InvoiceData {
         id: InvoiceId::new(),
         store_id: StoreId::new(),
-        network: Network::Ethereum,
+        currency: "USD".to_string(),
         status: InvoiceStatus::Pending,
-        amount: "1000000000000000000".to_string(), // 1 ETH in wei
+        amount: "100.00".to_string(), // $100 USD
         amount_received: "0".to_string(),
-        asset_symbol: "ETH".to_string(),
-        payment_address: Some("0x1234567890abcdef1234567890abcdef12345678".to_string()),
-        payment_request: None,
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::hours(1),
         metadata: None,
@@ -608,14 +737,34 @@ pub fn create_test_invoice() -> InvoiceData {
     }
 }
 
+/// Create a test payment option for an invoice.
+pub fn create_test_payment_option(invoice_id: &InvoiceId) -> PaymentOptionData {
+    PaymentOptionData {
+        id: PaymentOptionId(Uuid::new_v4()),
+        invoice_id: invoice_id.clone(),
+        payment_method_id: PaymentMethodId::new("ETH", 1),
+        chain_id: 1,
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        decimals: 18,
+        payment_address: "0x1234567890abcdef1234567890abcdef12345678".to_string(),
+        amount: "50000000000000000".to_string(), // ~0.05 ETH worth $100 at hypothetical rate
+        rate: Some("2000.00".to_string()),
+        rate_at: Some(Utc::now()),
+        is_active: true,
+        created_at: Utc::now(),
+    }
+}
+
 /// Create a test payment.
-pub fn create_test_payment(invoice_id: &InvoiceId) -> PaymentData {
+pub fn create_test_payment(invoice_id: &InvoiceId, payment_option_id: Option<&PaymentOptionId>) -> PaymentData {
     PaymentData {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
-        network: Network::Ethereum,
+        payment_option_id: payment_option_id.map(|po| po.0),
+        chain_id: 1, // Ethereum mainnet
         asset_type: types::AssetType::Native,
-        amount: "1000000000000000000".to_string(),
+        amount: "50000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
         token_address: None,
         tx_hash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),

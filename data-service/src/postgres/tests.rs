@@ -25,13 +25,10 @@ pub(super) fn test_invoice() -> InvoiceData {
     InvoiceData {
         id: InvoiceId::new(),
         store_id: StoreId::new(),
-        network: Network::Ethereum,
+        currency: "ETH".to_string(),
         status: InvoiceStatus::Pending,
         amount: "1000000000000000000".to_string(), // 1 ETH in wei
         amount_received: "0".to_string(),
-        asset_symbol: "ETH".to_string(),
-        payment_address: Some("0x1234567890abcdef1234567890abcdef12345678".to_string()),
-        payment_request: None,
         created_at: Utc::now(),
         expires_at: Utc::now() + Duration::hours(1),
         metadata: None,
@@ -43,7 +40,8 @@ pub(super) fn test_payment(invoice_id: &InvoiceId) -> PaymentData {
     PaymentData {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
-        network: Network::Ethereum,
+        payment_option_id: None,
+        chain_id: 1,
         asset_type: types::AssetType::Native,
         amount: "1000000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),

@@ -1,16 +1,15 @@
 //! Watched address repository implementation.
 
 use async_trait::async_trait;
-use chrono::Utc;
 use sqlx::Row;
+use uuid::Uuid;
 
 use crate::{
-    CleanupAddressInfo, PendingWatchInfo, RepositoryError, RepositoryResult,
+    CleanupAddressInfo, PendingWatchInfo, RepositoryResult,
     WatchedAddressReader, WatchedAddressWriter, sqlx_to_repo_error,
 };
-use types::{InvoiceId, Network};
+use types::{InvoiceId, PaymentOptionId};
 
-use super::conversions::{try_db_to_network, try_network_to_db};
 use super::PgDataService;
 
 #[async_trait]
@@ -18,30 +17,90 @@ impl WatchedAddressReader for PgDataService {
     async fn get_invoice_id(
         &self,
         address: &str,
-        network: Network,
+        chain_id: u64,
+        token_address: Option<&str>,
     ) -> RepositoryResult<Option<InvoiceId>> {
-        let row = sqlx::query(
-            r#"
-            SELECT invoice_id
-            FROM watched_addresses
-            WHERE address = $1 AND network = $2::network AND is_active = TRUE
-            "#,
-        )
-        .bind(address)
-        .bind(try_network_to_db(network)?)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
+        let row = if let Some(token) = token_address {
+            sqlx::query(
+                r#"
+                SELECT po.invoice_id
+                FROM watched_addresses wa
+                JOIN payment_options po ON wa.payment_option_id = po.id
+                WHERE wa.address = $1 AND wa.chain_id = $2 AND wa.token_address = $3 AND wa.is_active = TRUE
+                "#,
+            )
+            .bind(address)
+            .bind(chain_id as i64)
+            .bind(token)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT po.invoice_id
+                FROM watched_addresses wa
+                JOIN payment_options po ON wa.payment_option_id = po.id
+                WHERE wa.address = $1 AND wa.chain_id = $2 AND wa.token_address IS NULL AND wa.is_active = TRUE
+                "#,
+            )
+            .bind(address)
+            .bind(chain_id as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?
+        };
 
         Ok(row.map(|r| InvoiceId::from_string(r.get("invoice_id"))))
     }
 
-    async fn get_active(&self) -> RepositoryResult<Vec<(String, InvoiceId, Network)>> {
+    async fn get_payment_option_id(
+        &self,
+        address: &str,
+        chain_id: u64,
+        token_address: Option<&str>,
+    ) -> RepositoryResult<Option<PaymentOptionId>> {
+        let row = if let Some(token) = token_address {
+            sqlx::query(
+                r#"
+                SELECT payment_option_id
+                FROM watched_addresses
+                WHERE address = $1 AND chain_id = $2 AND token_address = $3 AND is_active = TRUE
+                "#,
+            )
+            .bind(address)
+            .bind(chain_id as i64)
+            .bind(token)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT payment_option_id
+                FROM watched_addresses
+                WHERE address = $1 AND chain_id = $2 AND token_address IS NULL AND is_active = TRUE
+                "#,
+            )
+            .bind(address)
+            .bind(chain_id as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?
+        };
+
+        Ok(row.map(|r| {
+            let id: Uuid = r.get("payment_option_id");
+            PaymentOptionId(id)
+        }))
+    }
+
+    async fn get_active(&self) -> RepositoryResult<Vec<(String, PaymentOptionId, u64, Option<String>)>> {
         let rows = sqlx::query(
             r#"
-            SELECT address, invoice_id, network::text
-            FROM watched_addresses
-            WHERE is_active = TRUE AND expires_at > NOW()
+            SELECT wa.address, wa.payment_option_id, wa.chain_id, wa.token_address
+            FROM watched_addresses wa
+            WHERE wa.is_active = TRUE AND wa.expires_at > NOW()
             "#,
         )
         .fetch_all(&self.pool)
@@ -51,9 +110,10 @@ impl WatchedAddressReader for PgDataService {
         let mut result = Vec::with_capacity(rows.len());
         for r in &rows {
             let address: String = r.get("address");
-            let invoice_id = InvoiceId::from_string(r.get("invoice_id"));
-            let network = try_db_to_network(r.get("network"))?;
-            result.push((address, invoice_id, network));
+            let payment_option_id: Uuid = r.get("payment_option_id");
+            let chain_id: i64 = r.get("chain_id");
+            let token_address: Option<String> = r.get("token_address");
+            result.push((address, PaymentOptionId(payment_option_id), chain_id as u64, token_address));
         }
         Ok(result)
     }
@@ -63,12 +123,13 @@ impl WatchedAddressReader for PgDataService {
             r#"
             SELECT
                 wa.address,
-                wa.invoice_id,
-                wa.network::text,
+                wa.payment_option_id,
+                po.invoice_id,
+                wa.chain_id,
                 wa.token_address,
-                i.amount_value::text as expected_amount
+                po.amount::text as expected_amount
             FROM watched_addresses wa
-            JOIN invoices i ON wa.invoice_id = i.id
+            JOIN payment_options po ON wa.payment_option_id = po.id
             WHERE wa.is_active = TRUE
               AND wa.monitor_notified = FALSE
               AND wa.expires_at > NOW()
@@ -82,13 +143,15 @@ impl WatchedAddressReader for PgDataService {
 
         let mut result = Vec::with_capacity(rows.len());
         for r in &rows {
-            let network = try_db_to_network(r.get("network"))?;
+            let payment_option_id: Uuid = r.get("payment_option_id");
+            let chain_id: i64 = r.get("chain_id");
             result.push(PendingWatchInfo {
                 address: r.get("address"),
+                payment_option_id: PaymentOptionId(payment_option_id),
                 invoice_id: r.get("invoice_id"),
-                network,
+                chain_id: chain_id as u64,
                 expected_amount: r.get("expected_amount"),
-                asset_id: r.get("token_address"),
+                token_address: r.get("token_address"),
             });
         }
         Ok(result)
@@ -100,9 +163,10 @@ impl WatchedAddressReader for PgDataService {
     ) -> RepositoryResult<Vec<CleanupAddressInfo>> {
         let rows = sqlx::query(
             r#"
-            SELECT wa.address, wa.network::text, wa.invoice_id
+            SELECT wa.address, wa.payment_option_id, wa.chain_id, wa.token_address, po.invoice_id
             FROM watched_addresses wa
-            JOIN invoices i ON wa.invoice_id = i.id
+            JOIN payment_options po ON wa.payment_option_id = po.id
+            JOIN invoices i ON po.invoice_id = i.id
             WHERE wa.is_active = TRUE
               AND i.status = 'expired'
               AND i.expires_at < NOW() - make_interval(secs => $1)
@@ -117,11 +181,14 @@ impl WatchedAddressReader for PgDataService {
 
         let mut result = Vec::with_capacity(rows.len());
         for r in &rows {
-            let network = try_db_to_network(r.get("network"))?;
+            let payment_option_id: Uuid = r.get("payment_option_id");
+            let chain_id: i64 = r.get("chain_id");
             result.push(CleanupAddressInfo {
                 address: r.get("address"),
-                network,
+                payment_option_id: PaymentOptionId(payment_option_id),
                 invoice_id: r.get("invoice_id"),
+                chain_id: chain_id as u64,
+                token_address: r.get("token_address"),
             });
         }
         Ok(result)
@@ -130,9 +197,10 @@ impl WatchedAddressReader for PgDataService {
     async fn get_paid_for_cleanup(&self) -> RepositoryResult<Vec<CleanupAddressInfo>> {
         let rows = sqlx::query(
             r#"
-            SELECT wa.address, wa.network::text, wa.invoice_id
+            SELECT wa.address, wa.payment_option_id, wa.chain_id, wa.token_address, po.invoice_id
             FROM watched_addresses wa
-            JOIN invoices i ON wa.invoice_id = i.id
+            JOIN payment_options po ON wa.payment_option_id = po.id
+            JOIN invoices i ON po.invoice_id = i.id
             WHERE wa.is_active = TRUE
               AND i.status = 'paid'
             ORDER BY i.created_at ASC
@@ -145,11 +213,14 @@ impl WatchedAddressReader for PgDataService {
 
         let mut result = Vec::with_capacity(rows.len());
         for r in &rows {
-            let network = try_db_to_network(r.get("network"))?;
+            let payment_option_id: Uuid = r.get("payment_option_id");
+            let chain_id: i64 = r.get("chain_id");
             result.push(CleanupAddressInfo {
                 address: r.get("address"),
-                network,
+                payment_option_id: PaymentOptionId(payment_option_id),
                 invoice_id: r.get("invoice_id"),
+                chain_id: chain_id as u64,
+                token_address: r.get("token_address"),
             });
         }
         Ok(result)
@@ -158,9 +229,10 @@ impl WatchedAddressReader for PgDataService {
     async fn get_cancelled_for_cleanup(&self) -> RepositoryResult<Vec<CleanupAddressInfo>> {
         let rows = sqlx::query(
             r#"
-            SELECT wa.address, wa.network::text, wa.invoice_id
+            SELECT wa.address, wa.payment_option_id, wa.chain_id, wa.token_address, po.invoice_id
             FROM watched_addresses wa
-            JOIN invoices i ON wa.invoice_id = i.id
+            JOIN payment_options po ON wa.payment_option_id = po.id
+            JOIN invoices i ON po.invoice_id = i.id
             WHERE wa.is_active = TRUE
               AND i.status = 'cancelled'
             ORDER BY i.created_at ASC
@@ -173,11 +245,14 @@ impl WatchedAddressReader for PgDataService {
 
         let mut result = Vec::with_capacity(rows.len());
         for r in &rows {
-            let network = try_db_to_network(r.get("network"))?;
+            let payment_option_id: Uuid = r.get("payment_option_id");
+            let chain_id: i64 = r.get("chain_id");
             result.push(CleanupAddressInfo {
                 address: r.get("address"),
-                network,
+                payment_option_id: PaymentOptionId(payment_option_id),
                 invoice_id: r.get("invoice_id"),
+                chain_id: chain_id as u64,
+                token_address: r.get("token_address"),
             });
         }
         Ok(result)
@@ -189,132 +264,152 @@ impl WatchedAddressWriter for PgDataService {
     async fn upsert(
         &self,
         address: &str,
-        invoice_id: &InvoiceId,
-        network: Network,
+        payment_option_id: &PaymentOptionId,
+        chain_id: u64,
+        token_address: Option<&str>,
     ) -> RepositoryResult<()> {
         // Get the invoice's expiration for the watched address
-        let invoice_row = sqlx::query("SELECT expires_at FROM invoices WHERE id = $1")
-            .bind(invoice_id.as_str())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(sqlx_to_repo_error)?;
-
-        let expires_at = invoice_row
-            .map(|r| r.get("expires_at"))
-            .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(24));
-
-        let network_db = try_network_to_db(network)?;
-
-        // Use a transaction to handle the race condition between check and insert/update.
-        // PostgreSQL's UNIQUE constraint doesn't match NULLs, so ON CONFLICT won't work
-        // for (address, network, token_address) when token_address IS NULL.
-        // We use a transaction with SELECT FOR UPDATE to prevent races.
-        let mut tx = self.pool.begin().await.map_err(sqlx_to_repo_error)?;
-
-        let existing = sqlx::query(
+        let invoice_row = sqlx::query(
             r#"
-            SELECT id FROM watched_addresses
-            WHERE address = $1 AND network = $2::network AND token_address IS NULL
-            FOR UPDATE
+            SELECT i.expires_at
+            FROM payment_options po
+            JOIN invoices i ON po.invoice_id = i.id
+            WHERE po.id = $1
             "#,
         )
-        .bind(address)
-        .bind(network_db)
-        .fetch_optional(&mut *tx)
+        .bind(payment_option_id.0)
+        .fetch_optional(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;
 
-        if existing.is_some() {
-            // Update existing row - reset monitor_notified since invoice changed
-            sqlx::query(
-                r#"
-                UPDATE watched_addresses
-                SET invoice_id = $1, is_active = TRUE, expires_at = $2, monitor_notified = FALSE
-                WHERE address = $3 AND network = $4::network AND token_address IS NULL
-                "#,
-            )
-            .bind(invoice_id.as_str())
-            .bind(expires_at)
-            .bind(address)
-            .bind(network_db)
-            .execute(&mut *tx)
-            .await
-            .map_err(sqlx_to_repo_error)?;
-        } else {
-            // Insert new row. The SELECT FOR UPDATE above prevents race conditions.
+        let expires_at = invoice_row
+            .map(|r| r.get("expires_at"))
+            .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
+
+        // Get the invoice_id from the payment option for the watched_addresses table
+        let invoice_id_row = sqlx::query(
+            r#"SELECT invoice_id FROM payment_options WHERE id = $1"#,
+        )
+        .bind(payment_option_id.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        let invoice_id: String = invoice_id_row
+            .map(|r| r.get("invoice_id"))
+            .unwrap_or_default();
+
+        if let Some(token) = token_address {
+            // For ERC20 tokens, use ON CONFLICT
             sqlx::query(
                 r#"
                 INSERT INTO watched_addresses (
-                    address, invoice_id, network, asset_type, is_active, expires_at, monitor_notified
+                    invoice_id, payment_option_id, chain_id, address, token_address,
+                    is_active, expires_at, monitor_notified
                 ) VALUES (
-                    $1, $2, $3::network, 'native'::asset_type, TRUE, $4, FALSE
+                    $1, $2, $3, $4, $5, TRUE, $6, FALSE
                 )
+                ON CONFLICT (address, chain_id, token_address) DO UPDATE
+                SET payment_option_id = $2, is_active = TRUE, expires_at = $6, monitor_notified = FALSE
                 "#,
             )
+            .bind(&invoice_id)
+            .bind(payment_option_id.0)
+            .bind(chain_id as i64)
             .bind(address)
-            .bind(invoice_id.as_str())
-            .bind(network_db)
-            .bind(expires_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(sqlx_to_repo_error)?;
-        }
-
-        tx.commit().await.map_err(sqlx_to_repo_error)?;
-
-        Ok(())
-    }
-
-    async fn upsert_with_asset(
-        &self,
-        address: &str,
-        invoice_id: &InvoiceId,
-        network: Network,
-        asset_id: Option<&str>,
-    ) -> RepositoryResult<()> {
-        let invoice_row = sqlx::query("SELECT expires_at FROM invoices WHERE id = $1")
-            .bind(invoice_id.as_str())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(sqlx_to_repo_error)?;
-
-        let expires_at = invoice_row
-            .map(|r| r.get("expires_at"))
-            .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(24));
-
-        let network_db = try_network_to_db(network)?;
-
-        // PostgreSQL unique constraints don't match NULLs, so we need separate queries
-        if let Some(token) = asset_id {
-            sqlx::query(
-                r#"
-                INSERT INTO watched_addresses (address, invoice_id, network, asset_type, token_address, is_active, expires_at, monitor_notified)
-                VALUES ($1, $2, $3::network, 'erc20'::asset_type, $4, TRUE, $5, FALSE)
-                ON CONFLICT (address, network, token_address) DO UPDATE
-                SET invoice_id = $2, is_active = TRUE, expires_at = $5, monitor_notified = FALSE
-                "#,
-            )
-            .bind(address)
-            .bind(invoice_id.as_str())
-            .bind(network_db)
             .bind(token)
             .bind(expires_at)
             .execute(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?;
         } else {
-            sqlx::query(
+            // For native assets, use a transaction to handle NULL token_address
+            let mut tx = self.pool.begin().await.map_err(sqlx_to_repo_error)?;
+
+            let existing = sqlx::query(
                 r#"
-                INSERT INTO watched_addresses (address, invoice_id, network, asset_type, is_active, expires_at, monitor_notified)
-                VALUES ($1, $2, $3::network, 'native'::asset_type, TRUE, $4, FALSE)
-                ON CONFLICT (address, network) WHERE token_address IS NULL DO UPDATE
-                SET invoice_id = $2, is_active = TRUE, expires_at = $4, monitor_notified = FALSE
+                SELECT id FROM watched_addresses
+                WHERE address = $1 AND chain_id = $2 AND token_address IS NULL
+                FOR UPDATE
                 "#,
             )
             .bind(address)
-            .bind(invoice_id.as_str())
-            .bind(network_db)
-            .bind(expires_at)
+            .bind(chain_id as i64)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+
+            if existing.is_some() {
+                sqlx::query(
+                    r#"
+                    UPDATE watched_addresses
+                    SET payment_option_id = $1, is_active = TRUE, expires_at = $2, monitor_notified = FALSE
+                    WHERE address = $3 AND chain_id = $4 AND token_address IS NULL
+                    "#,
+                )
+                .bind(payment_option_id.0)
+                .bind(expires_at)
+                .bind(address)
+                .bind(chain_id as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(sqlx_to_repo_error)?;
+            } else {
+                sqlx::query(
+                    r#"
+                    INSERT INTO watched_addresses (
+                        invoice_id, payment_option_id, chain_id, address, is_active, expires_at, monitor_notified
+                    ) VALUES (
+                        $1, $2, $3, $4, TRUE, $5, FALSE
+                    )
+                    "#,
+                )
+                .bind(&invoice_id)
+                .bind(payment_option_id.0)
+                .bind(chain_id as i64)
+                .bind(address)
+                .bind(expires_at)
+                .execute(&mut *tx)
+                .await
+                .map_err(sqlx_to_repo_error)?;
+            }
+
+            tx.commit().await.map_err(sqlx_to_repo_error)?;
+        }
+
+        Ok(())
+    }
+
+    async fn mark_notified(
+        &self,
+        address: &str,
+        chain_id: u64,
+        token_address: Option<&str>,
+    ) -> RepositoryResult<()> {
+        if let Some(token) = token_address {
+            sqlx::query(
+                r#"
+                UPDATE watched_addresses
+                SET monitor_notified = TRUE
+                WHERE address = $1 AND chain_id = $2 AND token_address = $3
+                "#,
+            )
+            .bind(address)
+            .bind(chain_id as i64)
+            .bind(token)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE watched_addresses
+                SET monitor_notified = TRUE
+                WHERE address = $1 AND chain_id = $2 AND token_address IS NULL
+                "#,
+            )
+            .bind(address)
+            .bind(chain_id as i64)
             .execute(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?;
@@ -323,64 +418,61 @@ impl WatchedAddressWriter for PgDataService {
         Ok(())
     }
 
-    async fn remove(&self, address: &str, network: Network) -> RepositoryResult<()> {
-        let result = sqlx::query(
-            r#"
-            UPDATE watched_addresses
-            SET is_active = FALSE
-            WHERE address = $1 AND network = $2::network
-            "#,
-        )
-        .bind(address)
-        .bind(try_network_to_db(network)?)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
-        if result.rows_affected() == 0 {
-            return Err(RepositoryError::NotFound(format!(
-                "Watched address not found: {} on {:?}",
-                address, network
-            )));
-        }
-
-        Ok(())
-    }
-
-    async fn mark_notified(&self, address: &str, network: Network) -> RepositoryResult<()> {
-        let network_db = try_network_to_db(network)?;
-
-        sqlx::query(
-            r#"
-            UPDATE watched_addresses
-            SET monitor_notified = TRUE
-            WHERE address = $1 AND network = $2::network
-            "#,
-        )
-        .bind(address)
-        .bind(network_db)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
-        Ok(())
-    }
-
-    async fn deactivate(&self, address: &str, network: Network) -> RepositoryResult<bool> {
-        let result = sqlx::query(
-            r#"
-            UPDATE watched_addresses
-            SET is_active = FALSE
-            WHERE address = $1 AND network = $2::network AND is_active = TRUE
-            "#,
-        )
-        .bind(address)
-        .bind(try_network_to_db(network)?)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
+    async fn deactivate(
+        &self,
+        address: &str,
+        chain_id: u64,
+        token_address: Option<&str>,
+    ) -> RepositoryResult<bool> {
+        let result = if let Some(token) = token_address {
+            sqlx::query(
+                r#"
+                UPDATE watched_addresses
+                SET is_active = FALSE
+                WHERE address = $1 AND chain_id = $2 AND token_address = $3 AND is_active = TRUE
+                "#,
+            )
+            .bind(address)
+            .bind(chain_id as i64)
+            .bind(token)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE watched_addresses
+                SET is_active = FALSE
+                WHERE address = $1 AND chain_id = $2 AND token_address IS NULL AND is_active = TRUE
+                "#,
+            )
+            .bind(address)
+            .bind(chain_id as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?
+        };
 
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn deactivate_for_payment_option(
+        &self,
+        payment_option_id: &PaymentOptionId,
+    ) -> RepositoryResult<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE watched_addresses
+            SET is_active = FALSE
+            WHERE payment_option_id = $1 AND is_active = TRUE
+            "#,
+        )
+        .bind(payment_option_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(result.rows_affected())
     }
 }
 

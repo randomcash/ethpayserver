@@ -47,7 +47,11 @@ pub use types::{
     PaymentQueryParams, PaymentReader, PaymentRepository, PaymentWriter,
     // Payment Event
     PaymentEventWriter,
-    // Store Wallet
+    // Payment Option
+    PaymentMethodId, PaymentOptionData, PaymentOptionId, PaymentOptionReader, PaymentOptionRepository, PaymentOptionWriter,
+    // Store Payment Method
+    StorePaymentMethod, StorePaymentMethodReader, StorePaymentMethodRepository, StorePaymentMethodWriter,
+    // Store Wallet (deprecated)
     StoreWallet, StoreWalletReader, StoreWalletRepository, StoreWalletWriter,
     // Store Webhook
     StoreWebhook, StoreWebhookReader, StoreWebhookRepository, StoreWebhookWriter,
@@ -75,8 +79,8 @@ pub fn sqlx_to_repo_error(e: sqlx::Error) -> RepositoryError {
 mod tests {
     use super::test_utils::*;
     use types::{
-        InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter, Network,
-        WatchedAddressReader, WatchedAddressWriter,
+        InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter,
+        PaymentOptionId, WatchedAddressReader, WatchedAddressWriter,
     };
 
     #[tokio::test]
@@ -106,50 +110,49 @@ mod tests {
     #[tokio::test]
     async fn test_watched_addresses() {
         let ds = InMemoryDataService::new();
-        let invoice_id = InvoiceId::new();
+        let payment_option_id = PaymentOptionId(uuid::Uuid::new_v4());
         let address = "0x1234567890abcdef1234567890abcdef12345678";
-        let network = Network::Ethereum;
+        let chain_id: u64 = 1; // Ethereum mainnet
 
-        WatchedAddressWriter::upsert(&ds, address, &invoice_id, network)
+        WatchedAddressWriter::upsert(&ds, address, &payment_option_id, chain_id, None)
             .await
             .unwrap();
 
-        let found = WatchedAddressReader::get_invoice_id(&ds, address, network)
+        let found = WatchedAddressReader::get_payment_option_id(&ds, address, chain_id, None)
             .await
             .unwrap();
-        assert_eq!(found, Some(invoice_id.clone()));
+        assert_eq!(found, Some(payment_option_id.clone()));
 
-        WatchedAddressWriter::remove(&ds, address, network)
+        WatchedAddressWriter::deactivate(&ds, address, chain_id, None)
             .await
             .unwrap();
-        let found = WatchedAddressReader::get_invoice_id(&ds, address, network)
+        let found = WatchedAddressReader::get_payment_option_id(&ds, address, chain_id, None)
             .await
             .unwrap();
         assert!(found.is_none());
     }
 
     #[tokio::test]
-    async fn test_query_by_network() {
+    async fn test_query_by_currency() {
         let ds = InMemoryDataService::new();
 
-        let eth_invoice = create_test_invoice();
-        InvoiceWriter::upsert(&ds, &eth_invoice).await.unwrap();
+        let usd_invoice = create_test_invoice();
+        InvoiceWriter::upsert(&ds, &usd_invoice).await.unwrap();
 
-        let mut btc_invoice = create_test_invoice();
-        btc_invoice.id = InvoiceId::new();
-        btc_invoice.network = Network::BitcoinMainnet;
-        btc_invoice.asset_symbol = "BTC".to_string();
-        InvoiceWriter::upsert(&ds, &btc_invoice).await.unwrap();
+        let mut eur_invoice = create_test_invoice();
+        eur_invoice.id = InvoiceId::new();
+        eur_invoice.currency = "EUR".to_string();
+        InvoiceWriter::upsert(&ds, &eur_invoice).await.unwrap();
 
         // Query all
         let params = InvoiceQueryParams::new();
         let (total, _) = InvoiceReader::query(&ds, &params).await.unwrap();
         assert_eq!(total, 2);
 
-        // Query ETH only
-        let params = InvoiceQueryParams::new().with_network(Network::Ethereum);
+        // Query USD only
+        let params = InvoiceQueryParams::new().with_currency("USD");
         let (total, invoices) = InvoiceReader::query(&ds, &params).await.unwrap();
         assert_eq!(total, 1);
-        assert_eq!(invoices[0].network, Network::Ethereum);
+        assert_eq!(invoices[0].currency, "USD");
     }
 }

@@ -10,6 +10,7 @@ use data_service::{
     WatchedAddressWriter,
 };
 use evm::api::EvmDataService;
+use rates::RateProvider;
 
 /// Read-only data service trait for the application.
 ///
@@ -60,6 +61,9 @@ pub struct AppState<D, A, E> {
     /// EVM monitor for sending commands to evmmonitor.
     /// None if Redis is not configured.
     pub evm_monitor: Option<Arc<E>>,
+
+    /// Rate provider for fiat-to-crypto conversions.
+    pub rate_provider: Arc<dyn RateProvider>,
 }
 
 // Manual Clone impl since we only need Arc::clone
@@ -69,6 +73,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             data_service: Arc::clone(&self.data_service),
             auth_service: Arc::clone(&self.auth_service),
             evm_monitor: self.evm_monitor.clone(),
+            rate_provider: Arc::clone(&self.rate_provider),
         }
     }
 }
@@ -79,11 +84,13 @@ impl<D, A, E> AppState<D, A, E> {
         data_service: Arc<D>,
         auth_service: Arc<A>,
         evm_monitor: Option<Arc<E>>,
+        rate_provider: Arc<dyn RateProvider>,
     ) -> Self {
         Self {
             data_service,
             auth_service,
             evm_monitor,
+            rate_provider,
         }
     }
 }

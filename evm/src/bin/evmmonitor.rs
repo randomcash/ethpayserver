@@ -275,7 +275,7 @@ async fn restore_watched_addresses(
     match persistence.get_all_watched().await {
         Ok(addresses) => {
             let mut restored_count = 0;
-            for (address, invoice_id, chain_id) in addresses {
+            for (address, invoice_id, chain_id, token_address) in addresses {
                 // Only restore addresses for chains we're monitoring
                 if !monitored_chain_ids.contains(&chain_id) {
                     debug!(chain_id, address = %address, "skipping address for unmonitored chain");
@@ -301,11 +301,14 @@ async fn restore_watched_addresses(
                         }
                     };
 
+                    // Parse token contract address if present
+                    let token_contract: Option<alloy::primitives::Address> = token_address.as_ref().and_then(|t| t.parse().ok());
+
                     let watched = WatchedAddress {
                         address: parsed_address,
                         invoice_id: uuid,
                         expected_amount: None,
-                        token_contract: None,
+                        token_contract,
                         created_at: Utc::now(),
                         last_known_balance: alloy::primitives::U256::ZERO,
                     };
@@ -343,10 +346,12 @@ async fn handle_commands(
                 // Persist to Redis first (using chain_id directly for testnet support)
                 let invoice_id = InvoiceId::from_string(cmd.invoice_id.to_string());
                 let address_str = cmd.address.to_string().to_lowercase();
+                let token_address_str = cmd.token_contract.map(|a| a.to_string().to_lowercase());
                 if let Err(e) = persistence.watch_address(
                     &address_str,
                     &invoice_id,
                     cmd.chain_id,
+                    token_address_str.as_deref(),
                 ).await {
                     error!(error = %e, "failed to persist watched address");
                 }
@@ -392,12 +397,13 @@ async fn handle_commands(
 
                 // Remove from persistence (using chain_id directly for testnet support)
                 let address_str = cmd.address.to_string().to_lowercase();
-                if let Err(e) = persistence.unwatch_address(&address_str, cmd.chain_id).await {
+                let token_address_str = cmd.token_contract.map(|a| a.to_string().to_lowercase());
+                if let Err(e) = persistence.unwatch_address(&address_str, cmd.chain_id, token_address_str.as_deref()).await {
                     debug!(error = %e, "failed to remove watched address from persistence");
                 }
 
                 if let Some(monitor) = coordinator.get_chain(cmd.chain_id).await {
-                    let removed = monitor.unwatch(&cmd.address).await;
+                    let removed = monitor.unwatch(&cmd.address, cmd.token_contract).await;
 
                     // Publish confirmation event
                     let event = MonitorEvent::AddressUnwatched(AddressUnwatched {

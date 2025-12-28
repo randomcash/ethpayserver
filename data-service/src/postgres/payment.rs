@@ -9,7 +9,6 @@ use crate::{PaymentReader, PaymentWriter, RepositoryError, RepositoryResult, sql
 use types::{AssetType, InvoiceId, PaymentData};
 
 use super::PgDataService;
-use super::conversions::{try_db_to_network, try_network_to_db};
 
 /// Convert AssetType to database string.
 fn asset_type_to_db(asset_type: AssetType) -> &'static str {
@@ -33,8 +32,8 @@ impl PaymentReader for PgDataService {
         let row = sqlx::query(
             r#"
             SELECT
-                id, invoice_id, network::text, asset_type::text,
-                amount_value::text, asset_symbol, tx_hash, block_number,
+                id, invoice_id, payment_option_id, chain_id, asset_type::text,
+                amount::text, asset_symbol, token_address, tx_hash, block_number,
                 detected_at, confirmed_at, from_address, reorged, extra
             FROM payments
             WHERE id = $1
@@ -55,8 +54,8 @@ impl PaymentReader for PgDataService {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, invoice_id, network::text, asset_type::text,
-                amount_value::text, asset_symbol, tx_hash, block_number,
+                id, invoice_id, payment_option_id, chain_id, asset_type::text,
+                amount::text, asset_symbol, token_address, tx_hash, block_number,
                 detected_at, confirmed_at, from_address, reorged, extra
             FROM payments
             WHERE invoice_id = $1
@@ -75,8 +74,8 @@ impl PaymentReader for PgDataService {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, invoice_id, network::text, asset_type::text,
-                amount_value::text, asset_symbol, tx_hash, block_number,
+                id, invoice_id, payment_option_id, chain_id, asset_type::text,
+                amount::text, asset_symbol, token_address, tx_hash, block_number,
                 detected_at, confirmed_at, from_address, reorged, extra
             FROM payments
             WHERE confirmed_at IS NULL AND reorged = FALSE
@@ -94,8 +93,8 @@ impl PaymentReader for PgDataService {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, invoice_id, network::text, asset_type::text,
-                amount_value::text, asset_symbol, tx_hash, block_number,
+                id, invoice_id, payment_option_id, chain_id, asset_type::text,
+                amount::text, asset_symbol, token_address, tx_hash, block_number,
                 detected_at, confirmed_at, from_address, reorged, extra
             FROM payments
             WHERE invoice_id = $1 AND reorged = FALSE
@@ -131,31 +130,18 @@ impl PaymentReader for PgDataService {
 #[async_trait]
 impl PaymentWriter for PgDataService {
     async fn upsert(&self, payment: &PaymentData) -> RepositoryResult<()> {
-        // Store token_address in extra if present
-        let extra = match (&payment.extra, &payment.token_address) {
-            (Some(existing), Some(addr)) => {
-                let mut obj = existing.clone();
-                if let Some(map) = obj.as_object_mut() {
-                    map.insert("token_address".to_string(), serde_json::json!(addr));
-                }
-                Some(obj)
-            }
-            (None, Some(addr)) => Some(serde_json::json!({ "token_address": addr })),
-            (extra, None) => extra.clone(),
-        };
-
-        // Use ON CONFLICT (tx_hash, network) to handle duplicate PaymentDetected events
+        // Use ON CONFLICT (tx_hash, chain_id) to handle duplicate PaymentDetected events
         // (e.g., after service restart). This is the unique constraint in the DB.
         sqlx::query(
             r#"
             INSERT INTO payments (
-                id, invoice_id, network, asset_type, amount_value, asset_symbol,
-                tx_hash, block_number, detected_at, confirmed_at, from_address, extra
+                id, invoice_id, payment_option_id, chain_id, asset_type, amount, asset_symbol,
+                token_address, tx_hash, block_number, detected_at, confirmed_at, from_address, extra
             ) VALUES (
-                $1, $2, $3::network, $4::asset_type, $5::numeric, $6,
-                $7, $8, $9, $10, $11, $12
+                $1, $2, $3, $4, $5::asset_type, $6::numeric, $7,
+                $8, $9, $10, $11, $12, $13, $14
             )
-            ON CONFLICT (tx_hash, network) DO UPDATE SET
+            ON CONFLICT (tx_hash, chain_id) DO UPDATE SET
                 block_number = COALESCE(EXCLUDED.block_number, payments.block_number),
                 confirmed_at = COALESCE(EXCLUDED.confirmed_at, payments.confirmed_at),
                 extra = COALESCE(EXCLUDED.extra, payments.extra)
@@ -163,16 +149,18 @@ impl PaymentWriter for PgDataService {
         )
         .bind(payment.id)
         .bind(payment.invoice_id.as_str())
-        .bind(try_network_to_db(payment.network)?)
+        .bind(payment.payment_option_id)
+        .bind(payment.chain_id as i64)
         .bind(asset_type_to_db(payment.asset_type))
         .bind(&payment.amount)
         .bind(&payment.asset_symbol)
+        .bind(&payment.token_address)
         .bind(&payment.tx_hash)
         .bind(payment.block_number.map(|n| n as i64))
         .bind(payment.detected_at)
         .bind(payment.confirmed_at)
         .bind(&payment.from_address)
-        .bind(&extra)
+        .bind(&payment.extra)
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;
@@ -207,7 +195,7 @@ impl PaymentWriter for PgDataService {
     async fn mark_reorged(
         &self,
         invoice_id: &InvoiceId,
-        network: types::Network,
+        chain_id: u64,
         fork_block: u64,
     ) -> RepositoryResult<u64> {
         let result = sqlx::query(
@@ -215,13 +203,13 @@ impl PaymentWriter for PgDataService {
             UPDATE payments
             SET reorged = TRUE, confirmed_at = NULL
             WHERE invoice_id = $1
-              AND network = $2::network
+              AND chain_id = $2
               AND block_number >= $3
               AND reorged = FALSE
             "#,
         )
         .bind(invoice_id.as_str())
-        .bind(try_network_to_db(network)?)
+        .bind(chain_id as i64)
         .bind(fork_block as i64)
         .execute(&self.pool)
         .await
@@ -233,32 +221,26 @@ impl PaymentWriter for PgDataService {
 
 /// Convert a database row to PaymentData.
 fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentData> {
+    let chain_id: i64 = row.get("chain_id");
     let block_number: Option<i64> = row.get("block_number");
     let asset_type_str: String = row.get("asset_type");
-    let extra: Option<serde_json::Value> = row.get("extra");
-
-    // Extract token_address from extra if present
-    let token_address = extra.as_ref().and_then(|e| {
-        e.get("token_address")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-    });
 
     Ok(PaymentData {
         id: row.get("id"),
         invoice_id: InvoiceId::from_string(row.get("invoice_id")),
-        network: try_db_to_network(row.get("network"))?,
+        payment_option_id: row.get("payment_option_id"),
+        chain_id: chain_id as u64,
         asset_type: db_to_asset_type(&asset_type_str),
-        amount: row.get("amount_value"),
+        amount: row.get("amount"),
         asset_symbol: row.get("asset_symbol"),
-        token_address,
+        token_address: row.get("token_address"),
         tx_hash: row.get("tx_hash"),
         block_number: block_number.map(|n| n as u64),
         detected_at: row.get("detected_at"),
         confirmed_at: row.get("confirmed_at"),
         from_address: row.get("from_address"),
         reorged: row.get("reorged"),
-        extra,
+        extra: row.get("extra"),
     })
 }
 

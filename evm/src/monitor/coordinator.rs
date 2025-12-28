@@ -246,9 +246,15 @@ impl<S: BlockSource + 'static> MonitorCoordinator<S> {
     }
 
     /// Unwatch an address.
-    pub async fn unwatch(&self, chain_id: u64, address: &Address) -> EvmResult<Option<WatchedAddress>> {
+    /// token_contract should be None for native, Some(addr) for ERC20.
+    pub async fn unwatch(
+        &self,
+        chain_id: u64,
+        address: &Address,
+        token_contract: Option<Address>,
+    ) -> EvmResult<Option<WatchedAddress>> {
         if let Some(monitor) = self.get_chain(chain_id).await {
-            Ok(monitor.unwatch(address).await)
+            Ok(monitor.unwatch(address, token_contract).await)
         } else {
             Err(EvmError::Monitor(format!("chain {} not found", chain_id)))
         }

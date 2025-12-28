@@ -47,3 +47,9 @@ pub use services::{
     WebhookConfig, WebhookService,
 };
 pub use state::{AppState, AppDataService, AppDataServiceReader};
+
+// Re-export rates crate types for convenience
+pub use rates::{
+    ExchangeRate, KrakenRateProvider, RateError, RateProvider, RateProviderConfig,
+    is_crypto_currency, is_fiat_currency, FIAT_CURRENCIES,
+};

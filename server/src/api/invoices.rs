@@ -8,22 +8,94 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use auth::{SessionService, repository::UserStoreRepository};
-use data_service::{StoreWalletReader, StoreWalletWriter};
+use data_service::{PaymentOptionReader, PaymentOptionWriter, StorePaymentMethodReader};
 use evm::{Address, U256, XpubDeriver};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use types::{
-    InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter, Network,
-    PaymentReader, StoreId, TokenReader, WatchedAddressWriter,
+    InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter,
+    PaymentMethodId, PaymentOptionData, PaymentOptionId, PaymentReader, StoreId,
+    StorePaymentMethodWriter, WatchedAddressWriter,
     traits::{InvoiceData, PaymentData},
 };
 
 use super::extractors::{AdminAuth, AuthenticatedUser};
 use crate::services::EVMMonitor;
 use crate::state::PgAppState;
+use rates::{RateError, is_fiat_currency};
+
+/// Convert a fiat amount to crypto smallest units using the exchange rate.
+///
+/// # Arguments
+/// * `fiat_amount` - Amount in fiat (e.g., "100.00")
+/// * `rate` - Exchange rate: 1 fiat = rate crypto
+/// * `decimals` - Number of decimals for the crypto asset (e.g., 18 for ETH)
+///
+/// # Returns
+/// Amount in smallest crypto units as a string (e.g., wei for ETH).
+fn convert_fiat_to_crypto_smallest_unit(
+    fiat_amount: &str,
+    rate: Decimal,
+    decimals: u8,
+) -> Result<String, &'static str> {
+    // Parse fiat amount
+    let fiat: Decimal = fiat_amount.parse().map_err(|_| "Invalid fiat amount")?;
+
+    // Validate amount is positive
+    if fiat <= Decimal::ZERO {
+        return Err("Amount must be positive");
+    }
+
+    // Calculate crypto amount: fiat * rate
+    let crypto_amount = fiat.checked_mul(rate).ok_or("Overflow in rate multiplication")?;
+
+    // Convert to smallest units by multiplying by 10^decimals
+    // Use Decimal's pow to avoid u64 overflow for high decimals
+    let ten = Decimal::from(10);
+    let mut multiplier = Decimal::ONE;
+    for _ in 0..decimals {
+        multiplier = multiplier.checked_mul(ten).ok_or("Overflow computing multiplier")?;
+    }
+
+    let smallest_units = crypto_amount.checked_mul(multiplier)
+        .ok_or("Overflow in smallest units calculation")?;
+
+    // Round to integer (floor to avoid overpaying)
+    let smallest_units_int = smallest_units.floor();
+
+    // Convert to string - use mantissa for large numbers
+    if smallest_units_int.is_sign_negative() {
+        return Err("Negative amount after conversion");
+    }
+
+    // Try to_u128 first for efficient conversion
+    // For very large values, use Decimal's mantissa representation
+    match smallest_units_int.to_u128() {
+        Some(n) => Ok(n.to_string()),
+        None => {
+            // Value too large for u128 - this shouldn't happen for reasonable amounts
+            // (u128 max is ~3.4e38, but 18-decimal tokens with 1e20 fiat would be ~1e38)
+            // Use normalize to remove trailing zeros and ensure integer representation
+            let normalized = smallest_units_int.normalize();
+            if normalized.scale() > 0 {
+                // Still has decimal places after normalization - shouldn't happen after floor()
+                return Err("Unexpected decimal places in conversion result");
+            }
+            // Extract mantissa and adjust for scale
+            let mantissa = normalized.mantissa();
+            if mantissa < 0 {
+                return Err("Negative amount after conversion");
+            }
+            Ok(mantissa.to_string())
+        }
+    }
+}
 
 /// Fetch invoice and verify user has access (admin or store member).
 /// Returns NOT_FOUND for both missing invoices and permission denied (prevents enumeration).
@@ -58,12 +130,12 @@ async fn get_invoice_with_permission<A: SessionService>(
 pub struct CreateInvoiceRequest {
     /// Store ID this invoice belongs to.
     pub store_id: Uuid,
-    /// Network to receive payment on.
-    pub network: String,
-    /// Amount in smallest unit (wei, satoshi).
+    /// Invoice currency (e.g., "USD", "ETH", "BTC").
+    /// For asset-denominated invoices (testing), use the asset symbol directly.
+    pub currency: String,
+    /// Amount in the currency's standard unit (e.g., "100.00" for USD, "0.1" for ETH).
+    /// For asset-denominated invoices, this is in the asset's smallest unit (wei, satoshi).
     pub amount: String,
-    /// Asset symbol (ETH, BTC, USDC, etc.).
-    pub asset_symbol: String,
     /// Expiration in seconds from now (default: 3600).
     pub expiration_seconds: Option<u64>,
     /// Optional metadata.
@@ -74,49 +146,69 @@ pub struct CreateInvoiceRequest {
     pub redirect_url: Option<String>,
 }
 
-/// Invoice response.
+/// Payment option response for an invoice.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PaymentOptionResponse {
+    /// Payment option ID.
+    pub id: String,
+    /// Payment method ID (e.g., "ETH-1", "USDC-137").
+    pub payment_method_id: String,
+    /// Chain ID (EIP-155).
+    pub chain_id: u64,
+    /// Asset symbol.
+    pub asset_symbol: String,
+    /// Token contract address (for ERC20, null for native).
+    pub token_address: Option<String>,
+    /// Asset decimals.
+    pub decimals: u8,
+    /// Payment address.
+    pub payment_address: String,
+    /// Amount in the asset's smallest unit.
+    pub amount: String,
+    /// Exchange rate at time of creation.
+    pub rate: Option<String>,
+    /// Whether this option is active.
+    pub is_active: bool,
+}
+
+impl From<PaymentOptionData> for PaymentOptionResponse {
+    fn from(po: PaymentOptionData) -> Self {
+        Self {
+            id: po.id.0.to_string(),
+            payment_method_id: po.payment_method_id.0,
+            chain_id: po.chain_id,
+            asset_symbol: po.asset_symbol,
+            token_address: po.token_address,
+            decimals: po.decimals,
+            payment_address: po.payment_address,
+            amount: po.amount,
+            rate: po.rate,
+            is_active: po.is_active,
+        }
+    }
+}
+
+/// Invoice response (network-agnostic).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct InvoiceResponse {
     /// Invoice ID.
     pub id: String,
-    /// Network.
-    pub network: String,
+    /// Invoice currency (e.g., "USD", "EUR", "ETH").
+    pub currency: String,
     /// Status.
     pub status: String,
-    /// Requested amount.
+    /// Requested amount in the invoice currency.
     pub amount: String,
-    /// Amount received so far.
+    /// Amount received so far (in invoice currency terms).
     pub amount_received: String,
-    /// Asset symbol.
-    pub asset_symbol: String,
-    /// Payment address.
-    pub payment_address: Option<String>,
-    /// Payment request (URI).
-    pub payment_request: Option<String>,
     /// Creation timestamp.
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Expiration timestamp.
     pub expires_at: chrono::DateTime<chrono::Utc>,
     /// Metadata.
     pub metadata: Option<serde_json::Value>,
-}
-
-impl From<InvoiceData> for InvoiceResponse {
-    fn from(inv: InvoiceData) -> Self {
-        Self {
-            id: inv.id.0,
-            network: inv.network.to_string(),
-            status: inv.status.to_string(),
-            amount: inv.amount,
-            amount_received: inv.amount_received,
-            asset_symbol: inv.asset_symbol,
-            payment_address: inv.payment_address,
-            payment_request: inv.payment_request,
-            created_at: inv.created_at,
-            expires_at: inv.expires_at,
-            metadata: inv.metadata,
-        }
-    }
+    /// Payment options for this invoice.
+    pub payment_options: Vec<PaymentOptionResponse>,
 }
 
 /// Payment response.
@@ -168,14 +260,12 @@ pub struct InvoiceStatusResponse {
     pub id: String,
     /// Current status.
     pub status: String,
-    /// Requested amount.
+    /// Requested amount in invoice currency.
     pub amount: String,
     /// Amount received so far.
     pub amount_received: String,
-    /// Asset symbol.
-    pub asset_symbol: String,
-    /// Payment address.
-    pub payment_address: Option<String>,
+    /// Invoice currency.
+    pub currency: String,
     /// Expiration timestamp.
     pub expires_at: chrono::DateTime<chrono::Utc>,
     /// Number of payments received.
@@ -186,6 +276,8 @@ pub struct InvoiceStatusResponse {
     pub is_paid: bool,
     /// Whether the invoice is expired.
     pub is_expired: bool,
+    /// Payment options for this invoice.
+    pub payment_options: Vec<PaymentOptionResponse>,
     /// Payments received for this invoice.
     pub payments: Vec<PaymentResponse>,
 }
@@ -197,8 +289,8 @@ pub struct ListInvoicesQuery {
     pub store_id: Option<Uuid>,
     /// Filter by status.
     pub status: Option<String>,
-    /// Filter by network.
-    pub network: Option<String>,
+    /// Filter by currency.
+    pub currency: Option<String>,
     /// Maximum number of results.
     pub limit: Option<i64>,
     /// Offset for pagination.
@@ -273,9 +365,8 @@ where
         params = params.with_status(status);
     }
 
-    if let Some(network) = query.network {
-        let network: Network = network.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-        params = params.with_network(network);
+    if let Some(currency) = query.currency {
+        params = params.with_currency(currency);
     }
 
     if let Some(limit) = query.limit {
@@ -295,15 +386,36 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Get payment options for each invoice
+    let mut responses = Vec::with_capacity(invoices.len());
+    for invoice in invoices {
+        let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &invoice.id)
+            .await
+            .unwrap_or_default();
+
+        responses.push(InvoiceResponse {
+            id: invoice.id.0,
+            currency: invoice.currency,
+            status: invoice.status.to_string(),
+            amount: invoice.amount,
+            amount_received: invoice.amount_received,
+            created_at: invoice.created_at,
+            expires_at: invoice.expires_at,
+            metadata: invoice.metadata,
+            payment_options: options.into_iter().map(Into::into).collect(),
+        });
+    }
+
     Ok(Json(InvoiceListResponse {
         total,
-        invoices: invoices.into_iter().map(|i| i.into()).collect(),
+        invoices: responses,
     }))
 }
 
 /// Create a new invoice.
 ///
 /// Requires `cancreateinvoice` permission on the store.
+/// The invoice is network-agnostic - payment methods are determined by store configuration.
 #[utoipa::path(
     post,
     path = "/invoices",
@@ -312,7 +424,7 @@ where
     request_body = CreateInvoiceRequest,
     responses(
         (status = 201, description = "Invoice created", body = InvoiceResponse),
-        (status = 400, description = "Invalid request"),
+        (status = 400, description = "Invalid request or no payment methods configured"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
     )
@@ -340,56 +452,124 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let network: Network = req.network.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    // Find enabled payment methods for the requested currency/asset
+    // For asset-denominated invoices (testing), currency = asset_symbol (e.g., "ETH")
+    let payment_methods = StorePaymentMethodReader::find_by_asset_symbol(
+        &*state.data_service,
+        req.store_id,
+        &req.currency,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if payment_methods.is_empty() {
+        tracing::warn!(
+            "Store {} has no enabled payment method for currency {}",
+            req.store_id,
+            req.currency
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Pre-validate: For fiat currencies, fetch rates first to avoid creating orphan invoices
+    // Stores (payment_method_index, crypto_amount, rate_string, rate_timestamp)
+    let mut validated_methods: Vec<(usize, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> = Vec::new();
+
+    if is_fiat_currency(&req.currency) {
+        for (idx, payment_method) in payment_methods.iter().enumerate() {
+            match state.rate_provider.get_rate(&req.currency, &payment_method.asset_symbol).await {
+                Ok(exchange_rate) => {
+                    // Validate rate is positive
+                    if exchange_rate.rate <= Decimal::ZERO {
+                        tracing::error!(
+                            from = %req.currency,
+                            to = %payment_method.asset_symbol,
+                            rate = %exchange_rate.rate,
+                            "Received non-positive exchange rate"
+                        );
+                        return Err(StatusCode::SERVICE_UNAVAILABLE);
+                    }
+
+                    // Convert fiat to crypto smallest units
+                    let amount = convert_fiat_to_crypto_smallest_unit(
+                        &req.amount,
+                        exchange_rate.rate,
+                        payment_method.decimals,
+                    )
+                    .map_err(|e| {
+                        tracing::error!(
+                            currency = %req.currency,
+                            amount = %req.amount,
+                            error = %e,
+                            "Failed to convert fiat amount to crypto"
+                        );
+                        StatusCode::BAD_REQUEST
+                    })?;
+
+                    tracing::debug!(
+                        from = %req.currency,
+                        to = %payment_method.asset_symbol,
+                        rate = %exchange_rate.rate,
+                        fiat_amount = %req.amount,
+                        crypto_amount = %amount,
+                        "Converted fiat to crypto"
+                    );
+
+                    validated_methods.push((
+                        idx,
+                        amount,
+                        Some(exchange_rate.rate.to_string()),
+                        Some(exchange_rate.timestamp),
+                    ));
+                }
+                Err(RateError::UnsupportedPair { from, to }) => {
+                    tracing::warn!(
+                        from = %from,
+                        to = %to,
+                        "Unsupported rate pair, skipping payment method"
+                    );
+                    // Skip this payment method - don't add to validated_methods
+                }
+                Err(e) => {
+                    tracing::error!(
+                        currency = %req.currency,
+                        asset = %payment_method.asset_symbol,
+                        error = %e,
+                        "Failed to fetch exchange rate"
+                    );
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                }
+            }
+        }
+
+        // Check if any payment methods have valid rates BEFORE creating invoice
+        if validated_methods.is_empty() {
+            tracing::error!(
+                store_id = %req.store_id,
+                currency = %req.currency,
+                "No payment methods with supported rate pairs"
+            );
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    } else {
+        // Crypto currency: all methods are valid, amount is used directly
+        for (idx, _) in payment_methods.iter().enumerate() {
+            validated_methods.push((idx, req.amount.clone(), None, None));
+        }
+    }
 
     let expiration_secs = req.expiration_seconds.unwrap_or(3600);
-    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
+    let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
-    // Get store wallet - required for invoice creation
-    let wallet = StoreWalletReader::get_wallet(&*state.data_service, req.store_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or_else(|| {
-            tracing::error!("Store {} has no wallet configured", req.store_id);
-            StatusCode::BAD_REQUEST
-        })?;
-
-    // Get and increment derivation index
-    let index = StoreWalletWriter::next_derivation_index(&*state.data_service, req.store_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Derive payment address from xpub
-    let deriver =
-        XpubDeriver::from_xpub(&wallet.xpub).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let address = deriver
-        .derive_address(index as u32)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let payment_address = address.to_string();
-
-    // Look up token contract for ERC20 payments (if in tokens table → ERC20, else native)
-    let token_contract: Option<Address> =
-        TokenReader::find_by_symbol(&*state.data_service, network, &req.asset_symbol)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|t| t.address.parse().ok());
-
-    let payment_request = generate_payment_uri(&payment_address, &req.amount, &req.asset_symbol);
-
-    // Create invoice data
+    // Create invoice (network-agnostic) - only after validating payment methods
     let invoice = InvoiceData {
         id: InvoiceId::new(),
         store_id: StoreId(req.store_id),
-        network,
+        currency: req.currency.clone(),
         status: InvoiceStatus::Pending,
-        amount: req.amount,
+        amount: req.amount.clone(),
         amount_received: "0".to_string(),
-        asset_symbol: req.asset_symbol,
-        payment_address: Some(payment_address.clone()),
-        payment_request: Some(payment_request),
-        created_at: chrono::Utc::now(),
+        created_at: Utc::now(),
         expires_at,
         metadata: req.metadata,
         extra: None,
@@ -399,77 +579,146 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Save watched address to database (required for payment detection & retry mechanism)
-    let token_address_str = token_contract.map(|a| a.to_string());
-    WatchedAddressWriter::upsert_with_asset(
-        &*state.data_service,
-        &payment_address,
-        &invoice.id,
-        network,
-        token_address_str.as_deref(),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(
-            address = %payment_address,
-            invoice_id = %invoice.id.0,
-            error = %e,
-            "Failed to save watched address - invoice creation aborted"
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Create payment options for each validated payment method
+    let mut created_options: Vec<PaymentOptionData> = Vec::with_capacity(validated_methods.len());
 
-    // Send WatchAddress command to EVM monitor if configured
-    if let Some(ref monitor) = state.evm_monitor {
-        // Parse invoice ID as UUID
-        let invoice_uuid = Uuid::parse_str(&invoice.id.0).map_err(|e| {
-            tracing::error!("Failed to parse invoice ID as UUID: {}", e);
+    for (method_idx, crypto_amount, rate_str, rate_at) in validated_methods {
+        let payment_method = &payment_methods[method_idx];
+
+        // Get and increment derivation index for this payment method
+        let index = StorePaymentMethodWriter::next_derivation_index(
+            &*state.data_service,
+            payment_method.id,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Derive payment address from the payment method's xpub
+        let deriver = XpubDeriver::from_xpub(&payment_method.xpub)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let address = deriver
+            .derive_address(index as u32)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let payment_address = address.to_string();
+
+        // Create payment option with calculated amount and rate
+        let payment_option = PaymentOptionData {
+            id: PaymentOptionId(Uuid::new_v4()),
+            invoice_id: invoice.id.clone(),
+            payment_method_id: PaymentMethodId::new(&payment_method.asset_symbol, payment_method.chain_id),
+            chain_id: payment_method.chain_id,
+            asset_symbol: payment_method.asset_symbol.clone(),
+            token_address: payment_method.token_address.clone(),
+            decimals: payment_method.decimals,
+            payment_address: payment_address.clone(),
+            amount: crypto_amount,
+            rate: rate_str,
+            rate_at,
+            is_active: true,
+            created_at: Utc::now(),
+        };
+
+        PaymentOptionWriter::create(&*state.data_service, &payment_option)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Save watched address to database (required for payment detection & retry mechanism)
+        let token_address_str = payment_method.token_address.as_deref();
+        WatchedAddressWriter::upsert(
+            &*state.data_service,
+            &payment_address,
+            &payment_option.id,
+            payment_method.chain_id,
+            token_address_str,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                address = %payment_address,
+                invoice_id = %invoice.id.0,
+                error = %e,
+                "Failed to save watched address - invoice creation aborted"
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-        // Parse amount as U256 (optional - only if we can parse it)
-        let expected_amount = invoice.amount.parse::<U256>().ok();
+        // Send WatchAddress command to EVM monitor if configured
+        if let Some(ref monitor) = state.evm_monitor {
+            // Parse invoice ID as UUID
+            let invoice_uuid = Uuid::parse_str(&invoice.id.0).map_err(|e| {
+                tracing::error!("Failed to parse invoice ID as UUID: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
-        match monitor
-            .watch_address(
-                network,
-                address,
-                invoice_uuid,
-                expected_amount,
-                token_contract,
-            )
-            .await
-        {
-            Ok(()) => {
-                // Mark as notified in database
-                if let Err(e) = WatchedAddressWriter::mark_notified(
-                    &*state.data_service,
-                    &payment_address,
-                    network,
+            // Parse amount as U256 (optional - only if we can parse it)
+            let expected_amount = payment_option.amount.parse::<U256>().ok();
+
+            // Token contract address (for ERC20 payments)
+            let token_contract: Option<Address> = payment_method
+                .token_address
+                .as_ref()
+                .and_then(|addr| addr.parse().ok());
+
+            match monitor
+                .watch_address_by_chain_id(
+                    payment_method.chain_id,
+                    address,
+                    invoice_uuid,
+                    expected_amount,
+                    token_contract,
                 )
                 .await
-                {
+            {
+                Ok(()) => {
+                    // Mark as notified in database
+                    if let Err(e) = WatchedAddressWriter::mark_notified(
+                        &*state.data_service,
+                        &payment_address,
+                        payment_method.chain_id,
+                        token_address_str,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            address = %payment_address,
+                            error = %e,
+                            "Failed to mark watch as notified"
+                        );
+                    }
+                }
+                Err(e) => {
+                    // Log the error but don't fail invoice creation
+                    // The address is recorded in the database and retry service will handle it
                     tracing::warn!(
-                        address = %payment_address,
+                        invoice_id = %invoice_uuid,
+                        address = %address,
                         error = %e,
-                        "Failed to mark watch as notified"
+                        "Failed to send WatchAddress command, will be retried"
                     );
                 }
             }
-            Err(e) => {
-                // Log the error but don't fail invoice creation
-                // The address is recorded in the database and retry service will handle it
-                tracing::warn!(
-                    invoice_id = %invoice_uuid,
-                    address = %address,
-                    error = %e,
-                    "Failed to send WatchAddress command, will be retried"
-                );
-            }
         }
+
+        created_options.push(payment_option);
     }
 
-    Ok((StatusCode::CREATED, Json(invoice.into())))
+    // Defensive check: should never happen since we pre-validate payment methods
+    debug_assert!(!created_options.is_empty(), "Pre-validation should ensure at least one valid method");
+
+    let response = InvoiceResponse {
+        id: invoice.id.0,
+        currency: invoice.currency,
+        status: invoice.status.to_string(),
+        amount: invoice.amount,
+        amount_received: invoice.amount_received,
+        created_at: invoice.created_at,
+        expires_at: invoice.expires_at,
+        metadata: invoice.metadata,
+        payment_options: created_options.into_iter().map(|o| o.into()).collect(),
+    };
+
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 /// Get an invoice by ID.
@@ -519,12 +768,28 @@ where
         }
     }
 
-    Ok(Json(invoice.into()))
+    let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
+        .await
+        .unwrap_or_default();
+
+    let response = InvoiceResponse {
+        id: invoice.id.0,
+        currency: invoice.currency,
+        status: invoice.status.to_string(),
+        amount: invoice.amount,
+        amount_received: invoice.amount_received,
+        created_at: invoice.created_at,
+        expires_at: invoice.expires_at,
+        metadata: invoice.metadata,
+        payment_options: options.into_iter().map(Into::into).collect(),
+    };
+
+    Ok(Json(response))
 }
 
 /// Get payments for an invoice.
 ///
-/// Returns all payments received for the invoice, including unconfirmed and reorged ones.
+/// User must be a member of the store the invoice belongs to.
 #[utoipa::path(
     get,
     path = "/invoices/{invoice_id}/payments",
@@ -536,7 +801,7 @@ where
     responses(
         (status = 200, description = "List of payments", body = Vec<PaymentResponse>),
         (status = 401, description = "Unauthorized"),
-        (status = 404, description = "Invoice not found or not accessible"),
+        (status = 404, description = "Invoice not found"),
     )
 )]
 pub async fn get_invoice_payments<A>(
@@ -548,18 +813,20 @@ where
     A: SessionService + 'static,
 {
     let id = InvoiceId::from_string(invoice_id);
-    let invoice = get_invoice_with_permission(&state, &user, &id).await?;
 
-    let payments = PaymentReader::get_for_invoice(&*state.data_service, &invoice.id)
+    // Verify permission
+    let _invoice = get_invoice_with_permission(&state, &user, &id).await?;
+
+    let payments = PaymentReader::get_for_invoice(&*state.data_service, &id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(payments.into_iter().map(|p| p.into()).collect()))
 }
 
-/// Get invoice status with payment details.
+/// Get detailed status of an invoice including payments.
 ///
-/// Returns the current invoice status along with all payments and confirmation progress.
+/// User must be a member of the store the invoice belongs to.
 #[utoipa::path(
     get,
     path = "/invoices/{invoice_id}/status",
@@ -569,9 +836,9 @@ where
         ("invoice_id" = String, Path, description = "Invoice ID")
     ),
     responses(
-        (status = 200, description = "Invoice status with payments", body = InvoiceStatusResponse),
+        (status = 200, description = "Invoice status with payment details", body = InvoiceStatusResponse),
         (status = 401, description = "Unauthorized"),
-        (status = 404, description = "Invoice not found or not accessible"),
+        (status = 404, description = "Invoice not found"),
     )
 )]
 pub async fn get_invoice_status<A>(
@@ -583,61 +850,57 @@ where
     A: SessionService + 'static,
 {
     let id = InvoiceId::from_string(invoice_id);
+
     let invoice = get_invoice_with_permission(&state, &user, &id).await?;
 
-    // Get all payments (including reorged for transparency)
-    let payments = PaymentReader::get_for_invoice(&*state.data_service, &invoice.id)
+    let payments = PaymentReader::get_for_invoice(&*state.data_service, &id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Count valid (non-reorged) payments
-    let valid_payments: Vec<_> = payments.iter().filter(|p| !p.reorged).collect();
-    let confirmed_count = valid_payments
-        .iter()
-        .filter(|p| p.confirmed_at.is_some())
-        .count();
+    let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
+        .await
+        .unwrap_or_default();
 
-    let is_paid = invoice.status == InvoiceStatus::Paid;
-    let is_expired = invoice.status == InvoiceStatus::Expired
-        || (invoice.status == InvoiceStatus::Pending && invoice.expires_at < chrono::Utc::now());
+    let now = chrono::Utc::now();
+    let confirmed_count = payments.iter().filter(|p| p.confirmed_at.is_some()).count();
 
     Ok(Json(InvoiceStatusResponse {
         id: invoice.id.0,
         status: invoice.status.to_string(),
-        amount: invoice.amount,
+        amount: invoice.amount.clone(),
         amount_received: invoice.amount_received,
-        asset_symbol: invoice.asset_symbol,
-        payment_address: invoice.payment_address,
+        currency: invoice.currency,
         expires_at: invoice.expires_at,
-        payment_count: valid_payments.len(),
+        payment_count: payments.len(),
         confirmed_count,
-        is_paid,
-        is_expired,
+        is_paid: invoice.status == InvoiceStatus::Paid,
+        is_expired: invoice.expires_at < now,
+        payment_options: options.into_iter().map(Into::into).collect(),
         payments: payments.into_iter().map(|p| p.into()).collect(),
     }))
 }
 
-/// Cancel an invoice.
+/// Cancel an invoice (admin only).
 ///
-/// User must have permission to manage invoices on the store.
+/// Only works for pending/processing invoices.
 #[utoipa::path(
     post,
-    path = "/invoices/{invoice_id}/cancel",
-    tag = "invoices",
+    path = "/admin/invoices/{invoice_id}/cancel",
+    tag = "admin",
     security(("bearer_auth" = [])),
     params(
         ("invoice_id" = String, Path, description = "Invoice ID")
     ),
     responses(
         (status = 200, description = "Invoice cancelled", body = InvoiceResponse),
+        (status = 400, description = "Cannot cancel - already paid/cancelled"),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Insufficient permissions"),
+        (status = 403, description = "Not an admin"),
         (status = 404, description = "Invoice not found"),
-        (status = 409, description = "Invoice cannot be cancelled"),
     )
 )]
 pub async fn cancel_invoice<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminAuth(_admin): AdminAuth,
     State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<InvoiceResponse>, StatusCode>
@@ -651,125 +914,125 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Check user has canmodifyinvoice permission on the invoice's store (unless admin)
-    if user.role != auth::Role::ServerAdmin {
-        let has_permission = state
-            .data_service
-            .user_has_store_permission(user.id, invoice.store_id, "ethpay.store.canmodifyinvoice")
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if !has_permission {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
-
-    // Can only cancel pending invoices
-    if invoice.status != InvoiceStatus::Pending {
-        return Err(StatusCode::CONFLICT);
+    // Can only cancel pending/processing invoices
+    match invoice.status {
+        InvoiceStatus::Pending | InvoiceStatus::Processing | InvoiceStatus::PartiallyPaid => {}
+        _ => return Err(StatusCode::BAD_REQUEST),
     }
 
     InvoiceWriter::update_status(&*state.data_service, &id, InvoiceStatus::Cancelled)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Send UnwatchAddress command to EVM monitor if configured
-    if let Some(ref monitor) = state.evm_monitor {
-        if let Some(ref addr_str) = invoice.payment_address {
-            if let Ok(address) = addr_str.parse::<Address>() {
-                if let Err(e) = monitor.unwatch_address(invoice.network, address).await {
-                    tracing::warn!(
-                        invoice_id = %invoice.id.0,
-                        address = %addr_str,
-                        error = %e,
-                        "Failed to send UnwatchAddress command"
-                    );
-                }
-            }
-        }
+    // Deactivate payment options
+    if let Err(e) = PaymentOptionWriter::deactivate_for_invoice(&*state.data_service, &id).await {
+        tracing::warn!(invoice_id = %id.0, error = %e, "Failed to deactivate payment options");
     }
 
-    // Re-fetch to get updated status
-    let updated = InvoiceReader::get(&*state.data_service, &id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut cancelled = invoice;
+    cancelled.status = InvoiceStatus::Cancelled;
 
-    Ok(Json(updated.into()))
+    let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
+        .await
+        .unwrap_or_default();
+
+    let response = InvoiceResponse {
+        id: cancelled.id.0,
+        currency: cancelled.currency,
+        status: cancelled.status.to_string(),
+        amount: cancelled.amount,
+        amount_received: cancelled.amount_received,
+        created_at: cancelled.created_at,
+        expires_at: cancelled.expires_at,
+        metadata: cancelled.metadata,
+        payment_options: options.into_iter().map(Into::into).collect(),
+    };
+
+    Ok(Json(response))
 }
 
-/// Mark expired invoices.
-///
-/// This is an admin-only endpoint to trigger expiration of overdue invoices.
-#[utoipa::path(
-    post,
-    path = "/invoices/expire",
-    tag = "invoices",
-    security(("bearer_auth" = [])),
-    responses(
-        (status = 200, description = "Number of invoices expired", body = ExpireResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Admin access required"),
-    )
-)]
-pub async fn expire_invoices<A>(
-    AdminAuth(_admin): AdminAuth,
-    State(state): State<PgAppState<A>>,
-) -> Result<Json<ExpireResponse>, StatusCode>
-where
-    A: SessionService + 'static,
-{
-    let expired = InvoiceReader::get_expired(&*state.data_service)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+/// Generate a payment URI (EIP-681 format for native transfers).
+fn _generate_payment_uri(address: &str, amount: &str, _asset_symbol: &str) -> String {
+    // For native assets, use simple ethereum: URI
+    // For ERC20, would need to add function call data
+    format!("ethereum:{}?value={}", address, amount)
+}
 
-    let count = expired.len();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for invoice in expired {
-        let _ =
-            InvoiceWriter::update_status(&*state.data_service, &invoice.id, InvoiceStatus::Expired)
-                .await;
-
-        // Send UnwatchAddress command to EVM monitor if configured
-        if let Some(ref monitor) = state.evm_monitor {
-            if let Some(ref addr_str) = invoice.payment_address {
-                if let Ok(address) = addr_str.parse::<Address>() {
-                    if let Err(e) = monitor.unwatch_address(invoice.network, address).await {
-                        tracing::warn!(
-                            invoice_id = %invoice.id.0,
-                            address = %addr_str,
-                            error = %e,
-                            "Failed to send UnwatchAddress command for expired invoice"
-                        );
-                    }
-                }
-            }
-        }
+    #[test]
+    fn test_convert_fiat_basic() {
+        // 100 USD at rate 0.0005 ETH/USD = 0.05 ETH = 50000000000000000 wei
+        let rate = Decimal::from_str_exact("0.0005").unwrap();
+        let result = convert_fiat_to_crypto_smallest_unit("100", rate, 18).unwrap();
+        assert_eq!(result, "50000000000000000");
     }
 
-    Ok(Json(ExpireResponse {
-        expired_count: count as u64,
-    }))
-}
+    #[test]
+    fn test_convert_fiat_small_amount() {
+        // 1 USD at rate 0.0005 ETH/USD = 0.0005 ETH = 500000000000000 wei
+        let rate = Decimal::from_str_exact("0.0005").unwrap();
+        let result = convert_fiat_to_crypto_smallest_unit("1", rate, 18).unwrap();
+        assert_eq!(result, "500000000000000");
+    }
 
-/// Response for expire operation.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ExpireResponse {
-    /// Number of invoices that were expired.
-    pub expired_count: u64,
-}
+    #[test]
+    fn test_convert_fiat_large_amount() {
+        // 1,000,000 USD at rate 0.0005 ETH/USD = 500 ETH = 500000000000000000000 wei
+        let rate = Decimal::from_str_exact("0.0005").unwrap();
+        let result = convert_fiat_to_crypto_smallest_unit("1000000", rate, 18).unwrap();
+        assert_eq!(result, "500000000000000000000");
+    }
 
-/// Generate an EIP-681 payment URI.
-///
-/// Format: ethereum:{address}?value={amount_in_wei}
-/// For ERC20: ethereum:{token_contract}/transfer?address={recipient}&uint256={amount}
-fn generate_payment_uri(address: &str, amount: &str, asset_symbol: &str) -> String {
-    // For native ETH, use simple format
-    if asset_symbol == "ETH" {
-        format!("ethereum:{}?value={}", address, amount)
-    } else {
-        // For tokens, we'd need the contract address
-        // For now, just use the basic format
-        format!("ethereum:{}?value={}", address, amount)
+    #[test]
+    fn test_convert_fiat_fractional() {
+        // 99.99 USD at rate 0.0005 ETH/USD = 0.049995 ETH
+        let rate = Decimal::from_str_exact("0.0005").unwrap();
+        let result = convert_fiat_to_crypto_smallest_unit("99.99", rate, 18).unwrap();
+        // 0.049995 ETH = 49995000000000000 wei
+        assert_eq!(result, "49995000000000000");
+    }
+
+    #[test]
+    fn test_convert_fiat_usdc_6_decimals() {
+        // 100 USD at rate 1.0 USDC/USD = 100 USDC = 100000000 (6 decimals)
+        let rate = Decimal::ONE;
+        let result = convert_fiat_to_crypto_smallest_unit("100", rate, 6).unwrap();
+        assert_eq!(result, "100000000");
+    }
+
+    #[test]
+    fn test_convert_rejects_zero_amount() {
+        let rate = Decimal::from_str_exact("0.0005").unwrap();
+        let result = convert_fiat_to_crypto_smallest_unit("0", rate, 18);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Amount must be positive");
+    }
+
+    #[test]
+    fn test_convert_rejects_negative_amount() {
+        let rate = Decimal::from_str_exact("0.0005").unwrap();
+        let result = convert_fiat_to_crypto_smallest_unit("-100", rate, 18);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Amount must be positive");
+    }
+
+    #[test]
+    fn test_convert_rejects_invalid_amount() {
+        let rate = Decimal::from_str_exact("0.0005").unwrap();
+        let result = convert_fiat_to_crypto_smallest_unit("abc", rate, 18);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Invalid fiat amount");
+    }
+
+    #[test]
+    fn test_convert_floors_result() {
+        // Ensure we floor (not round) to avoid overpaying
+        // 1.001 USD at rate 0.0005 = 0.0005005 ETH = 500500000000000 wei
+        let rate = Decimal::from_str_exact("0.0005").unwrap();
+        let result = convert_fiat_to_crypto_smallest_unit("1.001", rate, 18).unwrap();
+        assert_eq!(result, "500500000000000");
     }
 }

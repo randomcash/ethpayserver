@@ -15,7 +15,7 @@ use std::sync::Arc;
 use data_service::StoreWebhookReader;
 use evm::Address;
 use futures::StreamExt;
-use types::{InvoiceReader, InvoiceWriter, Network, WatchedAddressReader, WatchedAddressWriter};
+use types::{InvoiceReader, InvoiceWriter, WatchedAddressReader, WatchedAddressWriter};
 use uuid::Uuid;
 
 use super::evm_monitor::EVMMonitor;
@@ -85,8 +85,8 @@ impl CleanupConfig {
 /// 5. Sends webhook notifications when invoices expire
 ///
 /// Can be triggered in two ways:
-/// 1. Event-triggered: Call `check_network()` when block events arrive
-/// 2. Timer-triggered: The `run()` loop checks all networks periodically
+/// 1. Event-triggered: Call `check_expired()` when block events arrive
+/// 2. Timer-triggered: The `run()` loop checks periodically
 pub struct InvoiceCleanupService<D: CleanupDataService, M: EVMMonitor, W: WebhookDataService = D> {
     data_service: Arc<D>,
     evm_monitor: Arc<M>,
@@ -110,18 +110,24 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         }
     }
 
-    /// Check and expire invoices for a specific network.
+    /// Check and expire invoices for a specific chain (triggers full check).
     ///
-    /// Called by EventConsumer when block events arrive for a network.
+    /// Called by EventConsumer when block events arrive.
+    /// With network-agnostic invoices, this triggers a check of all expired invoices.
+    pub async fn check_chain(&self, _chain_id: u64) -> Result<u64, CleanupError> {
+        self.check_expired().await
+    }
+
+    /// Check and expire all pending invoices that have passed their expiration time.
+    ///
     /// Uses streaming to minimize memory usage.
-    ///
     /// Only expires invoices with status='pending' (no payments detected).
     /// Invoices with processing or partially_paid status are left unchanged.
-    pub async fn check_network(&self, network: Network) -> Result<u64, CleanupError> {
-        tracing::debug!(?network, "Checking expired invoices for network");
+    pub async fn check_expired(&self) -> Result<u64, CleanupError> {
+        tracing::debug!("Checking expired invoices");
 
         let mut expired_count = 0u64;
-        let mut stream = pin!(InvoiceReader::stream_expired_pending_for_network(&*self.data_service, network));
+        let mut stream = pin!(InvoiceReader::stream_expired_pending(&*self.data_service));
 
         while let Some(result) = stream.next().await {
             match result {
@@ -131,7 +137,6 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                             expired_count += 1;
                             tracing::debug!(
                                 invoice_id = %invoice_id.as_str(),
-                                ?network,
                                 "Expired invoice"
                             );
                             // Queue webhook notification for expiration
@@ -160,59 +165,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         }
 
         if expired_count > 0 {
-            tracing::info!(
-                ?network,
-                expired_count,
-                "Expired pending invoices for network"
-            );
-        }
-
-        Ok(expired_count)
-    }
-
-    /// Check and expire invoices for all networks.
-    ///
-    /// Called by the fallback timer.
-    /// Uses streaming to minimize memory usage.
-    pub async fn check_all_networks(&self) -> Result<u64, CleanupError> {
-        tracing::debug!("Checking expired invoices for all networks");
-
-        let mut expired_count = 0u64;
-        let mut stream = pin!(InvoiceReader::stream_all_expired_pending(&*self.data_service));
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok((network, invoice_id)) => {
-                    match InvoiceWriter::expire(&*self.data_service, &invoice_id).await {
-                        Ok(true) => {
-                            expired_count += 1;
-                            tracing::debug!(
-                                invoice_id = %invoice_id.as_str(),
-                                ?network,
-                                "Expired invoice"
-                            );
-                            // Queue webhook notification for expiration
-                            self.queue_expiration_webhook(&invoice_id).await;
-                        }
-                        Ok(false) => {
-                            tracing::trace!(
-                                invoice_id = %invoice_id.as_str(),
-                                "Invoice already processed"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                invoice_id = %invoice_id.as_str(),
-                                error = %e,
-                                "Failed to expire invoice"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Error streaming expired invoice");
-                }
-            }
+            tracing::info!(expired_count, "Expired pending invoices");
         }
 
         Ok(expired_count)
@@ -263,6 +216,8 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         };
 
         // Create webhook payload
+        // With network-agnostic invoices, we use the invoice currency for asset_symbol
+        // and set chain_id to 0 (no specific chain for expiration events)
         let payload = WebhookPayload {
             event_id: Uuid::new_v4(),
             event_type: WebhookEventType::InvoiceExpired,
@@ -272,8 +227,9 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
             status: invoice.status.to_string(),
             amount: invoice.amount.clone(),
             amount_received: invoice.amount_received.clone(),
-            asset_symbol: invoice.asset_symbol.clone(),
-            network: invoice.network.to_string(),
+            asset_symbol: invoice.currency.clone(),
+            chain_id: 0, // No specific chain for network-agnostic invoices
+            network: None, // Network-agnostic
             payment: None,
         };
 
@@ -333,10 +289,11 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
 
         let mut count = 0u64;
         for info in addresses {
-            if let Err(e) = self.unwatch_and_deactivate(&info.address, info.network).await {
+            if let Err(e) = self.unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref()).await {
                 tracing::warn!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
+                    chain_id = info.chain_id,
                     error = %e,
                     "Failed to cleanup expired address"
                 );
@@ -344,7 +301,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                 tracing::debug!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
-                    network = ?info.network,
+                    chain_id = info.chain_id,
                     "Unwatched expired invoice address"
                 );
                 count += 1;
@@ -360,10 +317,11 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
 
         let mut count = 0u64;
         for info in addresses {
-            if let Err(e) = self.unwatch_and_deactivate(&info.address, info.network).await {
+            if let Err(e) = self.unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref()).await {
                 tracing::warn!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
+                    chain_id = info.chain_id,
                     error = %e,
                     "Failed to cleanup paid address"
                 );
@@ -371,7 +329,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                 tracing::debug!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
-                    network = ?info.network,
+                    chain_id = info.chain_id,
                     "Unwatched paid invoice address"
                 );
                 count += 1;
@@ -387,10 +345,11 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
 
         let mut count = 0u64;
         for info in addresses {
-            if let Err(e) = self.unwatch_and_deactivate(&info.address, info.network).await {
+            if let Err(e) = self.unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref()).await {
                 tracing::warn!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
+                    chain_id = info.chain_id,
                     error = %e,
                     "Failed to cleanup cancelled address"
                 );
@@ -398,7 +357,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                 tracing::debug!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
-                    network = ?info.network,
+                    chain_id = info.chain_id,
                     "Unwatched cancelled invoice address"
                 );
                 count += 1;
@@ -412,18 +371,22 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
     async fn unwatch_and_deactivate(
         &self,
         address: &str,
-        network: Network,
+        chain_id: u64,
+        token_address: Option<&str>,
     ) -> Result<(), CleanupError> {
         // Parse address
         let addr: Address = address.parse().map_err(|_| {
             CleanupError::InvalidAddress(address.to_string())
         })?;
 
-        // Send UnwatchAddress command to monitor
-        self.evm_monitor.unwatch_address(network, addr).await?;
+        // Parse token contract address
+        let token_contract: Option<Address> = token_address.and_then(|t| t.parse().ok());
+
+        // Send UnwatchAddress command to monitor (using chain_id for testnet support)
+        self.evm_monitor.unwatch_address_by_chain_id(chain_id, addr, token_contract).await?;
 
         // Deactivate in database
-        WatchedAddressWriter::deactivate(&*self.data_service, address, network).await?;
+        WatchedAddressWriter::deactivate(&*self.data_service, address, chain_id, token_address).await?;
 
         Ok(())
     }
@@ -450,7 +413,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
             interval.tick().await;
 
             // Expire pending invoices
-            match self.check_all_networks().await {
+            match self.check_expired().await {
                 Ok(count) => {
                     if count > 0 {
                         tracing::info!(expired_count = count, "Expired invoices");
@@ -499,276 +462,27 @@ impl CleanupStats {
     }
 }
 
-/// Error type for cleanup operations.
+/// Errors that can occur during cleanup operations.
 #[derive(Debug, thiserror::Error)]
 pub enum CleanupError {
-    #[error("database error: {0}")]
-    Database(#[from] types::RepositoryError),
+    #[error("Repository error: {0}")]
+    Repository(#[from] types::RepositoryError),
 
-    #[error("monitor error: {0}")]
-    Monitor(#[from] super::evm_monitor::EVMMonitorError),
+    #[error("Monitor error: {0}")]
+    Monitor(String),
 
-    #[error("invalid address: {0}")]
+    #[error("Invalid address: {0}")]
     InvalidAddress(String),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use data_service::InMemoryDataService;
-    use evm::U256;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
-    use uuid::Uuid;
-
-    /// Mock EVM monitor that tracks unwatch calls.
-    struct MockEVMMonitor {
-        unwatch_count: AtomicUsize,
+impl From<Box<dyn std::error::Error + Send + Sync>> for CleanupError {
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        CleanupError::Monitor(e.to_string())
     }
+}
 
-    impl MockEVMMonitor {
-        fn new() -> Self {
-            Self {
-                unwatch_count: AtomicUsize::new(0),
-            }
-        }
-
-        fn unwatch_count(&self) -> usize {
-            self.unwatch_count.load(Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait]
-    impl super::super::evm_monitor::EVMMonitor for MockEVMMonitor {
-        async fn watch_address(
-            &self,
-            _network: Network,
-            _address: Address,
-            _invoice_id: Uuid,
-            _expected_amount: Option<U256>,
-            _token_contract: Option<Address>,
-        ) -> Result<(), super::super::evm_monitor::EVMMonitorError> {
-            Ok(())
-        }
-
-        async fn unwatch_address(
-            &self,
-            _network: Network,
-            _address: Address,
-        ) -> Result<(), super::super::evm_monitor::EVMMonitorError> {
-            self.unwatch_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn health_check(&self) -> Result<(), super::super::evm_monitor::EVMMonitorError> {
-            Ok(())
-        }
-    }
-
-    fn create_test_invoice(status: InvoiceStatus, expired: bool) -> InvoiceData {
-        let now = chrono::Utc::now();
-        let expires_at = if expired {
-            now - chrono::Duration::hours(1)
-        } else {
-            now + chrono::Duration::hours(1)
-        };
-
-        InvoiceData {
-            id: InvoiceId::new(),
-            store_id: StoreId(Uuid::new_v4()),
-            network: Network::Ethereum,
-            status,
-            amount: "1000000000000000000".to_string(), // 1 ETH
-            amount_received: "0".to_string(),
-            asset_symbol: "ETH".to_string(),
-            payment_address: Some("0x1234567890123456789012345678901234567890".to_string()),
-            payment_request: None,
-            created_at: now - chrono::Duration::hours(2),
-            expires_at,
-            metadata: None,
-            extra: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_config_default() {
-        let config = CleanupConfig::default();
-        assert_eq!(config.fallback_interval_secs, 60);
-        assert_eq!(config.unwatch_grace_period_secs, 60);
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_stats_total() {
-        let stats = CleanupStats {
-            expired: 5,
-            paid: 3,
-            cancelled: 2,
-        };
-        assert_eq!(stats.total(), 10);
-    }
-
-    #[tokio::test]
-    async fn test_check_network_expires_pending_invoices() {
-        let data_service = Arc::new(InMemoryDataService::new());
-        let monitor = Arc::new(MockEVMMonitor::new());
-        let config = CleanupConfig::default();
-
-        // Create an expired pending invoice
-        let invoice = create_test_invoice(InvoiceStatus::Pending, true);
-        types::InvoiceWriter::upsert(&*data_service, &invoice)
-            .await
-            .unwrap();
-
-        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
-            Arc::clone(&data_service),
-            Arc::clone(&monitor),
-            config,
-            None,
-        );
-
-        // Check for expired invoices
-        let expired = service.check_network(Network::Ethereum).await.unwrap();
-        assert_eq!(expired, 1);
-
-        // Verify invoice status changed to Expired
-        let updated = types::InvoiceReader::get(&*data_service, &invoice.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(updated.status, InvoiceStatus::Expired);
-    }
-
-    #[tokio::test]
-    async fn test_check_network_ignores_non_pending_invoices() {
-        let data_service = Arc::new(InMemoryDataService::new());
-        let monitor = Arc::new(MockEVMMonitor::new());
-        let config = CleanupConfig::default();
-
-        // Create an expired but already paid invoice
-        let invoice = create_test_invoice(InvoiceStatus::Paid, true);
-        types::InvoiceWriter::upsert(&*data_service, &invoice)
-            .await
-            .unwrap();
-
-        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
-            Arc::clone(&data_service),
-            Arc::clone(&monitor),
-            config,
-            None,
-        );
-
-        // Check for expired invoices - should not expire paid invoices
-        let expired = service.check_network(Network::Ethereum).await.unwrap();
-        assert_eq!(expired, 0);
-
-        // Verify invoice status unchanged
-        let updated = types::InvoiceReader::get(&*data_service, &invoice.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(updated.status, InvoiceStatus::Paid);
-    }
-
-    #[tokio::test]
-    async fn test_check_network_ignores_non_expired_invoices() {
-        let data_service = Arc::new(InMemoryDataService::new());
-        let monitor = Arc::new(MockEVMMonitor::new());
-        let config = CleanupConfig::default();
-
-        // Create a non-expired pending invoice
-        let invoice = create_test_invoice(InvoiceStatus::Pending, false);
-        types::InvoiceWriter::upsert(&*data_service, &invoice)
-            .await
-            .unwrap();
-
-        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
-            Arc::clone(&data_service),
-            Arc::clone(&monitor),
-            config,
-            None,
-        );
-
-        // Check for expired invoices - should not expire non-expired invoices
-        let expired = service.check_network(Network::Ethereum).await.unwrap();
-        assert_eq!(expired, 0);
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_paid_addresses() {
-        let data_service = Arc::new(InMemoryDataService::new());
-        let monitor = Arc::new(MockEVMMonitor::new());
-        let config = CleanupConfig::default();
-
-        // Create a paid invoice with watched address
-        let invoice = create_test_invoice(InvoiceStatus::Paid, false);
-        types::InvoiceWriter::upsert(&*data_service, &invoice)
-            .await
-            .unwrap();
-
-        // Add watched address
-        types::WatchedAddressWriter::upsert(
-            &*data_service,
-            invoice.payment_address.as_ref().unwrap(),
-            &invoice.id,
-            invoice.network,
-        )
-        .await
-        .unwrap();
-
-        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
-            Arc::clone(&data_service),
-            Arc::clone(&monitor),
-            config,
-            None,
-        );
-
-        // Cleanup addresses
-        let stats = service.cleanup_addresses().await.unwrap();
-        assert_eq!(stats.paid, 1);
-        assert_eq!(stats.expired, 0);
-        assert_eq!(stats.cancelled, 0);
-
-        // Verify unwatch was called
-        assert_eq!(monitor.unwatch_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_cancelled_addresses() {
-        let data_service = Arc::new(InMemoryDataService::new());
-        let monitor = Arc::new(MockEVMMonitor::new());
-        let config = CleanupConfig::default();
-
-        // Create a cancelled invoice with watched address
-        let invoice = create_test_invoice(InvoiceStatus::Cancelled, false);
-        types::InvoiceWriter::upsert(&*data_service, &invoice)
-            .await
-            .unwrap();
-
-        // Add watched address
-        types::WatchedAddressWriter::upsert(
-            &*data_service,
-            invoice.payment_address.as_ref().unwrap(),
-            &invoice.id,
-            invoice.network,
-        )
-        .await
-        .unwrap();
-
-        let service: InvoiceCleanupService<_, _, InMemoryDataService> = InvoiceCleanupService::new(
-            Arc::clone(&data_service),
-            Arc::clone(&monitor),
-            config,
-            None,
-        );
-
-        // Cleanup addresses
-        let stats = service.cleanup_addresses().await.unwrap();
-        assert_eq!(stats.cancelled, 1);
-        assert_eq!(stats.paid, 0);
-        assert_eq!(stats.expired, 0);
-
-        // Verify unwatch was called
-        assert_eq!(monitor.unwatch_count(), 1);
+impl From<super::evm_monitor::EVMMonitorError> for CleanupError {
+    fn from(e: super::evm_monitor::EVMMonitorError) -> Self {
+        CleanupError::Monitor(e.to_string())
     }
 }

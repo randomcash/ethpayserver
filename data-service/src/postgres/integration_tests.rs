@@ -5,11 +5,31 @@
 use chrono::{Duration, Utc};
 
 use types::{
-    InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter, Network, PaymentReader,
-    PaymentWriter, WatchedAddressReader, WatchedAddressWriter,
+    InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentReader,
+    PaymentWriter, PaymentMethodId, PaymentOptionId, PaymentOptionWriter, PaymentOptionData,
+    WatchedAddressReader, WatchedAddressWriter,
 };
 
 use super::tests::{create_test_service, test_invoice, test_payment, unique_address};
+
+// Helper to create a test payment option
+fn test_payment_option(invoice_id: &types::InvoiceId, chain_id: u64) -> PaymentOptionData {
+    PaymentOptionData {
+        id: PaymentOptionId::new(),
+        invoice_id: invoice_id.clone(),
+        payment_method_id: PaymentMethodId::new("ETH", chain_id),
+        chain_id,
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        decimals: 18,
+        payment_address: format!("0x{:040x}", uuid::Uuid::new_v4().as_u128()),
+        amount: "1000000000000000000".to_string(),
+        rate: None,
+        rate_at: None,
+        is_active: true,
+        created_at: Utc::now(),
+    }
+}
 
 // =========================================================================
 // Invoice integration tests
@@ -31,7 +51,7 @@ async fn integration_invoice_crud() {
         .unwrap();
     assert_eq!(fetched.id, invoice.id);
     assert_eq!(fetched.status, InvoiceStatus::Pending);
-    assert_eq!(fetched.network, Network::Ethereum);
+    assert_eq!(fetched.currency, "ETH");
     assert_eq!(fetched.amount, invoice.amount);
 
     // Update status
@@ -76,17 +96,17 @@ async fn integration_invoice_query() {
     // Create multiple invoices
     let mut invoice1 = test_invoice();
     invoice1.status = InvoiceStatus::Pending;
-    invoice1.network = Network::Ethereum;
+    invoice1.currency = "ETH".to_string();
     InvoiceWriter::upsert(&service, &invoice1).await.unwrap();
 
     let mut invoice2 = test_invoice();
     invoice2.status = InvoiceStatus::Paid;
-    invoice2.network = Network::Ethereum;
+    invoice2.currency = "ETH".to_string();
     InvoiceWriter::upsert(&service, &invoice2).await.unwrap();
 
     let mut invoice3 = test_invoice();
     invoice3.status = InvoiceStatus::Pending;
-    invoice3.network = Network::Polygon;
+    invoice3.currency = "USDC".to_string();
     InvoiceWriter::upsert(&service, &invoice3).await.unwrap();
 
     // Query by status
@@ -95,11 +115,11 @@ async fn integration_invoice_query() {
     assert!(total >= 2);
     assert!(invoices.iter().all(|i| i.status == InvoiceStatus::Pending));
 
-    // Query by network
-    let params = InvoiceQueryParams::new().with_network(Network::Polygon);
+    // Query by currency
+    let params = InvoiceQueryParams::new().with_currency("USDC");
     let (total, invoices) = InvoiceReader::query(&service, &params).await.unwrap();
     assert!(total >= 1);
-    assert!(invoices.iter().all(|i| i.network == Network::Polygon));
+    assert!(invoices.iter().all(|i| i.currency == "USDC"));
 
     // Query with pagination
     let params = InvoiceQueryParams::new().with_limit(1).with_offset(0);
@@ -144,7 +164,7 @@ async fn integration_invoice_with_metadata() {
         "customer": "test@example.com"
     }));
     invoice.extra = Some(serde_json::json!({
-        "chain_id": 1
+        "custom_field": "value"
     }));
 
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
@@ -286,31 +306,41 @@ async fn integration_payment_upsert_update() {
 async fn integration_watched_address_crud() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
-    // Create invoice first (watched_addresses have FK to invoices)
+    // Create invoice first
     let invoice = test_invoice();
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
+    // Create payment option (watched_addresses link to payment_options now)
+    let payment_option = test_payment_option(&invoice.id, 1);
+    PaymentOptionWriter::create(&service, &payment_option).await.unwrap();
+
     let address = unique_address();
-    let network = Network::Ethereum;
+    let chain_id = 1u64;
 
     // Upsert watched address
-    WatchedAddressWriter::upsert(&service, &address, &invoice.id, network)
+    WatchedAddressWriter::upsert(&service, &address, &payment_option.id, chain_id, None)
         .await
         .unwrap();
 
     // Get invoice_id by address
-    let found = WatchedAddressReader::get_invoice_id(&service, &address, network)
+    let found = WatchedAddressReader::get_invoice_id(&service, &address, chain_id, None)
         .await
         .unwrap();
     assert_eq!(found, Some(invoice.id.clone()));
 
-    // Remove watched address
-    WatchedAddressWriter::remove(&service, &address, network)
+    // Get payment_option_id by address
+    let found_opt = WatchedAddressReader::get_payment_option_id(&service, &address, chain_id, None)
+        .await
+        .unwrap();
+    assert_eq!(found_opt, Some(payment_option.id.clone()));
+
+    // Deactivate watched address
+    WatchedAddressWriter::deactivate(&service, &address, chain_id, None)
         .await
         .unwrap();
 
-    // Should not find it anymore
-    let found = WatchedAddressReader::get_invoice_id(&service, &address, network)
+    // Should not find it anymore (deactivated)
+    let found = WatchedAddressReader::get_invoice_id(&service, &address, chain_id, None)
         .await
         .unwrap();
     assert!(found.is_none());
@@ -326,11 +356,15 @@ async fn integration_watched_address_get_active() {
     invoice.expires_at = Utc::now() + Duration::hours(2);
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
+    // Create payment option
+    let payment_option = test_payment_option(&invoice.id, 1);
+    PaymentOptionWriter::create(&service, &payment_option).await.unwrap();
+
     let address = unique_address();
-    let network = Network::Ethereum;
+    let chain_id = 1u64;
 
     // Add watched address
-    WatchedAddressWriter::upsert(&service, &address, &invoice.id, network)
+    WatchedAddressWriter::upsert(&service, &address, &payment_option.id, chain_id, None)
         .await
         .unwrap();
 
@@ -340,65 +374,68 @@ async fn integration_watched_address_get_active() {
     // Should include our address
     assert!(active
         .iter()
-        .any(|(a, id, n)| a == &address && id == &invoice.id && *n == network));
+        .any(|(a, po_id, cid, _)| a == &address && po_id == &payment_option.id && *cid == chain_id));
 
-    // Remove it
-    WatchedAddressWriter::remove(&service, &address, network)
+    // Deactivate it
+    WatchedAddressWriter::deactivate(&service, &address, chain_id, None)
         .await
         .unwrap();
 
     // Should not be in active anymore
     let active = WatchedAddressReader::get_active(&service).await.unwrap();
-    assert!(!active.iter().any(|(a, _, _)| a == &address));
+    assert!(!active.iter().any(|(a, _, _, _)| a == &address));
 }
 
 #[tokio::test]
 #[ignore]
-async fn integration_watched_address_different_networks() {
+async fn integration_watched_address_different_chains() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
-    // Create two invoices
-    let invoice1 = test_invoice();
-    let mut invoice2 = test_invoice();
-    invoice2.network = Network::Polygon;
-    InvoiceWriter::upsert(&service, &invoice1).await.unwrap();
-    InvoiceWriter::upsert(&service, &invoice2).await.unwrap();
+    // Create invoice
+    let invoice = test_invoice();
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    // Create payment options for different chains
+    let po1 = test_payment_option(&invoice.id, 1);
+    let po2 = test_payment_option(&invoice.id, 137);
+    PaymentOptionWriter::create(&service, &po1).await.unwrap();
+    PaymentOptionWriter::create(&service, &po2).await.unwrap();
 
     let address = unique_address();
 
-    // Watch same address on different networks
-    WatchedAddressWriter::upsert(&service, &address, &invoice1.id, Network::Ethereum)
+    // Watch same address on different chain_ids
+    WatchedAddressWriter::upsert(&service, &address, &po1.id, 1, None)
         .await
         .unwrap();
-    WatchedAddressWriter::upsert(&service, &address, &invoice2.id, Network::Polygon)
-        .await
-        .unwrap();
-
-    // Each network should return the correct invoice
-    let found_eth = WatchedAddressReader::get_invoice_id(&service, &address, Network::Ethereum)
-        .await
-        .unwrap();
-    assert_eq!(found_eth, Some(invoice1.id.clone()));
-
-    let found_polygon = WatchedAddressReader::get_invoice_id(&service, &address, Network::Polygon)
-        .await
-        .unwrap();
-    assert_eq!(found_polygon, Some(invoice2.id.clone()));
-
-    // Remove from one network shouldn't affect the other
-    WatchedAddressWriter::remove(&service, &address, Network::Ethereum)
+    WatchedAddressWriter::upsert(&service, &address, &po2.id, 137, None)
         .await
         .unwrap();
 
-    let found_eth = WatchedAddressReader::get_invoice_id(&service, &address, Network::Ethereum)
+    // Each chain should return the correct payment option
+    let found_eth = WatchedAddressReader::get_payment_option_id(&service, &address, 1, None)
+        .await
+        .unwrap();
+    assert_eq!(found_eth, Some(po1.id.clone()));
+
+    let found_polygon = WatchedAddressReader::get_payment_option_id(&service, &address, 137, None)
+        .await
+        .unwrap();
+    assert_eq!(found_polygon, Some(po2.id.clone()));
+
+    // Remove from one chain shouldn't affect the other
+    WatchedAddressWriter::deactivate(&service, &address, 1, None)
+        .await
+        .unwrap();
+
+    let found_eth = WatchedAddressReader::get_payment_option_id(&service, &address, 1, None)
         .await
         .unwrap();
     assert!(found_eth.is_none());
 
-    let found_polygon = WatchedAddressReader::get_invoice_id(&service, &address, Network::Polygon)
+    let found_polygon = WatchedAddressReader::get_payment_option_id(&service, &address, 137, None)
         .await
         .unwrap();
-    assert_eq!(found_polygon, Some(invoice2.id.clone()));
+    assert_eq!(found_polygon, Some(po2.id.clone()));
 }
 
 #[tokio::test]
@@ -406,32 +443,36 @@ async fn integration_watched_address_different_networks() {
 async fn integration_watched_address_upsert_replaces() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
-    // Create two invoices
-    let invoice1 = test_invoice();
-    let invoice2 = test_invoice();
-    InvoiceWriter::upsert(&service, &invoice1).await.unwrap();
-    InvoiceWriter::upsert(&service, &invoice2).await.unwrap();
+    // Create invoice
+    let invoice = test_invoice();
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    // Create two payment options
+    let po1 = test_payment_option(&invoice.id, 1);
+    let po2 = test_payment_option(&invoice.id, 1);
+    PaymentOptionWriter::create(&service, &po1).await.unwrap();
+    PaymentOptionWriter::create(&service, &po2).await.unwrap();
 
     let address = unique_address();
-    let network = Network::Ethereum;
+    let chain_id = 1u64;
 
-    // Watch address for invoice1
-    WatchedAddressWriter::upsert(&service, &address, &invoice1.id, network)
+    // Watch address for payment_option1
+    WatchedAddressWriter::upsert(&service, &address, &po1.id, chain_id, None)
         .await
         .unwrap();
 
-    let found = WatchedAddressReader::get_invoice_id(&service, &address, network)
+    let found = WatchedAddressReader::get_payment_option_id(&service, &address, chain_id, None)
         .await
         .unwrap();
-    assert_eq!(found, Some(invoice1.id.clone()));
+    assert_eq!(found, Some(po1.id.clone()));
 
-    // Upsert same address for invoice2 - should replace
-    WatchedAddressWriter::upsert(&service, &address, &invoice2.id, network)
+    // Upsert same address for payment_option2 - should replace
+    WatchedAddressWriter::upsert(&service, &address, &po2.id, chain_id, None)
         .await
         .unwrap();
 
-    let found = WatchedAddressReader::get_invoice_id(&service, &address, network)
+    let found = WatchedAddressReader::get_payment_option_id(&service, &address, chain_id, None)
         .await
         .unwrap();
-    assert_eq!(found, Some(invoice2.id.clone()));
+    assert_eq!(found, Some(po2.id.clone()));
 }

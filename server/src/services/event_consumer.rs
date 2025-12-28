@@ -13,7 +13,7 @@ use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
 use types::{
     AssetType, InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter,
-    PaymentData, PaymentReader, PaymentWriter, TokenReader,
+    PaymentData, PaymentReader, PaymentWriter, TokenReader, WatchedAddressReader,
 };
 use uuid::Uuid;
 
@@ -31,6 +31,7 @@ pub trait EventConsumerDataService:
     + PaymentReader
     + PaymentWriter
     + TokenReader
+    + WatchedAddressReader
     + StoreWebhookReader
     + CleanupDataService
     + Send
@@ -44,6 +45,7 @@ impl<T> EventConsumerDataService for T where
         + PaymentReader
         + PaymentWriter
         + TokenReader
+        + WatchedAddressReader
         + StoreWebhookReader
         + CleanupDataService
         + Send
@@ -162,14 +164,16 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
     /// - Updates invoice.amount_received
     /// - Transitions invoice status: pending → processing
     async fn handle_payment_detected(&self, event: PaymentDetected) -> Result<(), EventConsumerError> {
-        let network = chain_id_to_network(event.chain_id)
-            .ok_or_else(|| EventConsumerError::InvalidData(
-                format!("Unknown chain_id: {}", event.chain_id)
-            ))?;
+        // Try to get network from chain_id (None for testnets)
+        let network = chain_id_to_network(event.chain_id);
 
         // Determine asset type and symbol based on whether it's native or token
         let (asset_type, asset_symbol, token_address) = if event.is_native {
-            (AssetType::Native, network_native_symbol(network), None)
+            // For native assets, try to get symbol from network, fallback to "ETH" for testnets
+            let symbol = network
+                .map(network_native_symbol)
+                .unwrap_or_else(|| "ETH".to_string());
+            (AssetType::Native, symbol, None)
         } else {
             // Look up the token symbol from the database
             let token_addr = event.token_address.ok_or_else(|| {
@@ -179,26 +183,50 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             })?;
             let token_addr_str = format!("{:#x}", token_addr);
 
-            let symbol = match TokenReader::get_by_address(&*self.data_service, network, &token_addr_str).await? {
-                Some(token) => token.symbol.unwrap_or_else(|| "ERC20".to_string()),
-                None => {
-                    tracing::warn!(
-                        token_address = %token_addr_str,
-                        network = ?network,
-                        "Unknown token, using address as symbol"
-                    );
-                    // Use shortened address as fallback
-                    format!("0x{}...", &token_addr_str[2..8])
+            // Try to look up token in DB (only if we have a known network)
+            let symbol = if let Some(net) = network {
+                match TokenReader::get_by_address(&*self.data_service, net, &token_addr_str).await? {
+                    Some(token) => token.symbol.unwrap_or_else(|| "ERC20".to_string()),
+                    None => {
+                        tracing::warn!(
+                            token_address = %token_addr_str,
+                            chain_id = event.chain_id,
+                            "Unknown token, using address as symbol"
+                        );
+                        format!("0x{}...", &token_addr_str[2..8])
+                    }
                 }
+            } else {
+                // Testnet - use shortened address as symbol
+                format!("0x{}...", &token_addr_str[2..8])
             };
 
             (AssetType::ERC20, symbol, Some(token_addr_str))
         };
 
+        // Look up the payment option by the payment address
+        let payment_address_str = format!("{:#x}", event.payment_address);
+        let payment_option_id = WatchedAddressReader::get_payment_option_id(
+            &*self.data_service,
+            &payment_address_str,
+            event.chain_id,
+            token_address.as_deref(),
+        ).await?;
+
+        if payment_option_id.is_none() {
+            tracing::warn!(
+                invoice_id = %event.invoice_id,
+                address = %payment_address_str,
+                chain_id = event.chain_id,
+                "Payment detected but no payment option found for address"
+            );
+        }
+
         let payment = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: InvoiceId::from_string(event.invoice_id.to_string()),
-            network,
+            payment_option_id: payment_option_id.map(|id| id.0),
+            chain_id: event.chain_id,
             asset_type,
             amount: event.amount.to_string(),
             asset_symbol,
@@ -216,7 +244,7 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             invoice_id = %event.invoice_id,
             tx_hash = %payment.tx_hash,
             amount = %payment.amount,
-            network = ?network,
+            chain_id = event.chain_id,
             asset_type = ?asset_type,
             block_number = event.block_number,
             "Payment detected"
@@ -338,25 +366,23 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
         Ok(())
     }
 
-    /// Trigger invoice expiration check for a network.
+    /// Trigger invoice expiration check.
     ///
     /// Called when block events are received. This is a non-blocking operation -
     /// errors are logged but don't stop event processing.
+    ///
+    /// With network-agnostic invoices, this checks all expired invoices regardless
+    /// of which chain triggered the event.
     async fn trigger_expiration_check(&self, chain_id: u64) {
         let Some(cleanup_service) = &self.cleanup_service else {
             return;
         };
 
-        let Some(network) = chain_id_to_network(chain_id) else {
-            tracing::trace!(chain_id, "Unknown chain_id for expiration check");
-            return;
-        };
-
-        match cleanup_service.check_network(network).await {
+        match cleanup_service.check_chain(chain_id).await {
             Ok(count) => {
                 if count > 0 {
                     tracing::debug!(
-                        ?network,
+                        chain_id,
                         expired_count = count,
                         "Expired invoices on block event"
                     );
@@ -364,7 +390,7 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             }
             Err(e) => {
                 tracing::warn!(
-                    ?network,
+                    chain_id,
                     error = %e,
                     "Failed to check expired invoices"
                 );
@@ -409,6 +435,15 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
         };
 
         // Create webhook payload
+        // With network-agnostic invoices, chain info comes from the payment
+        let (asset_symbol, chain_id, network) = if let Some(p) = payment {
+            let network = chain_id_to_network(p.chain_id);
+            (p.asset_symbol.clone(), Some(p.chain_id), network.map(|n| n.to_string()))
+        } else {
+            // No payment yet, use invoice currency as a placeholder
+            (invoice.currency.clone(), None, None)
+        };
+
         let payload = WebhookPayload {
             event_id: Uuid::new_v4(),
             event_type,
@@ -418,8 +453,9 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             status: invoice.status.to_string(),
             amount: invoice.amount.clone(),
             amount_received: invoice.amount_received.clone(),
-            asset_symbol: invoice.asset_symbol.clone(),
-            network: invoice.network.to_string(),
+            asset_symbol,
+            chain_id: chain_id.unwrap_or(0),
+            network,
             payment: payment.map(|p| WebhookPaymentInfo {
                 tx_hash: p.tx_hash.clone(),
                 from_address: p.from_address.clone(),
@@ -450,10 +486,8 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
     /// - If other valid payments exist → `processing`
     /// - If no valid payments → `pending`
     async fn handle_reorg_detected(&self, event: ReorgDetected) -> Result<(), EventConsumerError> {
-        let network = chain_id_to_network(event.chain_id)
-            .ok_or_else(|| EventConsumerError::InvalidData(
-                format!("Unknown chain_id: {}", event.chain_id)
-            ))?;
+        // Try to get network from chain_id (None for testnets)
+        let network = chain_id_to_network(event.chain_id);
 
         tracing::warn!(
             chain_id = event.chain_id,
@@ -469,7 +503,7 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
 
             // Mark payments from this chain at or after the fork block as reorged
             let reorged_count = self.data_service
-                .mark_reorged(&invoice_id, network, event.fork_block)
+                .mark_reorged(&invoice_id, event.chain_id, event.fork_block)
                 .await?;
 
             if reorged_count == 0 {
@@ -561,10 +595,31 @@ mod tests {
             Ok(())
         }
 
+        async fn watch_address_by_chain_id(
+            &self,
+            _chain_id: u64,
+            _address: Address,
+            _invoice_id: Uuid,
+            _expected_amount: Option<U256>,
+            _token_contract: Option<Address>,
+        ) -> Result<(), EVMMonitorError> {
+            Ok(())
+        }
+
         async fn unwatch_address(
             &self,
             _network: Network,
             _address: Address,
+            _token_contract: Option<Address>,
+        ) -> Result<(), EVMMonitorError> {
+            Ok(())
+        }
+
+        async fn unwatch_address_by_chain_id(
+            &self,
+            _chain_id: u64,
+            _address: Address,
+            _token_contract: Option<Address>,
         ) -> Result<(), EVMMonitorError> {
             Ok(())
         }
@@ -583,13 +638,10 @@ mod tests {
         let invoice = InvoiceData {
             id: invoice_id.clone(),
             store_id,
-            network: Network::Ethereum,
+            currency: "ETH".to_string(),
             status: InvoiceStatus::Pending,
             amount: "1000000000000000000".to_string(), // 1 ETH
             amount_received: "0".to_string(),
-            asset_symbol: "ETH".to_string(),
-            payment_address: Some("0x1234567890abcdef1234567890abcdef12345678".to_string()),
-            payment_request: None,
             created_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
             metadata: None,
@@ -658,6 +710,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_payment_detected_unknown_chain() {
+        // With network-agnostic approach, payments from unknown chains are accepted
+        // chain_id is stored on the payment, not the invoice
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
@@ -669,6 +723,22 @@ mod tests {
         );
 
         let invoice_id = InvoiceId::new();
+        let store_id = StoreId::new();
+
+        // Create network-agnostic invoice
+        let invoice = InvoiceData {
+            id: invoice_id.clone(),
+            store_id,
+            currency: "ETH".to_string(),
+            status: InvoiceStatus::Pending,
+            amount: "1000000000000000000".to_string(),
+            amount_received: "0".to_string(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            metadata: None,
+            extra: None,
+        };
+        InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
 
         // Create PaymentDetected event with unknown chain
         let event = PaymentDetected {
@@ -688,9 +758,14 @@ mod tests {
             detected_at: Utc::now(),
         };
 
-        // Should error with invalid data
-        let result = consumer.handle_payment_detected(event).await;
-        assert!(matches!(result, Err(EventConsumerError::InvalidData(_))));
+        // Should succeed - unknown chains are now accepted
+        consumer.handle_payment_detected(event).await.unwrap();
+
+        // Verify payment was created with chain_id
+        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id).await.unwrap();
+        assert_eq!(payments.len(), 1);
+        assert_eq!(payments[0].chain_id, 99999);
+        assert_eq!(payments[0].asset_symbol, "ETH"); // Fallback for unknown chains
     }
 
     #[tokio::test]
@@ -712,13 +787,10 @@ mod tests {
         let invoice = InvoiceData {
             id: invoice_id.clone(),
             store_id,
-            network: Network::Ethereum,
+            currency: "ETH".to_string(),
             status: InvoiceStatus::Processing,
             amount: "1000000000000000000".to_string(), // 1 ETH
             amount_received: "1000000000000000000".to_string(), // 1 ETH received
-            asset_symbol: "ETH".to_string(),
-            payment_address: Some("0x1234567890abcdef1234567890abcdef12345678".to_string()),
-            payment_request: None,
             created_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
             metadata: None,
@@ -731,7 +803,8 @@ mod tests {
         let payment = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: invoice_id.clone(),
-            network: Network::Ethereum,
+            payment_option_id: None,
+            chain_id: 1,
             asset_type: types::AssetType::Native,
             amount: "1000000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
@@ -789,13 +862,10 @@ mod tests {
         let invoice = InvoiceData {
             id: invoice_id.clone(),
             store_id,
-            network: Network::Ethereum,
+            currency: "ETH".to_string(),
             status: InvoiceStatus::Cancelled,
             amount: "1000000000000000000".to_string(),
             amount_received: "1000000000000000000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            payment_address: None,
-            payment_request: None,
             created_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
             metadata: None,
@@ -808,7 +878,8 @@ mod tests {
         let payment = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: invoice_id.clone(),
-            network: Network::Ethereum,
+            payment_option_id: None,
+            chain_id: 1,
             asset_type: types::AssetType::Native,
             amount: "1000000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
@@ -862,13 +933,10 @@ mod tests {
         let invoice = InvoiceData {
             id: invoice_id.clone(),
             store_id,
-            network: Network::Ethereum,
+            currency: "ETH".to_string(),
             status: InvoiceStatus::Processing,
             amount: "1000000000000000000".to_string(),
             amount_received: "500000000000000000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            payment_address: None,
-            payment_request: None,
             created_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
             metadata: None,
@@ -880,7 +948,8 @@ mod tests {
         let payment = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: invoice_id.clone(),
-            network: Network::Ethereum,
+            payment_option_id: None,
+            chain_id: 1,
             asset_type: types::AssetType::Native,
             amount: "500000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
@@ -937,13 +1006,10 @@ mod tests {
         let invoice = InvoiceData {
             id: invoice_id.clone(),
             store_id,
-            network: Network::Ethereum,
+            currency: "ETH".to_string(),
             status: InvoiceStatus::Processing,
             amount: "1000000000000000000".to_string(),
             amount_received: "1000000000000000000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            payment_address: None,
-            payment_request: None,
             created_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
             metadata: None,
@@ -955,7 +1021,8 @@ mod tests {
         let payment1 = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: invoice_id.clone(),
-            network: Network::Ethereum,
+            payment_option_id: None,
+            chain_id: 1,
             asset_type: types::AssetType::Native,
             amount: "500000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
@@ -974,7 +1041,8 @@ mod tests {
         let payment2 = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: invoice_id.clone(),
-            network: Network::Ethereum,
+            payment_option_id: None,
+            chain_id: 1,
             asset_type: types::AssetType::Native,
             amount: "500000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
@@ -1032,13 +1100,10 @@ mod tests {
         let invoice = InvoiceData {
             id: invoice_id.clone(),
             store_id,
-            network: Network::Ethereum,
+            currency: "ETH".to_string(),
             status: InvoiceStatus::Expired,
             amount: "1000000000000000000".to_string(), // 1 ETH
             amount_received: "1000000000000000000".to_string(), // Full amount received after expiry
-            asset_symbol: "ETH".to_string(),
-            payment_address: Some("0x1234567890abcdef1234567890abcdef12345678".to_string()),
-            payment_request: None,
             created_at: Utc::now() - chrono::Duration::hours(2),
             expires_at: Utc::now() - chrono::Duration::hours(1), // Expired an hour ago
             metadata: None,
@@ -1051,7 +1116,8 @@ mod tests {
         let payment = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: invoice_id.clone(),
-            network: Network::Ethereum,
+            payment_option_id: None,
+            chain_id: 1,
             asset_type: types::AssetType::Native,
             amount: "1000000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),

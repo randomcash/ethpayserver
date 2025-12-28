@@ -37,11 +37,30 @@ pub trait EVMMonitor: Send + Sync {
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError>;
 
+    /// Start watching an address using chain_id directly (for testnets/custom chains).
+    async fn watch_address_by_chain_id(
+        &self,
+        chain_id: u64,
+        address: Address,
+        invoice_id: Uuid,
+        expected_amount: Option<evm::U256>,
+        token_contract: Option<Address>,
+    ) -> Result<(), EVMMonitorError>;
+
     /// Stop watching an address.
     async fn unwatch_address(
         &self,
         network: Network,
         address: Address,
+        token_contract: Option<Address>,
+    ) -> Result<(), EVMMonitorError>;
+
+    /// Stop watching an address using chain_id directly.
+    async fn unwatch_address_by_chain_id(
+        &self,
+        chain_id: u64,
+        address: Address,
+        token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError>;
 
     /// Check if the monitor connection is healthy.
@@ -89,6 +108,17 @@ impl EVMMonitor for RedisEVMMonitor {
         let chain_id = network_to_chain_id(network)
             .ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
 
+        self.watch_address_by_chain_id(chain_id, address, invoice_id, expected_amount, token_contract).await
+    }
+
+    async fn watch_address_by_chain_id(
+        &self,
+        chain_id: u64,
+        address: Address,
+        invoice_id: Uuid,
+        expected_amount: Option<evm::U256>,
+        token_contract: Option<Address>,
+    ) -> Result<(), EVMMonitorError> {
         let command = MonitorCommand::WatchAddress(WatchAddressCommand {
             chain_id,
             address,
@@ -112,16 +142,27 @@ impl EVMMonitor for RedisEVMMonitor {
         &self,
         network: Network,
         address: Address,
+        token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
         let chain_id = network_to_chain_id(network)
             .ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
 
-        let command = MonitorCommand::UnwatchAddress(UnwatchAddressCommand { chain_id, address });
+        self.unwatch_address_by_chain_id(chain_id, address, token_contract).await
+    }
+
+    async fn unwatch_address_by_chain_id(
+        &self,
+        chain_id: u64,
+        address: Address,
+        token_contract: Option<Address>,
+    ) -> Result<(), EVMMonitorError> {
+        let command = MonitorCommand::UnwatchAddress(UnwatchAddressCommand { chain_id, address, token_contract });
 
         self.bridge.publish_command(&command).await?;
         tracing::info!(
             chain_id,
             address = %address,
+            token_contract = ?token_contract,
             "sent UnwatchAddress command"
         );
 

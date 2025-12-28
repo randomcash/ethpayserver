@@ -10,3 +10,4 @@ rust-version = "1.90.0"
 types = { path = "../payserver-commons/types" }
 auth = { path = "../payserver-commons/auth" }
 crypto = { path = "../payserver-commons/crypto" }
+rates = { path = "../payserver-commons/rates" }

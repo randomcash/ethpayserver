@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use evm::{network_to_chain_id, Address, U256};
+use evm::{Address, U256};
 use tokio::time::interval;
 use types::{WatchedAddressReader, WatchedAddressWriter};
 use uuid::Uuid;
@@ -139,34 +139,22 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
                 }
             };
 
-            // Check if network is supported
-            let chain_id = match network_to_chain_id(watch.network) {
-                Some(id) => id,
-                None => {
-                    tracing::warn!(
-                        network = ?watch.network,
-                        "Unsupported network for watch retry, skipping"
-                    );
-                    continue;
-                }
-            };
-
             // Parse expected amount
             let expected_amount = watch
                 .expected_amount
                 .as_ref()
                 .and_then(|s| s.parse::<U256>().ok());
 
-            // Parse token contract if present (asset_id is token address for ERC20)
+            // Parse token contract if present
             let token_contract: Option<Address> = watch
-                .asset_id
+                .token_address
                 .as_ref()
                 .and_then(|s| s.parse().ok());
 
-            // Try to send WatchAddress command
+            // Try to send WatchAddress command using chain_id (works for both mainnets and testnets)
             match self
                 .evm_monitor
-                .watch_address(watch.network, address, invoice_id, expected_amount, token_contract)
+                .watch_address_by_chain_id(watch.chain_id, address, invoice_id, expected_amount, token_contract)
                 .await
             {
                 Ok(()) => {
@@ -174,7 +162,8 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
                     if let Err(e) = WatchedAddressWriter::mark_notified(
                         &*self.data_service,
                         &watch.address,
-                        watch.network,
+                        watch.chain_id,
+                        watch.token_address.as_deref(),
                     ).await {
                         tracing::error!(
                             address = %watch.address,
@@ -184,7 +173,7 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
                     } else {
                         tracing::info!(
                             address = %watch.address,
-                            chain_id,
+                            chain_id = watch.chain_id,
                             invoice_id = %invoice_id,
                             "Successfully retried WatchAddress command"
                         );
@@ -193,7 +182,7 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
                 Err(e) => {
                     tracing::warn!(
                         address = %watch.address,
-                        chain_id,
+                        chain_id = watch.chain_id,
                         error = %e,
                         "Failed to retry WatchAddress command, will retry later"
                     );

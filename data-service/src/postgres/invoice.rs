@@ -11,9 +11,9 @@ use crate::{
     InvoiceQueryParams, InvoiceReader, InvoiceWriter, RepositoryError, RepositoryResult,
     sqlx_to_repo_error,
 };
-use types::{InvoiceData, InvoiceId, InvoiceStatus, Network, StoreId};
+use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
 
-use super::conversions::{status_to_db, try_db_to_network, try_db_to_status, try_network_to_db};
+use super::conversions::{status_to_db, try_db_to_status};
 use super::PgDataService;
 
 #[async_trait]
@@ -22,9 +22,8 @@ impl InvoiceReader for PgDataService {
         let row = sqlx::query(
             r#"
             SELECT
-                id, store_id, network::text, status::text, amount_value::text,
-                amount_received::text, asset_symbol, payment_address,
-                created_at, expires_at, metadata, extra
+                id, store_id, currency, status::text, amount::text,
+                amount_received::text, created_at, expires_at, metadata, extra
             FROM invoices
             WHERE id = $1
             "#,
@@ -53,8 +52,8 @@ impl InvoiceReader for PgDataService {
             conditions.push(format!("status = ${}::invoice_status", bind_idx));
             bind_idx += 1;
         }
-        if params.network.is_some() {
-            conditions.push(format!("network = ${}::network", bind_idx));
+        if params.currency.is_some() {
+            conditions.push(format!("currency = ${}", bind_idx));
             bind_idx += 1;
         }
         if params.created_after.is_some() {
@@ -79,9 +78,8 @@ impl InvoiceReader for PgDataService {
         let data_sql = format!(
             r#"
             SELECT
-                id, store_id, network::text, status::text, amount_value::text,
-                amount_received::text, asset_symbol, payment_address,
-                created_at, expires_at, metadata, extra
+                id, store_id, currency, status::text, amount::text,
+                amount_received::text, created_at, expires_at, metadata, extra
             FROM invoices
             {}
             ORDER BY created_at DESC
@@ -100,8 +98,8 @@ impl InvoiceReader for PgDataService {
         if let Some(status) = params.status {
             count_query = count_query.bind(status_to_db(status));
         }
-        if let Some(network) = params.network {
-            count_query = count_query.bind(try_network_to_db(network)?);
+        if let Some(ref currency) = params.currency {
+            count_query = count_query.bind(currency);
         }
         if let Some(after) = params.created_after {
             count_query = count_query.bind(after);
@@ -124,8 +122,8 @@ impl InvoiceReader for PgDataService {
         if let Some(status) = params.status {
             data_query = data_query.bind(status_to_db(status));
         }
-        if let Some(network) = params.network {
-            data_query = data_query.bind(try_network_to_db(network)?);
+        if let Some(ref currency) = params.currency {
+            data_query = data_query.bind(currency);
         }
         if let Some(after) = params.created_after {
             data_query = data_query.bind(after);
@@ -150,9 +148,8 @@ impl InvoiceReader for PgDataService {
         let rows = sqlx::query(
             r#"
             SELECT
-                id, store_id, network::text, status::text, amount_value::text,
-                amount_received::text, asset_symbol, payment_address,
-                created_at, expires_at, metadata, extra
+                id, store_id, currency, status::text, amount::text,
+                amount_received::text, created_at, expires_at, metadata, extra
             FROM invoices
             WHERE status IN ('pending', 'processing', 'partially_paid')
               AND expires_at < NOW()
@@ -168,53 +165,21 @@ impl InvoiceReader for PgDataService {
         invoices
     }
 
-    fn stream_expired_pending_for_network(
-        &self,
-        network: Network,
-    ) -> BoxStream<'_, RepositoryResult<InvoiceId>> {
-        let network_str = match try_network_to_db(network) {
-            Ok(s) => s,
-            Err(e) => return Box::pin(futures::stream::once(async move { Err(e) })),
-        };
-
+    fn stream_expired_pending(&self) -> BoxStream<'_, RepositoryResult<InvoiceId>> {
         Box::pin(
             sqlx::query_scalar::<_, String>(
                 r#"
                 SELECT id
                 FROM invoices
                 WHERE status = 'pending'
-                  AND network = $1::network
                   AND expires_at < NOW()
                 "#,
             )
-            .bind(network_str)
             .fetch(&self.pool)
             .map(|result| {
                 result
                     .map(InvoiceId::from_string)
                     .map_err(sqlx_to_repo_error)
-            }),
-        )
-    }
-
-    fn stream_all_expired_pending(&self) -> BoxStream<'_, RepositoryResult<(Network, InvoiceId)>> {
-        Box::pin(
-            sqlx::query(
-                r#"
-                SELECT id, network::text
-                FROM invoices
-                WHERE status = 'pending'
-                  AND expires_at < NOW()
-                "#,
-            )
-            .fetch(&self.pool)
-            .map(|result| {
-                result.map_err(sqlx_to_repo_error).and_then(|row| {
-                    let id: String = row.get("id");
-                    let network_str: String = row.get("network");
-                    let network = try_db_to_network(&network_str)?;
-                    Ok((network, InvoiceId::from_string(id)))
-                })
             }),
         )
     }
@@ -226,19 +191,16 @@ impl InvoiceWriter for PgDataService {
         sqlx::query(
             r#"
             INSERT INTO invoices (
-                id, store_id, network, status, amount_value, amount_received,
-                asset_symbol, payment_address, created_at, expires_at,
-                metadata, extra, asset_type
+                id, store_id, currency, status, amount, amount_received,
+                created_at, expires_at, metadata, extra
             ) VALUES (
-                $1, $2, $3::network, $4::invoice_status, $5::numeric, $6::numeric,
-                $7, $8, $9, $10, $11, $12, 'native'::asset_type
+                $1, $2, $3, $4::invoice_status, $5::numeric, $6::numeric,
+                $7, $8, $9, $10
             )
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
-                amount_value = EXCLUDED.amount_value,
+                amount = EXCLUDED.amount,
                 amount_received = EXCLUDED.amount_received,
-                asset_symbol = EXCLUDED.asset_symbol,
-                payment_address = EXCLUDED.payment_address,
                 expires_at = EXCLUDED.expires_at,
                 metadata = EXCLUDED.metadata,
                 extra = EXCLUDED.extra
@@ -246,12 +208,10 @@ impl InvoiceWriter for PgDataService {
         )
         .bind(invoice.id.as_str())
         .bind(invoice.store_id.0)
-        .bind(try_network_to_db(invoice.network)?)
+        .bind(&invoice.currency)
         .bind(status_to_db(invoice.status))
         .bind(&invoice.amount)
         .bind(&invoice.amount_received)
-        .bind(&invoice.asset_symbol)
-        .bind(&invoice.payment_address)
         .bind(invoice.created_at)
         .bind(invoice.expires_at)
         .bind(&invoice.metadata)
@@ -322,13 +282,10 @@ fn try_row_to_invoice(row: &sqlx::postgres::PgRow) -> RepositoryResult<InvoiceDa
     Ok(InvoiceData {
         id: InvoiceId::from_string(row.get("id")),
         store_id: StoreId(store_id),
-        network: try_db_to_network(row.get("network"))?,
+        currency: row.get("currency"),
         status: try_db_to_status(row.get("status"))?,
-        amount: row.get("amount_value"),
+        amount: row.get("amount"),
         amount_received: row.get("amount_received"),
-        asset_symbol: row.get("asset_symbol"),
-        payment_address: row.get("payment_address"),
-        payment_request: None, // Not stored in DB for EVM
         created_at: row.get("created_at"),
         expires_at: row.get("expires_at"),
         metadata: row.get("metadata"),
