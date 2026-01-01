@@ -3,11 +3,14 @@
 //! This implementation connects directly to an Ethereum node via
 //! WebSocket for block subscriptions and HTTP for data fetching.
 
-use super::{BlockNotification, BlockSource, BlockStream, LogFilter, SourceStatus};
+use super::{BlockNotification, BlockSource, BlockStream, LogFilter, NativeTransfer, SourceStatus};
 use crate::error::{EvmError, EvmResult};
+use alloy::consensus::Transaction as TransactionTrait;
+use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
-use alloy::rpc::types::{Block, BlockNumberOrTag, Filter, Log};
+use alloy::rpc::types::{Block, BlockNumberOrTag, BlockTransactionsKind, Filter, Log};
+use std::collections::HashSet;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::RwLock;
@@ -345,6 +348,68 @@ impl BlockSource for RpcBlockSource {
             .get_block_by_number(BlockNumberOrTag::Number(number))
             .await
             .map_err(|e| EvmError::Rpc(format!("get_block failed: {}", e)))
+    }
+
+    async fn find_native_transfers_to(
+        &self,
+        block_number: u64,
+        addresses: &[Address],
+    ) -> EvmResult<Vec<NativeTransfer>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build a set for O(1) lookup
+        let watched: HashSet<Address> = addresses.iter().copied().collect();
+
+        // Fetch block with full transactions
+        let block = self
+            .http_provider
+            .get_block_by_number(BlockNumberOrTag::Number(block_number))
+            .kind(BlockTransactionsKind::Full)
+            .await
+            .map_err(|e| EvmError::Rpc(format!("get_block_with_txs failed: {}", e)))?;
+
+        let Some(block) = block else {
+            return Ok(Vec::new());
+        };
+
+        // Filter transactions that send ETH to watched addresses
+        let mut transfers = Vec::new();
+
+        for (tx_index, tx) in block.transactions.txns().enumerate() {
+            // Skip if no recipient (contract creation)
+            let Some(to) = tx.to() else {
+                continue;
+            };
+
+            // Skip if not sending to a watched address
+            if !watched.contains(&to) {
+                continue;
+            }
+
+            // Skip if no value transferred
+            if tx.value().is_zero() {
+                continue;
+            }
+
+            transfers.push(NativeTransfer {
+                tx_hash: tx.tx_hash(),
+                from: tx.from(),
+                to,
+                value: tx.value(),
+                tx_index: tx_index as u64,
+            });
+        }
+
+        debug!(
+            chain_id = self.config.chain_id,
+            block = block_number,
+            found = transfers.len(),
+            "scanned block for native transfers"
+        );
+
+        Ok(transfers)
     }
 }
 

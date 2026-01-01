@@ -14,6 +14,21 @@ use async_trait::async_trait;
 use std::pin::Pin;
 use tokio_stream::Stream;
 
+/// A native ETH transfer found in a block.
+#[derive(Debug, Clone)]
+pub struct NativeTransfer {
+    /// Transaction hash.
+    pub tx_hash: B256,
+    /// Sender address.
+    pub from: Address,
+    /// Recipient address.
+    pub to: Address,
+    /// Amount transferred in wei.
+    pub value: U256,
+    /// Transaction index in block.
+    pub tx_index: u64,
+}
+
 /// Notification of a new block.
 #[derive(Debug, Clone)]
 pub struct BlockNotification {
@@ -133,6 +148,20 @@ pub trait BlockSource: Send + Sync {
 
     /// Get a block by number.
     async fn get_block(&self, number: u64) -> EvmResult<Option<Block>>;
+
+    /// Find native ETH transfers to specific addresses in a block.
+    ///
+    /// Uses batch RPC to efficiently find transactions that sent ETH
+    /// to any of the watched addresses. Returns matching transactions
+    /// with full details (tx_hash, from, value).
+    ///
+    /// This is called only when a balance change is detected, making it
+    /// efficient for payment detection without downloading every block.
+    async fn find_native_transfers_to(
+        &self,
+        block_number: u64,
+        addresses: &[Address],
+    ) -> EvmResult<Vec<NativeTransfer>>;
 
     /// Get the number of confirmations for a block.
     ///

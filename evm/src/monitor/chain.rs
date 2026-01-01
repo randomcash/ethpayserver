@@ -265,22 +265,32 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             }
         }
 
-        // Get watched addresses
-        let watched = self.watched.read().await;
-        if watched.is_empty() {
-            *self.last_block.write().await = Some(block.number);
-            *self.last_block_hash.write().await = Some(block.hash);
-            return Ok(());
-        }
+        // Get watched addresses (read lock)
+        let has_native_watches;
+        {
+            let watched = self.watched.read().await;
+            if watched.is_empty() {
+                *self.last_block.write().await = Some(block.number);
+                *self.last_block_hash.write().await = Some(block.hash);
+                return Ok(());
+            }
 
-        // Check for native transfers (balance changes)
-        if self.config.monitor_native {
-            self.check_native_payments(&watched, block).await?;
-        }
+            has_native_watches = watched.keys().any(|(_, token)| token.is_none());
 
-        // Check for ERC20 transfers
-        if self.config.monitor_erc20 {
-            self.check_erc20_payments(&watched, block).await?;
+            // Check for native transfers (balance changes)
+            if self.config.monitor_native {
+                self.check_native_payments(&watched, block).await?;
+            }
+
+            // Check for ERC20 transfers
+            if self.config.monitor_erc20 {
+                self.check_erc20_payments(&watched, block).await?;
+            }
+        } // Release read lock
+
+        // Update last known balances for native watches (requires write lock)
+        if has_native_watches && self.config.monitor_native {
+            self.update_watched_balances(block.number).await?;
         }
 
         *self.last_block.write().await = Some(block.number);
@@ -290,11 +300,18 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     }
 
     /// Check for native currency payments.
+    ///
+    /// Uses a two-phase approach:
+    /// 1. Poll balances to detect increases (lightweight)
+    /// 2. Only when balance increases, fetch block transactions to get tx details
     async fn check_native_payments(
         &self,
         watched: &HashMap<WatchKey, WatchedAddress>,
         block: &BlockNotification,
     ) -> EvmResult<()> {
+        // Collect native watched addresses and check for balance increases
+        let mut addresses_with_increase: Vec<(Address, uuid::Uuid, U256)> = Vec::new();
+
         for ((address, token), watch) in watched.iter() {
             // Skip if watching for token (not native)
             if token.is_some() {
@@ -304,47 +321,88 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             let current_balance = self.source.get_balance(*address, Some(block.number)).await?;
 
             if current_balance > watch.last_known_balance {
-                let amount = current_balance - watch.last_known_balance;
-
-                let event = PaymentDetected {
-                    chain_id: self.chain_id(),
-                    invoice_id: watch.invoice_id,
-                    payment_address: *address,
-                    amount,
-                    tx_hash: B256::ZERO, // Would need to trace to find tx
-                    block_number: block.number,
-                    block_hash: block.hash,
-                    log_index: None,
-                    is_native: true,
-                    token_address: None,
-                    from_address: Address::ZERO, // Unknown without tracing
-                    confirmations: 1,
-                    required_confirmations: self.config.required_confirmations,
-                    detected_at: Utc::now(),
-                };
-
-                info!(
-                    chain_id = self.chain_id(),
-                    invoice_id = %watch.invoice_id,
-                    %address,
-                    amount = %amount,
-                    "native payment detected"
-                );
-
-                // Add to pending
-                self.pending.write().await.insert(
-                    event.tx_hash,
-                    PendingPayment {
-                        event: event.clone(),
-                        last_check_block: block.number,
-                    },
-                );
-
-                let _ = self.event_tx.send(MonitorEvent::PaymentDetected(event));
-
-                // Update last known balance
-                // Note: In real impl, we'd update this in the watched map
+                let increase = current_balance - watch.last_known_balance;
+                addresses_with_increase.push((*address, watch.invoice_id, increase));
             }
+        }
+
+        // If no balance increases, nothing to do
+        if addresses_with_increase.is_empty() {
+            return Ok(());
+        }
+
+        // Fetch transactions for this block to find the actual transfers
+        let addresses: Vec<Address> = addresses_with_increase.iter().map(|(a, _, _)| *a).collect();
+        let transfers = self.source.find_native_transfers_to(block.number, &addresses).await?;
+
+        // Create a lookup map for quick access
+        let invoice_map: HashMap<Address, uuid::Uuid> = addresses_with_increase
+            .iter()
+            .map(|(addr, invoice_id, _)| (*addr, *invoice_id))
+            .collect();
+
+        // Process each transfer found
+        for transfer in transfers {
+            let Some(&invoice_id) = invoice_map.get(&transfer.to) else {
+                continue;
+            };
+
+            let event = PaymentDetected {
+                chain_id: self.chain_id(),
+                invoice_id,
+                payment_address: transfer.to,
+                amount: transfer.value,
+                tx_hash: transfer.tx_hash,
+                block_number: block.number,
+                block_hash: block.hash,
+                log_index: None,
+                is_native: true,
+                token_address: None,
+                from_address: transfer.from,
+                confirmations: 1,
+                required_confirmations: self.config.required_confirmations,
+                detected_at: Utc::now(),
+            };
+
+            info!(
+                chain_id = self.chain_id(),
+                invoice_id = %invoice_id,
+                address = %transfer.to,
+                amount = %transfer.value,
+                tx = %transfer.tx_hash,
+                from = %transfer.from,
+                "native payment detected"
+            );
+
+            // Add to pending for confirmation tracking
+            self.pending.write().await.insert(
+                event.tx_hash,
+                PendingPayment {
+                    event: event.clone(),
+                    last_check_block: block.number,
+                },
+            );
+
+            let _ = self.event_tx.send(MonitorEvent::PaymentDetected(event));
+        }
+
+        Ok(())
+    }
+
+    /// Update last known balances for all watched native addresses.
+    ///
+    /// Called after payment checks to ensure we track the latest balance
+    /// for detecting future payments.
+    async fn update_watched_balances(&self, block_number: u64) -> EvmResult<()> {
+        let mut watched = self.watched.write().await;
+
+        for ((_, token), watch) in watched.iter_mut() {
+            if token.is_some() {
+                continue; // Skip ERC20
+            }
+
+            let balance = self.source.get_balance(watch.address, Some(block_number)).await?;
+            watch.last_known_balance = balance;
         }
 
         Ok(())

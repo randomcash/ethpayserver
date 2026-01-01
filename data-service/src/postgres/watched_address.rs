@@ -26,7 +26,7 @@ impl WatchedAddressReader for PgDataService {
                 SELECT po.invoice_id
                 FROM watched_addresses wa
                 JOIN payment_options po ON wa.payment_option_id = po.id
-                WHERE wa.address = $1 AND wa.chain_id = $2 AND wa.token_address = $3 AND wa.is_active = TRUE
+                WHERE LOWER(wa.address) = LOWER($1) AND wa.chain_id = $2 AND LOWER(wa.token_address) = LOWER($3) AND wa.is_active = TRUE
                 "#,
             )
             .bind(address)
@@ -41,7 +41,7 @@ impl WatchedAddressReader for PgDataService {
                 SELECT po.invoice_id
                 FROM watched_addresses wa
                 JOIN payment_options po ON wa.payment_option_id = po.id
-                WHERE wa.address = $1 AND wa.chain_id = $2 AND wa.token_address IS NULL AND wa.is_active = TRUE
+                WHERE LOWER(wa.address) = LOWER($1) AND wa.chain_id = $2 AND wa.token_address IS NULL AND wa.is_active = TRUE
                 "#,
             )
             .bind(address)
@@ -65,7 +65,7 @@ impl WatchedAddressReader for PgDataService {
                 r#"
                 SELECT payment_option_id
                 FROM watched_addresses
-                WHERE address = $1 AND chain_id = $2 AND token_address = $3 AND is_active = TRUE
+                WHERE LOWER(address) = LOWER($1) AND chain_id = $2 AND LOWER(token_address) = LOWER($3) AND is_active = TRUE
                 "#,
             )
             .bind(address)
@@ -79,7 +79,7 @@ impl WatchedAddressReader for PgDataService {
                 r#"
                 SELECT payment_option_id
                 FROM watched_addresses
-                WHERE address = $1 AND chain_id = $2 AND token_address IS NULL AND is_active = TRUE
+                WHERE LOWER(address) = LOWER($1) AND chain_id = $2 AND token_address IS NULL AND is_active = TRUE
                 "#,
             )
             .bind(address)
@@ -329,7 +329,7 @@ impl WatchedAddressWriter for PgDataService {
             let existing = sqlx::query(
                 r#"
                 SELECT id FROM watched_addresses
-                WHERE address = $1 AND chain_id = $2 AND token_address IS NULL
+                WHERE LOWER(address) = LOWER($1) AND chain_id = $2 AND token_address IS NULL
                 FOR UPDATE
                 "#,
             )
@@ -344,7 +344,7 @@ impl WatchedAddressWriter for PgDataService {
                     r#"
                     UPDATE watched_addresses
                     SET payment_option_id = $1, is_active = TRUE, expires_at = $2, monitor_notified = FALSE
-                    WHERE address = $3 AND chain_id = $4 AND token_address IS NULL
+                    WHERE LOWER(address) = LOWER($3) AND chain_id = $4 AND token_address IS NULL
                     "#,
                 )
                 .bind(payment_option_id.0)
@@ -391,7 +391,7 @@ impl WatchedAddressWriter for PgDataService {
                 r#"
                 UPDATE watched_addresses
                 SET monitor_notified = TRUE
-                WHERE address = $1 AND chain_id = $2 AND token_address = $3
+                WHERE LOWER(address) = LOWER($1) AND chain_id = $2 AND LOWER(token_address) = LOWER($3)
                 "#,
             )
             .bind(address)
@@ -405,7 +405,7 @@ impl WatchedAddressWriter for PgDataService {
                 r#"
                 UPDATE watched_addresses
                 SET monitor_notified = TRUE
-                WHERE address = $1 AND chain_id = $2 AND token_address IS NULL
+                WHERE LOWER(address) = LOWER($1) AND chain_id = $2 AND token_address IS NULL
                 "#,
             )
             .bind(address)
@@ -429,7 +429,7 @@ impl WatchedAddressWriter for PgDataService {
                 r#"
                 UPDATE watched_addresses
                 SET is_active = FALSE
-                WHERE address = $1 AND chain_id = $2 AND token_address = $3 AND is_active = TRUE
+                WHERE LOWER(address) = LOWER($1) AND chain_id = $2 AND LOWER(token_address) = LOWER($3) AND is_active = TRUE
                 "#,
             )
             .bind(address)
@@ -443,7 +443,7 @@ impl WatchedAddressWriter for PgDataService {
                 r#"
                 UPDATE watched_addresses
                 SET is_active = FALSE
-                WHERE address = $1 AND chain_id = $2 AND token_address IS NULL AND is_active = TRUE
+                WHERE LOWER(address) = LOWER($1) AND chain_id = $2 AND token_address IS NULL AND is_active = TRUE
                 "#,
             )
             .bind(address)

@@ -30,28 +30,16 @@ CREATE INDEX idx_store_payment_methods_enabled ON store_payment_methods(store_id
     WHERE enabled = true;
 
 -- Add chain_id to invoices (replaces network enum for new invoices)
+-- Note: currency column already exists in base table
 ALTER TABLE invoices
-    ADD COLUMN chain_id BIGINT,
-    ADD COLUMN currency VARCHAR(16);
+    ADD COLUMN IF NOT EXISTS chain_id BIGINT;
 
 -- Add chain_id to watched_addresses
 ALTER TABLE watched_addresses
-    ADD COLUMN chain_id BIGINT;
+    ADD COLUMN IF NOT EXISTS chain_id BIGINT;
 
--- Migrate existing watched_addresses to have chain_id based on network
-UPDATE watched_addresses wa
-SET chain_id = nc.chain_id
-FROM network_configs nc
-WHERE wa.network::text = nc.network::text
-  AND wa.chain_id IS NULL;
-
--- Migrate existing invoices to have chain_id based on network
-UPDATE invoices i
-SET chain_id = nc.chain_id,
-    currency = i.asset_symbol
-FROM network_configs nc
-WHERE i.network::text = nc.network::text
-  AND i.chain_id IS NULL;
+-- Note: Data migration from network enum to chain_id is not needed for fresh installs.
+-- Legacy data migration removed (network_configs table doesn't exist).
 
 COMMENT ON TABLE store_payment_methods IS 'Payment method configurations per store (chain + asset + wallet)';
 COMMENT ON COLUMN store_payment_methods.chain_id IS 'EIP-155 chain ID (1=Ethereum, 137=Polygon, 11155111=Sepolia, etc.)';

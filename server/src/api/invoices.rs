@@ -30,6 +30,9 @@ use crate::services::EVMMonitor;
 use crate::state::PgAppState;
 use rates::{RateError, is_fiat_currency};
 
+/// Default invoice expiration time in seconds (15 minutes).
+const DEFAULT_INVOICE_EXPIRATION_SECS: u64 = 900;
+
 /// Convert an amount to crypto smallest units using the exchange rate.
 ///
 /// # Arguments
@@ -160,7 +163,7 @@ pub struct CreateInvoiceRequest {
     /// Amount in the currency's standard unit (e.g., "100.00" for USD, "0.1" for ETH).
     /// For asset-denominated invoices, this is in the asset's smallest unit (wei, satoshi).
     pub amount: String,
-    /// Expiration in seconds from now (default: 3600).
+    /// Expiration in seconds from now (default: 900 = 15 minutes).
     pub expiration_seconds: Option<u64>,
     /// Optional metadata.
     pub metadata: Option<serde_json::Value>,
@@ -613,7 +616,7 @@ where
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    let expiration_secs = req.expiration_seconds.unwrap_or(3600);
+    let expiration_secs = req.expiration_seconds.unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
     let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
     // Create invoice (network-agnostic) - only after validating payment methods
