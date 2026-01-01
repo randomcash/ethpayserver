@@ -53,6 +53,9 @@ pub(super) fn test_payment(invoice_id: &InvoiceId) -> PaymentData {
         from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".to_string()),
         reorged: false,
         extra: None,
+        credited_amount: None,
+        rate_used: None,
+        rate_applied_at: None,
     }
 }
 

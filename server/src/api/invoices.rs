@@ -30,64 +30,88 @@ use crate::services::EVMMonitor;
 use crate::state::PgAppState;
 use rates::{RateError, is_fiat_currency};
 
-/// Convert a fiat amount to crypto smallest units using the exchange rate.
+/// Convert an amount to crypto smallest units using the exchange rate.
 ///
 /// # Arguments
-/// * `fiat_amount` - Amount in fiat (e.g., "100.00")
-/// * `rate` - Exchange rate: 1 fiat = rate crypto
+/// * `amount` - Amount in invoice currency (e.g., "100.00" USD or "0.5" BTC)
+/// * `rate` - Exchange rate: 1 invoice_currency = rate crypto_units
 /// * `decimals` - Number of decimals for the crypto asset (e.g., 18 for ETH)
 ///
 /// # Returns
 /// Amount in smallest crypto units as a string (e.g., wei for ETH).
-fn convert_fiat_to_crypto_smallest_unit(
-    fiat_amount: &str,
+fn convert_to_crypto_smallest_unit(
+    amount: &str,
     rate: Decimal,
     decimals: u8,
 ) -> Result<String, &'static str> {
-    // Parse fiat amount
-    let fiat: Decimal = fiat_amount.parse().map_err(|_| "Invalid fiat amount")?;
+    // Parse amount
+    let parsed_amount: Decimal = amount.parse().map_err(|_| "Invalid amount")?;
 
     // Validate amount is positive
-    if fiat <= Decimal::ZERO {
+    if parsed_amount <= Decimal::ZERO {
         return Err("Amount must be positive");
     }
 
-    // Calculate crypto amount: fiat * rate
-    let crypto_amount = fiat.checked_mul(rate).ok_or("Overflow in rate multiplication")?;
+    // Calculate crypto amount: amount * rate
+    let crypto_amount = parsed_amount.checked_mul(rate).ok_or("Overflow in rate multiplication")?;
 
     // Convert to smallest units by multiplying by 10^decimals
-    // Use Decimal's pow to avoid u64 overflow for high decimals
+    let smallest_units = multiply_by_decimals(crypto_amount, decimals)?;
+
+    // Round to integer (floor to avoid overpaying)
+    decimal_to_integer_string(smallest_units)
+}
+
+/// Convert a human-readable amount to smallest units (no rate conversion).
+///
+/// # Arguments
+/// * `amount` - Amount in human-readable format (e.g., "1.5" ETH)
+/// * `decimals` - Number of decimals for the asset (e.g., 18 for ETH)
+///
+/// # Returns
+/// Amount in smallest units as a string (e.g., "1500000000000000000" wei).
+fn convert_human_to_smallest_unit(amount: &str, decimals: u8) -> Result<String, &'static str> {
+    // Parse amount
+    let parsed_amount: Decimal = amount.parse().map_err(|_| "Invalid amount")?;
+
+    // Validate amount is positive
+    if parsed_amount <= Decimal::ZERO {
+        return Err("Amount must be positive");
+    }
+
+    // Convert to smallest units
+    let smallest_units = multiply_by_decimals(parsed_amount, decimals)?;
+
+    decimal_to_integer_string(smallest_units)
+}
+
+/// Multiply a decimal by 10^decimals.
+fn multiply_by_decimals(value: Decimal, decimals: u8) -> Result<Decimal, &'static str> {
     let ten = Decimal::from(10);
     let mut multiplier = Decimal::ONE;
     for _ in 0..decimals {
         multiplier = multiplier.checked_mul(ten).ok_or("Overflow computing multiplier")?;
     }
+    value.checked_mul(multiplier).ok_or("Overflow in smallest units calculation")
+}
 
-    let smallest_units = crypto_amount.checked_mul(multiplier)
-        .ok_or("Overflow in smallest units calculation")?;
+/// Convert a Decimal to an integer string (floor, then stringify).
+fn decimal_to_integer_string(value: Decimal) -> Result<String, &'static str> {
+    let floored = value.floor();
 
-    // Round to integer (floor to avoid overpaying)
-    let smallest_units_int = smallest_units.floor();
-
-    // Convert to string - use mantissa for large numbers
-    if smallest_units_int.is_sign_negative() {
+    if floored.is_sign_negative() {
         return Err("Negative amount after conversion");
     }
 
     // Try to_u128 first for efficient conversion
-    // For very large values, use Decimal's mantissa representation
-    match smallest_units_int.to_u128() {
+    match floored.to_u128() {
         Some(n) => Ok(n.to_string()),
         None => {
-            // Value too large for u128 - this shouldn't happen for reasonable amounts
-            // (u128 max is ~3.4e38, but 18-decimal tokens with 1e20 fiat would be ~1e38)
-            // Use normalize to remove trailing zeros and ensure integer representation
-            let normalized = smallest_units_int.normalize();
+            // Value too large for u128 - use mantissa extraction
+            let normalized = floored.normalize();
             if normalized.scale() > 0 {
-                // Still has decimal places after normalization - shouldn't happen after floor()
                 return Err("Unexpected decimal places in conversion result");
             }
-            // Extract mantissa and adjust for scale
             let mantissa = normalized.mantissa();
             if mantissa < 0 {
                 return Err("Negative amount after conversion");
@@ -452,31 +476,67 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Find enabled payment methods for the requested currency/asset
-    // For asset-denominated invoices (testing), currency = asset_symbol (e.g., "ETH")
-    let payment_methods = StorePaymentMethodReader::find_by_asset_symbol(
+    // Get ALL enabled payment methods for the store
+    let payment_methods = StorePaymentMethodReader::get_enabled_payment_methods(
         &*state.data_service,
         req.store_id,
-        &req.currency,
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if payment_methods.is_empty() {
         tracing::warn!(
-            "Store {} has no enabled payment method for currency {}",
-            req.store_id,
-            req.currency
+            "Store {} has no enabled payment methods",
+            req.store_id
         );
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Pre-validate: For fiat currencies, fetch rates first to avoid creating orphan invoices
+    // Pre-validate: Fetch rates for cross-currency invoices to avoid creating orphan invoices
+    // For same-asset invoices (e.g., ETH invoice paid with ETH), no rate needed
     // Stores (payment_method_index, crypto_amount, rate_string, rate_timestamp)
     let mut validated_methods: Vec<(usize, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> = Vec::new();
+    let invoice_currency_upper = req.currency.to_uppercase();
 
-    if is_fiat_currency(&req.currency) {
-        for (idx, payment_method) in payment_methods.iter().enumerate() {
+    for (idx, payment_method) in payment_methods.iter().enumerate() {
+        let asset_symbol_upper = payment_method.asset_symbol.to_uppercase();
+
+        // Check if this is a same-asset payment (no conversion needed)
+        if invoice_currency_upper == asset_symbol_upper {
+            // Same asset: use amount directly, convert to smallest units if needed
+            let amount = if is_fiat_currency(&req.currency) {
+                // Fiat currency can't be same as crypto asset, this shouldn't happen
+                tracing::warn!(
+                    currency = %req.currency,
+                    asset = %payment_method.asset_symbol,
+                    "Fiat currency matched asset symbol, skipping"
+                );
+                continue;
+            } else {
+                // Crypto-denominated invoice with matching asset
+                // Amount is in human-readable format, convert to smallest units
+                convert_human_to_smallest_unit(&req.amount, payment_method.decimals)
+                    .map_err(|e| {
+                        tracing::error!(
+                            currency = %req.currency,
+                            amount = %req.amount,
+                            error = %e,
+                            "Failed to convert amount to smallest units"
+                        );
+                        StatusCode::BAD_REQUEST
+                    })?
+            };
+
+            tracing::debug!(
+                currency = %req.currency,
+                asset = %payment_method.asset_symbol,
+                amount = %amount,
+                "Same-asset payment, no rate conversion needed"
+            );
+
+            validated_methods.push((idx, amount, None, None));
+        } else {
+            // Cross-currency: need to fetch exchange rate
             match state.rate_provider.get_rate(&req.currency, &payment_method.asset_symbol).await {
                 Ok(exchange_rate) => {
                     // Validate rate is positive
@@ -490,8 +550,8 @@ where
                         return Err(StatusCode::SERVICE_UNAVAILABLE);
                     }
 
-                    // Convert fiat to crypto smallest units
-                    let amount = convert_fiat_to_crypto_smallest_unit(
+                    // Convert invoice currency to crypto smallest units
+                    let amount = convert_to_crypto_smallest_unit(
                         &req.amount,
                         exchange_rate.rate,
                         payment_method.decimals,
@@ -501,7 +561,7 @@ where
                             currency = %req.currency,
                             amount = %req.amount,
                             error = %e,
-                            "Failed to convert fiat amount to crypto"
+                            "Failed to convert amount to crypto"
                         );
                         StatusCode::BAD_REQUEST
                     })?;
@@ -510,9 +570,9 @@ where
                         from = %req.currency,
                         to = %payment_method.asset_symbol,
                         rate = %exchange_rate.rate,
-                        fiat_amount = %req.amount,
+                        invoice_amount = %req.amount,
                         crypto_amount = %amount,
-                        "Converted fiat to crypto"
+                        "Converted invoice currency to crypto"
                     );
 
                     validated_methods.push((
@@ -541,21 +601,16 @@ where
                 }
             }
         }
+    }
 
-        // Check if any payment methods have valid rates BEFORE creating invoice
-        if validated_methods.is_empty() {
-            tracing::error!(
-                store_id = %req.store_id,
-                currency = %req.currency,
-                "No payment methods with supported rate pairs"
-            );
-            return Err(StatusCode::UNPROCESSABLE_ENTITY);
-        }
-    } else {
-        // Crypto currency: all methods are valid, amount is used directly
-        for (idx, _) in payment_methods.iter().enumerate() {
-            validated_methods.push((idx, req.amount.clone(), None, None));
-        }
+    // Check if any payment methods are valid BEFORE creating invoice
+    if validated_methods.is_empty() {
+        tracing::error!(
+            store_id = %req.store_id,
+            currency = %req.currency,
+            "No payment methods with supported rate pairs for this currency"
+        );
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     let expiration_secs = req.expiration_seconds.unwrap_or(3600);
@@ -963,50 +1018,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_convert_fiat_basic() {
+    fn test_convert_to_crypto_basic() {
         // 100 USD at rate 0.0005 ETH/USD = 0.05 ETH = 50000000000000000 wei
         let rate = Decimal::from_str_exact("0.0005").unwrap();
-        let result = convert_fiat_to_crypto_smallest_unit("100", rate, 18).unwrap();
+        let result = convert_to_crypto_smallest_unit("100", rate, 18).unwrap();
         assert_eq!(result, "50000000000000000");
     }
 
     #[test]
-    fn test_convert_fiat_small_amount() {
+    fn test_convert_to_crypto_small_amount() {
         // 1 USD at rate 0.0005 ETH/USD = 0.0005 ETH = 500000000000000 wei
         let rate = Decimal::from_str_exact("0.0005").unwrap();
-        let result = convert_fiat_to_crypto_smallest_unit("1", rate, 18).unwrap();
+        let result = convert_to_crypto_smallest_unit("1", rate, 18).unwrap();
         assert_eq!(result, "500000000000000");
     }
 
     #[test]
-    fn test_convert_fiat_large_amount() {
+    fn test_convert_to_crypto_large_amount() {
         // 1,000,000 USD at rate 0.0005 ETH/USD = 500 ETH = 500000000000000000000 wei
         let rate = Decimal::from_str_exact("0.0005").unwrap();
-        let result = convert_fiat_to_crypto_smallest_unit("1000000", rate, 18).unwrap();
+        let result = convert_to_crypto_smallest_unit("1000000", rate, 18).unwrap();
         assert_eq!(result, "500000000000000000000");
     }
 
     #[test]
-    fn test_convert_fiat_fractional() {
+    fn test_convert_to_crypto_fractional() {
         // 99.99 USD at rate 0.0005 ETH/USD = 0.049995 ETH
         let rate = Decimal::from_str_exact("0.0005").unwrap();
-        let result = convert_fiat_to_crypto_smallest_unit("99.99", rate, 18).unwrap();
+        let result = convert_to_crypto_smallest_unit("99.99", rate, 18).unwrap();
         // 0.049995 ETH = 49995000000000000 wei
         assert_eq!(result, "49995000000000000");
     }
 
     #[test]
-    fn test_convert_fiat_usdc_6_decimals() {
+    fn test_convert_to_crypto_usdc_6_decimals() {
         // 100 USD at rate 1.0 USDC/USD = 100 USDC = 100000000 (6 decimals)
         let rate = Decimal::ONE;
-        let result = convert_fiat_to_crypto_smallest_unit("100", rate, 6).unwrap();
+        let result = convert_to_crypto_smallest_unit("100", rate, 6).unwrap();
         assert_eq!(result, "100000000");
     }
 
     #[test]
     fn test_convert_rejects_zero_amount() {
         let rate = Decimal::from_str_exact("0.0005").unwrap();
-        let result = convert_fiat_to_crypto_smallest_unit("0", rate, 18);
+        let result = convert_to_crypto_smallest_unit("0", rate, 18);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Amount must be positive");
     }
@@ -1014,7 +1069,7 @@ mod tests {
     #[test]
     fn test_convert_rejects_negative_amount() {
         let rate = Decimal::from_str_exact("0.0005").unwrap();
-        let result = convert_fiat_to_crypto_smallest_unit("-100", rate, 18);
+        let result = convert_to_crypto_smallest_unit("-100", rate, 18);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Amount must be positive");
     }
@@ -1022,9 +1077,9 @@ mod tests {
     #[test]
     fn test_convert_rejects_invalid_amount() {
         let rate = Decimal::from_str_exact("0.0005").unwrap();
-        let result = convert_fiat_to_crypto_smallest_unit("abc", rate, 18);
+        let result = convert_to_crypto_smallest_unit("abc", rate, 18);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Invalid fiat amount");
+        assert_eq!(result.unwrap_err(), "Invalid amount");
     }
 
     #[test]
@@ -1032,7 +1087,36 @@ mod tests {
         // Ensure we floor (not round) to avoid overpaying
         // 1.001 USD at rate 0.0005 = 0.0005005 ETH = 500500000000000 wei
         let rate = Decimal::from_str_exact("0.0005").unwrap();
-        let result = convert_fiat_to_crypto_smallest_unit("1.001", rate, 18).unwrap();
+        let result = convert_to_crypto_smallest_unit("1.001", rate, 18).unwrap();
         assert_eq!(result, "500500000000000");
+    }
+
+    // Tests for same-asset conversion (no rate needed)
+    #[test]
+    fn test_convert_human_to_smallest_basic() {
+        // 1.5 ETH = 1500000000000000000 wei
+        let result = convert_human_to_smallest_unit("1.5", 18).unwrap();
+        assert_eq!(result, "1500000000000000000");
+    }
+
+    #[test]
+    fn test_convert_human_to_smallest_usdc() {
+        // 100 USDC = 100000000 (6 decimals)
+        let result = convert_human_to_smallest_unit("100", 6).unwrap();
+        assert_eq!(result, "100000000");
+    }
+
+    #[test]
+    fn test_convert_human_to_smallest_fractional() {
+        // 0.001 ETH = 1000000000000000 wei
+        let result = convert_human_to_smallest_unit("0.001", 18).unwrap();
+        assert_eq!(result, "1000000000000000");
+    }
+
+    #[test]
+    fn test_convert_human_rejects_negative() {
+        let result = convert_human_to_smallest_unit("-1", 18);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Amount must be positive");
     }
 }

@@ -26,23 +26,26 @@ fn db_to_asset_type(s: &str) -> AssetType {
     }
 }
 
+/// Common SELECT columns for payment queries
+const PAYMENT_SELECT_COLS: &str = r#"
+    id, invoice_id, payment_option_id, chain_id, asset_type::text,
+    amount::text, asset_symbol, token_address, tx_hash, block_number,
+    detected_at, confirmed_at, from_address, reorged, extra,
+    credited_amount::text, rate_used::text, rate_applied_at
+"#;
+
 #[async_trait]
 impl PaymentReader for PgDataService {
     async fn get(&self, id: Uuid) -> RepositoryResult<Option<PaymentData>> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                id, invoice_id, payment_option_id, chain_id, asset_type::text,
-                amount::text, asset_symbol, token_address, tx_hash, block_number,
-                detected_at, confirmed_at, from_address, reorged, extra
-            FROM payments
-            WHERE id = $1
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
+        let query = format!(
+            "SELECT {} FROM payments WHERE id = $1",
+            PAYMENT_SELECT_COLS
+        );
+        let row = sqlx::query(&query)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
 
         match row {
             Some(r) => Ok(Some(try_row_to_payment(&r)?)),
@@ -51,60 +54,42 @@ impl PaymentReader for PgDataService {
     }
 
     async fn get_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentData>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                id, invoice_id, payment_option_id, chain_id, asset_type::text,
-                amount::text, asset_symbol, token_address, tx_hash, block_number,
-                detected_at, confirmed_at, from_address, reorged, extra
-            FROM payments
-            WHERE invoice_id = $1
-            ORDER BY detected_at DESC
-            "#,
-        )
-        .bind(invoice_id.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
+        let query = format!(
+            "SELECT {} FROM payments WHERE invoice_id = $1 ORDER BY detected_at DESC",
+            PAYMENT_SELECT_COLS
+        );
+        let rows = sqlx::query(&query)
+            .bind(invoice_id.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
 
         rows.iter().map(try_row_to_payment).collect()
     }
 
     async fn get_awaiting_confirmation(&self) -> RepositoryResult<Vec<PaymentData>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                id, invoice_id, payment_option_id, chain_id, asset_type::text,
-                amount::text, asset_symbol, token_address, tx_hash, block_number,
-                detected_at, confirmed_at, from_address, reorged, extra
-            FROM payments
-            WHERE confirmed_at IS NULL AND reorged = FALSE
-            ORDER BY detected_at ASC
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
+        let query = format!(
+            "SELECT {} FROM payments WHERE confirmed_at IS NULL AND reorged = FALSE ORDER BY detected_at ASC",
+            PAYMENT_SELECT_COLS
+        );
+        let rows = sqlx::query(&query)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
 
         rows.iter().map(try_row_to_payment).collect()
     }
 
     async fn get_valid_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentData>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT
-                id, invoice_id, payment_option_id, chain_id, asset_type::text,
-                amount::text, asset_symbol, token_address, tx_hash, block_number,
-                detected_at, confirmed_at, from_address, reorged, extra
-            FROM payments
-            WHERE invoice_id = $1 AND reorged = FALSE
-            ORDER BY detected_at DESC
-            "#,
-        )
-        .bind(invoice_id.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
+        let query = format!(
+            "SELECT {} FROM payments WHERE invoice_id = $1 AND reorged = FALSE ORDER BY detected_at DESC",
+            PAYMENT_SELECT_COLS
+        );
+        let rows = sqlx::query(&query)
+            .bind(invoice_id.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
 
         rows.iter().map(try_row_to_payment).collect()
     }
@@ -136,15 +121,20 @@ impl PaymentWriter for PgDataService {
             r#"
             INSERT INTO payments (
                 id, invoice_id, payment_option_id, chain_id, asset_type, amount, asset_symbol,
-                token_address, tx_hash, block_number, detected_at, confirmed_at, from_address, extra
+                token_address, tx_hash, block_number, detected_at, confirmed_at, from_address, extra,
+                credited_amount, rate_used, rate_applied_at
             ) VALUES (
                 $1, $2, $3, $4, $5::asset_type, $6::numeric, $7,
-                $8, $9, $10, $11, $12, $13, $14
+                $8, $9, $10, $11, $12, $13, $14,
+                $15::numeric, $16::numeric, $17
             )
             ON CONFLICT (tx_hash, chain_id) DO UPDATE SET
                 block_number = COALESCE(EXCLUDED.block_number, payments.block_number),
                 confirmed_at = COALESCE(EXCLUDED.confirmed_at, payments.confirmed_at),
-                extra = COALESCE(EXCLUDED.extra, payments.extra)
+                extra = COALESCE(EXCLUDED.extra, payments.extra),
+                credited_amount = COALESCE(EXCLUDED.credited_amount, payments.credited_amount),
+                rate_used = COALESCE(EXCLUDED.rate_used, payments.rate_used),
+                rate_applied_at = COALESCE(EXCLUDED.rate_applied_at, payments.rate_applied_at)
             "#,
         )
         .bind(payment.id)
@@ -161,6 +151,9 @@ impl PaymentWriter for PgDataService {
         .bind(payment.confirmed_at)
         .bind(&payment.from_address)
         .bind(&payment.extra)
+        .bind(&payment.credited_amount)
+        .bind(&payment.rate_used)
+        .bind(payment.rate_applied_at)
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;
@@ -241,6 +234,9 @@ fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentDa
         from_address: row.get("from_address"),
         reorged: row.get("reorged"),
         extra: row.get("extra"),
+        credited_amount: row.get("credited_amount"),
+        rate_used: row.get("rate_used"),
+        rate_applied_at: row.get("rate_applied_at"),
     })
 }
 

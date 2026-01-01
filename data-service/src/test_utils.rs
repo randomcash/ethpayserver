@@ -774,5 +774,8 @@ pub fn create_test_payment(invoice_id: &InvoiceId, payment_option_id: Option<&Pa
         from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".to_string()),
         reorged: false,
         extra: None,
+        credited_amount: Some("0.05".to_string()), // 0.05 ETH
+        rate_used: None,
+        rate_applied_at: None,
     }
 }

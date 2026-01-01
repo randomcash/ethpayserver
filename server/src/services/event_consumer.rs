@@ -5,7 +5,8 @@
 
 use std::sync::Arc;
 
-use data_service::StoreWebhookReader;
+use chrono::Utc;
+use data_service::{PaymentOptionReader, StoreWebhookReader};
 use evm::chain_id_to_network;
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::{MonitorEvent, PaymentConfirmed, PaymentDetected, ReorgDetected};
@@ -30,6 +31,7 @@ pub trait EventConsumerDataService:
     + InvoiceWriter
     + PaymentReader
     + PaymentWriter
+    + PaymentOptionReader
     + TokenReader
     + WatchedAddressReader
     + StoreWebhookReader
@@ -44,6 +46,7 @@ impl<T> EventConsumerDataService for T where
         + InvoiceWriter
         + PaymentReader
         + PaymentWriter
+        + PaymentOptionReader
         + TokenReader
         + WatchedAddressReader
         + StoreWebhookReader
@@ -218,9 +221,86 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
                 invoice_id = %event.invoice_id,
                 address = %payment_address_str,
                 chain_id = event.chain_id,
-                "Payment detected but no payment option found for address"
+                amount = %event.amount,
+                "Payment detected but no payment option found - payment will be recorded but NOT counted toward invoice total"
             );
         }
+
+        // Calculate converted amount if we have a payment option with rate info
+        // IMPORTANT: Payments without credited_amount won't count toward amount_received
+        let (credited_amount, rate_used, rate_applied_at) =
+            if let Some(ref po_id) = payment_option_id {
+                match PaymentOptionReader::get(&*self.data_service, po_id).await? {
+                    Some(payment_option) => {
+                        if let Some(ref rate_str) = payment_option.rate {
+                            // Convert payment amount to invoice currency
+                            // Formula: (raw_amount / 10^decimals) / rate = invoice_currency_amount
+                            match self.convert_payment_to_invoice_currency(
+                                &event.amount.to_string(),
+                                rate_str,
+                                payment_option.decimals,
+                            ) {
+                                Ok(converted) => {
+                                    tracing::debug!(
+                                        invoice_id = %event.invoice_id,
+                                        raw_amount = %event.amount,
+                                        rate = %rate_str,
+                                        decimals = payment_option.decimals,
+                                        converted = %converted,
+                                        "Converted payment amount to invoice currency"
+                                    );
+                                    (Some(converted), Some(rate_str.clone()), Some(Utc::now()))
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        invoice_id = %event.invoice_id,
+                                        raw_amount = %event.amount,
+                                        error = %e,
+                                        "Failed to convert payment amount - payment will NOT count toward invoice total"
+                                    );
+                                    (None, None, None)
+                                }
+                            }
+                        } else {
+                            // No rate = asset-denominated invoice, convert to human-readable
+                            match self.convert_smallest_to_human(
+                                &event.amount.to_string(),
+                                payment_option.decimals,
+                            ) {
+                                Ok(human_amount) => {
+                                    tracing::debug!(
+                                        invoice_id = %event.invoice_id,
+                                        raw_amount = %event.amount,
+                                        decimals = payment_option.decimals,
+                                        human_amount = %human_amount,
+                                        "Same-asset payment, converted to human-readable"
+                                    );
+                                    (Some(human_amount), None, None)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        invoice_id = %event.invoice_id,
+                                        raw_amount = %event.amount,
+                                        error = %e,
+                                        "Failed to convert same-asset payment - payment will NOT count toward invoice total"
+                                    );
+                                    (None, None, None)
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            invoice_id = %event.invoice_id,
+                            payment_option_id = %po_id.0,
+                            "Payment option not found in database - payment will NOT count toward invoice total"
+                        );
+                        (None, None, None)
+                    }
+                }
+            } else {
+                (None, None, None)
+            };
 
         let payment = PaymentData {
             id: Uuid::new_v4(),
@@ -238,6 +318,9 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             from_address: Some(format!("{:#x}", event.from_address)),
             reorged: false,
             extra: None,
+            credited_amount,
+            rate_used,
+            rate_applied_at,
         };
 
         tracing::info!(
@@ -541,6 +624,68 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
 
         Ok(())
     }
+
+    /// Convert a payment amount (in smallest units) to invoice currency.
+    ///
+    /// Formula: (raw_amount / 10^decimals) / rate = invoice_currency_amount
+    ///
+    /// The rate represents: 1 invoice_currency = rate asset_units
+    /// So to get invoice currency: asset_amount / rate
+    fn convert_payment_to_invoice_currency(
+        &self,
+        raw_amount: &str,
+        rate_str: &str,
+        decimals: u8,
+    ) -> Result<String, String> {
+        // Parse raw amount (in smallest units, e.g., wei)
+        let raw: Decimal = raw_amount
+            .parse()
+            .map_err(|e| format!("Invalid raw amount '{}': {}", raw_amount, e))?;
+
+        // Parse exchange rate
+        let rate: Decimal = rate_str
+            .parse()
+            .map_err(|e| format!("Invalid rate '{}': {}", rate_str, e))?;
+
+        if rate.is_zero() {
+            return Err("Rate is zero, cannot convert".to_string());
+        }
+
+        // Convert to human-readable amount: raw / 10^decimals
+        let divisor = Self::compute_decimal_divisor(decimals)?;
+        let human_amount = raw / divisor;
+
+        // Convert to invoice currency: human_amount / rate
+        let invoice_amount = human_amount / rate;
+
+        Ok(invoice_amount.to_string())
+    }
+
+    /// Convert a smallest unit amount to human-readable format.
+    ///
+    /// Used for asset-denominated invoices where no rate conversion is needed.
+    fn convert_smallest_to_human(&self, raw_amount: &str, decimals: u8) -> Result<String, String> {
+        let raw: Decimal = raw_amount
+            .parse()
+            .map_err(|e| format!("Invalid raw amount '{}': {}", raw_amount, e))?;
+
+        let divisor = Self::compute_decimal_divisor(decimals)?;
+        let human_amount = raw / divisor;
+
+        Ok(human_amount.to_string())
+    }
+
+    /// Compute 10^decimals safely using checked multiplication.
+    fn compute_decimal_divisor(decimals: u8) -> Result<Decimal, String> {
+        let ten = Decimal::from(10);
+        let mut divisor = Decimal::ONE;
+        for _ in 0..decimals {
+            divisor = divisor
+                .checked_mul(ten)
+                .ok_or_else(|| format!("Overflow computing 10^{}", decimals))?;
+        }
+        Ok(divisor)
+    }
 }
 
 /// Error type for event consumer operations.
@@ -816,6 +961,9 @@ mod tests {
             from_address: Some("0xabababababababababababababababababababab".to_string()),
             reorged: false,
             extra: None,
+            credited_amount: Some("1".to_string()), // 1 ETH
+            rate_used: None,
+            rate_applied_at: None,
         };
         PaymentWriter::upsert(&*ds, &payment).await.unwrap();
 
@@ -891,6 +1039,9 @@ mod tests {
             from_address: None,
             reorged: false,
             extra: None,
+            credited_amount: Some("1".to_string()),
+            rate_used: None,
+            rate_applied_at: None,
         };
         PaymentWriter::upsert(&*ds, &payment).await.unwrap();
 
@@ -961,6 +1112,9 @@ mod tests {
             from_address: None,
             reorged: false,
             extra: None,
+            credited_amount: Some("0.5".to_string()),
+            rate_used: None,
+            rate_applied_at: None,
         };
         PaymentWriter::upsert(&*ds, &payment).await.unwrap();
 
@@ -1034,6 +1188,9 @@ mod tests {
             from_address: None,
             reorged: false,
             extra: None,
+            credited_amount: Some("0.5".to_string()),
+            rate_used: None,
+            rate_applied_at: None,
         };
         PaymentWriter::upsert(&*ds, &payment1).await.unwrap();
 
@@ -1054,6 +1211,9 @@ mod tests {
             from_address: None,
             reorged: false,
             extra: None,
+            credited_amount: Some("0.5".to_string()),
+            rate_used: None,
+            rate_applied_at: None,
         };
         PaymentWriter::upsert(&*ds, &payment2).await.unwrap();
 
@@ -1129,6 +1289,9 @@ mod tests {
             from_address: Some("0xcccccccccccccccccccccccccccccccccccccccc".to_string()),
             reorged: false,
             extra: None,
+            credited_amount: Some("1".to_string()),
+            rate_used: None,
+            rate_applied_at: None,
         };
         PaymentWriter::upsert(&*ds, &payment).await.unwrap();
 
