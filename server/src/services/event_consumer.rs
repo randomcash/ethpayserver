@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use data_service::{PaymentOptionReader, StoreWebhookReader};
-use evm::chain_id_to_network;
+use evm::{chain_id_to_network, get_any_chain_config};
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::{MonitorEvent, PaymentConfirmed, PaymentDetected, ReorgDetected};
 use rust_decimal::Decimal;
@@ -172,9 +172,9 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
 
         // Determine asset type and symbol based on whether it's native or token
         let (asset_type, asset_symbol, token_address) = if event.is_native {
-            // For native assets, try to get symbol from network, fallback to "ETH" for testnets
-            let symbol = network
-                .map(network_native_symbol)
+            // Get native symbol from chain config (works for both mainnets and testnets)
+            let symbol = get_any_chain_config(event.chain_id)
+                .map(|c| c.native_symbol.to_string())
                 .unwrap_or_else(|| "ETH".to_string());
             (AssetType::Native, symbol, None)
         } else {
@@ -698,23 +698,23 @@ pub enum EventConsumerError {
     InvalidData(String),
 }
 
-/// Get the native asset symbol for a network.
-fn network_native_symbol(network: types::Network) -> String {
-    use types::Network::*;
-    match network {
-        Ethereum | Arbitrum | Optimism | Base | ZkSync | Linea | Scroll => "ETH",
-        Polygon => "POL",
-        Avalanche => "AVAX",
-        BinanceSmartChain => "BNB",
-        // Non-EVM networks - shouldn't reach here
-        _ => "UNKNOWN",
-    }.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
+
+    /// Get the native asset symbol for a network (test helper).
+    fn network_native_symbol(network: types::Network) -> String {
+        use types::Network::*;
+        match network {
+            Ethereum | Arbitrum | Optimism | Base | ZkSync | Linea | Scroll => "ETH",
+            Polygon => "POL",
+            Avalanche => "AVAX",
+            BinanceSmartChain => "BNB",
+            // Non-EVM networks - shouldn't reach here
+            _ => "UNKNOWN",
+        }.to_string()
+    }
     use chrono::Utc;
     use data_service::InMemoryDataService;
     use evm::monitor::bridge::MemoryBridge;
