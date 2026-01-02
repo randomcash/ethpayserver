@@ -26,6 +26,7 @@ use types::{
 };
 
 use super::extractors::{AdminAuth, AuthenticatedUser};
+use crate::metrics;
 use crate::services::EVMMonitor;
 use crate::state::PgAppState;
 use rates::{RateError, is_fiat_currency};
@@ -764,6 +765,9 @@ where
     // Defensive check: should never happen since we pre-validate payment methods
     debug_assert!(!created_options.is_empty(), "Pre-validation should ensure at least one valid method");
 
+    // Record metrics
+    metrics::record_invoice_created(&invoice.currency);
+
     let response = InvoiceResponse {
         id: invoice.id.0,
         currency: invoice.currency,
@@ -1005,6 +1009,9 @@ where
         metadata: cancelled.metadata,
         payment_options: options.into_iter().map(Into::into).collect(),
     };
+
+    // Record metrics
+    metrics::record_invoice_cancelled();
 
     Ok(Json(response))
 }

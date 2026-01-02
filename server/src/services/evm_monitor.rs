@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use evm::monitor::{EventBridge, RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
+use evm::monitor::{ChainHealth, EventBridge, RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
 use evm::monitor::events::{MonitorCommand, UnwatchAddressCommand, WatchAddressCommand};
 use evm::{network_to_chain_id, Address};
 use types::Network;
@@ -65,6 +65,11 @@ pub trait EVMMonitor: Send + Sync {
 
     /// Check if the monitor connection is healthy.
     async fn health_check(&self) -> Result<(), EVMMonitorError>;
+
+    /// Get chain health information from evmmonitor.
+    ///
+    /// Returns health info for all monitored chains.
+    async fn get_chain_health(&self) -> Result<Vec<ChainHealth>, EVMMonitorError>;
 }
 
 /// Redis-based implementation of EVMMonitor.
@@ -172,5 +177,21 @@ impl EVMMonitor for RedisEVMMonitor {
     async fn health_check(&self) -> Result<(), EVMMonitorError> {
         self.bridge.health_check().await?;
         Ok(())
+    }
+
+    async fn get_chain_health(&self) -> Result<Vec<ChainHealth>, EVMMonitorError> {
+        const HEALTH_KEY: &str = "evmmonitor:health";
+
+        let health_json: Option<String> = self.bridge.get_key(HEALTH_KEY).await?;
+
+        match health_json {
+            Some(json) => {
+                serde_json::from_str(&json)
+                    .map_err(|e| EVMMonitorError::Bridge(
+                        evm::EvmError::Monitor(format!("failed to parse health JSON: {}", e))
+                    ))
+            }
+            None => Ok(vec![]), // No health data yet
+        }
     }
 }

@@ -102,7 +102,8 @@ impl LogFilter {
 }
 
 /// Source status for health checks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SourceStatus {
     /// Connected and receiving blocks.
     Connected,
@@ -112,6 +113,25 @@ pub enum SourceStatus {
     Disconnected,
     /// Fatal error, stopped.
     Failed(String),
+}
+
+/// Health information for a single chain.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChainHealth {
+    /// Chain ID (EIP-155).
+    pub chain_id: u64,
+    /// Human-readable chain name.
+    pub chain_name: String,
+    /// Connection status.
+    pub status: SourceStatus,
+    /// Current block number on chain (from RPC).
+    pub current_block: Option<u64>,
+    /// Last block processed by the monitor.
+    pub last_processed_block: Option<u64>,
+    /// Number of addresses being watched.
+    pub watched_addresses: usize,
+    /// Overall health (connected and not lagging significantly).
+    pub is_healthy: bool,
 }
 
 /// Block stream type alias.

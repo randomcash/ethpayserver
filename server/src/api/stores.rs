@@ -23,6 +23,7 @@ use data_service::{
 use types::{StoreWebhookReader, StoreWebhookWriter};
 use evm::validate_xpub;
 
+use crate::metrics;
 use crate::state::PgAppState;
 use super::extractors::AuthenticatedUser;
 
@@ -199,6 +200,7 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    metrics::record_store_created();
     Ok((StatusCode::CREATED, Json(store.into())))
 }
 

@@ -11,6 +11,8 @@ use data_service::PaymentEventWriter;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::metrics;
+
 /// Trait for data service requirements in WebhookService.
 pub trait WebhookDataService: PaymentEventWriter + Send + Sync {}
 
@@ -278,6 +280,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             invoice_id = %job.payload.invoice_id,
             "Queued webhook job"
         );
+        metrics::record_webhook_queued(&job.payload.event_type.to_string());
 
         Ok(())
     }
@@ -326,6 +329,8 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             .map_err(|e| WebhookError::Redis(e.to_string()))?;
 
         let Some(json) = job_json else {
+            // Queue is empty - update gauge to 0
+            metrics::set_webhook_queue_depth(0);
             return Ok(false);
         };
 
@@ -356,6 +361,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     attempts = job.attempts,
                     "Webhook delivered successfully"
                 );
+                metrics::record_webhook_delivered(&job.payload.event_type.to_string());
                 self.record_delivery_event(&job, true, None).await;
             }
             Err(e) => {
@@ -373,6 +379,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                         invoice_id = %job.payload.invoice_id,
                         "Webhook delivery exhausted, giving up"
                     );
+                    metrics::record_webhook_failed(&job.payload.event_type.to_string());
                     self.record_delivery_event(&job, false, Some(e.to_string())).await;
                 } else {
                     // Schedule retry
@@ -396,6 +403,15 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     );
                 }
             }
+        }
+
+        // Update queue depth gauge
+        if let Ok(depth) = redis::cmd("LLEN")
+            .arg(&self.config.queue_key)
+            .query_async::<u64>(&mut conn)
+            .await
+        {
+            metrics::set_webhook_queue_depth(depth);
         }
 
         Ok(true)

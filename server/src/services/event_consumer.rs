@@ -24,6 +24,7 @@ use super::webhook::{
     WebhookDataService, WebhookEventType, WebhookJob, WebhookPayload, WebhookPaymentInfo,
     WebhookService,
 };
+use crate::metrics;
 
 /// Trait for data service requirements in EventConsumer.
 pub trait EventConsumerDataService:
@@ -302,6 +303,9 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
                 (None, None, None)
             };
 
+        // Record metrics before asset_symbol is moved into PaymentData
+        metrics::record_payment_detected(event.chain_id, &asset_symbol);
+
         let payment = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: InvoiceId::from_string(event.invoice_id.to_string()),
@@ -380,6 +384,9 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             "Payment confirmed"
         );
 
+        // Record metrics
+        metrics::record_payment_confirmed(event.chain_id, &payment.asset_symbol);
+
         // Check if invoice is fully paid
         let invoice = InvoiceReader::get(&*self.data_service, &invoice_id)
             .await?
@@ -411,6 +418,7 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
                         amount_expected = %amount_expected,
                         "Invoice fully paid"
                     );
+                    metrics::record_invoice_paid();
 
                     // Queue webhook notification for payment confirmed
                     if let Ok(Some(updated_invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {

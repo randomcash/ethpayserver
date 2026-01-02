@@ -18,6 +18,8 @@ use futures::StreamExt;
 use types::{InvoiceReader, InvoiceWriter, WatchedAddressReader, WatchedAddressWriter};
 use uuid::Uuid;
 
+use crate::metrics;
+
 use super::evm_monitor::EVMMonitor;
 use super::webhook::{
     WebhookDataService, WebhookEventType, WebhookJob, WebhookPayload, WebhookService,
@@ -139,6 +141,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                                 invoice_id = %invoice_id.as_str(),
                                 "Expired invoice"
                             );
+                            metrics::record_invoice_expired();
                             // Queue webhook notification for expiration
                             self.queue_expiration_webhook(&invoice_id).await;
                         }

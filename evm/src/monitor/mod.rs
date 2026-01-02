@@ -66,7 +66,7 @@ mod chain;
 mod coordinator;
 mod handlers;
 
-pub use source::{BlockSource, BlockNotification, LogFilter};
+pub use source::{BlockSource, BlockNotification, ChainHealth, LogFilter, SourceStatus};
 pub use source::rpc::{RpcBlockSource, RpcSourceConfig};
 // pub use source::alchemy::AlchemyBlockSource;
 // pub use source::infura::InfuraBlockSource;

@@ -17,7 +17,7 @@ use auth::AuthService;
 use data_service::PgDataService;
 use rates::RateProviderConfig;
 use server::{
-    api, config::Config, AppState, CleanupConfig, EventConsumer,
+    api, config::Config, metrics, AppState, CleanupConfig, EventConsumer,
     InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig,
     WatchRetryService, WebhookConfig, WebhookService,
 };
@@ -33,6 +33,9 @@ async fn main() -> Result<()> {
 
     // Initialize tracing
     init_tracing(&config.log_level);
+
+    // Initialize Prometheus metrics
+    metrics::init_metrics()?;
 
     tracing::info!("Starting ETHPayServer v{}", env!("CARGO_PKG_VERSION"));
 

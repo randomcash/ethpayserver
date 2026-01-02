@@ -48,4 +48,20 @@ impl PgDataService {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
     }
+
+    /// Count total registered users.
+    pub async fn count_users(&self) -> Result<i64, sqlx::Error> {
+        let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(result.0)
+    }
+
+    /// Count total stores (non-archived).
+    pub async fn count_stores(&self) -> Result<i64, sqlx::Error> {
+        let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM stores WHERE archived = false")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(result.0)
+    }
 }

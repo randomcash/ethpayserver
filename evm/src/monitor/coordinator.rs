@@ -3,7 +3,7 @@
 use super::chain::{ChainMonitor, WatchedAddress};
 use super::events::MonitorEvent;
 use super::handlers::EventHandler;
-use super::source::BlockSource;
+use super::source::{BlockSource, ChainHealth};
 use crate::error::{EvmError, EvmResult};
 use alloy::primitives::Address;
 use std::collections::HashMap;
@@ -141,6 +141,20 @@ impl<S: BlockSource + 'static> MonitorCoordinator<S> {
     /// Get all monitored chain IDs.
     pub async fn chain_ids(&self) -> Vec<u64> {
         self.monitors.read().await.keys().copied().collect()
+    }
+
+    /// Get health information for all monitored chains.
+    pub async fn get_all_health(&self) -> Vec<ChainHealth> {
+        let monitors = self.monitors.read().await;
+        let mut health = Vec::with_capacity(monitors.len());
+
+        for handle in monitors.values() {
+            health.push(handle.monitor.get_health().await);
+        }
+
+        // Sort by chain_id for consistent ordering
+        health.sort_by_key(|h| h.chain_id);
+        health
     }
 
     /// Remove and stop a chain monitor.

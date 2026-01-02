@@ -31,6 +31,8 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         health::health_check,
         health::liveness,
         health::readiness,
+        health::chains_health,
+        health::prometheus_metrics,
         // Stores
         stores::list_stores,
         stores::create_store,
@@ -63,6 +65,8 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
     ),
     components(schemas(
         health::HealthResponse,
+        health::ChainsHealthResponse,
+        health::ChainHealthInfo,
         stores::CreateStoreRequest,
         stores::UpdateStoreRequest,
         stores::StoreResponse,
@@ -112,6 +116,8 @@ where
         .route("/health", get(health::health_check::<A>))
         .route("/health/live", get(health::liveness))
         .route("/health/ready", get(health::readiness::<A>))
+        .route("/health/chains", get(health::chains_health::<A>))
+        .route("/metrics", get(health::prometheus_metrics::<A>))
         .with_state(state.clone());
 
     // Store endpoints

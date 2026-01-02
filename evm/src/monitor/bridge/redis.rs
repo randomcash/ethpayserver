@@ -62,6 +62,15 @@ impl RedisBridge {
     pub fn commands_channel(&self) -> &str {
         &self.commands_channel
     }
+
+    /// Get a value from Redis by key.
+    pub async fn get_key(&self, key: &str) -> EvmResult<Option<String>> {
+        let mut conn = self.publisher.clone();
+        let value: Option<String> = conn.get(key)
+            .await
+            .map_err(|e| EvmError::Monitor(format!("redis GET failed: {}", e)))?;
+        Ok(value)
+    }
 }
 
 #[async_trait]

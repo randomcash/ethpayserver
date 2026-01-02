@@ -1,7 +1,7 @@
 //! Chain monitor - monitors a single EVM chain for payments.
 
 use super::events::{MonitorEvent, PaymentConfirmed, PaymentDetected, ReorgDetected};
-use super::source::{BlockNotification, BlockSource, LogFilter};
+use super::source::{BlockNotification, BlockSource, ChainHealth, LogFilter, SourceStatus};
 use crate::error::{EvmError, EvmResult};
 use crate::network::ChainConfig;
 use alloy::primitives::{Address, B256, U256};
@@ -175,6 +175,32 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// Get the current block number.
     pub async fn current_block(&self) -> EvmResult<u64> {
         self.source.get_block_number().await
+    }
+
+    /// Get health information for this chain.
+    pub async fn get_health(&self) -> ChainHealth {
+        let status = self.source.status();
+        let current_block = self.source.get_block_number().await.ok();
+        let last_processed_block = *self.last_block.read().await;
+        let watched_addresses = self.watched.read().await.len();
+
+        // Consider healthy if connected and not lagging more than 10 blocks
+        let is_healthy = status == SourceStatus::Connected
+            && match (current_block, last_processed_block) {
+                (Some(current), Some(last)) => current.saturating_sub(last) <= 10,
+                (Some(_), None) => true, // Just started, not yet processed
+                _ => false,
+            };
+
+        ChainHealth {
+            chain_id: self.chain_id(),
+            chain_name: self.chain_name().to_string(),
+            status,
+            current_block,
+            last_processed_block,
+            watched_addresses,
+            is_healthy,
+        }
     }
 
     /// Start the monitor.
