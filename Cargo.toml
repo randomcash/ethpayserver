@@ -1,5 +1,5 @@
 [workspace]
-members = ["server", "data-service", "evm"]
+members = ["server", "data-service", "evm", "client"]
 resolver = "3"
 
 [workspace.package]
@@ -11,3 +11,4 @@ types = { path = "../payserver-commons/types" }
 auth = { path = "../payserver-commons/auth" }
 crypto = { path = "../payserver-commons/crypto" }
 rates = { path = "../payserver-commons/rates" }
+ui-kit = { path = "../payserver-commons/ui-kit" }
