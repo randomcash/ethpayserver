@@ -64,6 +64,20 @@ where
 {
     let on_close_link = on_close.clone();
 
+    // Store selector state
+    let (dropdown_open, set_dropdown_open) = signal(false);
+    let (selected_store, set_selected_store) = signal("My Store".to_string());
+
+    // Mock stores for now - will come from API
+    let stores = vec![
+        ("all", "All Stores"),
+        ("store-1", "My Store"),
+        ("store-2", "Demo Shop"),
+        ("store-3", "Test Store"),
+    ];
+
+    let toggle_dropdown = move |_| set_dropdown_open.update(|v| *v = !*v);
+
     view! {
         <aside class=move || if open.get() { "sidebar open" } else { "sidebar" }>
             <div class="sidebar-header">
@@ -76,7 +90,53 @@ where
                 </button>
             </div>
 
+            // Store Selector
+            <div class="store-selector">
+                <button
+                    class="store-selector-btn"
+                    on:click=toggle_dropdown
+                >
+                    <div class="store-selector-info">
+                        <IconStore />
+                        <span class="store-selector-name">{move || selected_store.get()}</span>
+                    </div>
+                    <IconChevron expanded=dropdown_open />
+                </button>
+
+                <div class=move || if dropdown_open.get() { "store-dropdown open" } else { "store-dropdown" }>
+                    {stores.into_iter().map(|(id, name)| {
+                        let name_owned = name.to_string();
+                        let name_for_class = name.to_string();
+                        let name_for_click = name.to_string();
+                        view! {
+                            <button
+                                class=move || if selected_store.get() == name_owned { "store-dropdown-item active" } else { "store-dropdown-item" }
+                                on:click=move |_| {
+                                    set_selected_store.set(name_for_click.clone());
+                                    set_dropdown_open.set(false);
+                                }
+                            >
+                                {if id == "all" {
+                                    view! { <IconLayers /> }.into_any()
+                                } else {
+                                    view! { <IconStore /> }.into_any()
+                                }}
+                                <span>{name}</span>
+                                {move || (selected_store.get() == name_for_class).then(|| view! { <IconCheck /> })}
+                            </button>
+                        }
+                    }).collect_view()}
+
+                    <div class="store-dropdown-divider"></div>
+                    <a href="/evm/stores" class="store-dropdown-item store-dropdown-manage">
+                        <IconSettings />
+                        <span>"Manage Stores"</span>
+                    </a>
+                </div>
+            </div>
+
             <nav class="sidebar-nav" on:click=move |e| on_close_link(e)>
+                // Main Navigation
                 <div class="sidebar-section">
                     <SidebarLink href="/" label="Dashboard">
                         <IconDashboard />
@@ -89,6 +149,7 @@ where
                     </SidebarLink>
                 </div>
 
+                // Configuration Section
                 <div class="sidebar-section">
                     <div class="sidebar-section-title">"Configuration"</div>
                     <SidebarLink href="/evm/stores" label="Stores">
@@ -104,10 +165,10 @@ where
             </nav>
 
             <div class="sidebar-footer">
-                <div class="sidebar-link">
+                <a href="https://docs.random.cash" target="_blank" class="sidebar-link">
                     <IconHelp />
                     <span>"Documentation"</span>
-                </div>
+                </a>
             </div>
         </aside>
     }
@@ -293,6 +354,47 @@ fn IconClose() -> impl IntoView {
         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+    }
+}
+
+#[component]
+fn IconChevron(expanded: ReadSignal<bool>) -> impl IntoView {
+    view! {
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="icon-chevron"
+            style=move || if expanded.get() { "transform: rotate(180deg)" } else { "" }
+        >
+            <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+    }
+}
+
+#[component]
+fn IconLayers() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+            <polyline points="2 17 12 22 22 17"></polyline>
+            <polyline points="2 12 12 17 22 12"></polyline>
+        </svg>
+    }
+}
+
+#[component]
+fn IconCheck() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"></polyline>
         </svg>
     }
 }

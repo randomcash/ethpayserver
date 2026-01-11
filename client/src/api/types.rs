@@ -1,36 +1,158 @@
 //! API types for ethpayserver.
+//!
+//! These types mirror the backend types from payserver-commons/types.
 
 use serde::{Deserialize, Serialize};
 
+/// Status of an invoice.
+///
+/// Mirrors `types::InvoiceStatus` from the backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvoiceStatus {
+    /// Invoice created, awaiting payment.
+    Pending,
+    /// Payment detected but not confirmed.
+    Processing,
+    /// Payment partially received.
+    PartiallyPaid,
+    /// Payment fully received and confirmed.
+    Paid,
+    /// Invoice expired without payment.
+    Expired,
+    /// Invoice cancelled.
+    Cancelled,
+    /// Payment refunded.
+    Refunded,
+    /// Payment received after invoice expired.
+    LatePaid,
+}
+
+impl InvoiceStatus {
+    /// Returns the display label for this status.
+    pub fn label(&self) -> &'static str {
+        match self {
+            InvoiceStatus::Pending => "Pending",
+            InvoiceStatus::Processing => "Processing",
+            InvoiceStatus::PartiallyPaid => "Partially Paid",
+            InvoiceStatus::Paid => "Paid",
+            InvoiceStatus::Expired => "Expired",
+            InvoiceStatus::Cancelled => "Cancelled",
+            InvoiceStatus::Refunded => "Refunded",
+            InvoiceStatus::LatePaid => "Late Paid",
+        }
+    }
+
+    /// Returns the CSS class for styling this status.
+    pub fn css_class(&self) -> &'static str {
+        match self {
+            InvoiceStatus::Pending => "badge badge-warning",
+            InvoiceStatus::Processing => "badge badge-info",
+            InvoiceStatus::PartiallyPaid => "badge badge-warning",
+            InvoiceStatus::Paid => "badge badge-success",
+            InvoiceStatus::Expired => "badge badge-error",
+            InvoiceStatus::Cancelled => "badge badge-neutral",
+            InvoiceStatus::Refunded => "badge badge-neutral",
+            InvoiceStatus::LatePaid => "badge badge-info",
+        }
+    }
+
+    /// Returns true if this is a final status (no more changes expected).
+    pub fn is_final(&self) -> bool {
+        matches!(
+            self,
+            InvoiceStatus::Paid
+                | InvoiceStatus::Expired
+                | InvoiceStatus::Cancelled
+                | InvoiceStatus::Refunded
+                | InvoiceStatus::LatePaid
+        )
+    }
+}
+
+impl Default for InvoiceStatus {
+    fn default() -> Self {
+        InvoiceStatus::Pending
+    }
+}
+
+/// Asset type for payments.
+///
+/// Mirrors `types::AssetType` from the backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetType {
+    /// Native network currency (ETH, BTC, POL, etc.)
+    #[default]
+    Native,
+    /// ERC20 token (for EVM networks)
+    ERC20,
+}
+
 /// Invoice data from the API.
+///
+/// Mirrors `types::InvoiceData` from the backend.
+/// An invoice is network-agnostic: it represents a payment request in a
+/// specific currency (which can be fiat like "USD" or crypto like "ETH").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invoice {
     pub id: String,
+    /// The store this invoice belongs to.
     pub store_id: String,
-    pub amount: String,
+    /// Invoice currency (e.g., "USD", "EUR", "ETH").
     pub currency: String,
-    pub crypto_amount: Option<String>,
-    pub crypto_currency: Option<String>,
-    pub status: String,
-    pub payment_address: Option<String>,
-    pub chain_id: Option<u64>,
+    /// Invoice status.
+    #[serde(default)]
+    pub status: InvoiceStatus,
+    /// Amount requested in the invoice currency.
+    pub amount: String,
+    /// Total amount received across all payments, converted to invoice currency.
+    #[serde(default)]
+    pub amount_received: String,
+    /// When the invoice was created (ISO 8601 string).
     pub created_at: String,
-    pub expires_at: Option<String>,
+    /// When the invoice expires (ISO 8601 string).
+    pub expires_at: String,
+    /// Optional metadata.
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Payment data from the API.
+///
+/// Mirrors `types::PaymentData` from the backend.
+/// A payment is an actual received transaction belonging to an invoice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
     pub id: String,
     pub invoice_id: String,
-    pub tx_hash: String,
-    pub amount: String,
-    pub currency: String,
-    pub from_address: String,
+    /// EIP-155 chain ID where this payment was received.
     pub chain_id: u64,
-    pub status: String,
-    pub confirmations: u32,
-    pub created_at: String,
+    /// Asset type (native or ERC20).
+    #[serde(default)]
+    pub asset_type: AssetType,
+    /// Amount received (smallest unit as string).
+    pub amount: String,
+    /// Asset symbol (e.g., "ETH", "USDC").
+    pub asset_symbol: String,
+    /// Token contract address (for ERC20 tokens).
+    pub token_address: Option<String>,
+    /// Transaction hash.
+    pub tx_hash: String,
+    /// Block number where the payment was included.
+    pub block_number: Option<u64>,
+    /// When the payment was detected (ISO 8601 string).
+    pub detected_at: String,
+    /// When the payment reached required confirmations (None = awaiting).
+    pub confirmed_at: Option<String>,
+    /// Sender address (if known).
+    pub from_address: Option<String>,
+    /// Whether this payment was invalidated by a chain reorganization.
+    #[serde(default)]
+    pub reorged: bool,
+    /// The payment's value credited toward the invoice total, in invoice currency.
+    pub credited_amount: Option<String>,
+    /// Exchange rate used to calculate credited_amount.
+    pub rate_used: Option<String>,
 }
 
 /// Store data from the API.
@@ -99,19 +221,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_invoice_status() {
+        assert_eq!(InvoiceStatus::Pending.label(), "Pending");
+        assert_eq!(InvoiceStatus::Paid.css_class(), "badge badge-success");
+        assert!(InvoiceStatus::Paid.is_final());
+        assert!(!InvoiceStatus::Pending.is_final());
+    }
+
+    #[test]
     fn test_invoice_serialization() {
         let invoice = Invoice {
             id: "inv_001".to_string(),
             store_id: "store_001".to_string(),
             amount: "100.00".to_string(),
             currency: "USD".to_string(),
-            crypto_amount: Some("0.05".to_string()),
-            crypto_currency: Some("ETH".to_string()),
-            status: "pending".to_string(),
-            payment_address: Some("0x1234...".to_string()),
-            chain_id: Some(1),
+            status: InvoiceStatus::Pending,
+            amount_received: "0.00".to_string(),
             created_at: "2024-01-01T00:00:00Z".to_string(),
-            expires_at: None,
+            expires_at: "2024-01-02T00:00:00Z".to_string(),
+            metadata: None,
         };
 
         let json = serde_json::to_string(&invoice).unwrap();
@@ -126,21 +254,27 @@ mod tests {
         let payment = Payment {
             id: "pay_001".to_string(),
             invoice_id: "inv_001".to_string(),
-            tx_hash: "0xabc...".to_string(),
-            amount: "0.05".to_string(),
-            currency: "ETH".to_string(),
-            from_address: "0x1234...".to_string(),
             chain_id: 1,
-            status: "confirmed".to_string(),
-            confirmations: 12,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
+            asset_type: AssetType::Native,
+            amount: "50000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            tx_hash: "0xabc123...".to_string(),
+            block_number: Some(19000000),
+            detected_at: "2024-01-01T00:00:00Z".to_string(),
+            confirmed_at: Some("2024-01-01T00:05:00Z".to_string()),
+            from_address: Some("0x1234...".to_string()),
+            reorged: false,
+            credited_amount: Some("100.00".to_string()),
+            rate_used: Some("0.0005".to_string()),
         };
 
         let json = serde_json::to_string(&payment).unwrap();
         let parsed: Payment = serde_json::from_str(&json).unwrap();
 
         assert_eq!(payment.id, parsed.id);
-        assert_eq!(payment.confirmations, parsed.confirmations);
+        assert_eq!(payment.chain_id, parsed.chain_id);
+        assert_eq!(payment.confirmed_at, parsed.confirmed_at);
     }
 
     #[test]

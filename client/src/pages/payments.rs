@@ -4,7 +4,18 @@ use leptos::prelude::*;
 use ui_kit::components::{Card, PageHeader, Skeleton, Stack};
 use ui_kit::components::crypto::{Address, CryptoAmount, NetworkBadge, StatusBadge};
 
-use crate::api::Payment;
+use crate::api::{AssetType, Payment};
+
+/// Helper to determine payment status display.
+fn payment_status_display(payment: &Payment) -> &'static str {
+    if payment.reorged {
+        "reorged"
+    } else if payment.confirmed_at.is_some() {
+        "confirmed"
+    } else {
+        "pending"
+    }
+}
 
 /// Payments list page.
 #[component]
@@ -15,14 +26,19 @@ pub fn PaymentsPage() -> impl IntoView {
             Payment {
                 id: "pay_001".to_string(),
                 invoice_id: "inv_001".to_string(),
-                tx_hash: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-                amount: "0.05".to_string(),
-                currency: "ETH".to_string(),
-                from_address: "0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".to_string(),
                 chain_id: 1,
-                status: "confirmed".to_string(),
-                confirmations: 12,
-                created_at: "2024-01-15T10:35:00Z".to_string(),
+                asset_type: AssetType::Native,
+                amount: "50000000000000000".to_string(), // 0.05 ETH in wei
+                asset_symbol: "ETH".to_string(),
+                token_address: None,
+                tx_hash: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+                block_number: Some(19234500),
+                detected_at: "2024-01-15T10:35:00Z".to_string(),
+                confirmed_at: Some("2024-01-15T10:40:00Z".to_string()),
+                from_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".to_string()),
+                reorged: false,
+                credited_amount: Some("100.00".to_string()),
+                rate_used: Some("0.0005".to_string()),
             },
         ])
     });
@@ -79,7 +95,9 @@ fn PaymentListItem(payment: Payment) -> impl IntoView {
         .unwrap_or(types::Network::Ethereum);
     let invoice_id = payment.invoice_id.clone();
     let invoice_id_link = payment.invoice_id.clone();
-    let created_at = payment.created_at.clone();
+    let detected_at = payment.detected_at.clone();
+    let status = payment_status_display(&payment).to_string();
+    let from_address = payment.from_address.clone().unwrap_or_else(|| "Unknown".to_string());
 
     view! {
         <Card class="evm-payment-item">
@@ -87,11 +105,11 @@ fn PaymentListItem(payment: Payment) -> impl IntoView {
                 <div class="evm-payment-item-amount">
                     <CryptoAmount
                         amount=payment.amount.clone()
-                        symbol=payment.currency.clone()
+                        symbol=payment.asset_symbol.clone()
                         size="lg"
                     />
                 </div>
-                <StatusBadge status=payment.status.clone() />
+                <StatusBadge status=status />
             </div>
 
             <div class="evm-payment-item-details">
@@ -101,16 +119,18 @@ fn PaymentListItem(payment: Payment) -> impl IntoView {
                 </div>
                 <div class="evm-payment-detail">
                     <span class="evm-payment-detail-label">"From"</span>
-                    <Address address=payment.from_address.clone() />
+                    <Address address=from_address />
                 </div>
                 <div class="evm-payment-detail">
                     <span class="evm-payment-detail-label">"Tx Hash"</span>
                     <Address address=payment.tx_hash.clone() prefix_len=10 suffix_len=8 />
                 </div>
-                <div class="evm-payment-detail">
-                    <span class="evm-payment-detail-label">"Confirmations"</span>
-                    <span class="evm-payment-confirmations">{payment.confirmations}</span>
-                </div>
+                {payment.credited_amount.clone().map(|credited| view! {
+                    <div class="evm-payment-detail">
+                        <span class="evm-payment-detail-label">"Credited"</span>
+                        <span class="evm-payment-credited">"$"{credited}</span>
+                    </div>
+                })}
             </div>
 
             <div class="evm-payment-item-footer">
@@ -118,7 +138,7 @@ fn PaymentListItem(payment: Payment) -> impl IntoView {
                     "Invoice: "
                     <a href=format!("/evm/invoices/{}", invoice_id_link)>{invoice_id}</a>
                 </span>
-                <span class="evm-payment-time">{created_at}</span>
+                <span class="evm-payment-time">{detected_at}</span>
             </div>
         </Card>
     }
