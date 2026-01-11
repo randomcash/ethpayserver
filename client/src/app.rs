@@ -10,7 +10,7 @@ use leptos_router::{
 
 use crate::pages::{
     DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage, PaymentsPage,
-    SettingsPage, StoreDetailPage, StoresPage, WalletsPage,
+    SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage, WalletsPage,
 };
 
 /// Root application component.
@@ -45,6 +45,7 @@ pub fn App() -> impl IntoView {
                             <Route path=path!("/evm/stores") view=StoresPage />
                             <Route path=path!("/evm/stores/:id") view=StoreDetailPage />
                             <Route path=path!("/evm/wallets") view=WalletsPage />
+                            <Route path=path!("/evm/wallets/:id") view=WalletDetailPage />
                             <Route path=path!("/evm/settings") view=SettingsPage />
                         </Routes>
                     </main>

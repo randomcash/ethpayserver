@@ -14,4 +14,4 @@ pub use not_found::NotFoundPage;
 pub use payments::{PaymentDetailPage, PaymentsPage};
 pub use settings::SettingsPage;
 pub use stores::{StoreDetailPage, StoresPage};
-pub use wallets::WalletsPage;
+pub use wallets::{WalletDetailPage, WalletsPage};
