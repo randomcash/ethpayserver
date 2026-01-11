@@ -16,12 +16,24 @@ use crate::pages::{
 /// Root application component.
 #[component]
 pub fn App() -> impl IntoView {
+    // Mobile sidebar state
+    let (sidebar_open, set_sidebar_open) = signal(false);
+
+    let close_sidebar = move |_| set_sidebar_open.set(false);
+    let toggle_sidebar = move |_| set_sidebar_open.update(|v| *v = !*v);
+
     view! {
         <Router>
             <div class="app-layout">
-                <Sidebar />
+                // Mobile overlay
+                <div
+                    class=move || if sidebar_open.get() { "sidebar-overlay open" } else { "sidebar-overlay" }
+                    on:click=close_sidebar
+                ></div>
+
+                <Sidebar open=sidebar_open on_close=close_sidebar />
                 <div class="main-content">
-                    <MainHeader />
+                    <MainHeader on_menu_click=toggle_sidebar />
                     <main class="page-container">
                         <Routes fallback=|| view! { <NotFoundPage /> }>
                             <Route path=path!("/") view=DashboardPage />
@@ -43,17 +55,28 @@ pub fn App() -> impl IntoView {
 
 /// Sidebar navigation component.
 #[component]
-fn Sidebar() -> impl IntoView {
+fn Sidebar<F>(
+    open: ReadSignal<bool>,
+    on_close: F,
+) -> impl IntoView
+where
+    F: Fn(web_sys::MouseEvent) + 'static + Clone,
+{
+    let on_close_link = on_close.clone();
+
     view! {
-        <aside class="sidebar">
+        <aside class=move || if open.get() { "sidebar open" } else { "sidebar" }>
             <div class="sidebar-header">
                 <div class="sidebar-logo">
                     <span class="sidebar-logo-icon">"E"</span>
                     <span>"ETHPayServer"</span>
                 </div>
+                <button class="sidebar-close" on:click=on_close>
+                    <IconClose />
+                </button>
             </div>
 
-            <nav class="sidebar-nav">
+            <nav class="sidebar-nav" on:click=move |e| on_close_link(e)>
                 <div class="sidebar-section">
                     <SidebarLink href="/" label="Dashboard">
                         <IconDashboard />
@@ -122,21 +145,31 @@ fn SidebarLink(
 
 /// Main header with search and actions.
 #[component]
-fn MainHeader() -> impl IntoView {
+fn MainHeader<F>(on_menu_click: F) -> impl IntoView
+where
+    F: Fn(web_sys::MouseEvent) + 'static,
+{
     view! {
         <header class="main-header">
-            <div class="main-header-search">
-                <IconSearch />
-                <input type="text" placeholder="Search invoices, payments..." />
-            </div>
+            <div class="main-header-inner">
+                <div class="main-header-left">
+                    <button class="mobile-menu-toggle" on:click=on_menu_click>
+                        <IconMenu />
+                    </button>
+                    <div class="main-header-search">
+                        <IconSearch />
+                        <input type="text" placeholder="Search invoices, payments..." />
+                    </div>
+                </div>
 
-            <div class="main-header-actions">
-                <button class="btn btn-ghost btn-sm">
-                    <IconBell />
-                </button>
-                <button class="btn btn-primary btn-sm">
-                    "Create Invoice"
-                </button>
+                <div class="main-header-actions">
+                    <button class="btn btn-ghost btn-sm">
+                        <IconBell />
+                    </button>
+                    <button class="btn btn-primary btn-sm">
+                        <span>"Create Invoice"</span>
+                    </button>
+                </div>
             </div>
         </header>
     }
@@ -239,6 +272,27 @@ fn IconBell() -> impl IntoView {
         <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
             <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+        </svg>
+    }
+}
+
+#[component]
+fn IconMenu() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+    }
+}
+
+#[component]
+fn IconClose() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
     }
 }
