@@ -4510,3 +4510,418 @@ a:hover {
         min-width: 500px;
     }
 }
+
+/* ============================================
+   Settings Page
+   ============================================ */
+
+.settings-page {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+    width: 100%;
+    max-width: 900px;
+}
+
+/* Settings Tabs */
+.settings-tabs {
+    display: flex;
+    gap: var(--space-1);
+    border-bottom: 1px solid var(--border-color);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+
+.settings-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.settings-tab {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-muted);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    margin-bottom: -1px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.settings-tab:hover {
+    color: var(--text-secondary);
+}
+
+.settings-tab.active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+}
+
+.settings-tab-admin {
+    color: var(--color-warning);
+}
+
+.settings-tab-admin.active {
+    color: var(--color-warning);
+    border-bottom-color: var(--color-warning);
+}
+
+.settings-tab-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.settings-tab-label svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
+.settings-tab-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+}
+
+/* Tab Content Containers */
+.settings-tab-account,
+.settings-tab-preferences,
+.settings-tab-api-keys,
+.settings-tab-notifications,
+.settings-tab-admin {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+}
+
+/* Form Select */
+.form-select {
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    font-family: var(--font-family);
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-md);
+    outline: none;
+    transition: all 0.15s ease;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23697386' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 40px;
+}
+
+.form-select:hover {
+    border-color: var(--border-color-strong);
+}
+
+.form-select:focus {
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow-focus);
+}
+
+.form-input-mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+}
+
+/* API Keys */
+.api-keys-list {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-lg);
+    overflow: hidden;
+}
+
+.api-key-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.api-key-item:last-child {
+    border-bottom: none;
+}
+
+.api-key-info {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+}
+
+.api-key-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.api-key-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.api-key-value {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+}
+
+.api-key-created {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+.api-key-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+}
+
+/* Settings Info Box */
+.settings-info {
+    display: flex;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--color-warning-light);
+    border-radius: var(--border-radius-md);
+}
+
+.settings-info svg {
+    flex-shrink: 0;
+    color: var(--color-warning);
+    margin-top: 2px;
+}
+
+.settings-info p {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    margin: 0;
+    line-height: var(--leading-relaxed);
+}
+
+.settings-info p + p {
+    margin-top: var(--space-1);
+}
+
+/* Notification Options */
+.notification-options {
+    display: flex;
+    flex-direction: column;
+}
+
+.notification-option {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-4) 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.notification-option:first-child {
+    padding-top: 0;
+}
+
+.notification-option:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.notification-option-info {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.notification-option-title {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.notification-option-desc {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+/* Admin Tab */
+.admin-warning {
+    display: flex;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    background: var(--color-warning-light);
+    border: 1px solid var(--color-warning);
+    border-radius: var(--border-radius-md);
+}
+
+.admin-warning svg {
+    flex-shrink: 0;
+    color: var(--color-warning);
+    margin-top: 2px;
+}
+
+.admin-warning strong {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+    display: block;
+}
+
+.admin-warning p {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    margin: var(--space-1) 0 0 0;
+}
+
+.settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: var(--space-4);
+}
+
+.admin-networks-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: var(--space-3);
+}
+
+.admin-network-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--space-3);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-md);
+    transition: all 0.15s ease;
+}
+
+.admin-network-item.enabled {
+    border-color: var(--color-primary);
+    background: var(--color-primary-light);
+}
+
+.admin-network-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.admin-network-name {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.admin-network-chain-id {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+.admin-actions {
+    display: flex;
+    flex-direction: column;
+}
+
+.admin-action {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-4) 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.admin-action:first-child {
+    padding-top: 0;
+}
+
+.admin-action:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.admin-action-info {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+}
+
+.admin-action-title {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.admin-action-desc {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+/* Mobile Responsive - Settings */
+@media (max-width: 768px) {
+    .settings-page {
+        width: 100%;
+        max-width: 100%;
+        overflow-x: hidden;
+    }
+
+    .settings-page .page-header-row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: var(--space-3);
+    }
+
+    .settings-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .admin-networks-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .api-key-item {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--space-3);
+    }
+
+    .api-key-actions {
+        width: 100%;
+        justify-content: flex-end;
+    }
+
+    .notification-option {
+        flex-direction: row;
+        align-items: flex-start;
+    }
+
+    .admin-action {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--space-3);
+    }
+
+    .admin-action .btn {
+        width: 100%;
+        justify-content: center;
+    }
+}
