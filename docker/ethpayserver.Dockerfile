@@ -12,7 +12,9 @@ WORKDIR /usr/local/server/
 COPY . .
 
 # Remove local patch (use git dependencies instead)
-RUN sed -i '/^\[patch\./,/^$/d' Cargo.toml
+# Also exclude client from workspace (it has local path deps to ui-kit)
+RUN sed -i '/^\[patch\./,/^$/d' Cargo.toml && \
+    sed -i 's/"client"//' Cargo.toml
 
 RUN \
     --mount=type=secret,id=GIT_AUTH_TOKEN \

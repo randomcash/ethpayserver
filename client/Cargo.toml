@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Shared UI components
-ui-kit = { path = "../../payserver-commons/ui-kit" }
+ui-kit = { path = "../../payserver-commons/ui-kit", features = ["auth"] }
 types = { path = "../../payserver-commons/types" }
 
 # Leptos framework

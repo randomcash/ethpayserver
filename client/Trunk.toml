@@ -10,6 +10,11 @@ address = "127.0.0.1"
 port = 8080
 open = false
 
+# Proxy API requests to the backend server
+[[proxy]]
+rewrite = "/api/"
+backend = "http://127.0.0.1:3000/"
+
 [[hooks]]
 stage = "build"
 command = "sh"

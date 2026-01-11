@@ -13,7 +13,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use auth::AuthService;
+use auth::{AuthConfig, AuthService};
 use data_service::PgDataService;
 use rates::RateProviderConfig;
 use server::{
@@ -44,9 +44,12 @@ async fn main() -> Result<()> {
     let data_service = Arc::new(PgDataService::connect(&config.database_url).await?);
     tracing::info!("Database connected");
 
-    // Create auth service
+    // Create auth service with custom config
     // Note: PgDataService implements AuthRepository (all required traits)
-    let auth_service = Arc::new(AuthService::new(Arc::clone(&data_service)));
+    let mut auth_config = AuthConfig::default();
+    // Increase wallet challenge timeout to 10 minutes for registration flow
+    auth_config.wallet_challenge_duration = chrono::Duration::minutes(10);
+    let auth_service = Arc::new(AuthService::with_config(Arc::clone(&data_service), auth_config));
 
     // Connect to Redis (REQUIRED for event processing)
     let redis_url = config.redis_url.as_ref()

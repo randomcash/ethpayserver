@@ -50,7 +50,7 @@ impl ChallengeRepository for PgDataService {
         let row = sqlx::query(
             r#"
             DELETE FROM passkey_registration_challenges
-            WHERE user_id = $1 AND created_at > NOW() - INTERVAL '5 minutes'
+            WHERE user_id = $1 AND created_at > NOW() - INTERVAL '10 minutes'
             RETURNING challenge_state, identifier
             "#,
         )
@@ -104,7 +104,7 @@ impl ChallengeRepository for PgDataService {
         let row = sqlx::query(
             r#"
             DELETE FROM passkey_authentication_challenges
-            WHERE user_id = $1 AND created_at > NOW() - INTERVAL '5 minutes'
+            WHERE user_id = $1 AND created_at > NOW() - INTERVAL '10 minutes'
             RETURNING challenge_state
             "#,
         )
@@ -132,16 +132,17 @@ impl ChallengeRepository for PgDataService {
         sqlx::query(
             r#"
             INSERT INTO wallet_challenges (user_id, challenge, address, created_at)
-            VALUES ($1, $2, $3, NOW())
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (user_id) DO UPDATE SET
                 challenge = EXCLUDED.challenge,
                 address = EXCLUDED.address,
-                created_at = NOW()
+                created_at = EXCLUDED.created_at
             "#,
         )
         .bind(user_id.0)
         .bind(&challenge.challenge)
         .bind(&challenge.address)
+        .bind(challenge.created_at)
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;
@@ -153,7 +154,7 @@ impl ChallengeRepository for PgDataService {
         let row = sqlx::query(
             r#"
             DELETE FROM wallet_challenges
-            WHERE user_id = $1 AND created_at > NOW() - INTERVAL '5 minutes'
+            WHERE user_id = $1 AND created_at > NOW() - INTERVAL '10 minutes'
             RETURNING challenge, address, created_at
             "#,
         )
@@ -174,21 +175,21 @@ impl ChallengeRepository for PgDataService {
 
     async fn cleanup_expired_challenges(&self) -> Result<u64> {
         let r1 = sqlx::query(
-            "DELETE FROM passkey_registration_challenges WHERE created_at < NOW() - INTERVAL '5 minutes'"
+            "DELETE FROM passkey_registration_challenges WHERE created_at < NOW() - INTERVAL '10 minutes'"
         )
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;
 
         let r2 = sqlx::query(
-            "DELETE FROM passkey_authentication_challenges WHERE created_at < NOW() - INTERVAL '5 minutes'"
+            "DELETE FROM passkey_authentication_challenges WHERE created_at < NOW() - INTERVAL '10 minutes'"
         )
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;
 
         let r3 = sqlx::query(
-            "DELETE FROM wallet_challenges WHERE created_at < NOW() - INTERVAL '5 minutes'"
+            "DELETE FROM wallet_challenges WHERE created_at < NOW() - INTERVAL '10 minutes'"
         )
         .execute(&self.pool)
         .await

@@ -2,6 +2,9 @@
 target/
 build/
 
+# Frontend client (built separately with trunk)
+client/
+
 # IDE and editor
 .idea/
 .vscode/

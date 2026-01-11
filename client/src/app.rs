@@ -1,12 +1,14 @@
 //! Root application component with Stripe-inspired layout.
 
 use leptos::prelude::*;
-use leptos::children::Children;
+use leptos::children::{Children, ChildrenFn};
 use leptos_router::{
     components::{Route, Router, Routes, A},
     hooks::use_location,
     path,
 };
+
+use ui_kit::{AuthProvider, AuthGuard, LoginPage, RegisterPage};
 
 use crate::pages::{
     DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage, PaymentsPage,
@@ -16,6 +18,86 @@ use crate::pages::{
 /// Root application component.
 #[component]
 pub fn App() -> impl IntoView {
+    view! {
+        <AuthProvider>
+            <Router>
+                <Routes fallback=|| view! { <NotFoundPage /> }>
+                    // Public auth routes (no layout)
+                    <Route path=path!("/login") view=|| view! { <LoginPage /> } />
+                    <Route path=path!("/register") view=|| view! { <RegisterPage /> } />
+
+                    // Protected routes with layout
+                    <Route path=path!("/") view=DashboardProtected />
+                    <Route path=path!("/evm") view=DashboardProtected />
+                    <Route path=path!("/evm/invoices") view=InvoicesProtected />
+                    <Route path=path!("/evm/invoices/:id") view=InvoiceDetailProtected />
+                    <Route path=path!("/evm/payments") view=PaymentsProtected />
+                    <Route path=path!("/evm/payments/:id") view=PaymentDetailProtected />
+                    <Route path=path!("/evm/stores") view=StoresProtected />
+                    <Route path=path!("/evm/stores/:id") view=StoreDetailProtected />
+                    <Route path=path!("/evm/wallets") view=WalletsProtected />
+                    <Route path=path!("/evm/wallets/:id") view=WalletDetailProtected />
+                    <Route path=path!("/evm/settings") view=SettingsProtected />
+                </Routes>
+            </Router>
+        </AuthProvider>
+    }
+}
+
+// Protected route wrappers
+#[component]
+fn DashboardProtected() -> impl IntoView {
+    view! { <ProtectedLayout><DashboardPage /></ProtectedLayout> }
+}
+
+#[component]
+fn InvoicesProtected() -> impl IntoView {
+    view! { <ProtectedLayout><InvoicesPage /></ProtectedLayout> }
+}
+
+#[component]
+fn InvoiceDetailProtected() -> impl IntoView {
+    view! { <ProtectedLayout><InvoiceDetailPage /></ProtectedLayout> }
+}
+
+#[component]
+fn PaymentsProtected() -> impl IntoView {
+    view! { <ProtectedLayout><PaymentsPage /></ProtectedLayout> }
+}
+
+#[component]
+fn PaymentDetailProtected() -> impl IntoView {
+    view! { <ProtectedLayout><PaymentDetailPage /></ProtectedLayout> }
+}
+
+#[component]
+fn StoresProtected() -> impl IntoView {
+    view! { <ProtectedLayout><StoresPage /></ProtectedLayout> }
+}
+
+#[component]
+fn StoreDetailProtected() -> impl IntoView {
+    view! { <ProtectedLayout><StoreDetailPage /></ProtectedLayout> }
+}
+
+#[component]
+fn WalletsProtected() -> impl IntoView {
+    view! { <ProtectedLayout><WalletsPage /></ProtectedLayout> }
+}
+
+#[component]
+fn WalletDetailProtected() -> impl IntoView {
+    view! { <ProtectedLayout><WalletDetailPage /></ProtectedLayout> }
+}
+
+#[component]
+fn SettingsProtected() -> impl IntoView {
+    view! { <ProtectedLayout><SettingsPage /></ProtectedLayout> }
+}
+
+/// Protected layout with AuthGuard and app shell.
+#[component]
+fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
     // Mobile sidebar state
     let (sidebar_open, set_sidebar_open) = signal(false);
 
@@ -23,7 +105,7 @@ pub fn App() -> impl IntoView {
     let toggle_sidebar = move |_| set_sidebar_open.update(|v| *v = !*v);
 
     view! {
-        <Router>
+        <AuthGuard redirect_to="/login".to_string()>
             <div class="app-layout">
                 // Mobile overlay
                 <div
@@ -35,23 +117,11 @@ pub fn App() -> impl IntoView {
                 <div class="main-content">
                     <MainHeader on_menu_click=toggle_sidebar />
                     <main class="page-container">
-                        <Routes fallback=|| view! { <NotFoundPage /> }>
-                            <Route path=path!("/") view=DashboardPage />
-                            <Route path=path!("/evm") view=DashboardPage />
-                            <Route path=path!("/evm/invoices") view=InvoicesPage />
-                            <Route path=path!("/evm/invoices/:id") view=InvoiceDetailPage />
-                            <Route path=path!("/evm/payments") view=PaymentsPage />
-                            <Route path=path!("/evm/payments/:id") view=PaymentDetailPage />
-                            <Route path=path!("/evm/stores") view=StoresPage />
-                            <Route path=path!("/evm/stores/:id") view=StoreDetailPage />
-                            <Route path=path!("/evm/wallets") view=WalletsPage />
-                            <Route path=path!("/evm/wallets/:id") view=WalletDetailPage />
-                            <Route path=path!("/evm/settings") view=SettingsPage />
-                        </Routes>
+                        {children()}
                     </main>
                 </div>
             </div>
-        </Router>
+        </AuthGuard>
     }
 }
 
