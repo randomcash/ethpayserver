@@ -156,17 +156,83 @@ pub struct Payment {
 }
 
 /// Store data from the API.
+///
+/// Mirrors `Store` / `StoreInfo` from the backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Store {
     pub id: String,
     pub name: String,
     pub website: Option<String>,
-    pub default_currency: String,
-    pub enabled_networks: Vec<u64>,
+    /// Whether the store is archived (soft-deleted).
+    #[serde(default)]
+    pub archived: bool,
     pub created_at: String,
 }
 
-/// Wallet data from the API.
+/// Store payment method - defines which chains/tokens a store accepts.
+///
+/// Mirrors `StorePaymentMethod` from the backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorePaymentMethod {
+    pub id: String,
+    pub store_id: String,
+    /// EIP-155 chain ID (1 = Ethereum, 137 = Polygon, etc.)
+    pub chain_id: u64,
+    /// Token contract address for ERC20, None for native asset.
+    pub token_address: Option<String>,
+    /// Asset symbol (ETH, USDC, USDT, etc.)
+    pub asset_symbol: String,
+    /// Token decimals (18 for ETH, 6 for USDC/USDT).
+    pub decimals: u8,
+    /// BIP-32 extended public key for HD wallet derivation.
+    pub xpub: String,
+    /// Next derivation index to use.
+    pub derivation_index: i32,
+    /// Whether this payment method is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Store webhook configuration.
+///
+/// Mirrors `StoreWebhook` from the backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreWebhook {
+    pub id: String,
+    pub store_id: String,
+    /// Webhook endpoint URL.
+    pub webhook_url: String,
+    /// HMAC-SHA256 secret for payload signing (masked in responses).
+    pub webhook_secret: String,
+    /// Whether webhooks are enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Store role for user permissions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreRole {
+    pub id: String,
+    pub store_id: Option<String>,
+    pub role: String,
+    pub permissions: Vec<String>,
+}
+
+/// User's relationship to a store with role info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserStoreInfo {
+    pub store: Store,
+    pub role: StoreRole,
+}
+
+/// Wallet data from the API (legacy, kept for compatibility).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wallet {
     pub id: String,
@@ -203,8 +269,23 @@ pub struct CreateInvoiceRequest {
 pub struct CreateStoreRequest {
     pub name: String,
     pub website: Option<String>,
-    pub default_currency: String,
-    pub enabled_networks: Vec<u64>,
+}
+
+/// Create payment method request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePaymentMethodRequest {
+    pub chain_id: u64,
+    pub token_address: Option<String>,
+    pub asset_symbol: String,
+    pub decimals: u8,
+    pub xpub: String,
+}
+
+/// Update webhook request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateWebhookRequest {
+    pub webhook_url: String,
+    pub enabled: bool,
 }
 
 /// Paginated response wrapper.
