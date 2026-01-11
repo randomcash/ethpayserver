@@ -11,7 +11,7 @@ mod wallets;
 pub use dashboard::DashboardPage;
 pub use invoices::{InvoiceDetailPage, InvoicesPage};
 pub use not_found::NotFoundPage;
-pub use payments::PaymentsPage;
+pub use payments::{PaymentDetailPage, PaymentsPage};
 pub use settings::SettingsPage;
 pub use stores::{StoreDetailPage, StoresPage};
 pub use wallets::WalletsPage;

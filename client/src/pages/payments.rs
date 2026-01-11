@@ -1,13 +1,30 @@
-//! Payments page - view payment history.
+//! Payments page - Stripe-inspired payment history view.
+//!
+//! Uses types from `crate::api::types` which mirror the backend.
 
 use leptos::prelude::*;
-use ui_kit::components::{Card, PageHeader, Skeleton, Stack};
-use ui_kit::components::crypto::{Address, CryptoAmount, NetworkBadge, StatusBadge};
+use leptos_router::components::A;
+use leptos_router::hooks::use_params_map;
 
 use crate::api::{AssetType, Payment};
 
+/// Helper to get chain name from chain ID.
+fn chain_name(chain_id: u64) -> &'static str {
+    match chain_id {
+        1 => "Ethereum",
+        137 => "Polygon",
+        42161 => "Arbitrum",
+        10 => "Optimism",
+        8453 => "Base",
+        56 => "BSC",
+        43114 => "Avalanche",
+        11155111 => "Sepolia",
+        _ => "Unknown",
+    }
+}
+
 /// Helper to determine payment status display.
-fn payment_status_display(payment: &Payment) -> &'static str {
+fn payment_status(payment: &Payment) -> &'static str {
     if payment.reorged {
         "reorged"
     } else if payment.confirmed_at.is_some() {
@@ -17,222 +34,755 @@ fn payment_status_display(payment: &Payment) -> &'static str {
     }
 }
 
+/// CSS class for payment status badge.
+fn payment_status_class(payment: &Payment) -> &'static str {
+    if payment.reorged {
+        "badge badge-error"
+    } else if payment.confirmed_at.is_some() {
+        "badge badge-success"
+    } else {
+        "badge badge-warning"
+    }
+}
+
+/// Format ISO date string for display.
+fn format_date(iso: &str) -> String {
+    if iso.len() >= 10 {
+        let date_part = &iso[..10];
+        let parts: Vec<&str> = date_part.split('-').collect();
+        if parts.len() == 3 {
+            let month = match parts[1] {
+                "01" => "Jan", "02" => "Feb", "03" => "Mar", "04" => "Apr",
+                "05" => "May", "06" => "Jun", "07" => "Jul", "08" => "Aug",
+                "09" => "Sep", "10" => "Oct", "11" => "Nov", "12" => "Dec",
+                _ => parts[1],
+            };
+            return format!("{} {}, {}", month, parts[2], parts[0]);
+        }
+    }
+    iso.to_string()
+}
+
+/// Truncate address/hash for display.
+fn truncate_hash(hash: &str, prefix: usize, suffix: usize) -> String {
+    if hash.len() > prefix + suffix + 3 {
+        format!("{}...{}", &hash[..prefix], &hash[hash.len()-suffix..])
+    } else {
+        hash.to_string()
+    }
+}
+
 /// Payments list page.
 #[component]
 pub fn PaymentsPage() -> impl IntoView {
-    let payments = Resource::new(|| (), |_| async {
-        // TODO: Fetch from API
-        Ok::<_, String>(vec![
-            Payment {
-                id: "pay_001".to_string(),
-                invoice_id: "inv_001".to_string(),
-                chain_id: 1,
-                asset_type: AssetType::Native,
-                amount: "50000000000000000".to_string(), // 0.05 ETH in wei
-                asset_symbol: "ETH".to_string(),
-                token_address: None,
-                tx_hash: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-                block_number: Some(19234500),
-                detected_at: "2024-01-15T10:35:00Z".to_string(),
-                confirmed_at: Some("2024-01-15T10:40:00Z".to_string()),
-                from_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".to_string()),
-                reorged: false,
-                credited_amount: Some("100.00".to_string()),
-                rate_used: Some("0.0005".to_string()),
-            },
-        ])
-    });
+    // Filter state
+    let (active_filter, set_active_filter) = signal("all".to_string());
+    let (search_query, set_search_query) = signal(String::new());
+
+    // Mock payments - will come from API
+    let payments: Vec<Payment> = vec![
+        Payment {
+            id: "pay_001".to_string(),
+            invoice_id: "INV-0001".to_string(),
+            chain_id: 1,
+            asset_type: AssetType::Native,
+            amount: "140000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            tx_hash: "0x1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
+            block_number: Some(19234567),
+            detected_at: "2024-01-15T10:45:00Z".to_string(),
+            confirmed_at: Some("2024-01-15T10:50:00Z".to_string()),
+            from_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".to_string()),
+            reorged: false,
+            credited_amount: Some("250.00".to_string()),
+            rate_used: Some("0.00056".to_string()),
+        },
+        Payment {
+            id: "pay_002".to_string(),
+            invoice_id: "INV-0001".to_string(),
+            chain_id: 1,
+            asset_type: AssetType::ERC20,
+            amount: "250000000".to_string(),
+            asset_symbol: "USDC".to_string(),
+            token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
+            tx_hash: "0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba".to_string(),
+            block_number: Some(19234612),
+            detected_at: "2024-01-15T11:15:00Z".to_string(),
+            confirmed_at: Some("2024-01-15T11:20:00Z".to_string()),
+            from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".to_string()),
+            reorged: false,
+            credited_amount: Some("250.00".to_string()),
+            rate_used: Some("1.0".to_string()),
+        },
+        Payment {
+            id: "pay_003".to_string(),
+            invoice_id: "INV-0002".to_string(),
+            chain_id: 137,
+            asset_type: AssetType::Native,
+            amount: "89500000000000000000".to_string(),
+            asset_symbol: "POL".to_string(),
+            token_address: None,
+            tx_hash: "0xaabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344".to_string(),
+            block_number: None,
+            detected_at: "2024-01-15T14:30:00Z".to_string(),
+            confirmed_at: None,
+            from_address: Some("0x5555666677778888999900001111222233334444".to_string()),
+            reorged: false,
+            credited_amount: None,
+            rate_used: None,
+        },
+        Payment {
+            id: "pay_004".to_string(),
+            invoice_id: "INV-0003".to_string(),
+            chain_id: 42161,
+            asset_type: AssetType::ERC20,
+            amount: "500000000".to_string(),
+            asset_symbol: "USDT".to_string(),
+            token_address: Some("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".to_string()),
+            tx_hash: "0xeeeeffffaaaabbbbccccddddeeeeffffaaaabbbbccccddddeeeeffffaaaabbbb".to_string(),
+            block_number: Some(175234890),
+            detected_at: "2024-01-14T16:00:00Z".to_string(),
+            confirmed_at: Some("2024-01-14T16:01:00Z".to_string()),
+            from_address: Some("0x1111222233334444555566667777888899990000".to_string()),
+            reorged: false,
+            credited_amount: Some("500.00".to_string()),
+            rate_used: Some("1.0".to_string()),
+        },
+        Payment {
+            id: "pay_005".to_string(),
+            invoice_id: "INV-0004".to_string(),
+            chain_id: 1,
+            asset_type: AssetType::Native,
+            amount: "75000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            tx_hash: "0x0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff".to_string(),
+            block_number: Some(19230000),
+            detected_at: "2024-01-12T09:00:00Z".to_string(),
+            confirmed_at: Some("2024-01-12T09:05:00Z".to_string()),
+            from_address: Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()),
+            reorged: true,
+            credited_amount: None,
+            rate_used: None,
+        },
+        Payment {
+            id: "pay_006".to_string(),
+            invoice_id: "INV-0005".to_string(),
+            chain_id: 8453,
+            asset_type: AssetType::Native,
+            amount: "320000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            tx_hash: "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
+            block_number: Some(8234567),
+            detected_at: "2024-01-11T20:00:00Z".to_string(),
+            confirmed_at: Some("2024-01-11T20:02:00Z".to_string()),
+            from_address: Some("0xcafebabecafebabecafebabecafebabecafebabe".to_string()),
+            reorged: false,
+            credited_amount: Some("800.00".to_string()),
+            rate_used: Some("0.0004".to_string()),
+        },
+    ];
+
+    let filters = vec![
+        ("all", "All", None),
+        ("pending", "Pending", Some(1)),
+        ("confirmed", "Confirmed", Some(4)),
+        ("reorged", "Reorged", Some(1)),
+    ];
 
     view! {
-        <div class="evm-page">
-            <PageHeader
-                title="Payments"
-                description="View your payment history"
-            />
-
-            <Suspense fallback=move || view! { <PaymentListSkeleton /> }>
-                {move || {
-                    payments.get().map(|result| {
-                        match result {
-                            Ok(list) => view! { <PaymentList payments=list /> }.into_any(),
-                            Err(e) => view! {
-                                <Card>
-                                    <p class="text-error">"Error loading payments: " {e}</p>
-                                </Card>
-                            }.into_any(),
-                        }
-                    })
-                }}
-            </Suspense>
-        </div>
-    }
-}
-
-#[component]
-fn PaymentList(payments: Vec<Payment>) -> impl IntoView {
-    if payments.is_empty() {
-        return view! {
-            <Card>
-                <div class="evm-empty-state">
-                    <p>"No payments received yet"</p>
+        <div class="payments-page">
+            // Page Header
+            <div class="page-header-row">
+                <div>
+                    <h1 class="page-title">"Payments"</h1>
+                    <p class="page-description">"View all received payments across networks"</p>
                 </div>
-            </Card>
-        }.into_any();
-    }
+                <div class="page-actions">
+                    <button class="btn btn-secondary btn-sm">
+                        <IconExport />
+                        "Export"
+                    </button>
+                </div>
+            </div>
 
-    view! {
-        <div class="evm-payment-list">
-            {payments.into_iter().map(|payment| {
-                view! { <PaymentListItem payment=payment /> }
-            }).collect_view()}
-        </div>
-    }.into_any()
-}
+            // Filters and Search
+            <div class="payments-toolbar">
+                <div class="payments-filters">
+                    {filters.into_iter().map(|(key, label, count)| {
+                        let key_owned = key.to_string();
+                        let key_for_click = key.to_string();
+                        view! {
+                            <button
+                                class=move || if active_filter.get() == key_owned { "filter-tab active" } else { "filter-tab" }
+                                on:click=move |_| set_active_filter.set(key_for_click.clone())
+                            >
+                                {label}
+                                {count.map(|c| view! { <span class="filter-count">{c}</span> })}
+                            </button>
+                        }
+                    }).collect_view()}
+                </div>
 
-#[component]
-fn PaymentListItem(payment: Payment) -> impl IntoView {
-    let network = chain_id_to_network(payment.chain_id)
-        .unwrap_or(types::Network::Ethereum);
-    let invoice_id = payment.invoice_id.clone();
-    let invoice_id_link = payment.invoice_id.clone();
-    let detected_at = payment.detected_at.clone();
-    let status = payment_status_display(&payment).to_string();
-    let from_address = payment.from_address.clone().unwrap_or_else(|| "Unknown".to_string());
-
-    view! {
-        <Card class="evm-payment-item">
-            <div class="evm-payment-item-header">
-                <div class="evm-payment-item-amount">
-                    <CryptoAmount
-                        amount=payment.amount.clone()
-                        symbol=payment.asset_symbol.clone()
-                        size="lg"
+                <div class="payments-search">
+                    <IconSearch />
+                    <input
+                        type="text"
+                        placeholder="Search by tx hash, address..."
+                        prop:value=move || search_query.get()
+                        on:input=move |ev| set_search_query.set(event_target_value(&ev))
                     />
                 </div>
-                <StatusBadge status=status />
             </div>
 
-            <div class="evm-payment-item-details">
-                <div class="evm-payment-detail">
-                    <span class="evm-payment-detail-label">"Network"</span>
-                    <NetworkBadge network=network />
+            // Payment Table (Desktop)
+            <div class="payments-table-container desktop-only">
+                <table class="payments-table">
+                    <thead>
+                        <tr>
+                            <th>"Transaction"</th>
+                            <th>"Amount"</th>
+                            <th>"Network"</th>
+                            <th>"Invoice"</th>
+                            <th>"Status"</th>
+                            <th>"Credited"</th>
+                            <th>"Date"</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {payments.clone().into_iter().map(|payment| {
+                            view! { <PaymentRow payment=payment /> }
+                        }).collect_view()}
+                    </tbody>
+                </table>
+            </div>
+
+            // Payment Cards (Mobile)
+            <div class="payments-cards mobile-only">
+                {payments.into_iter().map(|payment| {
+                    view! { <PaymentCard payment=payment /> }
+                }).collect_view()}
+            </div>
+
+            // Pagination
+            <div class="payments-pagination">
+                <div class="pagination-info">
+                    "Showing "<strong>"1-6"</strong>" of "<strong>"42"</strong>" payments"
                 </div>
-                <div class="evm-payment-detail">
-                    <span class="evm-payment-detail-label">"From"</span>
-                    <Address address=from_address />
+                <div class="pagination-controls">
+                    <button class="btn btn-ghost btn-sm" disabled>"Previous"</button>
+                    <button class="btn btn-ghost btn-sm">"Next"</button>
                 </div>
-                <div class="evm-payment-detail">
-                    <span class="evm-payment-detail-label">"Tx Hash"</span>
-                    <Address address=payment.tx_hash.clone() prefix_len=10 suffix_len=8 />
+            </div>
+        </div>
+    }
+}
+
+/// Payment table row.
+#[component]
+fn PaymentRow(payment: Payment) -> impl IntoView {
+    let tx_display = truncate_hash(&payment.tx_hash, 10, 8);
+    let network = chain_name(payment.chain_id);
+    let status = payment_status(&payment);
+    let status_class = payment_status_class(&payment);
+    let date_display = format_date(&payment.detected_at);
+    let invoice_id = payment.invoice_id.clone();
+    let invoice_link = payment.invoice_id.clone();
+    let credited = payment.credited_amount.clone()
+        .map(|c| format!("${}", c))
+        .unwrap_or_else(|| "—".to_string());
+    let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
+
+    view! {
+        <tr class="payment-row">
+            <td>
+                <div class="payment-tx-cell">
+                    <code class="tx-hash">{tx_display}</code>
+                    <button class="btn-icon-xs" title="View on explorer">
+                        <IconExternalLink />
+                    </button>
                 </div>
-                {payment.credited_amount.clone().map(|credited| view! {
-                    <div class="evm-payment-detail">
-                        <span class="evm-payment-detail-label">"Credited"</span>
-                        <span class="evm-payment-credited">"$"{credited}</span>
+            </td>
+            <td>
+                <span class="payment-amount">{amount_display}</span>
+            </td>
+            <td>
+                <span class="payment-network">{network}</span>
+            </td>
+            <td>
+                <A href=format!("/evm/invoices/{}", invoice_link) attr:class="payment-invoice-link">
+                    {invoice_id}
+                </A>
+            </td>
+            <td>
+                <span class=status_class>{status}</span>
+            </td>
+            <td>
+                <span class="payment-credited">{credited}</span>
+            </td>
+            <td>
+                <span class="payment-date">{date_display}</span>
+            </td>
+            <td>
+                <button class="btn btn-ghost btn-sm btn-icon">
+                    <IconMore />
+                </button>
+            </td>
+        </tr>
+    }
+}
+
+/// Mobile payment card component.
+#[component]
+fn PaymentCard(payment: Payment) -> impl IntoView {
+    let tx_display = truncate_hash(&payment.tx_hash, 8, 6);
+    let network = chain_name(payment.chain_id);
+    let status = payment_status(&payment);
+    let status_class = payment_status_class(&payment);
+    let date_display = format_date(&payment.detected_at);
+    let invoice_id = payment.invoice_id.clone();
+    let invoice_link = payment.invoice_id.clone();
+    let credited = payment.credited_amount.clone()
+        .map(|c| format!("${}", c))
+        .unwrap_or_else(|| "—".to_string());
+    let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
+
+    view! {
+        <div class="payment-card">
+            <div class="payment-card-header">
+                <div class="payment-card-amount">
+                    <span class="payment-card-amount-value">{amount_display}</span>
+                    <span class="payment-card-network">{network}</span>
+                </div>
+                <span class=status_class>{status}</span>
+            </div>
+
+            <div class="payment-card-details">
+                <div class="payment-card-row">
+                    <span class="payment-card-label">"Transaction"</span>
+                    <div class="payment-card-tx">
+                        <code>{tx_display}</code>
+                        <IconExternalLink />
                     </div>
-                })}
+                </div>
+                <div class="payment-card-row">
+                    <span class="payment-card-label">"Invoice"</span>
+                    <A href=format!("/evm/invoices/{}", invoice_link) attr:class="payment-card-invoice-link">
+                        {invoice_id}
+                    </A>
+                </div>
+                <div class="payment-card-row">
+                    <span class="payment-card-label">"Credited"</span>
+                    <span class="payment-card-credited">{credited}</span>
+                </div>
             </div>
 
-            <div class="evm-payment-item-footer">
-                <span class="evm-payment-invoice">
-                    "Invoice: "
-                    <a href=format!("/evm/invoices/{}", invoice_id_link)>{invoice_id}</a>
-                </span>
-                <span class="evm-payment-time">{detected_at}</span>
+            <div class="payment-card-footer">
+                <span class="payment-card-date">{date_display}</span>
+                <A href=format!("/evm/payments/{}", payment.tx_hash) attr:class="btn btn-ghost btn-xs">
+                    "Details"
+                    <IconChevronRight />
+                </A>
             </div>
-        </Card>
+        </div>
+    }
+}
+
+/// Payment detail page.
+#[component]
+pub fn PaymentDetailPage() -> impl IntoView {
+    let params = use_params_map();
+    let tx_hash = move || params.get().get("id").unwrap_or_default();
+
+    // Mock payment data - will come from API based on tx_hash
+    let payment = Payment {
+        id: "pay_001".to_string(),
+        invoice_id: "INV-0001".to_string(),
+        chain_id: 1,
+        asset_type: AssetType::Native,
+        amount: "140000000000000000".to_string(),
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        tx_hash: tx_hash(),
+        block_number: Some(19234567),
+        detected_at: "2024-01-15T10:45:00Z".to_string(),
+        confirmed_at: Some("2024-01-15T10:50:00Z".to_string()),
+        from_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".to_string()),
+        reorged: false,
+        credited_amount: Some("250.00".to_string()),
+        rate_used: Some("1785.71".to_string()),
+    };
+
+    let network = chain_name(payment.chain_id);
+    let status = payment_status(&payment);
+    let status_class = payment_status_class(&payment);
+    let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
+    let detected_display = format_date(&payment.detected_at);
+    let confirmed_display = payment.confirmed_at.as_ref()
+        .map(|d| format_date(d))
+        .unwrap_or_else(|| "Pending".to_string());
+    let from_address = payment.from_address.clone().unwrap_or_else(|| "Unknown".to_string());
+    let block_number = payment.block_number
+        .map(|b| b.to_string())
+        .unwrap_or_else(|| "Pending".to_string());
+    let credited = payment.credited_amount.clone()
+        .map(|c| format!("${}", c))
+        .unwrap_or_else(|| "—".to_string());
+    let rate = payment.rate_used.clone()
+        .map(|r| format!("${}/{}",r, payment.asset_symbol))
+        .unwrap_or_else(|| "—".to_string());
+    let invoice_id = payment.invoice_id.clone();
+    let invoice_link = payment.invoice_id.clone();
+
+    // Explorer URL based on chain
+    let explorer_base = match payment.chain_id {
+        1 => "https://etherscan.io",
+        137 => "https://polygonscan.com",
+        42161 => "https://arbiscan.io",
+        10 => "https://optimistic.etherscan.io",
+        8453 => "https://basescan.org",
+        56 => "https://bscscan.com",
+        43114 => "https://snowtrace.io",
+        11155111 => "https://sepolia.etherscan.io",
+        _ => "https://etherscan.io",
+    };
+    let tx_explorer_url = format!("{}/tx/{}", explorer_base, payment.tx_hash);
+    let address_explorer_url = format!("{}/address/{}", explorer_base, from_address);
+
+    view! {
+        <div class="payment-detail-page">
+            // Header
+            <div class="payment-detail-header">
+                <div class="payment-detail-header-left">
+                    <A href="/evm/payments" attr:class="back-link">
+                        <IconArrowLeft />
+                        "Payments"
+                    </A>
+                    <div class="payment-detail-title-row">
+                        <h1 class="payment-detail-title">{amount_display.clone()}</h1>
+                        <span class=status_class>{status}</span>
+                    </div>
+                    <p class="payment-detail-subtitle">{network}" · "{detected_display.clone()}</p>
+                </div>
+                <div class="payment-detail-actions">
+                    <a href=tx_explorer_url.clone() target="_blank" class="btn btn-secondary btn-sm">
+                        <IconExternalLink />
+                        "View on Explorer"
+                    </a>
+                </div>
+            </div>
+
+            // Content
+            <div class="payment-detail-content">
+                // Main Info Cards
+                <div class="payment-detail-main">
+                    // Transaction Details Card
+                    <div class="detail-card">
+                        <div class="detail-card-header">
+                            <h3>"Transaction Details"</h3>
+                        </div>
+                        <div class="detail-card-body">
+                            <div class="detail-row">
+                                <span class="detail-label">"Transaction Hash"</span>
+                                <div class="detail-value detail-value-mono">
+                                    <span class="tx-hash-full">{payment.tx_hash.clone()}</span>
+                                    <button class="btn-icon-xs" title="Copy">
+                                        <IconCopy />
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">"Network"</span>
+                                <span class="detail-value">{network}</span>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">"Block Number"</span>
+                                <span class="detail-value">{block_number}</span>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">"From Address"</span>
+                                <div class="detail-value detail-value-mono">
+                                    <a href=address_explorer_url target="_blank" class="address-link">
+                                        {truncate_hash(&from_address, 10, 8)}
+                                    </a>
+                                    <button class="btn-icon-xs" title="Copy">
+                                        <IconCopy />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    // Payment Amount Card
+                    <div class="detail-card">
+                        <div class="detail-card-header">
+                            <h3>"Payment Amount"</h3>
+                        </div>
+                        <div class="detail-card-body">
+                            <div class="detail-row">
+                                <span class="detail-label">"Amount Received"</span>
+                                <span class="detail-value detail-value-lg">{amount_display}</span>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">"Exchange Rate"</span>
+                                <span class="detail-value">{rate}</span>
+                            </div>
+                            <div class="detail-row">
+                                <span class="detail-label">"Credited Amount"</span>
+                                <span class="detail-value detail-value-success">{credited}</span>
+                            </div>
+                            {payment.token_address.clone().map(|addr| view! {
+                                <div class="detail-row">
+                                    <span class="detail-label">"Token Contract"</span>
+                                    <div class="detail-value detail-value-mono">
+                                        <span>{truncate_hash(&addr, 10, 8)}</span>
+                                        <button class="btn-icon-xs" title="Copy">
+                                            <IconCopy />
+                                        </button>
+                                    </div>
+                                </div>
+                            })}
+                        </div>
+                    </div>
+
+                    // Timeline Card
+                    <div class="detail-card">
+                        <div class="detail-card-header">
+                            <h3>"Activity"</h3>
+                        </div>
+                        <div class="detail-card-body">
+                            <div class="timeline">
+                                // Timeline shows newest events first (top to bottom = newest to oldest)
+                                {payment.confirmed_at.is_some().then(|| view! {
+                                    <div class="timeline-item timeline-item-success">
+                                        <div class="timeline-dot"></div>
+                                        <div class="timeline-content">
+                                            <span class="timeline-title">"Payment confirmed"</span>
+                                            <span class="timeline-desc">"Reached required block confirmations"</span>
+                                            <span class="timeline-time">{confirmed_display.clone()}</span>
+                                        </div>
+                                    </div>
+                                })}
+                                {(!payment.reorged && payment.confirmed_at.is_none()).then(|| view! {
+                                    <div class="timeline-item timeline-item-pending">
+                                        <div class="timeline-dot"></div>
+                                        <div class="timeline-content">
+                                            <span class="timeline-title">"Awaiting confirmation"</span>
+                                            <span class="timeline-desc">"Waiting for block confirmations..."</span>
+                                        </div>
+                                    </div>
+                                })}
+                                {payment.reorged.then(|| view! {
+                                    <div class="timeline-item timeline-item-error">
+                                        <div class="timeline-dot"></div>
+                                        <div class="timeline-content">
+                                            <span class="timeline-title">"Payment invalidated"</span>
+                                            <span class="timeline-desc">"Chain reorganization detected"</span>
+                                        </div>
+                                    </div>
+                                })}
+                                <div class="timeline-item">
+                                    <div class="timeline-dot"></div>
+                                    <div class="timeline-content">
+                                        <span class="timeline-title">"Payment detected"</span>
+                                        <span class="timeline-desc">"Transaction seen on chain"</span>
+                                        <span class="timeline-time">{detected_display}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                // Sidebar
+                <div class="payment-detail-sidebar">
+                    <div class="detail-card">
+                        <div class="detail-card-header">
+                            <h3>"Related Invoice"</h3>
+                        </div>
+                        <div class="detail-card-body">
+                            <A href=format!("/evm/invoices/{}", invoice_link) attr:class="related-invoice-link">
+                                <div class="related-invoice-info">
+                                    <IconInvoice />
+                                    <span>{invoice_id}</span>
+                                </div>
+                                <IconChevronRight />
+                            </A>
+                        </div>
+                    </div>
+
+                    <div class="detail-card">
+                        <div class="detail-card-header">
+                            <h3>"Status"</h3>
+                        </div>
+                        <div class="detail-card-body">
+                            <div class="status-info">
+                                <span class=format!("{} status-badge-lg", status_class)>{status}</span>
+                                {payment.reorged.then(|| view! {
+                                    <p class="status-warning">
+                                        "This payment was invalidated due to a chain reorganization."
+                                    </p>
+                                })}
+                                {(!payment.reorged && payment.confirmed_at.is_none()).then(|| view! {
+                                    <p class="status-info-text">
+                                        "Waiting for block confirmations..."
+                                    </p>
+                                })}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="detail-card">
+                        <div class="detail-card-header">
+                            <h3>"Raw Data"</h3>
+                        </div>
+                        <div class="detail-card-body">
+                            <pre class="metadata-json">{format!(r#"{{
+  "id": "{}",
+  "invoice_id": "{}",
+  "chain_id": {},
+  "asset_type": "{}",
+  "amount": "{}",
+  "asset_symbol": "{}",
+  "block_number": {}
+}}"#,
+                                payment.id,
+                                payment.invoice_id,
+                                payment.chain_id,
+                                if payment.asset_type == AssetType::Native { "native" } else { "erc20" },
+                                payment.amount,
+                                payment.asset_symbol,
+                                payment.block_number.map(|b| b.to_string()).unwrap_or_else(|| "null".to_string())
+                            )}</pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+/// Format crypto amount from wei/smallest unit to human readable.
+fn format_crypto_amount(amount: &str, symbol: &str) -> String {
+    // Get decimals based on token
+    let decimals = match symbol {
+        "ETH" | "POL" | "MATIC" => 18,
+        "USDC" | "USDT" => 6,
+        "DAI" => 18,
+        _ => 18,
+    };
+
+    // Parse amount and convert
+    if let Ok(val) = amount.parse::<u128>() {
+        let divisor = 10u128.pow(decimals);
+        let whole = val / divisor;
+        let frac = val % divisor;
+
+        if frac == 0 {
+            return whole.to_string();
+        }
+
+        // Format with appropriate decimal places
+        let frac_str = format!("{:0width$}", frac, width = decimals as usize);
+        let trimmed = frac_str.trim_end_matches('0');
+        if trimmed.is_empty() {
+            whole.to_string()
+        } else {
+            format!("{}.{}", whole, trimmed)
+        }
+    } else {
+        amount.to_string()
+    }
+}
+
+// ============================================
+// Icons
+// ============================================
+
+#[component]
+fn IconExport() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
     }
 }
 
 #[component]
-fn PaymentListSkeleton() -> impl IntoView {
+fn IconSearch() -> impl IntoView {
     view! {
-        <Stack gap="md">
-            <Skeleton height="150px" />
-            <Skeleton height="150px" />
-            <Skeleton height="150px" />
-        </Stack>
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
     }
 }
 
-fn chain_id_to_network(chain_id: u64) -> Option<types::Network> {
-    match chain_id {
-        1 => Some(types::Network::Ethereum),
-        137 => Some(types::Network::Polygon),
-        42161 => Some(types::Network::Arbitrum),
-        10 => Some(types::Network::Optimism),
-        8453 => Some(types::Network::Base),
-        43114 => Some(types::Network::Avalanche),
-        56 => Some(types::Network::BinanceSmartChain),
-        324 => Some(types::Network::ZkSync),
-        59144 => Some(types::Network::Linea),
-        534352 => Some(types::Network::Scroll),
-        _ => None,
+#[component]
+fn IconExternalLink() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+            <polyline points="15 3 21 3 21 9"></polyline>
+            <line x1="10" y1="14" x2="21" y2="3"></line>
+        </svg>
     }
 }
 
-/// Payment page styles.
-pub const PAYMENT_STYLES: &str = r#"
-.evm-payment-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--ps-spacing-md);
+#[component]
+fn IconMore() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="1"></circle>
+            <circle cx="19" cy="12" r="1"></circle>
+            <circle cx="5" cy="12" r="1"></circle>
+        </svg>
+    }
 }
 
-.evm-payment-item {
-    padding: var(--ps-spacing-md);
+#[component]
+fn IconChevronRight() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+    }
 }
 
-.evm-payment-item-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--ps-spacing-md);
+#[component]
+fn IconArrowLeft() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="19" y1="12" x2="5" y2="12"></line>
+            <polyline points="12 19 5 12 12 5"></polyline>
+        </svg>
+    }
 }
 
-.evm-payment-item-details {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: var(--ps-spacing-sm);
-    padding: var(--ps-spacing-md) 0;
-    border-top: 1px solid var(--ps-border);
-    border-bottom: 1px solid var(--ps-border);
+#[component]
+fn IconCopy() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+        </svg>
+    }
 }
 
-.evm-payment-detail {
-    display: flex;
-    flex-direction: column;
-    gap: var(--ps-spacing-xs);
+#[component]
+fn IconInvoice() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+    }
 }
-
-.evm-payment-detail-label {
-    font-size: var(--ps-font-sm);
-    color: var(--ps-text-muted);
-}
-
-.evm-payment-confirmations {
-    font-weight: 600;
-    color: var(--ps-success);
-}
-
-.evm-payment-item-footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-top: var(--ps-spacing-md);
-    font-size: var(--ps-font-sm);
-}
-
-.evm-payment-invoice a {
-    color: var(--ps-primary);
-    text-decoration: none;
-}
-
-.evm-payment-invoice a:hover {
-    text-decoration: underline;
-}
-
-.evm-payment-time {
-    color: var(--ps-text-muted);
-}
-"#;
