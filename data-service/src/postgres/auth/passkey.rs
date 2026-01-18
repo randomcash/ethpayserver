@@ -50,10 +50,10 @@ impl PasskeyRepository for PgDataService {
     }
 
     async fn get_passkey_by_credential_id(&self, credential_id: &[u8]) -> Result<Option<PasskeyCredential>> {
-        // The credential ID is stored as base64 in the passkey JSON under "cred" -> "cred_id"
-        // We need to encode our bytes to base64 and search for it
+        // The credential ID is stored as base64url (URL-safe, no padding) in the passkey JSON
+        // under "cred" -> "cred_id". We need to encode our bytes the same way.
         use base64::Engine;
-        let cred_id_b64 = base64::engine::general_purpose::STANDARD.encode(credential_id);
+        let cred_id_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential_id);
 
         // Query for active passkeys where the JSON cred_id matches
         // The passkey JSON structure is: { "cred": { "cred_id": "base64..." }, ... }
