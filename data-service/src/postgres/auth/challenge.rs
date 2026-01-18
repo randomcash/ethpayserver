@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use sqlx::Row;
 
 use auth::{
-    ChallengeRepository, PasskeyAuthentication, PasskeyRegistration, UserId, WalletChallenge,
+    ChallengeRepository, DiscoverableAuthentication, PasskeyAuthentication, PasskeyRegistration,
+    UserId, WalletChallenge,
     error::{AuthError, Result},
 };
 
@@ -124,6 +125,59 @@ impl ChallengeRepository for PgDataService {
         }
     }
 
+    async fn store_discoverable_authentication_challenge(
+        &self,
+        challenge_id: uuid::Uuid,
+        state: DiscoverableAuthentication,
+    ) -> Result<()> {
+        let state_json = serde_json::to_value(&state)
+            .map_err(|e| AuthError::Repository(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO discoverable_authentication_challenges (challenge_id, challenge_state, created_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (challenge_id) DO UPDATE SET
+                challenge_state = EXCLUDED.challenge_state,
+                created_at = NOW()
+            "#,
+        )
+        .bind(challenge_id)
+        .bind(&state_json)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_to_auth_error)?;
+
+        Ok(())
+    }
+
+    async fn take_discoverable_authentication_challenge(
+        &self,
+        challenge_id: uuid::Uuid,
+    ) -> Result<Option<DiscoverableAuthentication>> {
+        let row = sqlx::query(
+            r#"
+            DELETE FROM discoverable_authentication_challenges
+            WHERE challenge_id = $1 AND created_at > NOW() - INTERVAL '10 minutes'
+            RETURNING challenge_state
+            "#,
+        )
+        .bind(challenge_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_to_auth_error)?;
+
+        match row {
+            Some(r) => {
+                let state_json: serde_json::Value = r.get("challenge_state");
+                let state: DiscoverableAuthentication = serde_json::from_value(state_json)
+                    .map_err(|e| AuthError::Repository(e.to_string()))?;
+                Ok(Some(state))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn store_wallet_challenge(
         &self,
         user_id: UserId,
@@ -195,6 +249,13 @@ impl ChallengeRepository for PgDataService {
         .await
         .map_err(sqlx_to_auth_error)?;
 
-        Ok(r1.rows_affected() + r2.rows_affected() + r3.rows_affected())
+        let r4 = sqlx::query(
+            "DELETE FROM discoverable_authentication_challenges WHERE created_at < NOW() - INTERVAL '10 minutes'"
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_to_auth_error)?;
+
+        Ok(r1.rows_affected() + r2.rows_affected() + r3.rows_affected() + r4.rows_affected())
     }
 }

@@ -49,6 +49,17 @@ async fn main() -> Result<()> {
     let mut auth_config = AuthConfig::default();
     // Increase wallet challenge timeout to 10 minutes for registration flow
     auth_config.wallet_challenge_duration = chrono::Duration::minutes(10);
+    // WebAuthn config from environment
+    if let Ok(rp_id) = std::env::var("WEBAUTHN_RP_ID") {
+        auth_config.rp_id = rp_id;
+    }
+    if let Ok(rp_origin) = std::env::var("WEBAUTHN_RP_ORIGIN") {
+        auth_config.rp_origin = rp_origin;
+    }
+    if let Ok(rp_name) = std::env::var("WEBAUTHN_RP_NAME") {
+        auth_config.rp_name = rp_name;
+    }
+    tracing::info!(rp_id = %auth_config.rp_id, rp_origin = %auth_config.rp_origin, "WebAuthn configured");
     let auth_service = Arc::new(AuthService::with_config(Arc::clone(&data_service), auth_config));
 
     // Connect to Redis (REQUIRED for event processing)

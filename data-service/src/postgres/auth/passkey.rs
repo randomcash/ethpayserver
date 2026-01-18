@@ -49,6 +49,30 @@ impl PasskeyRepository for PgDataService {
         row.map(|r| row_to_passkey(&r)).transpose()
     }
 
+    async fn get_passkey_by_credential_id(&self, credential_id: &[u8]) -> Result<Option<PasskeyCredential>> {
+        // The credential ID is stored as base64 in the passkey JSON under "cred" -> "cred_id"
+        // We need to encode our bytes to base64 and search for it
+        use base64::Engine;
+        let cred_id_b64 = base64::engine::general_purpose::STANDARD.encode(credential_id);
+
+        // Query for active passkeys where the JSON cred_id matches
+        // The passkey JSON structure is: { "cred": { "cred_id": "base64..." }, ... }
+        let row = sqlx::query(
+            r#"
+            SELECT id, user_id, name, passkey, created_at, last_used_at, is_active
+            FROM passkey_credentials
+            WHERE is_active = TRUE
+              AND passkey->'cred'->>'cred_id' = $1
+            "#,
+        )
+        .bind(&cred_id_b64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_to_auth_error)?;
+
+        row.map(|r| row_to_passkey(&r)).transpose()
+    }
+
     async fn get_passkeys_for_user(&self, user_id: UserId) -> Result<Vec<PasskeyCredential>> {
         let rows = sqlx::query(
             r#"
