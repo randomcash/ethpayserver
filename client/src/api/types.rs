@@ -408,4 +408,302 @@ mod tests {
         assert_eq!(stats.pending_invoices, 0);
         assert_eq!(stats.total_payments, 0);
     }
+
+    // =========================================================================
+    // Store types
+    // =========================================================================
+
+    #[test]
+    fn test_store_deserialization_from_backend() {
+        // Simulates the JSON the backend actually sends (StoreResponse)
+        let json = r#"{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "name": "My Shop",
+            "website": "https://myshop.com",
+            "owner_id": "660e8400-e29b-41d4-a716-446655440000",
+            "archived": false,
+            "created_at": "2024-06-15T10:30:00Z"
+        }"#;
+        let store: Store = serde_json::from_str(json).unwrap();
+        assert_eq!(store.id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(store.name, "My Shop");
+        assert_eq!(store.website, Some("https://myshop.com".to_string()));
+        assert!(!store.archived);
+        // owner_id is ignored by client-side Store (extra fields tolerated by serde default)
+    }
+
+    #[test]
+    fn test_store_deserialization_minimal() {
+        // Backend may omit optional fields
+        let json = r#"{
+            "id": "abc",
+            "name": "Bare Store",
+            "website": null,
+            "created_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let store: Store = serde_json::from_str(json).unwrap();
+        assert_eq!(store.name, "Bare Store");
+        assert!(store.website.is_none());
+        assert!(!store.archived); // default
+    }
+
+    #[test]
+    fn test_create_store_request() {
+        let req = CreateStoreRequest {
+            name: "New Store".to_string(),
+            website: Some("https://new.store".to_string()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["name"], "New Store");
+        assert_eq!(json["website"], "https://new.store");
+    }
+
+    #[test]
+    fn test_create_store_request_without_website() {
+        let req = CreateStoreRequest {
+            name: "Simple".to_string(),
+            website: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["name"], "Simple");
+        assert!(json["website"].is_null());
+    }
+
+    #[test]
+    fn test_update_store_request_serialization() {
+        let req = UpdateStoreRequest {
+            name: Some("Updated Name".to_string()),
+            website: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["name"], "Updated Name");
+        assert!(json["website"].is_null());
+    }
+
+    // =========================================================================
+    // InvoiceStatus coverage
+    // =========================================================================
+
+    #[test]
+    fn test_invoice_status_all_labels() {
+        assert_eq!(InvoiceStatus::Processing.label(), "Processing");
+        assert_eq!(InvoiceStatus::PartiallyPaid.label(), "Partially Paid");
+        assert_eq!(InvoiceStatus::Expired.label(), "Expired");
+        assert_eq!(InvoiceStatus::Cancelled.label(), "Cancelled");
+        assert_eq!(InvoiceStatus::Refunded.label(), "Refunded");
+        assert_eq!(InvoiceStatus::LatePaid.label(), "Late Paid");
+    }
+
+    #[test]
+    fn test_invoice_status_all_css_classes() {
+        assert_eq!(InvoiceStatus::Pending.css_class(), "badge badge-warning");
+        assert_eq!(InvoiceStatus::Processing.css_class(), "badge badge-info");
+        assert_eq!(InvoiceStatus::PartiallyPaid.css_class(), "badge badge-warning");
+        assert_eq!(InvoiceStatus::Expired.css_class(), "badge badge-error");
+        assert_eq!(InvoiceStatus::Cancelled.css_class(), "badge badge-neutral");
+        assert_eq!(InvoiceStatus::Refunded.css_class(), "badge badge-neutral");
+        assert_eq!(InvoiceStatus::LatePaid.css_class(), "badge badge-info");
+    }
+
+    #[test]
+    fn test_invoice_status_is_final() {
+        // Final statuses
+        assert!(InvoiceStatus::Paid.is_final());
+        assert!(InvoiceStatus::Expired.is_final());
+        assert!(InvoiceStatus::Cancelled.is_final());
+        assert!(InvoiceStatus::Refunded.is_final());
+        assert!(InvoiceStatus::LatePaid.is_final());
+        // Non-final
+        assert!(!InvoiceStatus::Pending.is_final());
+        assert!(!InvoiceStatus::Processing.is_final());
+        assert!(!InvoiceStatus::PartiallyPaid.is_final());
+    }
+
+    #[test]
+    fn test_invoice_status_default() {
+        assert_eq!(InvoiceStatus::default(), InvoiceStatus::Pending);
+    }
+
+    #[test]
+    fn test_invoice_status_serde_roundtrip() {
+        // snake_case serialization
+        let json = serde_json::to_string(&InvoiceStatus::PartiallyPaid).unwrap();
+        assert_eq!(json, "\"partially_paid\"");
+        let parsed: InvoiceStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, InvoiceStatus::PartiallyPaid);
+    }
+
+    // =========================================================================
+    // AssetType
+    // =========================================================================
+
+    #[test]
+    fn test_asset_type_default() {
+        assert_eq!(AssetType::default(), AssetType::Native);
+    }
+
+    #[test]
+    fn test_asset_type_serde_roundtrip() {
+        let json = serde_json::to_string(&AssetType::ERC20).unwrap();
+        assert_eq!(json, "\"e_r_c20\""); // rename_all = snake_case on ERC20
+        let parsed: AssetType = serde_json::from_str("\"e_r_c20\"").unwrap();
+        assert_eq!(parsed, AssetType::ERC20);
+
+        let json = serde_json::to_string(&AssetType::Native).unwrap();
+        assert_eq!(json, "\"native\"");
+        let parsed: AssetType = serde_json::from_str("\"native\"").unwrap();
+        assert_eq!(parsed, AssetType::Native);
+    }
+
+    // =========================================================================
+    // Payment method & webhook
+    // =========================================================================
+
+    #[test]
+    fn test_store_payment_method_serialization() {
+        let pm = StorePaymentMethod {
+            id: "pm_001".to_string(),
+            store_id: "store_001".to_string(),
+            chain_id: 1,
+            token_address: None,
+            asset_symbol: "ETH".to_string(),
+            decimals: 18,
+            xpub: "xpub123...".to_string(),
+            derivation_index: 0,
+            enabled: true,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&pm).unwrap();
+        let parsed: StorePaymentMethod = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.chain_id, 1);
+        assert_eq!(parsed.asset_symbol, "ETH");
+        assert!(parsed.enabled);
+        assert!(parsed.token_address.is_none());
+    }
+
+    #[test]
+    fn test_store_payment_method_erc20() {
+        let pm = StorePaymentMethod {
+            id: "pm_002".to_string(),
+            store_id: "store_001".to_string(),
+            chain_id: 137,
+            token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
+            asset_symbol: "USDC".to_string(),
+            decimals: 6,
+            xpub: "xpub456...".to_string(),
+            derivation_index: 5,
+            enabled: false,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&pm).unwrap();
+        let parsed: StorePaymentMethod = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.decimals, 6);
+        assert!(!parsed.enabled);
+        assert!(parsed.token_address.is_some());
+    }
+
+    #[test]
+    fn test_store_payment_method_enabled_default() {
+        // When 'enabled' is missing from JSON, it should default to true
+        let json = r#"{
+            "id": "pm_003",
+            "store_id": "s1",
+            "chain_id": 1,
+            "token_address": null,
+            "asset_symbol": "ETH",
+            "decimals": 18,
+            "xpub": "xpub...",
+            "derivation_index": 0,
+            "created_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let pm: StorePaymentMethod = serde_json::from_str(json).unwrap();
+        assert!(pm.enabled);
+    }
+
+    #[test]
+    fn test_store_webhook_serialization() {
+        let wh = StoreWebhook {
+            id: "wh_001".to_string(),
+            store_id: "store_001".to_string(),
+            webhook_url: "https://example.com/hook".to_string(),
+            webhook_secret: "secret123".to_string(),
+            enabled: true,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&wh).unwrap();
+        let parsed: StoreWebhook = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.webhook_url, "https://example.com/hook");
+        assert!(parsed.enabled);
+    }
+
+    #[test]
+    fn test_store_webhook_enabled_default() {
+        let json = r#"{
+            "id": "wh_002",
+            "store_id": "s1",
+            "webhook_url": "https://example.com/hook",
+            "webhook_secret": "sec",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let wh: StoreWebhook = serde_json::from_str(json).unwrap();
+        assert!(wh.enabled);
+    }
+
+    // =========================================================================
+    // Paginated response
+    // =========================================================================
+
+    #[test]
+    fn test_paginated_response() {
+        let json = r#"{
+            "data": [
+                {"id": "inv_1", "store_id": "s1", "currency": "USD", "status": "pending", "amount": "100", "amount_received": "0", "created_at": "2024-01-01T00:00:00Z", "expires_at": "2024-01-02T00:00:00Z", "metadata": null}
+            ],
+            "total": 50,
+            "page": 1,
+            "per_page": 10
+        }"#;
+        let resp: PaginatedResponse<Invoice> = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.total, 50);
+        assert_eq!(resp.page, 1);
+        assert_eq!(resp.per_page, 10);
+        assert_eq!(resp.data[0].id, "inv_1");
+    }
+
+    // =========================================================================
+    // Create invoice request
+    // =========================================================================
+
+    #[test]
+    fn test_create_invoice_request() {
+        let req = CreateInvoiceRequest {
+            store_id: "store_001".to_string(),
+            amount: "99.99".to_string(),
+            currency: "USD".to_string(),
+            chain_id: Some(1),
+            metadata: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["store_id"], "store_001");
+        assert_eq!(json["amount"], "99.99");
+        assert_eq!(json["currency"], "USD");
+        assert_eq!(json["chain_id"], 1);
+    }
+
+    #[test]
+    fn test_create_invoice_request_minimal() {
+        let req = CreateInvoiceRequest {
+            store_id: "s1".to_string(),
+            amount: "10".to_string(),
+            currency: "ETH".to_string(),
+            chain_id: None,
+            metadata: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json["chain_id"].is_null());
+        assert!(json["metadata"].is_null());
+    }
 }

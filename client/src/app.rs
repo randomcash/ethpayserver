@@ -7,14 +7,57 @@ use leptos_router::{
     hooks::use_location,
     path,
 };
-
 use ui_kit::{AuthProvider, AuthGuard, LoginPage, RegisterPage, use_auth};
+use ui_kit::hooks::use_storage::{get_local, set_local};
 
-use crate::api::EvmApiClient;
+use crate::api::{EvmApiClient, Store};
 use crate::pages::{
     DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage, PaymentsPage,
     SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage, WalletsPage,
 };
+
+/// localStorage key for persisted selected store ID.
+const SELECTED_STORE_KEY: &str = "eps_selected_store";
+
+/// Store context provided to all authenticated pages.
+///
+/// Tracks available stores and the currently selected store,
+/// persisting the selection in localStorage.
+#[derive(Clone)]
+pub struct StoreContext {
+    /// All stores the user has access to.
+    pub stores: ReadSignal<Vec<Store>>,
+    /// Currently selected store (None = "All Stores").
+    pub selected_store_id: ReadSignal<Option<String>>,
+    /// Set the selected store (pass None for "All Stores").
+    set_selected: WriteSignal<Option<String>>,
+    /// Trigger a refetch of stores.
+    refetch: ArcTrigger,
+}
+
+impl StoreContext {
+    /// Set the currently selected store. Persists to localStorage.
+    pub fn select_store(&self, store_id: Option<String>) {
+        if let Some(ref id) = store_id {
+            let _ = set_local(SELECTED_STORE_KEY, id);
+        } else {
+            ui_kit::hooks::use_storage::remove_local(SELECTED_STORE_KEY);
+        }
+        self.set_selected.set(store_id);
+    }
+
+    /// Get the currently selected store object.
+    pub fn selected_store(&self) -> Option<Store> {
+        let id = self.selected_store_id.get();
+        let stores = self.stores.get();
+        id.and_then(|id| stores.iter().find(|s| s.id == id).cloned())
+    }
+
+    /// Trigger a refetch of the stores list.
+    pub fn refetch_stores(&self) {
+        self.refetch.notify();
+    }
+}
 
 /// Root application component.
 #[component]
@@ -114,6 +157,52 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
     });
     provide_context(api);
 
+    // Store context: fetch stores, track selection, persist in localStorage.
+    let (stores, set_stores) = signal(Vec::<Store>::new());
+    let saved_id: Option<String> = get_local(SELECTED_STORE_KEY);
+    let (selected_store_id, set_selected_store_id) = signal(saved_id);
+    let refetch = ArcTrigger::new();
+
+    // Fetch stores on mount and whenever refetch is triggered.
+    let refetch_for_effect = refetch.clone();
+    Effect::new(move || {
+        refetch_for_effect.track();
+        let api = api.get();
+        leptos::task::spawn_local(async move {
+            match api.list_stores().await {
+                Ok(fetched) => {
+                    // If selected store no longer exists, clear selection.
+                    if let Some(ref id) = selected_store_id.get_untracked() {
+                        if !fetched.iter().any(|s| &s.id == id) {
+                            set_selected_store_id.set(None);
+                            ui_kit::hooks::use_storage::remove_local(SELECTED_STORE_KEY);
+                        }
+                    }
+                    // Auto-select the first store if none is selected.
+                    if selected_store_id.get_untracked().is_none() {
+                        if let Some(first) = fetched.first() {
+                            let id = first.id.clone();
+                            let _ = set_local(SELECTED_STORE_KEY, &id);
+                            set_selected_store_id.set(Some(id));
+                        }
+                    }
+                    set_stores.set(fetched);
+                }
+                Err(e) => {
+                    web_sys::console::error_1(&format!("Failed to fetch stores: {}", e).into());
+                }
+            }
+        });
+    });
+
+    let store_ctx = StoreContext {
+        stores,
+        selected_store_id,
+        set_selected: set_selected_store_id,
+        refetch,
+    };
+    provide_context(store_ctx);
+
     view! {
         <AuthGuard redirect_to="/login".to_string()>
             <div class="app-layout">
@@ -148,17 +237,22 @@ where
 
     // Store selector state
     let (dropdown_open, set_dropdown_open) = signal(false);
-    let (selected_store, set_selected_store) = signal("My Store".to_string());
 
-    // Mock stores for now - will come from API
-    let stores = vec![
-        ("all", "All Stores"),
-        ("store-1", "My Store"),
-        ("store-2", "Demo Shop"),
-        ("store-3", "Test Store"),
-    ];
+    // Get store context
+    let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
 
     let toggle_dropdown = move |_| set_dropdown_open.update(|v| *v = !*v);
+
+    // Selected store name for display
+    let selected_name = {
+        let store_ctx = store_ctx.clone();
+        move || {
+            match store_ctx.selected_store() {
+                Some(s) => s.name.clone(),
+                None => "All Stores".to_string(),
+            }
+        }
+    };
 
     view! {
         <aside class=move || if open.get() { "sidebar open" } else { "sidebar" }>
@@ -180,37 +274,82 @@ where
                 >
                     <div class="store-selector-info">
                         <IconStore />
-                        <span class="store-selector-name">{move || selected_store.get()}</span>
+                        <span class="store-selector-name">{selected_name.clone()}</span>
                     </div>
                     <IconChevron expanded=dropdown_open />
                 </button>
 
                 <div class=move || if dropdown_open.get() { "store-dropdown open" } else { "store-dropdown" }>
-                    {stores.into_iter().map(|(id, name)| {
-                        let name_owned = name.to_string();
-                        let name_for_class = name.to_string();
-                        let name_for_click = name.to_string();
+                    // "All Stores" option
+                    {
+                        let store_ctx = store_ctx.clone();
                         view! {
                             <button
-                                class=move || if selected_store.get() == name_owned { "store-dropdown-item active" } else { "store-dropdown-item" }
-                                on:click=move |_| {
-                                    set_selected_store.set(name_for_click.clone());
-                                    set_dropdown_open.set(false);
+                                class=move || if store_ctx.selected_store_id.get().is_none() { "store-dropdown-item active" } else { "store-dropdown-item" }
+                                on:click={
+                                    let store_ctx = store_ctx.clone();
+                                    move |_| {
+                                        store_ctx.select_store(None);
+                                        set_dropdown_open.set(false);
+                                    }
                                 }
                             >
-                                {if id == "all" {
-                                    view! { <IconLayers /> }.into_any()
-                                } else {
-                                    view! { <IconStore /> }.into_any()
-                                }}
-                                <span>{name}</span>
-                                {move || (selected_store.get() == name_for_class).then(|| view! { <IconCheck /> })}
+                                <IconLayers />
+                                <span>"All Stores"</span>
+                                {
+                                    let store_ctx = store_ctx.clone();
+                                    move || store_ctx.selected_store_id.get().is_none().then(|| view! { <IconCheck /> })
+                                }
                             </button>
                         }
-                    }).collect_view()}
+                    }
+
+                    // Store list from API
+                    <For
+                        each=move || store_ctx.stores.get()
+                        key=|store| store.id.clone()
+                        let:store
+                    >
+                        {
+                            let store_id = store.id.clone();
+                            let store_name = store.name.clone();
+                            let store_ctx = store_ctx.clone();
+                            let id_for_click = store_id.clone();
+                            let id_for_active = store_id.clone();
+                            view! {
+                                <button
+                                    class=move || {
+                                        let is_active = store_ctx.selected_store_id.get().as_deref() == Some(&id_for_active);
+                                        if is_active { "store-dropdown-item active" } else { "store-dropdown-item" }
+                                    }
+                                    on:click={
+                                        let store_ctx = store_ctx.clone();
+                                        let id = id_for_click.clone();
+                                        move |_| {
+                                            store_ctx.select_store(Some(id.clone()));
+                                            set_dropdown_open.set(false);
+                                        }
+                                    }
+                                >
+                                    <IconStore />
+                                    <span>{store_name.clone()}</span>
+                                    {
+                                        let store_ctx = store_ctx.clone();
+                                        let id = store_id.clone();
+                                        move || {
+                                            let is_active = store_ctx.selected_store_id.get().as_deref() == Some(&id);
+                                            is_active.then(|| view! { <IconCheck /> })
+                                        }
+                                    }
+                                </button>
+                            }
+                        }
+                    </For>
 
                     <div class="store-dropdown-divider"></div>
-                    <a href="/evm/stores" class="store-dropdown-item store-dropdown-manage">
+                    <a href="/evm/stores" class="store-dropdown-item store-dropdown-manage"
+                        on:click=move |_| set_dropdown_open.set(false)
+                    >
                         <IconSettings />
                         <span>"Manage Stores"</span>
                     </a>

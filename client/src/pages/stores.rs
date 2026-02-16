@@ -7,6 +7,7 @@ use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map};
 
 use crate::api::{CreateStoreRequest, EvmApiClient, Store, StorePaymentMethod, StoreWebhook, UpdateStoreRequest};
+use crate::app::StoreContext;
 
 /// Helper to get chain name from chain ID.
 fn chain_name(chain_id: u64) -> &'static str {
@@ -50,6 +51,7 @@ fn format_date(iso: &str) -> String {
 #[component]
 pub fn StoresPage() -> impl IntoView {
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
 
     // Fetch stores from API
     let (refresh_counter, set_refresh_counter) = signal(0u32);
@@ -65,31 +67,36 @@ pub fn StoresPage() -> impl IntoView {
     let (creating, set_creating) = signal(false);
     let (create_error, set_create_error) = signal(None::<String>);
 
-    let on_create_store = move |_| {
-        let name = new_store_name.get_untracked();
-        if name.trim().is_empty() {
-            return;
-        }
-        let api = api.get();
-        set_creating.set(true);
-        set_create_error.set(None);
-        leptos::task::spawn_local(async move {
-            let req = CreateStoreRequest {
-                name: name.trim().to_string(),
-                website: None,
-            };
-            match api.create_store(&req).await {
-                Ok(_) => {
-                    set_new_store_name.set(String::new());
-                    set_show_create_form.set(false);
-                    set_refresh_counter.update(|c| *c += 1);
-                }
-                Err(e) => {
-                    set_create_error.set(Some(e.to_string()));
-                }
+    let on_create_store = {
+        let store_ctx = store_ctx.clone();
+        move |_| {
+            let name = new_store_name.get_untracked();
+            if name.trim().is_empty() {
+                return;
             }
-            set_creating.set(false);
-        });
+            let api = api.get();
+            let store_ctx = store_ctx.clone();
+            set_creating.set(true);
+            set_create_error.set(None);
+            leptos::task::spawn_local(async move {
+                let req = CreateStoreRequest {
+                    name: name.trim().to_string(),
+                    website: None,
+                };
+                match api.create_store(&req).await {
+                    Ok(_) => {
+                        set_new_store_name.set(String::new());
+                        set_show_create_form.set(false);
+                        set_refresh_counter.update(|c| *c += 1);
+                        store_ctx.refetch_stores();
+                    }
+                    Err(e) => {
+                        set_create_error.set(Some(e.to_string()));
+                    }
+                }
+                set_creating.set(false);
+            });
+        }
     };
 
     // Filter to show only active stores by default
@@ -132,33 +139,38 @@ pub fn StoresPage() -> impl IntoView {
                                 placeholder="My Store"
                                 prop:value=move || new_store_name.get()
                                 on:input=move |ev| set_new_store_name.set(event_target_value(&ev))
-                                on:keydown=move |ev: web_sys::KeyboardEvent| {
-                                    if ev.key() == "Enter" {
-                                        ev.prevent_default();
-                                        let name = new_store_name.get_untracked();
-                                        if name.trim().is_empty() {
-                                            return;
-                                        }
-                                        let api = api.get();
-                                        set_creating.set(true);
-                                        set_create_error.set(None);
-                                        leptos::task::spawn_local(async move {
-                                            let req = CreateStoreRequest {
-                                                name: name.trim().to_string(),
-                                                website: None,
-                                            };
-                                            match api.create_store(&req).await {
-                                                Ok(_) => {
-                                                    set_new_store_name.set(String::new());
-                                                    set_show_create_form.set(false);
-                                                    set_refresh_counter.update(|c| *c += 1);
-                                                }
-                                                Err(e) => {
-                                                    set_create_error.set(Some(e.to_string()));
-                                                }
+                                on:keydown={
+                                    let store_ctx = store_ctx.clone();
+                                    move |ev: web_sys::KeyboardEvent| {
+                                        if ev.key() == "Enter" {
+                                            ev.prevent_default();
+                                            let name = new_store_name.get_untracked();
+                                            if name.trim().is_empty() {
+                                                return;
                                             }
-                                            set_creating.set(false);
-                                        });
+                                            let api = api.get();
+                                            let store_ctx = store_ctx.clone();
+                                            set_creating.set(true);
+                                            set_create_error.set(None);
+                                            leptos::task::spawn_local(async move {
+                                                let req = CreateStoreRequest {
+                                                    name: name.trim().to_string(),
+                                                    website: None,
+                                                };
+                                                match api.create_store(&req).await {
+                                                    Ok(_) => {
+                                                        set_new_store_name.set(String::new());
+                                                        set_show_create_form.set(false);
+                                                        set_refresh_counter.update(|c| *c += 1);
+                                                        store_ctx.refetch_stores();
+                                                    }
+                                                    Err(e) => {
+                                                        set_create_error.set(Some(e.to_string()));
+                                                    }
+                                                }
+                                                set_creating.set(false);
+                                            });
+                                        }
                                     }
                                 }
                             />
@@ -398,6 +410,7 @@ pub fn StoreDetailPage() -> impl IntoView {
 #[component]
 fn GeneralTab(store: Store) -> impl IntoView {
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
     let navigate = use_navigate();
     let store_id = store.id.clone();
 
@@ -408,24 +421,31 @@ fn GeneralTab(store: Store) -> impl IntoView {
     let (deleting, set_deleting) = signal(false);
 
     let store_id_save = store_id.clone();
-    let on_save = move |_| {
-        let api = api.get();
-        let id = store_id_save.clone();
-        let new_name = name.get_untracked();
-        let new_website = website.get_untracked();
-        set_saving.set(true);
-        set_save_message.set(None);
-        leptos::task::spawn_local(async move {
-            let req = UpdateStoreRequest {
-                name: Some(new_name),
-                website: Some(if new_website.is_empty() { String::new() } else { new_website }),
-            };
-            match api.update_store(&id, &req).await {
-                Ok(_) => set_save_message.set(Some((true, "Changes saved".to_string()))),
-                Err(e) => set_save_message.set(Some((false, e.to_string()))),
-            }
-            set_saving.set(false);
-        });
+    let on_save = {
+        let store_ctx = store_ctx.clone();
+        move |_| {
+            let api = api.get();
+            let id = store_id_save.clone();
+            let new_name = name.get_untracked();
+            let new_website = website.get_untracked();
+            let store_ctx = store_ctx.clone();
+            set_saving.set(true);
+            set_save_message.set(None);
+            leptos::task::spawn_local(async move {
+                let req = UpdateStoreRequest {
+                    name: Some(new_name),
+                    website: Some(if new_website.is_empty() { String::new() } else { new_website }),
+                };
+                match api.update_store(&id, &req).await {
+                    Ok(_) => {
+                        set_save_message.set(Some((true, "Changes saved".to_string())));
+                        store_ctx.refetch_stores();
+                    }
+                    Err(e) => set_save_message.set(Some((false, e.to_string()))),
+                }
+                set_saving.set(false);
+            });
+        }
     };
 
     let store_id_delete = store_id.clone();
@@ -433,10 +453,14 @@ fn GeneralTab(store: Store) -> impl IntoView {
         let api = api.get();
         let id = store_id_delete.clone();
         let navigate = navigate.clone();
+        let store_ctx = store_ctx.clone();
         set_deleting.set(true);
         leptos::task::spawn_local(async move {
             match api.delete_store(&id).await {
-                Ok(_) => navigate("/evm/stores", Default::default()),
+                Ok(_) => {
+                    store_ctx.refetch_stores();
+                    navigate("/evm/stores", Default::default());
+                }
                 Err(e) => {
                     web_sys::window()
                         .and_then(|w| w.alert_with_message(&format!("Delete failed: {}", e)).ok());
