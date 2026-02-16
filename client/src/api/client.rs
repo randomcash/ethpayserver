@@ -5,8 +5,9 @@ use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
 use super::{
-    CreateInvoiceRequest, CreateStoreRequest, DashboardStats, Invoice, PaginatedResponse,
-    Payment, Store, UpdateStoreRequest, Wallet,
+    CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
+    PaginatedResponse, Payment, Store, StorePaymentMethod, UpdatePaymentMethodRequest,
+    UpdateStoreRequest, Wallet,
 };
 
 /// API client errors.
@@ -253,6 +254,30 @@ impl EvmApiClient {
     /// Delete a store.
     pub async fn delete_store(&self, id: &str) -> Result<(), ApiError> {
         self.delete(&format!("/api/stores/{}", id)).await
+    }
+
+    // =========================================================================
+    // Payment Methods
+    // =========================================================================
+
+    /// List payment methods for a store.
+    pub async fn list_payment_methods(&self, store_id: &str) -> Result<Vec<StorePaymentMethod>, ApiError> {
+        self.get(&format!("/api/stores/{}/payment-methods", store_id)).await
+    }
+
+    /// Create a payment method for a store.
+    pub async fn create_payment_method(&self, store_id: &str, request: &CreatePaymentMethodRequest) -> Result<StorePaymentMethod, ApiError> {
+        self.post(&format!("/api/stores/{}/payment-methods", store_id), request).await
+    }
+
+    /// Update a payment method.
+    pub async fn update_payment_method(&self, store_id: &str, method_id: &str, request: &UpdatePaymentMethodRequest) -> Result<StorePaymentMethod, ApiError> {
+        self.put(&format!("/api/stores/{}/payment-methods/{}", store_id, method_id), request).await
+    }
+
+    /// Delete a payment method.
+    pub async fn delete_payment_method(&self, store_id: &str, method_id: &str) -> Result<(), ApiError> {
+        self.delete(&format!("/api/stores/{}/payment-methods/{}", store_id, method_id)).await
     }
 
     // =========================================================================

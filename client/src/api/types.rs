@@ -171,7 +171,7 @@ pub struct Store {
 
 /// Store payment method - defines which chains/tokens a store accepts.
 ///
-/// Mirrors `StorePaymentMethod` from the backend.
+/// Mirrors `PaymentMethodResponse` from the backend API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorePaymentMethod {
     pub id: String,
@@ -182,10 +182,8 @@ pub struct StorePaymentMethod {
     pub token_address: Option<String>,
     /// Asset symbol (ETH, USDC, USDT, etc.)
     pub asset_symbol: String,
-    /// Token decimals (18 for ETH, 6 for USDC/USDT).
-    pub decimals: u8,
-    /// BIP-32 extended public key for HD wallet derivation.
-    pub xpub: String,
+    /// BIP-32 extended public key (masked for security).
+    pub xpub_masked: String,
     /// Next derivation index to use.
     pub derivation_index: i32,
     /// Whether this payment method is enabled.
@@ -286,6 +284,13 @@ pub struct CreatePaymentMethodRequest {
     pub asset_symbol: String,
     pub decimals: u8,
     pub xpub: String,
+}
+
+/// Update payment method request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatePaymentMethodRequest {
+    pub enabled: Option<bool>,
+    pub xpub: Option<String>,
 }
 
 /// Update webhook request.
@@ -567,8 +572,7 @@ mod tests {
             chain_id: 1,
             token_address: None,
             asset_symbol: "ETH".to_string(),
-            decimals: 18,
-            xpub: "xpub123...".to_string(),
+            xpub_masked: "xpub12...pub123".to_string(),
             derivation_index: 0,
             enabled: true,
             created_at: "2024-01-01T00:00:00Z".to_string(),
@@ -589,15 +593,13 @@ mod tests {
             chain_id: 137,
             token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
             asset_symbol: "USDC".to_string(),
-            decimals: 6,
-            xpub: "xpub456...".to_string(),
+            xpub_masked: "xpub45...pub456".to_string(),
             derivation_index: 5,
             enabled: false,
             created_at: "2024-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_string(&pm).unwrap();
         let parsed: StorePaymentMethod = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.decimals, 6);
         assert!(!parsed.enabled);
         assert!(parsed.token_address.is_some());
     }
@@ -611,13 +613,122 @@ mod tests {
             "chain_id": 1,
             "token_address": null,
             "asset_symbol": "ETH",
-            "decimals": 18,
-            "xpub": "xpub...",
+            "xpub_masked": "xpub...pub",
             "derivation_index": 0,
             "created_at": "2024-01-01T00:00:00Z"
         }"#;
         let pm: StorePaymentMethod = serde_json::from_str(json).unwrap();
         assert!(pm.enabled);
+    }
+
+    #[test]
+    fn test_store_payment_method_from_backend_json() {
+        // Simulates the actual PaymentMethodResponse JSON from the backend
+        let json = r#"{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "store_id": "660e8400-e29b-41d4-a716-446655440000",
+            "chain_id": 11155111,
+            "token_address": null,
+            "asset_symbol": "ETH",
+            "xpub_masked": "xpub6CUG...Ht4QRnxv",
+            "derivation_index": 3,
+            "enabled": true,
+            "created_at": "2024-06-15T10:30:00Z"
+        }"#;
+        let pm: StorePaymentMethod = serde_json::from_str(json).unwrap();
+        assert_eq!(pm.id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(pm.chain_id, 11155111);
+        assert_eq!(pm.asset_symbol, "ETH");
+        assert_eq!(pm.xpub_masked, "xpub6CUG...Ht4QRnxv");
+        assert_eq!(pm.derivation_index, 3);
+        assert!(pm.enabled);
+        assert!(pm.token_address.is_none());
+    }
+
+    #[test]
+    fn test_store_payment_method_from_backend_erc20_json() {
+        // Backend response for an ERC20 payment method
+        let json = r#"{
+            "id": "770e8400-e29b-41d4-a716-446655440000",
+            "store_id": "660e8400-e29b-41d4-a716-446655440000",
+            "chain_id": 1,
+            "token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "asset_symbol": "USDC",
+            "xpub_masked": "xpub6D4B...9kW3F2Rq",
+            "derivation_index": 0,
+            "enabled": false,
+            "created_at": "2024-06-15T10:30:00Z"
+        }"#;
+        let pm: StorePaymentMethod = serde_json::from_str(json).unwrap();
+        assert_eq!(pm.chain_id, 1);
+        assert_eq!(pm.asset_symbol, "USDC");
+        assert_eq!(pm.token_address.as_deref(), Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"));
+        assert!(!pm.enabled);
+    }
+
+    #[test]
+    fn test_create_payment_method_request() {
+        let req = CreatePaymentMethodRequest {
+            chain_id: 1,
+            token_address: None,
+            asset_symbol: "ETH".to_string(),
+            decimals: 18,
+            xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz".to_string(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chain_id"], 1);
+        assert!(json["token_address"].is_null());
+        assert_eq!(json["asset_symbol"], "ETH");
+        assert_eq!(json["decimals"], 18);
+        assert!(json["xpub"].as_str().unwrap().starts_with("xpub"));
+    }
+
+    #[test]
+    fn test_create_payment_method_request_erc20() {
+        let req = CreatePaymentMethodRequest {
+            chain_id: 137,
+            token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
+            asset_symbol: "USDC".to_string(),
+            decimals: 6,
+            xpub: "xpub123...".to_string(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chain_id"], 137);
+        assert_eq!(json["token_address"], "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        assert_eq!(json["decimals"], 6);
+    }
+
+    #[test]
+    fn test_update_payment_method_request_toggle_enabled() {
+        let req = UpdatePaymentMethodRequest {
+            enabled: Some(false),
+            xpub: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["enabled"], false);
+        assert!(json["xpub"].is_null());
+    }
+
+    #[test]
+    fn test_update_payment_method_request_change_xpub() {
+        let req = UpdatePaymentMethodRequest {
+            enabled: None,
+            xpub: Some("xpub6NEW...".to_string()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json["enabled"].is_null());
+        assert_eq!(json["xpub"], "xpub6NEW...");
+    }
+
+    #[test]
+    fn test_update_payment_method_request_both_fields() {
+        let req = UpdatePaymentMethodRequest {
+            enabled: Some(true),
+            xpub: Some("xpub6ABC...".to_string()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["xpub"], "xpub6ABC...");
     }
 
     #[test]
