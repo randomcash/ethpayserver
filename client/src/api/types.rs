@@ -198,15 +198,17 @@ fn default_true() -> bool {
 
 /// Store webhook configuration.
 ///
-/// Mirrors `StoreWebhook` from the backend.
+/// Mirrors `WebhookResponse` from the backend API.
+/// `webhook_secret` is only present in the response after configure (PUT),
+/// not on GET (backend hides it for security).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreWebhook {
     pub id: String,
     pub store_id: String,
     /// Webhook endpoint URL.
     pub webhook_url: String,
-    /// HMAC-SHA256 secret for payload signing (masked in responses).
-    pub webhook_secret: String,
+    /// HMAC-SHA256 secret for payload signing. Only returned on configure (PUT).
+    pub webhook_secret: Option<String>,
     /// Whether webhooks are enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -737,7 +739,7 @@ mod tests {
             id: "wh_001".to_string(),
             store_id: "store_001".to_string(),
             webhook_url: "https://example.com/hook".to_string(),
-            webhook_secret: "secret123".to_string(),
+            webhook_secret: Some("secret123".to_string()),
             enabled: true,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
@@ -745,7 +747,41 @@ mod tests {
         let json = serde_json::to_string(&wh).unwrap();
         let parsed: StoreWebhook = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.webhook_url, "https://example.com/hook");
+        assert_eq!(parsed.webhook_secret, Some("secret123".to_string()));
         assert!(parsed.enabled);
+    }
+
+    #[test]
+    fn test_store_webhook_from_backend_get() {
+        // Backend GET returns webhook_secret as null
+        let json = r#"{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "store_id": "660e8400-e29b-41d4-a716-446655440000",
+            "webhook_url": "https://example.com/hook",
+            "webhook_secret": null,
+            "enabled": true,
+            "created_at": "2024-06-15T10:30:00Z",
+            "updated_at": "2024-06-15T10:30:00Z"
+        }"#;
+        let wh: StoreWebhook = serde_json::from_str(json).unwrap();
+        assert!(wh.webhook_secret.is_none());
+        assert!(wh.enabled);
+    }
+
+    #[test]
+    fn test_store_webhook_from_backend_put() {
+        // Backend PUT returns webhook_secret with the new secret
+        let json = r#"{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "store_id": "660e8400-e29b-41d4-a716-446655440000",
+            "webhook_url": "https://example.com/hook",
+            "webhook_secret": "whsec_abc123",
+            "enabled": true,
+            "created_at": "2024-06-15T10:30:00Z",
+            "updated_at": "2024-06-15T10:30:00Z"
+        }"#;
+        let wh: StoreWebhook = serde_json::from_str(json).unwrap();
+        assert_eq!(wh.webhook_secret, Some("whsec_abc123".to_string()));
     }
 
     #[test]
@@ -754,12 +790,50 @@ mod tests {
             "id": "wh_002",
             "store_id": "s1",
             "webhook_url": "https://example.com/hook",
-            "webhook_secret": "sec",
+            "webhook_secret": null,
             "created_at": "2024-01-01T00:00:00Z",
             "updated_at": "2024-01-01T00:00:00Z"
         }"#;
         let wh: StoreWebhook = serde_json::from_str(json).unwrap();
         assert!(wh.enabled);
+    }
+
+    // =========================================================================
+    // UpdateWebhookRequest
+    // =========================================================================
+
+    #[test]
+    fn test_update_webhook_request_serialization() {
+        let req = UpdateWebhookRequest {
+            webhook_url: "https://example.com/hook".to_string(),
+            enabled: true,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["webhook_url"], "https://example.com/hook");
+        assert_eq!(json["enabled"], true);
+    }
+
+    #[test]
+    fn test_update_webhook_request_disabled() {
+        let req = UpdateWebhookRequest {
+            webhook_url: "http://localhost:1234".to_string(),
+            enabled: false,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["webhook_url"], "http://localhost:1234");
+        assert_eq!(json["enabled"], false);
+    }
+
+    #[test]
+    fn test_update_webhook_request_roundtrip() {
+        let req = UpdateWebhookRequest {
+            webhook_url: "https://api.example.com/webhooks/payments".to_string(),
+            enabled: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: UpdateWebhookRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.webhook_url, req.webhook_url);
+        assert_eq!(parsed.enabled, req.enabled);
     }
 
     // =========================================================================

@@ -6,8 +6,8 @@ use thiserror::Error;
 
 use super::{
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
-    PaginatedResponse, Payment, Store, StorePaymentMethod, UpdatePaymentMethodRequest,
-    UpdateStoreRequest, Wallet,
+    PaginatedResponse, Payment, Store, StorePaymentMethod, StoreWebhook,
+    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, Wallet,
 };
 
 /// API client errors.
@@ -278,6 +278,26 @@ impl EvmApiClient {
     /// Delete a payment method.
     pub async fn delete_payment_method(&self, store_id: &str, method_id: &str) -> Result<(), ApiError> {
         self.delete(&format!("/api/stores/{}/payment-methods/{}", store_id, method_id)).await
+    }
+
+    // =========================================================================
+    // Webhooks
+    // =========================================================================
+
+    /// Get webhook configuration for a store.
+    pub async fn get_store_webhook(&self, store_id: &str) -> Result<StoreWebhook, ApiError> {
+        self.get(&format!("/api/stores/{}/webhook", store_id)).await
+    }
+
+    /// Configure (create or update) webhook for a store.
+    /// Returns the webhook with the secret visible (only time it's shown).
+    pub async fn configure_store_webhook(&self, store_id: &str, request: &UpdateWebhookRequest) -> Result<StoreWebhook, ApiError> {
+        self.put(&format!("/api/stores/{}/webhook", store_id), request).await
+    }
+
+    /// Delete webhook configuration for a store.
+    pub async fn delete_store_webhook(&self, store_id: &str) -> Result<(), ApiError> {
+        self.delete(&format!("/api/stores/{}/webhook", store_id)).await
     }
 
     // =========================================================================
