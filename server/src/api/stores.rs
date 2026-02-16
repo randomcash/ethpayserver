@@ -1308,3 +1308,317 @@ where
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    // =========================================================================
+    // mask_xpub
+    // =========================================================================
+
+    #[test]
+    fn test_mask_xpub_normal() {
+        let xpub = "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz";
+        let masked = mask_xpub(xpub);
+        assert!(masked.starts_with("xpub6CUG"));
+        assert!(masked.contains("..."));
+        assert!(masked.ends_with("3fDVmz"));
+    }
+
+    #[test]
+    fn test_mask_xpub_short() {
+        assert_eq!(mask_xpub("short"), "****");
+    }
+
+    #[test]
+    fn test_mask_xpub_boundary_20() {
+        assert_eq!(mask_xpub("12345678901234567890"), "****");
+    }
+
+    #[test]
+    fn test_mask_xpub_boundary_21() {
+        assert_eq!(mask_xpub("123456789012345678901"), "12345678...45678901");
+    }
+
+    // =========================================================================
+    // StoreResponse conversion
+    // =========================================================================
+
+    #[test]
+    fn test_store_response_from_store() {
+        let now = Utc::now();
+        let store = Store {
+            id: StoreId(Uuid::nil()),
+            name: "Test Store".to_string(),
+            website: Some("https://example.com".to_string()),
+            owner_id: UserId(Uuid::nil()),
+            archived: false,
+            created_at: now,
+        };
+
+        let response: StoreResponse = store.into();
+        assert_eq!(response.id, Uuid::nil());
+        assert_eq!(response.name, "Test Store");
+        assert_eq!(response.website, Some("https://example.com".to_string()));
+        assert_eq!(response.owner_id, Uuid::nil());
+        assert!(!response.archived);
+        assert_eq!(response.created_at, now);
+    }
+
+    #[test]
+    fn test_store_response_without_website() {
+        let store = Store {
+            id: StoreId(Uuid::new_v4()),
+            name: "No Website".to_string(),
+            website: None,
+            owner_id: UserId(Uuid::new_v4()),
+            archived: false,
+            created_at: Utc::now(),
+        };
+
+        let response: StoreResponse = store.into();
+        assert!(response.website.is_none());
+    }
+
+    #[test]
+    fn test_store_response_archived() {
+        let store = Store {
+            id: StoreId(Uuid::new_v4()),
+            name: "Archived".to_string(),
+            website: None,
+            owner_id: UserId(Uuid::new_v4()),
+            archived: true,
+            created_at: Utc::now(),
+        };
+
+        let response: StoreResponse = store.into();
+        assert!(response.archived);
+    }
+
+    // =========================================================================
+    // PaymentMethodResponse conversion
+    // =========================================================================
+
+    #[test]
+    fn test_payment_method_response_native() {
+        let pm = StorePaymentMethod {
+            id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            chain_id: 1,
+            token_address: None,
+            asset_symbol: "ETH".to_string(),
+            decimals: 18,
+            xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz".to_string(),
+            derivation_index: 5,
+            enabled: true,
+            created_at: Utc::now(),
+        };
+
+        let response: PaymentMethodResponse = pm.into();
+        assert_eq!(response.chain_id, 1);
+        assert_eq!(response.asset_symbol, "ETH");
+        assert!(response.token_address.is_none());
+        assert_eq!(response.derivation_index, 5);
+        assert!(response.enabled);
+        assert!(response.xpub_masked.contains("..."));
+    }
+
+    #[test]
+    fn test_payment_method_response_erc20() {
+        let token_addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string();
+        let pm = StorePaymentMethod {
+            id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            chain_id: 137,
+            token_address: Some(token_addr.clone()),
+            asset_symbol: "USDC".to_string(),
+            decimals: 6,
+            xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz".to_string(),
+            derivation_index: 0,
+            enabled: false,
+            created_at: Utc::now(),
+        };
+
+        let response: PaymentMethodResponse = pm.into();
+        assert_eq!(response.chain_id, 137);
+        assert_eq!(response.asset_symbol, "USDC");
+        assert_eq!(response.token_address, Some(token_addr));
+        assert!(!response.enabled);
+    }
+
+    // =========================================================================
+    // Request deserialization
+    // =========================================================================
+
+    #[test]
+    fn test_create_store_request() {
+        let json = r#"{"name": "My Store", "website": "https://mystore.com"}"#;
+        let req: CreateStoreRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.name, "My Store");
+        assert_eq!(req.website, Some("https://mystore.com".to_string()));
+    }
+
+    #[test]
+    fn test_create_store_request_without_website() {
+        let json = r#"{"name": "My Store"}"#;
+        let req: CreateStoreRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.name, "My Store");
+        assert!(req.website.is_none());
+    }
+
+    #[test]
+    fn test_create_store_request_missing_name() {
+        let json = r#"{"website": "https://mystore.com"}"#;
+        let result = serde_json::from_str::<CreateStoreRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_update_store_request_partial() {
+        let json = r#"{"name": "New Name"}"#;
+        let req: UpdateStoreRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.name, Some("New Name".to_string()));
+        assert!(req.website.is_none());
+    }
+
+    #[test]
+    fn test_update_store_request_empty() {
+        let json = r#"{}"#;
+        let req: UpdateStoreRequest = serde_json::from_str(json).unwrap();
+        assert!(req.name.is_none());
+        assert!(req.website.is_none());
+    }
+
+    #[test]
+    fn test_create_payment_method_request() {
+        let json = r#"{
+            "chain_id": 1,
+            "token_address": null,
+            "asset_symbol": "ETH",
+            "decimals": 18,
+            "xpub": "xpub123..."
+        }"#;
+        let req: CreatePaymentMethodRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.chain_id, 1);
+        assert!(req.token_address.is_none());
+        assert_eq!(req.asset_symbol, "ETH");
+        assert_eq!(req.decimals, 18);
+    }
+
+    #[test]
+    fn test_update_payment_method_request_partial() {
+        let json = r#"{"enabled": false}"#;
+        let req: UpdatePaymentMethodRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.enabled, Some(false));
+        assert!(req.xpub.is_none());
+    }
+
+    #[test]
+    fn test_configure_webhook_request_defaults_enabled() {
+        let json = r#"{"webhook_url": "https://example.com/hook"}"#;
+        let req: ConfigureWebhookRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.webhook_url, "https://example.com/hook");
+        assert!(req.enabled);
+    }
+
+    #[test]
+    fn test_configure_webhook_request_disabled() {
+        let json = r#"{"webhook_url": "https://example.com/hook", "enabled": false}"#;
+        let req: ConfigureWebhookRequest = serde_json::from_str(json).unwrap();
+        assert!(!req.enabled);
+    }
+
+    // =========================================================================
+    // Response serialization
+    // =========================================================================
+
+    #[test]
+    fn test_store_response_json() {
+        let response = StoreResponse {
+            id: Uuid::nil(),
+            name: "Test".to_string(),
+            website: None,
+            owner_id: Uuid::nil(),
+            archived: false,
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["name"], "Test");
+        assert_eq!(json["archived"], false);
+        assert!(json["website"].is_null());
+        assert!(json["id"].is_string());
+        assert!(json["created_at"].is_string());
+    }
+
+    #[test]
+    fn test_member_response_json() {
+        let response = MemberResponse {
+            user_id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            role_id: Uuid::nil(),
+            role_name: "Owner".to_string(),
+            permissions: vec![
+                "ethpay.store.canmodifystoresettings".to_string(),
+                "ethpay.store.canviewinvoices".to_string(),
+            ],
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["role_name"], "Owner");
+        assert_eq!(json["permissions"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_wallet_response_json() {
+        let response = WalletResponse {
+            id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            xpub_masked: "xpub6CUG...3fDVmz".to_string(),
+            derivation_index: 42,
+            name: Some("Main Wallet".to_string()),
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["derivation_index"], 42);
+        assert_eq!(json["name"], "Main Wallet");
+        assert_eq!(json["xpub_masked"], "xpub6CUG...3fDVmz");
+    }
+
+    #[test]
+    fn test_webhook_response_with_secret() {
+        let response = WebhookResponse {
+            id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            webhook_url: "https://example.com/webhook".to_string(),
+            webhook_secret: Some("secret123".to_string()),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["webhook_url"], "https://example.com/webhook");
+        assert_eq!(json["webhook_secret"], "secret123");
+        assert!(json["enabled"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_webhook_response_without_secret() {
+        let response = WebhookResponse {
+            id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            webhook_url: "https://example.com/webhook".to_string(),
+            webhook_secret: None,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["webhook_secret"].is_null());
+    }
+}

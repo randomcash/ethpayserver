@@ -271,6 +271,13 @@ pub struct CreateStoreRequest {
     pub website: Option<String>,
 }
 
+/// Update store request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateStoreRequest {
+    pub name: Option<String>,
+    pub website: Option<String>,
+}
+
 /// Create payment method request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreatePaymentMethodRequest {
@@ -364,8 +371,7 @@ mod tests {
             id: "store_001".to_string(),
             name: "Test Store".to_string(),
             website: Some("https://example.com".to_string()),
-            default_currency: "USD".to_string(),
-            enabled_networks: vec![1, 137],
+            archived: false,
             created_at: "2024-01-01T00:00:00Z".to_string(),
         };
 
@@ -373,7 +379,7 @@ mod tests {
         let parsed: Store = serde_json::from_str(&json).unwrap();
 
         assert_eq!(store.id, parsed.id);
-        assert_eq!(store.enabled_networks, parsed.enabled_networks);
+        assert_eq!(store.name, parsed.name);
     }
 
     #[test]

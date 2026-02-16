@@ -4,9 +4,9 @@
 
 use leptos::prelude::*;
 use leptos_router::components::A;
-use leptos_router::hooks::use_params_map;
+use leptos_router::hooks::{use_navigate, use_params_map};
 
-use crate::api::{Store, StorePaymentMethod, StoreWebhook};
+use crate::api::{CreateStoreRequest, EvmApiClient, Store, StorePaymentMethod, StoreWebhook, UpdateStoreRequest};
 
 /// Helper to get chain name from chain ID.
 fn chain_name(chain_id: u64) -> &'static str {
@@ -49,30 +49,48 @@ fn format_date(iso: &str) -> String {
 /// Stores list page.
 #[component]
 pub fn StoresPage() -> impl IntoView {
-    // Mock stores - will come from API
-    let stores: Vec<Store> = vec![
-        Store {
-            id: "store-001".to_string(),
-            name: "My Online Shop".to_string(),
-            website: Some("https://myshop.example.com".to_string()),
-            archived: false,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-        },
-        Store {
-            id: "store-002".to_string(),
-            name: "Demo Store".to_string(),
-            website: None,
-            archived: false,
-            created_at: "2024-01-15T00:00:00Z".to_string(),
-        },
-        Store {
-            id: "store-003".to_string(),
-            name: "Test Environment".to_string(),
-            website: Some("https://test.example.com".to_string()),
-            archived: true,
-            created_at: "2023-12-01T00:00:00Z".to_string(),
-        },
-    ];
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+
+    // Fetch stores from API
+    let (refresh_counter, set_refresh_counter) = signal(0u32);
+    let stores_resource = LocalResource::new(move || {
+        let api = api.get();
+        refresh_counter.get(); // Track to allow manual refresh
+        async move { api.list_stores().await }
+    });
+
+    // Create store form state
+    let (show_create_form, set_show_create_form) = signal(false);
+    let (new_store_name, set_new_store_name) = signal(String::new());
+    let (creating, set_creating) = signal(false);
+    let (create_error, set_create_error) = signal(None::<String>);
+
+    let on_create_store = move |_| {
+        let name = new_store_name.get_untracked();
+        if name.trim().is_empty() {
+            return;
+        }
+        let api = api.get();
+        set_creating.set(true);
+        set_create_error.set(None);
+        leptos::task::spawn_local(async move {
+            let req = CreateStoreRequest {
+                name: name.trim().to_string(),
+                website: None,
+            };
+            match api.create_store(&req).await {
+                Ok(_) => {
+                    set_new_store_name.set(String::new());
+                    set_show_create_form.set(false);
+                    set_refresh_counter.update(|c| *c += 1);
+                }
+                Err(e) => {
+                    set_create_error.set(Some(e.to_string()));
+                }
+            }
+            set_creating.set(false);
+        });
+    };
 
     // Filter to show only active stores by default
     let (show_archived, set_show_archived) = signal(false);
@@ -86,12 +104,83 @@ pub fn StoresPage() -> impl IntoView {
                     <p class="page-description">"Manage your payment stores and configurations"</p>
                 </div>
                 <div class="page-actions">
-                    <button class="btn btn-primary btn-sm">
+                    <button
+                        class="btn btn-primary btn-sm"
+                        on:click=move |_| set_show_create_form.update(|v| *v = !*v)
+                    >
                         <IconPlus />
                         "Create store"
                     </button>
                 </div>
             </div>
+
+            // Create store form
+            {move || show_create_form.get().then(|| view! {
+                <div class="detail-card" style="margin-bottom: 1.5rem;">
+                    <div class="detail-card-header">
+                        <h3>"New Store"</h3>
+                    </div>
+                    <div class="detail-card-body">
+                        {move || create_error.get().map(|e| view! {
+                            <div class="form-error" style="color: var(--color-error); margin-bottom: 0.75rem;">{e}</div>
+                        })}
+                        <div class="form-group">
+                            <label class="form-label">"Store Name"</label>
+                            <input
+                                type="text"
+                                class="form-input"
+                                placeholder="My Store"
+                                prop:value=move || new_store_name.get()
+                                on:input=move |ev| set_new_store_name.set(event_target_value(&ev))
+                                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                    if ev.key() == "Enter" {
+                                        ev.prevent_default();
+                                        let name = new_store_name.get_untracked();
+                                        if name.trim().is_empty() {
+                                            return;
+                                        }
+                                        let api = api.get();
+                                        set_creating.set(true);
+                                        set_create_error.set(None);
+                                        leptos::task::spawn_local(async move {
+                                            let req = CreateStoreRequest {
+                                                name: name.trim().to_string(),
+                                                website: None,
+                                            };
+                                            match api.create_store(&req).await {
+                                                Ok(_) => {
+                                                    set_new_store_name.set(String::new());
+                                                    set_show_create_form.set(false);
+                                                    set_refresh_counter.update(|c| *c += 1);
+                                                }
+                                                Err(e) => {
+                                                    set_create_error.set(Some(e.to_string()));
+                                                }
+                                            }
+                                            set_creating.set(false);
+                                        });
+                                    }
+                                }
+                            />
+                        </div>
+                        <div class="form-actions">
+                            <button
+                                class="btn btn-primary btn-sm"
+                                on:click=on_create_store.clone()
+                                disabled=move || creating.get()
+                            >
+                                {move || if creating.get() { "Creating..." } else { "Create" }}
+                            </button>
+                            <button
+                                class="btn btn-secondary btn-sm"
+                                on:click=move |_| set_show_create_form.set(false)
+                            >
+                                "Cancel"
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            })}
 
             // Toolbar
             <div class="stores-toolbar">
@@ -105,17 +194,50 @@ pub fn StoresPage() -> impl IntoView {
                 </label>
             </div>
 
-            // Stores Grid - reactive filtering
-            <div class="stores-grid">
-                {move || {
-                    let show = show_archived.get();
-                    stores.iter()
-                        .filter(|s| show || !s.archived)
-                        .cloned()
-                        .map(|store| view! { <StoreCard store=store /> })
-                        .collect_view()
-                }}
-            </div>
+            // Stores Grid
+            <Suspense fallback=move || view! {
+                <div class="stores-loading" style="text-align: center; padding: 3rem; color: var(--text-muted);">
+                    "Loading stores..."
+                </div>
+            }>
+                {move || stores_resource.get().map(|result| match &*result {
+                    Ok(stores) => {
+                        if stores.is_empty() {
+                            view! {
+                                <div class="stores-empty" style="text-align: center; padding: 3rem;">
+                                    <IconStore />
+                                    <h3 style="margin-top: 1rem;">"No stores yet"</h3>
+                                    <p style="color: var(--text-muted);">"Create your first store to start accepting payments"</p>
+                                </div>
+                            }.into_any()
+                        } else {
+                            let show = show_archived.get();
+                            view! {
+                                <div class="stores-grid">
+                                    {stores.iter()
+                                        .filter(|s| show || !s.archived)
+                                        .cloned()
+                                        .map(|store| view! { <StoreCard store=store /> })
+                                        .collect_view()
+                                    }
+                                </div>
+                            }.into_any()
+                        }
+                    }
+                    Err(e) => view! {
+                        <div class="stores-error" style="text-align: center; padding: 3rem; color: var(--color-error);">
+                            <p>"Failed to load stores: "{e.to_string()}</p>
+                            <button
+                                class="btn btn-secondary btn-sm"
+                                style="margin-top: 1rem;"
+                                on:click=move |_| set_refresh_counter.update(|c| *c += 1)
+                            >
+                                "Retry"
+                            </button>
+                        </div>
+                    }.into_any(),
+                })}
+            </Suspense>
         </div>
     }
 }
@@ -166,86 +288,19 @@ fn StoreCard(store: Store) -> impl IntoView {
 /// Store detail page.
 #[component]
 pub fn StoreDetailPage() -> impl IntoView {
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
     let params = use_params_map();
     let store_id = move || params.get().get("id").unwrap_or_default();
 
     // Active tab state
     let (active_tab, set_active_tab) = signal("general".to_string());
 
-    // Mock store data - will come from API
-    let store = Store {
-        id: store_id(),
-        name: "My Online Shop".to_string(),
-        website: Some("https://myshop.example.com".to_string()),
-        archived: false,
-        created_at: "2024-01-01T00:00:00Z".to_string(),
-    };
-
-    // Mock payment methods
-    let payment_methods: Vec<StorePaymentMethod> = vec![
-        StorePaymentMethod {
-            id: "pm-001".to_string(),
-            store_id: store.id.clone(),
-            chain_id: 1,
-            token_address: None,
-            asset_symbol: "ETH".to_string(),
-            decimals: 18,
-            xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWZiD6...".to_string(),
-            derivation_index: 42,
-            enabled: true,
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-        },
-        StorePaymentMethod {
-            id: "pm-002".to_string(),
-            store_id: store.id.clone(),
-            chain_id: 1,
-            token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
-            asset_symbol: "USDC".to_string(),
-            decimals: 6,
-            xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWZiD6...".to_string(),
-            derivation_index: 15,
-            enabled: true,
-            created_at: "2024-01-02T00:00:00Z".to_string(),
-        },
-        StorePaymentMethod {
-            id: "pm-003".to_string(),
-            store_id: store.id.clone(),
-            chain_id: 137,
-            token_address: None,
-            asset_symbol: "POL".to_string(),
-            decimals: 18,
-            xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWZiD6...".to_string(),
-            derivation_index: 8,
-            enabled: true,
-            created_at: "2024-01-05T00:00:00Z".to_string(),
-        },
-        StorePaymentMethod {
-            id: "pm-004".to_string(),
-            store_id: store.id.clone(),
-            chain_id: 42161,
-            token_address: None,
-            asset_symbol: "ETH".to_string(),
-            decimals: 18,
-            xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWZiD6...".to_string(),
-            derivation_index: 3,
-            enabled: false,
-            created_at: "2024-01-10T00:00:00Z".to_string(),
-        },
-    ];
-
-    // Mock webhook
-    let webhook: Option<StoreWebhook> = Some(StoreWebhook {
-        id: "wh-001".to_string(),
-        store_id: store.id.clone(),
-        webhook_url: "https://myshop.example.com/api/webhooks/ethpay".to_string(),
-        webhook_secret: "whsec_****************************".to_string(),
-        enabled: true,
-        created_at: "2024-01-01T00:00:00Z".to_string(),
-        updated_at: "2024-01-15T00:00:00Z".to_string(),
+    // Fetch store from API
+    let store_resource = LocalResource::new(move || {
+        let api = api.get();
+        let id = store_id();
+        async move { api.get_store(&id).await }
     });
-
-    let store_name = store.name.clone();
-    let created_display = format_date(&store.created_at);
 
     let tabs = vec![
         ("general", "General"),
@@ -255,59 +310,86 @@ pub fn StoreDetailPage() -> impl IntoView {
 
     view! {
         <div class="store-detail-page">
-            // Header
-            <div class="store-detail-header">
-                <div class="store-detail-header-left">
-                    <A href="/evm/stores" attr:class="back-link">
-                        <IconArrowLeft />
-                        "Stores"
-                    </A>
-                    <div class="store-detail-title-row">
-                        <h1 class="store-detail-title">{store_name}</h1>
-                        {store.archived.then(|| view! {
-                            <span class="badge badge-neutral">"Archived"</span>
-                        })}
-                    </div>
-                    <p class="store-detail-subtitle">
-                        <code class="store-detail-id">{store.id.clone()}</code>
-                        " · Created "{created_display}
-                    </p>
+            <Suspense fallback=move || view! {
+                <div style="text-align: center; padding: 3rem; color: var(--text-muted);">
+                    "Loading store..."
                 </div>
-                <div class="store-detail-actions">
-                    {(!store.archived).then(|| view! {
-                        <button class="btn btn-secondary btn-sm">
-                            <IconArchive />
-                            "Archive"
-                        </button>
-                    })}
-                </div>
-            </div>
+            }>
+                {move || store_resource.get().map(|result| match &*result {
+                    Ok(store) => {
+                        let store_name = store.name.clone();
+                        let created_display = format_date(&store.created_at);
+                        let store_for_tabs = store.clone();
 
-            // Tabs
-            <div class="store-tabs">
-                {tabs.into_iter().map(|(key, label)| {
-                    let key_owned = key.to_string();
-                    let key_for_click = key.to_string();
-                    view! {
-                        <button
-                            class=move || if active_tab.get() == key_owned { "store-tab active" } else { "store-tab" }
-                            on:click=move |_| set_active_tab.set(key_for_click.clone())
-                        >
-                            {label}
-                        </button>
+                        view! {
+                            // Header
+                            <div class="store-detail-header">
+                                <div class="store-detail-header-left">
+                                    <A href="/evm/stores" attr:class="back-link">
+                                        <IconArrowLeft />
+                                        "Stores"
+                                    </A>
+                                    <div class="store-detail-title-row">
+                                        <h1 class="store-detail-title">{store_name}</h1>
+                                        {store.archived.then(|| view! {
+                                            <span class="badge badge-neutral">"Archived"</span>
+                                        })}
+                                    </div>
+                                    <p class="store-detail-subtitle">
+                                        <code class="store-detail-id">{store.id.clone()}</code>
+                                        " · Created "{created_display}
+                                    </p>
+                                </div>
+                                <div class="store-detail-actions">
+                                    {(!store.archived).then(|| view! {
+                                        <button class="btn btn-secondary btn-sm">
+                                            <IconArchive />
+                                            "Archive"
+                                        </button>
+                                    })}
+                                </div>
+                            </div>
+
+                            // Tabs
+                            <div class="store-tabs">
+                                {tabs.clone().into_iter().map(|(key, label)| {
+                                    let key_owned = key.to_string();
+                                    let key_for_click = key.to_string();
+                                    view! {
+                                        <button
+                                            class=move || if active_tab.get() == key_owned { "store-tab active" } else { "store-tab" }
+                                            on:click=move |_| set_active_tab.set(key_for_click.clone())
+                                        >
+                                            {label}
+                                        </button>
+                                    }
+                                }).collect_view()}
+                            </div>
+
+                            // Tab Content
+                            <div class="store-tab-content">
+                                {move || match active_tab.get().as_str() {
+                                    "general" => view! { <GeneralTab store=store_for_tabs.clone() /> }.into_any(),
+                                    "payment_methods" => view! { <PaymentMethodsTab store_id=store_for_tabs.id.clone() /> }.into_any(),
+                                    "webhooks" => view! { <WebhooksTab store_id=store_for_tabs.id.clone() /> }.into_any(),
+                                    _ => view! { <GeneralTab store=store_for_tabs.clone() /> }.into_any(),
+                                }}
+                            </div>
+                        }.into_any()
                     }
-                }).collect_view()}
-            </div>
-
-            // Tab Content
-            <div class="store-tab-content">
-                {move || match active_tab.get().as_str() {
-                    "general" => view! { <GeneralTab store=store.clone() /> }.into_any(),
-                    "payment_methods" => view! { <PaymentMethodsTab methods=payment_methods.clone() /> }.into_any(),
-                    "webhooks" => view! { <WebhooksTab webhook=webhook.clone() /> }.into_any(),
-                    _ => view! { <GeneralTab store=store.clone() /> }.into_any(),
-                }}
-            </div>
+                    Err(e) => view! {
+                        <div style="text-align: center; padding: 3rem;">
+                            <A href="/evm/stores" attr:class="back-link">
+                                <IconArrowLeft />
+                                "Back to Stores"
+                            </A>
+                            <p style="color: var(--color-error); margin-top: 1rem;">
+                                "Failed to load store: "{e.to_string()}
+                            </p>
+                        </div>
+                    }.into_any(),
+                })}
+            </Suspense>
         </div>
     }
 }
@@ -315,8 +397,54 @@ pub fn StoreDetailPage() -> impl IntoView {
 /// General settings tab.
 #[component]
 fn GeneralTab(store: Store) -> impl IntoView {
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let navigate = use_navigate();
+    let store_id = store.id.clone();
+
     let (name, set_name) = signal(store.name.clone());
     let (website, set_website) = signal(store.website.clone().unwrap_or_default());
+    let (saving, set_saving) = signal(false);
+    let (save_message, set_save_message) = signal(None::<(bool, String)>); // (is_success, message)
+    let (deleting, set_deleting) = signal(false);
+
+    let store_id_save = store_id.clone();
+    let on_save = move |_| {
+        let api = api.get();
+        let id = store_id_save.clone();
+        let new_name = name.get_untracked();
+        let new_website = website.get_untracked();
+        set_saving.set(true);
+        set_save_message.set(None);
+        leptos::task::spawn_local(async move {
+            let req = UpdateStoreRequest {
+                name: Some(new_name),
+                website: Some(if new_website.is_empty() { String::new() } else { new_website }),
+            };
+            match api.update_store(&id, &req).await {
+                Ok(_) => set_save_message.set(Some((true, "Changes saved".to_string()))),
+                Err(e) => set_save_message.set(Some((false, e.to_string()))),
+            }
+            set_saving.set(false);
+        });
+    };
+
+    let store_id_delete = store_id.clone();
+    let on_delete = move |_| {
+        let api = api.get();
+        let id = store_id_delete.clone();
+        let navigate = navigate.clone();
+        set_deleting.set(true);
+        leptos::task::spawn_local(async move {
+            match api.delete_store(&id).await {
+                Ok(_) => navigate("/evm/stores", Default::default()),
+                Err(e) => {
+                    web_sys::window()
+                        .and_then(|w| w.alert_with_message(&format!("Delete failed: {}", e)).ok());
+                }
+            }
+            set_deleting.set(false);
+        });
+    };
 
     view! {
         <div class="store-tab-general">
@@ -325,6 +453,11 @@ fn GeneralTab(store: Store) -> impl IntoView {
                     <h3>"Store Information"</h3>
                 </div>
                 <div class="detail-card-body">
+                    {move || save_message.get().map(|(success, msg)| {
+                        let class = if success { "color: var(--color-success)" } else { "color: var(--color-error)" };
+                        view! { <p style=class>{msg}</p> }
+                    })}
+
                     <div class="form-group">
                         <label class="form-label">"Store Name"</label>
                         <input
@@ -349,7 +482,13 @@ fn GeneralTab(store: Store) -> impl IntoView {
                     </div>
 
                     <div class="form-actions">
-                        <button class="btn btn-primary btn-sm">"Save changes"</button>
+                        <button
+                            class="btn btn-primary btn-sm"
+                            on:click=on_save
+                            disabled=move || saving.get()
+                        >
+                            {move || if saving.get() { "Saving..." } else { "Save changes" }}
+                        </button>
                     </div>
                 </div>
             </div>
@@ -361,17 +500,16 @@ fn GeneralTab(store: Store) -> impl IntoView {
                 <div class="detail-card-body">
                     <div class="danger-action">
                         <div class="danger-action-info">
-                            <span class="danger-action-title">"Archive this store"</span>
-                            <span class="danger-action-desc">"Archived stores cannot receive new payments"</span>
-                        </div>
-                        <button class="btn btn-danger btn-sm">"Archive store"</button>
-                    </div>
-                    <div class="danger-action">
-                        <div class="danger-action-info">
                             <span class="danger-action-title">"Delete this store"</span>
                             <span class="danger-action-desc">"Permanently delete this store and all its data"</span>
                         </div>
-                        <button class="btn btn-danger btn-sm">"Delete store"</button>
+                        <button
+                            class="btn btn-danger btn-sm"
+                            on:click=on_delete
+                            disabled=move || deleting.get()
+                        >
+                            {move || if deleting.get() { "Deleting..." } else { "Delete store" }}
+                        </button>
                     </div>
                 </div>
             </div>
@@ -381,7 +519,9 @@ fn GeneralTab(store: Store) -> impl IntoView {
 
 /// Payment methods tab.
 #[component]
-fn PaymentMethodsTab(methods: Vec<StorePaymentMethod>) -> impl IntoView {
+fn PaymentMethodsTab(#[allow(unused)] store_id: String) -> impl IntoView {
+    // TODO: Fetch from API when payment methods client methods are added
+    let methods: Vec<StorePaymentMethod> = vec![];
     let enabled_count = methods.iter().filter(|m| m.enabled).count();
     let total_count = methods.len();
 
@@ -459,7 +599,9 @@ fn PaymentMethodRow(method: StorePaymentMethod) -> impl IntoView {
 
 /// Webhooks tab.
 #[component]
-fn WebhooksTab(webhook: Option<StoreWebhook>) -> impl IntoView {
+fn WebhooksTab(#[allow(unused)] store_id: String) -> impl IntoView {
+    // TODO: Fetch from API when webhook client methods are added
+    let webhook: Option<StoreWebhook> = None;
     view! {
         <div class="store-tab-webhooks">
             <div class="section-header">

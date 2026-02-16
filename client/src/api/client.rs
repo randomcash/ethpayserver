@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use super::{
     CreateInvoiceRequest, CreateStoreRequest, DashboardStats, Invoice, PaginatedResponse,
-    Payment, Store, Wallet,
+    Payment, Store, UpdateStoreRequest, Wallet,
 };
 
 /// API client errors.
@@ -88,6 +88,25 @@ impl EvmApiClient {
     ) -> Result<T, ApiError> {
         let request = self
             .build_request("POST", path)
+            .json(body)
+            .map_err(|e| ApiError::Parse(e.to_string()))?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        self.handle_response(response).await
+    }
+
+    /// Make a PUT request.
+    async fn put<T: DeserializeOwned, B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        let request = self
+            .build_request("PUT", path)
             .json(body)
             .map_err(|e| ApiError::Parse(e.to_string()))?;
 
@@ -224,6 +243,11 @@ impl EvmApiClient {
     /// Create a new store.
     pub async fn create_store(&self, request: &CreateStoreRequest) -> Result<Store, ApiError> {
         self.post("/api/stores", request).await
+    }
+
+    /// Update a store.
+    pub async fn update_store(&self, id: &str, request: &UpdateStoreRequest) -> Result<Store, ApiError> {
+        self.put(&format!("/api/stores/{}", id), request).await
     }
 
     /// Delete a store.

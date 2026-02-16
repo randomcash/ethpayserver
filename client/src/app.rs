@@ -8,8 +8,9 @@ use leptos_router::{
     path,
 };
 
-use ui_kit::{AuthProvider, AuthGuard, LoginPage, RegisterPage};
+use ui_kit::{AuthProvider, AuthGuard, LoginPage, RegisterPage, use_auth};
 
+use crate::api::EvmApiClient;
 use crate::pages::{
     DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage, PaymentsPage,
     SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage, WalletsPage,
@@ -103,6 +104,15 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
 
     let close_sidebar = move |_| set_sidebar_open.set(false);
     let toggle_sidebar = move |_| set_sidebar_open.update(|v| *v = !*v);
+
+    // Provide authenticated API client to all child pages.
+    // Reactively updates when the auth token changes.
+    let auth = use_auth();
+    let api = Signal::derive(move || {
+        let token = auth.token.get();
+        EvmApiClient::new("").with_token(token)
+    });
+    provide_context(api);
 
     view! {
         <AuthGuard redirect_to="/login".to_string()>

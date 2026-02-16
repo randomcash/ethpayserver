@@ -780,6 +780,10 @@ mod tests {
         async fn health_check(&self) -> Result<(), EVMMonitorError> {
             Ok(())
         }
+
+        async fn get_chain_health(&self) -> Result<Vec<evm::monitor::ChainHealth>, EVMMonitorError> {
+            Ok(vec![])
+        }
     }
 
     /// Create a test invoice in the data service.
