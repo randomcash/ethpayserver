@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use super::{
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
-    PaginatedResponse, Payment, Store, StorePaymentMethod, StoreWebhook,
+    InvoiceListResponse, InvoiceStatusResponse, Payment, Store, StorePaymentMethod, StoreWebhook,
     UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, Wallet,
 };
 
@@ -182,17 +182,27 @@ impl EvmApiClient {
     // Invoices
     // =========================================================================
 
-    /// List invoices with pagination.
+    /// List invoices with filters and pagination.
+    ///
+    /// `store_id` is required for non-admin users.
     pub async fn list_invoices(
         &self,
-        page: u32,
-        per_page: u32,
-    ) -> Result<PaginatedResponse<Invoice>, ApiError> {
-        self.get(&format!(
-            "/api/invoices?page={}&per_page={}",
-            page, per_page
-        ))
-        .await
+        store_id: &str,
+        status: Option<&str>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<InvoiceListResponse, ApiError> {
+        let mut query = format!("/api/invoices?store_id={}", store_id);
+        if let Some(s) = status {
+            query.push_str(&format!("&status={}", s));
+        }
+        if let Some(l) = limit {
+            query.push_str(&format!("&limit={}", l));
+        }
+        if let Some(o) = offset {
+            query.push_str(&format!("&offset={}", o));
+        }
+        self.get(&query).await
     }
 
     /// Get an invoice by ID.
@@ -205,26 +215,14 @@ impl EvmApiClient {
         self.post("/api/invoices", request).await
     }
 
-    // =========================================================================
-    // Payments
-    // =========================================================================
-
-    /// List payments with pagination.
-    pub async fn list_payments(
-        &self,
-        page: u32,
-        per_page: u32,
-    ) -> Result<PaginatedResponse<Payment>, ApiError> {
-        self.get(&format!(
-            "/api/payments?page={}&per_page={}",
-            page, per_page
-        ))
-        .await
+    /// Get payments for an invoice.
+    pub async fn get_invoice_payments(&self, invoice_id: &str) -> Result<Vec<Payment>, ApiError> {
+        self.get(&format!("/api/invoices/{}/payments", invoice_id)).await
     }
 
-    /// Get a payment by ID.
-    pub async fn get_payment(&self, id: &str) -> Result<Payment, ApiError> {
-        self.get(&format!("/api/payments/{}", id)).await
+    /// Get invoice status (includes payment options and payments).
+    pub async fn get_invoice_status(&self, invoice_id: &str) -> Result<InvoiceStatusResponse, ApiError> {
+        self.get(&format!("/api/invoices/{}/status", invoice_id)).await
     }
 
     // =========================================================================

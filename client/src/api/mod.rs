@@ -4,4 +4,4 @@ mod client;
 mod types;
 
 pub use client::{ApiError, EvmApiClient};
-pub use types::*;
+pub use self::types::*;

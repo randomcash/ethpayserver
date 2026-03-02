@@ -6,7 +6,18 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::use_params_map;
 
-use crate::api::{AssetType, Payment};
+use crate::api::Payment;
+
+/// Extended payment data for display purposes.
+/// Wraps the API Payment with extra fields needed for UI that aren't in the API response.
+/// TODO: When wiring to real API, these extra fields come from PaymentOption or invoice context.
+#[allow(dead_code)]
+struct PaymentDisplay {
+    payment: Payment,
+    chain_id: u64,
+    invoice_id: String,
+    credited_amount: Option<String>,
+}
 
 /// Helper to get chain name from chain ID.
 fn chain_name(chain_id: u64) -> &'static str {
@@ -80,110 +91,46 @@ pub fn PaymentsPage() -> impl IntoView {
     let (search_query, set_search_query) = signal(String::new());
 
     // Mock payments - will come from API
-    let payments: Vec<Payment> = vec![
-        Payment {
-            id: "pay_001".to_string(),
-            invoice_id: "INV-0001".to_string(),
-            chain_id: 1,
-            asset_type: AssetType::Native,
-            amount: "140000000000000000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            token_address: None,
-            tx_hash: "0x1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890".to_string(),
-            block_number: Some(19234567),
-            detected_at: "2024-01-15T10:45:00Z".to_string(),
-            confirmed_at: Some("2024-01-15T10:50:00Z".to_string()),
-            from_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".to_string()),
-            reorged: false,
-            credited_amount: Some("250.00".to_string()),
-            rate_used: Some("0.00056".to_string()),
-        },
-        Payment {
-            id: "pay_002".to_string(),
-            invoice_id: "INV-0001".to_string(),
-            chain_id: 1,
-            asset_type: AssetType::ERC20,
-            amount: "250000000".to_string(),
-            asset_symbol: "USDC".to_string(),
-            token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
-            tx_hash: "0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba".to_string(),
-            block_number: Some(19234612),
-            detected_at: "2024-01-15T11:15:00Z".to_string(),
-            confirmed_at: Some("2024-01-15T11:20:00Z".to_string()),
-            from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".to_string()),
-            reorged: false,
-            credited_amount: Some("250.00".to_string()),
-            rate_used: Some("1.0".to_string()),
-        },
-        Payment {
-            id: "pay_003".to_string(),
-            invoice_id: "INV-0002".to_string(),
-            chain_id: 137,
-            asset_type: AssetType::Native,
-            amount: "89500000000000000000".to_string(),
-            asset_symbol: "POL".to_string(),
-            token_address: None,
-            tx_hash: "0xaabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344".to_string(),
-            block_number: None,
-            detected_at: "2024-01-15T14:30:00Z".to_string(),
-            confirmed_at: None,
-            from_address: Some("0x5555666677778888999900001111222233334444".to_string()),
-            reorged: false,
-            credited_amount: None,
-            rate_used: None,
-        },
-        Payment {
-            id: "pay_004".to_string(),
-            invoice_id: "INV-0003".to_string(),
-            chain_id: 42161,
-            asset_type: AssetType::ERC20,
-            amount: "500000000".to_string(),
-            asset_symbol: "USDT".to_string(),
-            token_address: Some("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".to_string()),
-            tx_hash: "0xeeeeffffaaaabbbbccccddddeeeeffffaaaabbbbccccddddeeeeffffaaaabbbb".to_string(),
-            block_number: Some(175234890),
-            detected_at: "2024-01-14T16:00:00Z".to_string(),
-            confirmed_at: Some("2024-01-14T16:01:00Z".to_string()),
-            from_address: Some("0x1111222233334444555566667777888899990000".to_string()),
-            reorged: false,
-            credited_amount: Some("500.00".to_string()),
-            rate_used: Some("1.0".to_string()),
-        },
-        Payment {
-            id: "pay_005".to_string(),
-            invoice_id: "INV-0004".to_string(),
-            chain_id: 1,
-            asset_type: AssetType::Native,
-            amount: "75000000000000000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            token_address: None,
-            tx_hash: "0x0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff".to_string(),
-            block_number: Some(19230000),
-            detected_at: "2024-01-12T09:00:00Z".to_string(),
-            confirmed_at: Some("2024-01-12T09:05:00Z".to_string()),
-            from_address: Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()),
-            reorged: true,
-            credited_amount: None,
-            rate_used: None,
-        },
-        Payment {
-            id: "pay_006".to_string(),
-            invoice_id: "INV-0005".to_string(),
-            chain_id: 8453,
-            asset_type: AssetType::Native,
-            amount: "320000000000000000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            token_address: None,
-            tx_hash: "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
-            block_number: Some(8234567),
-            detected_at: "2024-01-11T20:00:00Z".to_string(),
-            confirmed_at: Some("2024-01-11T20:02:00Z".to_string()),
-            from_address: Some("0xcafebabecafebabecafebabecafebabecafebabe".to_string()),
-            reorged: false,
-            credited_amount: Some("800.00".to_string()),
-            rate_used: Some("0.0004".to_string()),
-        },
+    let mock_data: Vec<PaymentDisplay> = vec![
+        PaymentDisplay { chain_id: 1, invoice_id: "INV-0001".into(), credited_amount: Some("250.00".into()),
+            payment: Payment { id: "pay_001".into(), amount: "140000000000000000".into(), asset_symbol: "ETH".into(), token_address: None,
+                tx_hash: "0x1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890".into(),
+                block_number: Some(19234567), detected_at: "2024-01-15T10:45:00Z".into(),
+                confirmed_at: Some("2024-01-15T10:50:00Z".into()),
+                from_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".into()), reorged: false } },
+        PaymentDisplay { chain_id: 1, invoice_id: "INV-0001".into(), credited_amount: Some("250.00".into()),
+            payment: Payment { id: "pay_002".into(), amount: "250000000".into(), asset_symbol: "USDC".into(),
+                token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".into()),
+                tx_hash: "0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba".into(),
+                block_number: Some(19234612), detected_at: "2024-01-15T11:15:00Z".into(),
+                confirmed_at: Some("2024-01-15T11:20:00Z".into()),
+                from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".into()), reorged: false } },
+        PaymentDisplay { chain_id: 137, invoice_id: "INV-0002".into(), credited_amount: None,
+            payment: Payment { id: "pay_003".into(), amount: "89500000000000000000".into(), asset_symbol: "POL".into(), token_address: None,
+                tx_hash: "0xaabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344".into(),
+                block_number: None, detected_at: "2024-01-15T14:30:00Z".into(), confirmed_at: None,
+                from_address: Some("0x5555666677778888999900001111222233334444".into()), reorged: false } },
+        PaymentDisplay { chain_id: 42161, invoice_id: "INV-0003".into(), credited_amount: Some("500.00".into()),
+            payment: Payment { id: "pay_004".into(), amount: "500000000".into(), asset_symbol: "USDT".into(),
+                token_address: Some("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".into()),
+                tx_hash: "0xeeeeffffaaaabbbbccccddddeeeeffffaaaabbbbccccddddeeeeffffaaaabbbb".into(),
+                block_number: Some(175234890), detected_at: "2024-01-14T16:00:00Z".into(),
+                confirmed_at: Some("2024-01-14T16:01:00Z".into()),
+                from_address: Some("0x1111222233334444555566667777888899990000".into()), reorged: false } },
+        PaymentDisplay { chain_id: 1, invoice_id: "INV-0004".into(), credited_amount: None,
+            payment: Payment { id: "pay_005".into(), amount: "75000000000000000".into(), asset_symbol: "ETH".into(), token_address: None,
+                tx_hash: "0x0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff".into(),
+                block_number: Some(19230000), detected_at: "2024-01-12T09:00:00Z".into(),
+                confirmed_at: Some("2024-01-12T09:05:00Z".into()),
+                from_address: Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into()), reorged: true } },
+        PaymentDisplay { chain_id: 8453, invoice_id: "INV-0005".into(), credited_amount: Some("800.00".into()),
+            payment: Payment { id: "pay_006".into(), amount: "320000000000000000".into(), asset_symbol: "ETH".into(), token_address: None,
+                tx_hash: "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".into(),
+                block_number: Some(8234567), detected_at: "2024-01-11T20:00:00Z".into(),
+                confirmed_at: Some("2024-01-11T20:02:00Z".into()),
+                from_address: Some("0xcafebabecafebabecafebabecafebabecafebabe".into()), reorged: false } },
     ];
+    let payments: Vec<Payment> = mock_data.iter().map(|d| d.payment.clone()).collect();
 
     let filters = vec![
         ("all", "All", None),
@@ -282,18 +229,17 @@ pub fn PaymentsPage() -> impl IntoView {
 }
 
 /// Payment table row.
+/// TODO: When wired to API, chain_id/invoice_id/credited will come from context.
 #[component]
 fn PaymentRow(payment: Payment) -> impl IntoView {
     let tx_display = truncate_hash(&payment.tx_hash, 10, 8);
-    let network = chain_name(payment.chain_id);
+    let network = "—"; // chain_id not in API response yet
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
     let date_display = format_date(&payment.detected_at);
-    let invoice_id = payment.invoice_id.clone();
-    let invoice_link = payment.invoice_id.clone();
-    let credited = payment.credited_amount.clone()
-        .map(|c| format!("${}", c))
-        .unwrap_or_else(|| "—".to_string());
+    let invoice_id = "—".to_string();
+    let invoice_link = String::new();
+    let credited = "—".to_string();
     let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
 
     view! {
@@ -339,15 +285,13 @@ fn PaymentRow(payment: Payment) -> impl IntoView {
 #[component]
 fn PaymentCard(payment: Payment) -> impl IntoView {
     let tx_display = truncate_hash(&payment.tx_hash, 8, 6);
-    let network = chain_name(payment.chain_id);
+    let network = "—";
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
     let date_display = format_date(&payment.detected_at);
-    let invoice_id = payment.invoice_id.clone();
-    let invoice_link = payment.invoice_id.clone();
-    let credited = payment.credited_amount.clone()
-        .map(|c| format!("${}", c))
-        .unwrap_or_else(|| "—".to_string());
+    let invoice_id = "—".to_string();
+    let invoice_link = String::new();
+    let credited = "—".to_string();
     let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
 
     view! {
@@ -397,12 +341,9 @@ pub fn PaymentDetailPage() -> impl IntoView {
     let params = use_params_map();
     let tx_hash = move || params.get().get("id").unwrap_or_default();
 
-    // Mock payment data - will come from API based on tx_hash
+    // Mock payment data - will come from API
     let payment = Payment {
         id: "pay_001".to_string(),
-        invoice_id: "INV-0001".to_string(),
-        chain_id: 1,
-        asset_type: AssetType::Native,
         amount: "140000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
         token_address: None,
@@ -412,11 +353,14 @@ pub fn PaymentDetailPage() -> impl IntoView {
         confirmed_at: Some("2024-01-15T10:50:00Z".to_string()),
         from_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".to_string()),
         reorged: false,
-        credited_amount: Some("250.00".to_string()),
-        rate_used: Some("1785.71".to_string()),
     };
+    // TODO: These come from invoice/payment option context when wired to API
+    let mock_chain_id: u64 = 1;
+    let mock_invoice_id = "INV-0001".to_string();
+    let mock_credited = Some("250.00".to_string());
+    let mock_rate = Some("1785.71".to_string());
 
-    let network = chain_name(payment.chain_id);
+    let network = chain_name(mock_chain_id);
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
     let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
@@ -428,17 +372,17 @@ pub fn PaymentDetailPage() -> impl IntoView {
     let block_number = payment.block_number
         .map(|b| b.to_string())
         .unwrap_or_else(|| "Pending".to_string());
-    let credited = payment.credited_amount.clone()
+    let credited = mock_credited
         .map(|c| format!("${}", c))
         .unwrap_or_else(|| "—".to_string());
-    let rate = payment.rate_used.clone()
+    let rate = mock_rate
         .map(|r| format!("${}/{}",r, payment.asset_symbol))
         .unwrap_or_else(|| "—".to_string());
-    let invoice_id = payment.invoice_id.clone();
-    let invoice_link = payment.invoice_id.clone();
+    let invoice_id = mock_invoice_id.clone();
+    let invoice_link = mock_invoice_id;
 
     // Explorer URL based on chain
-    let explorer_base = match payment.chain_id {
+    let explorer_base = match mock_chain_id {
         1 => "https://etherscan.io",
         137 => "https://polygonscan.com",
         42161 => "https://arbiscan.io",
@@ -642,17 +586,13 @@ pub fn PaymentDetailPage() -> impl IntoView {
                         <div class="detail-card-body">
                             <pre class="metadata-json">{format!(r#"{{
   "id": "{}",
-  "invoice_id": "{}",
-  "chain_id": {},
-  "asset_type": "{}",
+  "tx_hash": "{}",
   "amount": "{}",
   "asset_symbol": "{}",
   "block_number": {}
 }}"#,
                                 payment.id,
-                                payment.invoice_id,
-                                payment.chain_id,
-                                if payment.asset_type == AssetType::Native { "native" } else { "erc20" },
+                                payment.tx_hash,
                                 payment.amount,
                                 payment.asset_symbol,
                                 payment.block_number.map(|b| b.to_string()).unwrap_or_else(|| "null".to_string())

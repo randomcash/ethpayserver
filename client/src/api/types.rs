@@ -4,33 +4,17 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Status of an invoice.
-///
-/// Mirrors `types::InvoiceStatus` from the backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InvoiceStatus {
-    /// Invoice created, awaiting payment.
-    Pending,
-    /// Payment detected but not confirmed.
-    Processing,
-    /// Payment partially received.
-    PartiallyPaid,
-    /// Payment fully received and confirmed.
-    Paid,
-    /// Invoice expired without payment.
-    Expired,
-    /// Invoice cancelled.
-    Cancelled,
-    /// Payment refunded.
-    Refunded,
-    /// Payment received after invoice expired.
-    LatePaid,
+// Re-export InvoiceStatus from the shared types crate.
+pub use types::InvoiceStatus;
+
+/// UI-specific display methods for InvoiceStatus.
+pub trait InvoiceStatusExt {
+    fn label(&self) -> &'static str;
+    fn css_class(&self) -> &'static str;
 }
 
-impl InvoiceStatus {
-    /// Returns the display label for this status.
-    pub fn label(&self) -> &'static str {
+impl InvoiceStatusExt for InvoiceStatus {
+    fn label(&self) -> &'static str {
         match self {
             InvoiceStatus::Pending => "Pending",
             InvoiceStatus::Processing => "Processing",
@@ -43,8 +27,7 @@ impl InvoiceStatus {
         }
     }
 
-    /// Returns the CSS class for styling this status.
-    pub fn css_class(&self) -> &'static str {
+    fn css_class(&self) -> &'static str {
         match self {
             InvoiceStatus::Pending => "badge badge-warning",
             InvoiceStatus::Processing => "badge badge-info",
@@ -56,53 +39,24 @@ impl InvoiceStatus {
             InvoiceStatus::LatePaid => "badge badge-info",
         }
     }
-
-    /// Returns true if this is a final status (no more changes expected).
-    pub fn is_final(&self) -> bool {
-        matches!(
-            self,
-            InvoiceStatus::Paid
-                | InvoiceStatus::Expired
-                | InvoiceStatus::Cancelled
-                | InvoiceStatus::Refunded
-                | InvoiceStatus::LatePaid
-        )
-    }
 }
 
-impl Default for InvoiceStatus {
-    fn default() -> Self {
-        InvoiceStatus::Pending
-    }
-}
-
-/// Asset type for payments.
-///
-/// Mirrors `types::AssetType` from the backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AssetType {
-    /// Native network currency (ETH, BTC, POL, etc.)
-    #[default]
-    Native,
-    /// ERC20 token (for EVM networks)
-    ERC20,
+fn default_invoice_status() -> InvoiceStatus {
+    InvoiceStatus::Pending
 }
 
 /// Invoice data from the API.
 ///
-/// Mirrors `types::InvoiceData` from the backend.
+/// Mirrors `InvoiceResponse` from the backend.
 /// An invoice is network-agnostic: it represents a payment request in a
 /// specific currency (which can be fiat like "USD" or crypto like "ETH").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invoice {
     pub id: String,
-    /// The store this invoice belongs to.
-    pub store_id: String,
     /// Invoice currency (e.g., "USD", "EUR", "ETH").
     pub currency: String,
     /// Invoice status.
-    #[serde(default)]
+    #[serde(default = "default_invoice_status")]
     pub status: InvoiceStatus,
     /// Amount requested in the invoice currency.
     pub amount: String,
@@ -115,44 +69,83 @@ pub struct Invoice {
     pub expires_at: String,
     /// Optional metadata.
     pub metadata: Option<serde_json::Value>,
+    /// Available payment options for this invoice.
+    #[serde(default)]
+    pub payment_options: Vec<PaymentOption>,
 }
 
 /// Payment data from the API.
 ///
-/// Mirrors `types::PaymentData` from the backend.
+/// Mirrors `PaymentResponse` from the backend.
 /// A payment is an actual received transaction belonging to an invoice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
     pub id: String,
-    pub invoice_id: String,
-    /// EIP-155 chain ID where this payment was received.
-    pub chain_id: u64,
-    /// Asset type (native or ERC20).
-    #[serde(default)]
-    pub asset_type: AssetType,
+    /// Transaction hash.
+    pub tx_hash: String,
     /// Amount received (smallest unit as string).
     pub amount: String,
     /// Asset symbol (e.g., "ETH", "USDC").
     pub asset_symbol: String,
     /// Token contract address (for ERC20 tokens).
     pub token_address: Option<String>,
-    /// Transaction hash.
-    pub tx_hash: String,
     /// Block number where the payment was included.
     pub block_number: Option<u64>,
+    /// Sender address (if known).
+    pub from_address: Option<String>,
     /// When the payment was detected (ISO 8601 string).
     pub detected_at: String,
     /// When the payment reached required confirmations (None = awaiting).
     pub confirmed_at: Option<String>,
-    /// Sender address (if known).
-    pub from_address: Option<String>,
     /// Whether this payment was invalidated by a chain reorganization.
     #[serde(default)]
     pub reorged: bool,
-    /// The payment's value credited toward the invoice total, in invoice currency.
-    pub credited_amount: Option<String>,
-    /// Exchange rate used to calculate credited_amount.
-    pub rate_used: Option<String>,
+}
+
+/// Payment option for an invoice (a specific chain/asset the payer can use).
+///
+/// Mirrors `PaymentOptionResponse` from the backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentOption {
+    pub id: String,
+    /// Format: "{ASSET}-{CHAIN_ID}" e.g., "ETH-1", "USDC-137".
+    pub payment_method_id: String,
+    /// EIP-155 chain ID.
+    pub chain_id: u64,
+    /// Asset symbol (e.g., "ETH", "USDC").
+    pub asset_symbol: String,
+    /// Token contract address (None for native assets).
+    pub token_address: Option<String>,
+    /// Token decimals.
+    pub decimals: u8,
+    /// Derived wallet address for this payment.
+    pub payment_address: String,
+    /// Amount due in smallest units.
+    pub amount: String,
+    /// Exchange rate used (if currency conversion involved).
+    pub rate: Option<String>,
+    /// Whether this payment option is still active.
+    pub is_active: bool,
+}
+
+/// Invoice status response (comprehensive view with payments).
+///
+/// Mirrors `InvoiceStatusResponse` from the backend.
+/// Returned by `GET /invoices/{id}/status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvoiceStatusResponse {
+    pub id: String,
+    pub status: InvoiceStatus,
+    pub amount: String,
+    pub amount_received: String,
+    pub currency: String,
+    pub expires_at: String,
+    pub payment_count: usize,
+    pub confirmed_count: usize,
+    pub is_paid: bool,
+    pub is_expired: bool,
+    pub payment_options: Vec<PaymentOption>,
+    pub payments: Vec<Payment>,
 }
 
 /// Store data from the API.
@@ -255,13 +248,22 @@ pub struct DashboardStats {
 }
 
 /// Create invoice request.
+///
+/// Mirrors `CreateInvoiceRequest` from the backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateInvoiceRequest {
     pub store_id: String,
-    pub amount: String,
     pub currency: String,
-    pub chain_id: Option<u64>,
+    pub amount: String,
+    /// Invoice expiration in seconds (default: 900 = 15 minutes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_url: Option<String>,
 }
 
 /// Create store request.
@@ -311,6 +313,15 @@ pub struct PaginatedResponse<T> {
     pub per_page: u32,
 }
 
+/// Invoice list response from the backend.
+///
+/// Mirrors `InvoiceListResponse` from the server API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvoiceListResponse {
+    pub total: i64,
+    pub invoices: Vec<Invoice>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,7 +338,6 @@ mod tests {
     fn test_invoice_serialization() {
         let invoice = Invoice {
             id: "inv_001".to_string(),
-            store_id: "store_001".to_string(),
             amount: "100.00".to_string(),
             currency: "USD".to_string(),
             status: InvoiceStatus::Pending,
@@ -335,6 +345,7 @@ mod tests {
             created_at: "2024-01-01T00:00:00Z".to_string(),
             expires_at: "2024-01-02T00:00:00Z".to_string(),
             metadata: None,
+            payment_options: vec![],
         };
 
         let json = serde_json::to_string(&invoice).unwrap();
@@ -348,9 +359,6 @@ mod tests {
     fn test_payment_serialization() {
         let payment = Payment {
             id: "pay_001".to_string(),
-            invoice_id: "inv_001".to_string(),
-            chain_id: 1,
-            asset_type: AssetType::Native,
             amount: "50000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
             token_address: None,
@@ -360,15 +368,12 @@ mod tests {
             confirmed_at: Some("2024-01-01T00:05:00Z".to_string()),
             from_address: Some("0x1234...".to_string()),
             reorged: false,
-            credited_amount: Some("100.00".to_string()),
-            rate_used: Some("0.0005".to_string()),
         };
 
         let json = serde_json::to_string(&payment).unwrap();
         let parsed: Payment = serde_json::from_str(&json).unwrap();
 
         assert_eq!(payment.id, parsed.id);
-        assert_eq!(payment.chain_id, parsed.chain_id);
         assert_eq!(payment.confirmed_at, parsed.confirmed_at);
     }
 
@@ -528,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_invoice_status_default() {
-        assert_eq!(InvoiceStatus::default(), InvoiceStatus::Pending);
+        assert_eq!(default_invoice_status(), InvoiceStatus::Pending);
     }
 
     #[test]
@@ -541,25 +546,44 @@ mod tests {
     }
 
     // =========================================================================
-    // AssetType
+    // InvoiceStatusResponse
     // =========================================================================
 
     #[test]
-    fn test_asset_type_default() {
-        assert_eq!(AssetType::default(), AssetType::Native);
-    }
-
-    #[test]
-    fn test_asset_type_serde_roundtrip() {
-        let json = serde_json::to_string(&AssetType::ERC20).unwrap();
-        assert_eq!(json, "\"e_r_c20\""); // rename_all = snake_case on ERC20
-        let parsed: AssetType = serde_json::from_str("\"e_r_c20\"").unwrap();
-        assert_eq!(parsed, AssetType::ERC20);
-
-        let json = serde_json::to_string(&AssetType::Native).unwrap();
-        assert_eq!(json, "\"native\"");
-        let parsed: AssetType = serde_json::from_str("\"native\"").unwrap();
-        assert_eq!(parsed, AssetType::Native);
+    fn test_invoice_status_response_from_backend() {
+        let json = r#"{
+            "id": "inv-1",
+            "status": "paid",
+            "amount": "100.00",
+            "amount_received": "100.00",
+            "currency": "USD",
+            "expires_at": "2024-01-02T00:00:00Z",
+            "payment_count": 1,
+            "confirmed_count": 1,
+            "is_paid": true,
+            "is_expired": false,
+            "payment_options": [],
+            "payments": [
+                {
+                    "id": "pay-1",
+                    "tx_hash": "0xabc123",
+                    "amount": "50000000000000000",
+                    "asset_symbol": "ETH",
+                    "token_address": null,
+                    "block_number": 19000000,
+                    "from_address": "0x1234",
+                    "detected_at": "2024-01-01T10:00:00Z",
+                    "confirmed_at": "2024-01-01T10:05:00Z",
+                    "reorged": false
+                }
+            ]
+        }"#;
+        let resp: InvoiceStatusResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, "inv-1");
+        assert_eq!(resp.status, InvoiceStatus::Paid);
+        assert!(resp.is_paid);
+        assert_eq!(resp.payments.len(), 1);
+        assert_eq!(resp.payments[0].tx_hash, "0xabc123");
     }
 
     // =========================================================================
@@ -844,7 +868,7 @@ mod tests {
     fn test_paginated_response() {
         let json = r#"{
             "data": [
-                {"id": "inv_1", "store_id": "s1", "currency": "USD", "status": "pending", "amount": "100", "amount_received": "0", "created_at": "2024-01-01T00:00:00Z", "expires_at": "2024-01-02T00:00:00Z", "metadata": null}
+                {"id": "inv_1", "currency": "USD", "status": "pending", "amount": "100", "amount_received": "0", "created_at": "2024-01-01T00:00:00Z", "expires_at": "2024-01-02T00:00:00Z", "metadata": null}
             ],
             "total": 50,
             "page": 1,
@@ -862,20 +886,152 @@ mod tests {
     // Create invoice request
     // =========================================================================
 
+    // =========================================================================
+    // InvoiceListResponse (backend response for GET /invoices)
+    // =========================================================================
+
+    #[test]
+    fn test_invoice_list_response_from_backend() {
+        let json = r#"{
+            "total": 42,
+            "invoices": [
+                {
+                    "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "currency": "USD",
+                    "status": "paid",
+                    "amount": "100.00",
+                    "amount_received": "100.00",
+                    "created_at": "2024-06-15T10:30:00Z",
+                    "expires_at": "2024-06-16T10:30:00Z",
+                    "metadata": {"order_id": "ORD-123"},
+                    "payment_options": []
+                },
+                {
+                    "id": "660e8400-e29b-41d4-a716-446655440000",
+                    "currency": "ETH",
+                    "status": "pending",
+                    "amount": "0.5",
+                    "amount_received": "0",
+                    "created_at": "2024-06-15T11:00:00Z",
+                    "expires_at": "2024-06-15T11:15:00Z",
+                    "metadata": null,
+                    "payment_options": []
+                }
+            ]
+        }"#;
+        let resp: InvoiceListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.total, 42);
+        assert_eq!(resp.invoices.len(), 2);
+        assert_eq!(resp.invoices[0].id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(resp.invoices[0].status, InvoiceStatus::Paid);
+        assert_eq!(resp.invoices[0].amount, "100.00");
+        assert_eq!(resp.invoices[1].status, InvoiceStatus::Pending);
+    }
+
+    #[test]
+    fn test_invoice_list_response_empty() {
+        let json = r#"{"total": 0, "invoices": []}"#;
+        let resp: InvoiceListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.total, 0);
+        assert!(resp.invoices.is_empty());
+    }
+
+    #[test]
+    fn test_invoice_from_backend() {
+        let json = r#"{
+            "id": "inv-1",
+            "currency": "USD",
+            "status": "expired",
+            "amount": "50.00",
+            "amount_received": "0",
+            "created_at": "2024-01-01T00:00:00Z",
+            "expires_at": "2024-01-01T01:00:00Z",
+            "metadata": null,
+            "payment_options": []
+        }"#;
+        let invoice: Invoice = serde_json::from_str(json).unwrap();
+        assert_eq!(invoice.id, "inv-1");
+        assert_eq!(invoice.status, InvoiceStatus::Expired);
+        assert!(invoice.payment_options.is_empty());
+    }
+
+    #[test]
+    fn test_invoice_with_payment_options() {
+        let json = r#"{
+            "id": "inv-2",
+            "currency": "USD",
+            "status": "pending",
+            "amount": "100.00",
+            "amount_received": "0",
+            "created_at": "2024-01-01T00:00:00Z",
+            "expires_at": "2024-01-01T01:00:00Z",
+            "metadata": null,
+            "payment_options": [
+                {
+                    "id": "po-1",
+                    "payment_method_id": "ETH-1",
+                    "chain_id": 1,
+                    "asset_symbol": "ETH",
+                    "token_address": null,
+                    "decimals": 18,
+                    "payment_address": "0xabc123",
+                    "amount": "28000000000000000",
+                    "rate": "0.00028",
+                    "is_active": true
+                }
+            ]
+        }"#;
+        let invoice: Invoice = serde_json::from_str(json).unwrap();
+        assert_eq!(invoice.payment_options.len(), 1);
+        assert_eq!(invoice.payment_options[0].chain_id, 1);
+        assert_eq!(invoice.payment_options[0].asset_symbol, "ETH");
+    }
+
+    #[test]
+    fn test_invoice_list_response_roundtrip() {
+        let resp = InvoiceListResponse {
+            total: 1,
+            invoices: vec![Invoice {
+                id: "inv-rt".to_string(),
+                currency: "USD".to_string(),
+                status: InvoiceStatus::Paid,
+                amount: "25.00".to_string(),
+                amount_received: "25.00".to_string(),
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: "2024-01-02T00:00:00Z".to_string(),
+                metadata: None,
+                payment_options: vec![],
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: InvoiceListResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total, 1);
+        assert_eq!(parsed.invoices[0].id, "inv-rt");
+    }
+
+    // =========================================================================
+    // Create invoice request
+    // =========================================================================
+
     #[test]
     fn test_create_invoice_request() {
         let req = CreateInvoiceRequest {
             store_id: "store_001".to_string(),
             amount: "99.99".to_string(),
             currency: "USD".to_string(),
-            chain_id: Some(1),
+            expiration_seconds: Some(1800),
             metadata: None,
+            webhook_url: None,
+            redirect_url: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["store_id"], "store_001");
         assert_eq!(json["amount"], "99.99");
         assert_eq!(json["currency"], "USD");
-        assert_eq!(json["chain_id"], 1);
+        assert_eq!(json["expiration_seconds"], 1800);
+        // skip_serializing_if = None fields should be absent
+        assert!(json.get("metadata").is_none());
+        assert!(json.get("webhook_url").is_none());
     }
 
     #[test]
@@ -884,11 +1040,15 @@ mod tests {
             store_id: "s1".to_string(),
             amount: "10".to_string(),
             currency: "ETH".to_string(),
-            chain_id: None,
+            expiration_seconds: None,
             metadata: None,
+            webhook_url: None,
+            redirect_url: None,
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert!(json["chain_id"].is_null());
-        assert!(json["metadata"].is_null());
+        assert_eq!(json["store_id"], "s1");
+        // Optional fields should not be present in JSON
+        assert!(json.get("expiration_seconds").is_none());
+        assert!(json.get("metadata").is_none());
     }
 }
