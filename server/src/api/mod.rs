@@ -62,6 +62,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::get_invoice_payments,
         invoices::get_invoice_status,
         invoices::cancel_invoice,
+        // Payments
+        invoices::list_payments,
+        invoices::get_payment,
     ),
     components(schemas(
         health::HealthResponse,
@@ -84,6 +87,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::InvoiceResponse,
         invoices::InvoiceListResponse,
         invoices::PaymentResponse,
+        invoices::PaymentListResponse,
         invoices::PaymentOptionResponse,
         invoices::InvoiceStatusResponse,
     )),
@@ -91,6 +95,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         (name = "health", description = "Health check endpoints"),
         (name = "stores", description = "Store management"),
         (name = "invoices", description = "Invoice management"),
+        (name = "payments", description = "Payment management"),
         (name = "tokens", description = "Token management (from EVM API)"),
         (name = "networks", description = "Network information (from EVM API)"),
         (name = "auth", description = "Authentication (from Auth API)"),
@@ -161,6 +166,12 @@ where
         .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
         .with_state(state.clone());
 
+    // Payment endpoints (store-scoped)
+    let payment_routes = Router::new()
+        .route("/", get(invoices::list_payments::<A>))
+        .route("/{payment_id}", get(invoices::get_payment::<A>))
+        .with_state(state.clone());
+
     // Auth API from auth crate
     let auth_state = auth::api::AuthState::new(state.auth_service.clone());
     let auth_routes = auth::api::router(auth_state);
@@ -173,6 +184,7 @@ where
         .merge(health_routes)
         .nest("/stores", store_routes)
         .nest("/invoices", invoice_routes)
+        .nest("/payments", payment_routes)
         .nest("/auth", auth_routes)
         .nest("/evm", evm_routes);
 

@@ -9,9 +9,10 @@ use futures::stream::{self, BoxStream, StreamExt};
 use types::{
     CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
     InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentMethodId, PaymentOptionData,
-    PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentReader, PaymentWriter,
-    PendingWatchInfo, RepositoryResult, StoreId, StoreWebhook, StoreWebhookReader, TokenData,
-    TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
+    PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentQueryParams, PaymentReader,
+    PaymentWriter, PendingWatchInfo, RepositoryResult, StoreId, StoreWebhook, StoreWebhookReader,
+    TokenData, TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader,
+    WatchedAddressWriter,
 };
 use uuid::Uuid;
 
@@ -193,6 +194,48 @@ impl PaymentReader for InMemoryDataService {
         Ok(payments
             .values()
             .any(|p| p.invoice_id == *invoice_id && !p.reorged))
+    }
+
+    async fn query(&self, params: &PaymentQueryParams) -> RepositoryResult<(i64, Vec<PaymentData>)> {
+        let payments = self.payments.read().unwrap();
+        let invoices = self.invoices.read().unwrap();
+
+        let mut filtered: Vec<PaymentData> = payments
+            .values()
+            .filter(|p| {
+                if let Some(ref invoice_id) = params.invoice_id {
+                    if p.invoice_id != *invoice_id {
+                        return false;
+                    }
+                }
+                if let Some(store_id) = params.store_id {
+                    let invoice_store_id = invoices
+                        .get(&p.invoice_id.0)
+                        .map(|i| i.store_id);
+                    if invoice_store_id != Some(store_id) {
+                        return false;
+                    }
+                }
+                if let Some(confirmed) = params.confirmed {
+                    if confirmed && p.confirmed_at.is_none() {
+                        return false;
+                    }
+                    if !confirmed && p.confirmed_at.is_some() {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+
+        filtered.sort_by(|a, b| b.detected_at.cmp(&a.detected_at));
+        let total = filtered.len() as i64;
+        let offset = params.offset as usize;
+        let limit = params.limit as usize;
+        let page = filtered.into_iter().skip(offset).take(limit).collect();
+
+        Ok((total, page))
     }
 }
 

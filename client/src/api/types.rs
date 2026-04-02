@@ -81,6 +81,10 @@ pub struct Invoice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
     pub id: String,
+    /// Chain ID (EIP-155).
+    pub chain_id: u64,
+    /// Invoice ID this payment belongs to.
+    pub invoice_id: String,
     /// Transaction hash.
     pub tx_hash: String,
     /// Amount received (smallest unit as string).
@@ -322,6 +326,15 @@ pub struct InvoiceListResponse {
     pub invoices: Vec<Invoice>,
 }
 
+/// Payment list response from the backend.
+///
+/// Mirrors `PaymentListResponse` from the server API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentListResponse {
+    pub total: i64,
+    pub payments: Vec<Payment>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +372,8 @@ mod tests {
     fn test_payment_serialization() {
         let payment = Payment {
             id: "pay_001".to_string(),
+            chain_id: 1,
+            invoice_id: "inv_001".to_string(),
             amount: "50000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
             token_address: None,
@@ -374,6 +389,8 @@ mod tests {
         let parsed: Payment = serde_json::from_str(&json).unwrap();
 
         assert_eq!(payment.id, parsed.id);
+        assert_eq!(payment.chain_id, parsed.chain_id);
+        assert_eq!(payment.invoice_id, parsed.invoice_id);
         assert_eq!(payment.confirmed_at, parsed.confirmed_at);
     }
 
@@ -566,6 +583,8 @@ mod tests {
             "payments": [
                 {
                     "id": "pay-1",
+                    "chain_id": 1,
+                    "invoice_id": "inv-1",
                     "tx_hash": "0xabc123",
                     "amount": "50000000000000000",
                     "asset_symbol": "ETH",

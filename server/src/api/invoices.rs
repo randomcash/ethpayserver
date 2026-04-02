@@ -20,8 +20,8 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use types::{
     InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter,
-    PaymentMethodId, PaymentOptionData, PaymentOptionId, PaymentReader, StoreId,
-    StorePaymentMethodWriter, WatchedAddressWriter,
+    PaymentMethodId, PaymentOptionData, PaymentOptionId, PaymentQueryParams, PaymentReader,
+    StoreId, StorePaymentMethodWriter, WatchedAddressWriter,
     traits::{InvoiceData, PaymentData},
 };
 
@@ -244,6 +244,10 @@ pub struct InvoiceResponse {
 pub struct PaymentResponse {
     /// Payment ID.
     pub id: String,
+    /// Chain ID (EIP-155).
+    pub chain_id: u64,
+    /// Invoice ID this payment belongs to.
+    pub invoice_id: String,
     /// Transaction hash.
     pub tx_hash: String,
     /// Amount received.
@@ -268,6 +272,8 @@ impl From<PaymentData> for PaymentResponse {
     fn from(p: PaymentData) -> Self {
         Self {
             id: p.id.to_string(),
+            chain_id: p.chain_id,
+            invoice_id: p.invoice_id.0,
             tx_hash: p.tx_hash,
             amount: p.amount,
             asset_symbol: p.asset_symbol,
@@ -279,6 +285,28 @@ impl From<PaymentData> for PaymentResponse {
             reorged: p.reorged,
         }
     }
+}
+
+/// Paginated payment list response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PaymentListResponse {
+    /// Total number of matching payments.
+    pub total: i64,
+    /// Payments in this page.
+    pub payments: Vec<PaymentResponse>,
+}
+
+/// Query parameters for listing payments.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct ListPaymentsQuery {
+    /// Filter by store ID.
+    pub store_id: Option<Uuid>,
+    /// Filter by status (confirmed, pending).
+    pub status: Option<String>,
+    /// Maximum number of results.
+    pub limit: Option<i64>,
+    /// Offset for pagination.
+    pub offset: Option<i64>,
 }
 
 /// Invoice status response with payment details.
@@ -884,6 +912,140 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(payments.into_iter().map(|p| p.into()).collect()))
+}
+
+/// List payments with optional filters.
+///
+/// Users can only see payments for stores they are members of.
+/// store_id is required unless user is a server admin.
+#[utoipa::path(
+    get,
+    path = "/payments",
+    tag = "payments",
+    security(("bearer_auth" = [])),
+    params(ListPaymentsQuery),
+    responses(
+        (status = 200, description = "List of payments", body = PaymentListResponse),
+        (status = 400, description = "store_id required"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not a member of the store"),
+    )
+)]
+pub async fn list_payments<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Query(query): Query<ListPaymentsQuery>,
+) -> Result<Json<PaymentListResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    // For non-admins, store_id is required
+    let store_id = match query.store_id {
+        Some(id) => id,
+        None => {
+            if user.role != auth::Role::ServerAdmin {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            uuid::Uuid::nil()
+        }
+    };
+
+    // Check user has access to the store (unless admin or no store filter)
+    if store_id != uuid::Uuid::nil() {
+        let is_member = state
+            .data_service
+            .get_user_store(user.id, StoreId(store_id))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_some();
+
+        if !is_member && user.role != auth::Role::ServerAdmin {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
+    let mut params = PaymentQueryParams::new();
+
+    if let Some(status) = query.status {
+        match status.as_str() {
+            "confirmed" => params = params.with_confirmed(true),
+            "pending" => params = params.with_confirmed(false),
+            _ => return Err(StatusCode::BAD_REQUEST),
+        }
+    }
+
+    if let Some(limit) = query.limit {
+        params = params.with_limit(limit);
+    }
+
+    if let Some(offset) = query.offset {
+        params = params.with_offset(offset);
+    }
+
+    if store_id != uuid::Uuid::nil() {
+        params = params.with_store_id(StoreId(store_id));
+    }
+
+    let (total, payments) = PaymentReader::query(&*state.data_service, &params)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(PaymentListResponse {
+        total,
+        payments: payments.into_iter().map(Into::into).collect(),
+    }))
+}
+
+/// Get a single payment by ID.
+///
+/// User must be a member of the store the payment's invoice belongs to.
+#[utoipa::path(
+    get,
+    path = "/payments/{payment_id}",
+    tag = "payments",
+    security(("bearer_auth" = [])),
+    params(
+        ("payment_id" = Uuid, Path, description = "Payment ID")
+    ),
+    responses(
+        (status = 200, description = "Payment details", body = PaymentResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Payment not found"),
+    )
+)]
+pub async fn get_payment<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(payment_id): Path<Uuid>,
+) -> Result<Json<PaymentResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let payment = PaymentReader::get(&*state.data_service, payment_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Look up the invoice to check store membership
+    let invoice = InvoiceReader::get(&*state.data_service, &payment.invoice_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if user.role != auth::Role::ServerAdmin {
+        let is_member = state
+            .data_service
+            .get_user_store(user.id, invoice.store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_some();
+
+        if !is_member {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    Ok(Json(payment.into()))
 }
 
 /// Get detailed status of an invoice including payments.

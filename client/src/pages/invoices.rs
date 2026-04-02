@@ -899,7 +899,8 @@ mod tests {
     #[test]
     fn test_payment_status_confirmed() {
         let p = Payment {
-            id: "p1".into(), amount: "100".into(),
+            id: "p1".into(), chain_id: 1, invoice_id: "inv-1".into(),
+            amount: "100".into(),
             asset_symbol: "ETH".into(), token_address: None,
             tx_hash: "0xabc".into(), block_number: Some(1),
             detected_at: "2024-01-01T00:00:00Z".into(),
@@ -913,7 +914,8 @@ mod tests {
     #[test]
     fn test_payment_status_confirming() {
         let p = Payment {
-            id: "p2".into(), amount: "100".into(),
+            id: "p2".into(), chain_id: 1, invoice_id: "inv-1".into(),
+            amount: "100".into(),
             asset_symbol: "ETH".into(), token_address: None,
             tx_hash: "0xdef".into(), block_number: None,
             detected_at: "2024-01-01T00:00:00Z".into(),
@@ -927,7 +929,8 @@ mod tests {
     #[test]
     fn test_payment_status_reorged() {
         let p = Payment {
-            id: "p3".into(), amount: "100".into(),
+            id: "p3".into(), chain_id: 1, invoice_id: "inv-1".into(),
+            amount: "100".into(),
             asset_symbol: "ETH".into(), token_address: None,
             tx_hash: "0xghi".into(), block_number: Some(1),
             detected_at: "2024-01-01T00:00:00Z".into(),

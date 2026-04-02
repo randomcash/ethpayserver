@@ -6,8 +6,9 @@ use thiserror::Error;
 
 use super::{
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
-    InvoiceListResponse, InvoiceStatusResponse, Payment, Store, StorePaymentMethod, StoreWebhook,
-    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, Wallet,
+    InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, Store,
+    StorePaymentMethod, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
+    UpdateWebhookRequest, Wallet,
 };
 
 /// API client errors.
@@ -223,6 +224,38 @@ impl EvmApiClient {
     /// Get invoice status (includes payment options and payments).
     pub async fn get_invoice_status(&self, invoice_id: &str) -> Result<InvoiceStatusResponse, ApiError> {
         self.get(&format!("/api/invoices/{}/status", invoice_id)).await
+    }
+
+    // =========================================================================
+    // Payments (store-scoped)
+    // =========================================================================
+
+    /// List payments with filters and pagination.
+    ///
+    /// `store_id` is required for non-admin users.
+    pub async fn list_payments(
+        &self,
+        store_id: &str,
+        status: Option<&str>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<PaymentListResponse, ApiError> {
+        let mut query = format!("/api/payments?store_id={}", store_id);
+        if let Some(s) = status {
+            query.push_str(&format!("&status={}", s));
+        }
+        if let Some(l) = limit {
+            query.push_str(&format!("&limit={}", l));
+        }
+        if let Some(o) = offset {
+            query.push_str(&format!("&offset={}", o));
+        }
+        self.get(&query).await
+    }
+
+    /// Get a single payment by ID.
+    pub async fn get_payment(&self, id: &str) -> Result<Payment, ApiError> {
+        self.get(&format!("/api/payments/{}", id)).await
     }
 
     // =========================================================================
