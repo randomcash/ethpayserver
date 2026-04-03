@@ -14,6 +14,7 @@ pub mod extractors;
 pub mod health;
 pub mod invoices;
 pub mod stores;
+pub mod users;
 
 pub use extractors::{AdminAuth, AuthenticatedUser};
 
@@ -62,6 +63,13 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::get_invoice_payments,
         invoices::get_invoice_status,
         invoices::cancel_invoice,
+        // Payments
+        invoices::list_payments,
+        invoices::get_payment,
+        // Users
+        users::list_api_keys,
+        users::create_api_key,
+        users::revoke_api_key,
     ),
     components(schemas(
         health::HealthResponse,
@@ -86,6 +94,10 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::PaymentResponse,
         invoices::PaymentOptionResponse,
         invoices::InvoiceStatusResponse,
+        users::ApiKeyListResponse,
+        users::ApiKeyInfoResponse,
+        users::CreateApiKeyPayload,
+        users::CreateApiKeyResponsePayload,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -94,6 +106,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         (name = "tokens", description = "Token management (from EVM API)"),
         (name = "networks", description = "Network information (from EVM API)"),
         (name = "auth", description = "Authentication (from Auth API)"),
+        (name = "users", description = "User management (API keys)"),
     )
 )]
 pub struct ApiDoc;
@@ -161,6 +174,18 @@ where
         .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
         .with_state(state.clone());
 
+    // Payment endpoints (store-scoped)
+    let payment_routes = Router::new()
+        .route("/", get(invoices::list_payments::<A>))
+        .route("/{payment_id}", get(invoices::get_payment::<A>))
+        .with_state(state.clone());
+
+    // User endpoints (API keys)
+    let user_routes = Router::new()
+        .route("/api-keys", get(users::list_api_keys::<A>))
+        .route("/api-keys", post(users::create_api_key::<A>))
+        .route("/api-keys/{id}", delete(users::revoke_api_key::<A>))
+        .with_state(state.clone());
     // Auth API from auth crate
     let auth_state = auth::api::AuthState::new(state.auth_service.clone());
     let auth_routes = auth::api::router(auth_state);
