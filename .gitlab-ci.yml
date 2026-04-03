@@ -7,8 +7,15 @@ stages:
 variables:
   CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
   RUSTFLAGS: "-D warnings"
-  # payserver-commons as git dep — CI needs access
   GIT_SUBMODULE_STRATEGY: none
+
+# Clone payserver-commons so [patch] paths resolve
+# Uses CI_JOB_TOKEN for cross-project access within the same group
+before_script:
+  - |
+    if [ ! -d "../payserver-commons" ]; then
+      git clone --depth 1 https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/random.cash/payserver-commons.git ../payserver-commons
+    fi
 
 # Cache cargo registry, git checkouts, and build artifacts between jobs
 cache:
