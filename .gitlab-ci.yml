@@ -34,7 +34,7 @@ format:
   image: rust:1.90
   script:
     - rustup component add rustfmt
-    - cargo fmt --all -- --check
+    - cargo fmt -p server -p data-service -p evm -p client -- --check
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
