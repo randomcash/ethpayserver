@@ -32,6 +32,10 @@ web-sys = { version = "0.3", features = [
     "Element",
     "HtmlElement",
     "console",
+    "WebSocket",
+    "MessageEvent",
+    "Event",
+    "CloseEvent",
 ] }
 
 # Serialization

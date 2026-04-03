@@ -198,6 +198,8 @@ where
         .merge(health_routes)
         .nest("/stores", store_routes)
         .nest("/invoices", invoice_routes)
+        .nest("/payments", payment_routes)
+        .nest("/users", user_routes)
         .nest("/auth", auth_routes)
         .nest("/evm", evm_routes);
 

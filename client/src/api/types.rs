@@ -322,6 +322,53 @@ pub struct InvoiceListResponse {
     pub invoices: Vec<Invoice>,
 }
 
+/// Payment list response from the backend.
+///
+/// Mirrors `PaymentListResponse` from the server API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentListResponse {
+    pub total: i64,
+    pub payments: Vec<Payment>,
+}
+
+/// API key info (returned for list/get).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyInfo {
+    pub id: String,
+    pub name: String,
+    pub key_prefix: String,
+    pub is_active: bool,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// Response for listing API keys.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyListResponse {
+    pub keys: Vec<ApiKeyInfo>,
+}
+
+/// Request to create a new API key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateApiKeyRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// Response after creating an API key (includes plaintext key).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateApiKeyResponsePayload {
+    pub id: String,
+    pub name: String,
+    pub key_prefix: String,
+    pub is_active: bool,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub key: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

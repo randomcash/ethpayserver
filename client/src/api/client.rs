@@ -5,6 +5,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
 use super::{
+    ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
     InvoiceListResponse, InvoiceStatusResponse, Payment, Store, StorePaymentMethod, StoreWebhook,
     UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, Wallet,
@@ -310,6 +311,25 @@ impl EvmApiClient {
     /// Get a wallet by ID.
     pub async fn get_wallet(&self, id: &str) -> Result<Wallet, ApiError> {
         self.get(&format!("/api/wallets/{}", id)).await
+    }
+
+    // =========================================================================
+    // API Keys
+    // =========================================================================
+
+    /// List API keys for the authenticated user.
+    pub async fn list_api_keys(&self) -> Result<ApiKeyListResponse, ApiError> {
+        self.get("/api/users/api-keys").await
+    }
+
+    /// Create a new API key.
+    pub async fn create_api_key(&self, request: &CreateApiKeyRequest) -> Result<CreateApiKeyResponsePayload, ApiError> {
+        self.post("/api/users/api-keys", request).await
+    }
+
+    /// Revoke an API key.
+    pub async fn revoke_api_key(&self, id: &str) -> Result<(), ApiError> {
+        self.delete(&format!("/api/users/api-keys/{}", id)).await
     }
 }
 

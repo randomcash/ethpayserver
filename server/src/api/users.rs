@@ -12,10 +12,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use auth::{
-    ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, CreateApiKeyRequest, CreateApiKeyResponse,
-    SessionService, UserId,
-};
+use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, SessionService};
 
 use crate::state::PgAppState;
 use super::extractors::AuthenticatedUser;
