@@ -646,6 +646,50 @@ fn mask_xpub(xpub: &str) -> String {
     format!("{}...{}", &xpub[..8], &xpub[xpub.len() - 8..])
 }
 
+/// List all wallets for stores the user is a member of.
+#[utoipa::path(
+    get,
+    path = "/wallets",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of user's wallets", body = Vec<WalletResponse>),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
+pub async fn list_wallets<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+) -> Result<Json<Vec<WalletResponse>>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    // Get user's stores
+    let stores = state
+        .data_service
+        .get_stores_for_user(user.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut wallets = Vec::new();
+
+    // Fetch wallet for each store
+    for store in stores {
+        if let Ok(Some(wallet)) = StoreWalletReader::get_wallet(&*state.data_service, store.id.0).await {
+            wallets.push(WalletResponse {
+                id: wallet.id,
+                store_id: wallet.store_id,
+                xpub_masked: mask_xpub(&wallet.xpub),
+                derivation_index: wallet.derivation_index,
+                name: wallet.name,
+                created_at: wallet.created_at,
+            });
+        }
+    }
+
+    Ok(Json(wallets))
+}
+
 /// Get wallet configuration for a store.
 #[utoipa::path(
     get,
@@ -1620,5 +1664,47 @@ mod tests {
 
         let json = serde_json::to_value(&response).unwrap();
         assert!(json["webhook_secret"].is_null());
+    }
+
+    // =========================================================================
+    // list_wallets response shape
+    // =========================================================================
+
+    #[test]
+    fn test_list_wallets_response_serialization() {
+        let wallets = vec![
+            WalletResponse {
+                id: Uuid::nil(),
+                store_id: Uuid::nil(),
+                xpub_masked: mask_xpub("xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz"),
+                derivation_index: 0,
+                name: Some("ETH Wallet".to_string()),
+                created_at: Utc::now(),
+            },
+            WalletResponse {
+                id: Uuid::new_v4(),
+                store_id: Uuid::new_v4(),
+                xpub_masked: mask_xpub("xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5"),
+                derivation_index: 5,
+                name: None,
+                created_at: Utc::now(),
+            },
+        ];
+
+        let json = serde_json::to_value(&wallets).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], "ETH Wallet");
+        assert_eq!(arr[0]["derivation_index"], 0);
+        assert!(arr[0]["xpub_masked"].as_str().unwrap().contains("..."));
+        assert!(arr[1]["name"].is_null());
+        assert_eq!(arr[1]["derivation_index"], 5);
+    }
+
+    #[test]
+    fn test_list_wallets_empty_response() {
+        let wallets: Vec<WalletResponse> = vec![];
+        let json = serde_json::to_value(&wallets).unwrap();
+        assert!(json.as_array().unwrap().is_empty());
     }
 }
