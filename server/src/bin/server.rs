@@ -46,9 +46,11 @@ async fn main() -> Result<()> {
 
     // Create auth service with custom config
     // Note: PgDataService implements AuthRepository (all required traits)
-    let mut auth_config = AuthConfig::default();
-    // Increase wallet challenge timeout to 10 minutes for registration flow
-    auth_config.wallet_challenge_duration = chrono::Duration::minutes(10);
+    let mut auth_config = AuthConfig {
+        // Increase wallet challenge timeout to 10 minutes for registration flow
+        wallet_challenge_duration: chrono::Duration::minutes(10),
+        ..AuthConfig::default()
+    };
     // WebAuthn config from environment
     if let Ok(rp_id) = std::env::var("WEBAUTHN_RP_ID") {
         auth_config.rp_id = rp_id;

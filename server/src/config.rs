@@ -109,10 +109,11 @@ impl Config {
         }
 
         // Validate REDIS_URL format (if provided)
-        if let Some(ref redis_url) = self.redis_url {
-            if !redis_url.starts_with("redis://") && !redis_url.starts_with("rediss://") {
-                anyhow::bail!("REDIS_URL must start with 'redis://' or 'rediss://'");
-            }
+        if let Some(ref redis_url) = self.redis_url
+            && !redis_url.starts_with("redis://")
+            && !redis_url.starts_with("rediss://")
+        {
+            anyhow::bail!("REDIS_URL must start with 'redis://' or 'rediss://'");
         }
 
         // Validate LOG_LEVEL

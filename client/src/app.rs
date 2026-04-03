@@ -172,19 +172,19 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
             match api.list_stores().await {
                 Ok(fetched) => {
                     // If selected store no longer exists, clear selection.
-                    if let Some(ref id) = selected_store_id.get_untracked() {
-                        if !fetched.iter().any(|s| &s.id == id) {
-                            set_selected_store_id.set(None);
-                            ui_kit::hooks::use_storage::remove_local(SELECTED_STORE_KEY);
-                        }
+                    if let Some(ref id) = selected_store_id.get_untracked()
+                        && !fetched.iter().any(|s| &s.id == id)
+                    {
+                        set_selected_store_id.set(None);
+                        ui_kit::hooks::use_storage::remove_local(SELECTED_STORE_KEY);
                     }
                     // Auto-select the first store if none is selected.
-                    if selected_store_id.get_untracked().is_none() {
-                        if let Some(first) = fetched.first() {
-                            let id = first.id.clone();
-                            let _ = set_local(SELECTED_STORE_KEY, &id);
-                            set_selected_store_id.set(Some(id));
-                        }
+                    if selected_store_id.get_untracked().is_none()
+                        && let Some(first) = fetched.first()
+                    {
+                        let id = first.id.clone();
+                        let _ = set_local(SELECTED_STORE_KEY, &id);
+                        set_selected_store_id.set(Some(id));
                     }
                     set_stores.set(fetched);
                 }
@@ -351,7 +351,7 @@ where
                 </div>
             </div>
 
-            <nav class="sidebar-nav" on:click=move |e| on_close_link(e)>
+            <nav class="sidebar-nav" on:click=on_close_link>
                 // Main Navigation
                 <div class="sidebar-section">
                     <SidebarLink href="/" label="Dashboard">

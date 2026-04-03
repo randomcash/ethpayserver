@@ -82,9 +82,10 @@ pub trait EventBridge: Send + Sync {
 }
 
 /// Configuration for event bridges.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum BridgeConfig {
     /// In-memory bridge (for testing or single-process deployments).
+    #[default]
     Memory,
     /// Redis pub/sub bridge.
     #[cfg(feature = "redis")]
@@ -95,12 +96,6 @@ pub enum BridgeConfig {
         /// Channel for commands (API server -> monitor).
         commands_channel: String,
     },
-}
-
-impl Default for BridgeConfig {
-    fn default() -> Self {
-        Self::Memory
-    }
 }
 
 impl BridgeConfig {

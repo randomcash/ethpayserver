@@ -288,19 +288,19 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         debug!(chain_id, block = block.number, "processing block");
 
         // Check for reorg
-        if let Some(last_hash) = *self.last_block_hash.read().await {
-            if let Some(last_num) = *self.last_block.read().await {
-                // If this block's parent doesn't match our last block, potential reorg
-                if block.number == last_num + 1 && block.parent_hash != last_hash {
-                    warn!(
-                        chain_id,
-                        block = block.number,
-                        expected_parent = %last_hash,
-                        actual_parent = %block.parent_hash,
-                        "potential reorg detected"
-                    );
-                    self.handle_reorg(last_num, last_hash, block).await?;
-                }
+        if let Some(last_hash) = *self.last_block_hash.read().await
+            && let Some(last_num) = *self.last_block.read().await
+        {
+            // If this block's parent doesn't match our last block, potential reorg
+            if block.number == last_num + 1 && block.parent_hash != last_hash {
+                warn!(
+                    chain_id,
+                    block = block.number,
+                    expected_parent = %last_hash,
+                    actual_parent = %block.parent_hash,
+                    "potential reorg detected"
+                );
+                self.handle_reorg(last_num, last_hash, block).await?;
             }
         }
 

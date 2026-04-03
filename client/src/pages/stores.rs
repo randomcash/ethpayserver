@@ -1101,12 +1101,9 @@ fn WebhooksTab(store_id: String) -> impl IntoView {
                                             webhook_url: url,
                                             enabled,
                                         };
-                                        match api.configure_store_webhook(&sid, &req).await {
-                                            Ok(wh) => {
-                                                set_revealed_secret.set(wh.webhook_secret);
-                                                set_refresh_counter.update(|c| *c += 1);
-                                            }
-                                            Err(_) => {}
+                                        if let Ok(wh) = api.configure_store_webhook(&sid, &req).await {
+                                            set_revealed_secret.set(wh.webhook_secret);
+                                            set_refresh_counter.update(|c| *c += 1);
                                         }
                                     });
                                 }

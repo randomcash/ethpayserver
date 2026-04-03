@@ -273,16 +273,11 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
     /// 2. Unwatches addresses for paid invoices
     /// 3. Unwatches addresses for cancelled invoices
     pub async fn cleanup_addresses(&self) -> Result<CleanupStats, CleanupError> {
-        let mut stats = CleanupStats::default();
-
-        // Cleanup expired invoices past grace period
-        stats.expired = self.cleanup_expired_addresses().await?;
-
-        // Cleanup paid invoices
-        stats.paid = self.cleanup_paid_addresses().await?;
-
-        // Cleanup cancelled invoices
-        stats.cancelled = self.cleanup_cancelled_addresses().await?;
+        let stats = CleanupStats {
+            expired: self.cleanup_expired_addresses().await?,
+            paid: self.cleanup_paid_addresses().await?,
+            cancelled: self.cleanup_cancelled_addresses().await?,
+        };
 
         if stats.total() > 0 {
             tracing::info!(

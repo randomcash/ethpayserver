@@ -7,8 +7,8 @@ use leptos_router::components::A;
 use leptos_router::hooks::use_params_map;
 
 use crate::api::{
-    ApiError, CreateInvoiceRequest, EvmApiClient, Invoice, InvoiceStatus, InvoiceStatusExt,
-    InvoiceStatusResponse, Payment,
+    ApiError, CreateInvoiceRequest, EvmApiClient, Invoice, InvoiceStatusExt, InvoiceStatusResponse,
+    Payment,
 };
 use crate::app::StoreContext;
 
@@ -599,7 +599,7 @@ pub fn InvoiceDetailPage() -> impl IntoView {
 /// Inner content of the invoice detail page (rendered after data loads).
 #[component]
 fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
-    let order_id = status.payments.first().and_then(|_| None::<String>); // metadata not on status response
+    let order_id = status.payments.first().and(None::<String>); // metadata not on status response
     let customer_email = None::<String>;
     let created_display = "—".to_string(); // created_at not on status response
     let expires_display = format_date(&status.expires_at);

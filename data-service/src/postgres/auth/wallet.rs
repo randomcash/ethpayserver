@@ -31,10 +31,10 @@ impl WalletRepository for PgDataService {
         .execute(&self.pool)
         .await
         .map_err(|e| {
-            if let sqlx::Error::Database(ref db_err) = e {
-                if db_err.is_unique_violation() {
-                    return AuthError::WalletAlreadyRegistered;
-                }
+            if let sqlx::Error::Database(ref db_err) = e
+                && db_err.is_unique_violation()
+            {
+                return AuthError::WalletAlreadyRegistered;
             }
             sqlx_to_auth_error(e)
         })?;

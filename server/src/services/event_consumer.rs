@@ -868,7 +868,7 @@ mod tests {
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
-        create_test_invoice(&*ds, &invoice_id, store_id).await;
+        create_test_invoice(&ds, &invoice_id, store_id).await;
 
         // Create PaymentDetected event
         let event = PaymentDetected {

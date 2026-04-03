@@ -1327,10 +1327,10 @@ where
     require_store_settings_permission(&state, &user, store_id).await?;
 
     // Validate xpub if provided
-    if let Some(ref xpub) = req.xpub {
-        if !validate_xpub(xpub) {
-            return Err(StatusCode::BAD_REQUEST);
-        }
+    if let Some(ref xpub) = req.xpub
+        && !validate_xpub(xpub)
+    {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     // Verify method exists and belongs to this store
