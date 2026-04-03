@@ -31,6 +31,18 @@ impl StoreWalletReader for PgDataService {
 
         Ok(row.as_ref().map(row_to_wallet))
     }
+
+    async fn get_wallet_by_id(&self, wallet_id: Uuid) -> RepositoryResult<Option<StoreWallet>> {
+        let row = sqlx::query(
+            "SELECT id, store_id, xpub, derivation_index, name, created_at FROM store_wallets WHERE id = $1",
+        )
+        .bind(wallet_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(row.as_ref().map(row_to_wallet))
+    }
 }
 
 #[async_trait]

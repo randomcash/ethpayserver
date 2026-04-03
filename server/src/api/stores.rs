@@ -646,6 +646,100 @@ fn mask_xpub(xpub: &str) -> String {
     format!("{}...{}", &xpub[..8], &xpub[xpub.len() - 8..])
 }
 
+/// List all wallets for stores the user is a member of.
+#[utoipa::path(
+    get,
+    path = "/wallets",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "List of user's wallets", body = Vec<WalletResponse>),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
+pub async fn list_wallets<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+) -> Result<Json<Vec<WalletResponse>>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let stores = state
+        .data_service
+        .get_stores_for_user(user.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut wallets = Vec::new();
+
+    for store in stores {
+        if let Ok(Some(wallet)) = StoreWalletReader::get_wallet(&*state.data_service, store.id.0).await {
+            wallets.push(WalletResponse {
+                id: wallet.id,
+                store_id: wallet.store_id,
+                xpub_masked: mask_xpub(&wallet.xpub),
+                derivation_index: wallet.derivation_index,
+                name: wallet.name,
+                created_at: wallet.created_at,
+            });
+        }
+    }
+
+    Ok(Json(wallets))
+}
+
+/// Get a wallet by ID.
+///
+/// User must be a member of the wallet's store.
+#[utoipa::path(
+    get,
+    path = "/wallets/{wallet_id}",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("wallet_id" = Uuid, Path, description = "Wallet ID")
+    ),
+    responses(
+        (status = 200, description = "Wallet details", body = WalletResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not a member of this wallet's store"),
+        (status = 404, description = "Wallet not found"),
+    )
+)]
+pub async fn get_wallet_by_id<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(wallet_id): Path<Uuid>,
+) -> Result<Json<WalletResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let wallet = StoreWalletReader::get_wallet_by_id(&*state.data_service, wallet_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Verify user has access to the wallet's store
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(user.id, StoreId(wallet.store_id), "ethpay.store.canviewstoresettings")
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !has_permission {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(Json(WalletResponse {
+        id: wallet.id,
+        store_id: wallet.store_id,
+        xpub_masked: mask_xpub(&wallet.xpub),
+        derivation_index: wallet.derivation_index,
+        name: wallet.name,
+        created_at: wallet.created_at,
+    }))
+}
+
 /// Get wallet configuration for a store.
 #[utoipa::path(
     get,
