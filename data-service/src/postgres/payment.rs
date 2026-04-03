@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{PaymentReader, PaymentWriter, RepositoryError, RepositoryResult, sqlx_to_repo_error};
-use types::{AssetType, InvoiceId, PaymentData, PaymentQueryParams};
+use crate::{PaymentQueryParams, PaymentReader, PaymentWriter, RepositoryError, RepositoryResult, sqlx_to_repo_error};
+use types::{AssetType, InvoiceId, PaymentData};
 
 use super::PgDataService;
 
@@ -112,95 +112,79 @@ impl PaymentReader for PgDataService {
     }
 
     async fn query(&self, params: &PaymentQueryParams) -> RepositoryResult<(i64, Vec<PaymentData>)> {
-        // Build dynamic WHERE clause
-        let mut conditions = Vec::new();
-        let mut bind_idx = 1;
-        let needs_join = params.store_id.is_some();
+        use sqlx::Row as _;
+
+        let mut where_clauses = Vec::new();
+        let mut bind_idx = 1u32;
 
         if params.store_id.is_some() {
-            conditions.push(format!("i.store_id = ${}", bind_idx));
+            where_clauses.push(format!(
+                "p.invoice_id IN (SELECT id FROM invoices WHERE store_id = ${})",
+                bind_idx
+            ));
             bind_idx += 1;
         }
         if params.invoice_id.is_some() {
-            conditions.push(format!("p.invoice_id = ${}", bind_idx));
+            where_clauses.push(format!("p.invoice_id = ${}", bind_idx));
             bind_idx += 1;
         }
         if let Some(confirmed) = params.confirmed {
             if confirmed {
-                conditions.push("p.confirmed_at IS NOT NULL".to_string());
+                where_clauses.push("p.confirmed_at IS NOT NULL".to_string());
             } else {
-                conditions.push("p.confirmed_at IS NULL".to_string());
+                where_clauses.push("p.confirmed_at IS NULL".to_string());
             }
         }
 
-        let join_clause = if needs_join {
-            "JOIN invoices i ON i.id = p.invoice_id"
-        } else {
-            ""
-        };
-
-        let where_clause = if conditions.is_empty() {
+        let where_str = if where_clauses.is_empty() {
             String::new()
         } else {
-            format!("WHERE {}", conditions.join(" AND "))
+            format!("WHERE {}", where_clauses.join(" AND "))
         };
 
         // Count query
-        let count_sql = format!(
-            "SELECT COUNT(*) as count FROM payments p {} {}",
-            join_clause, where_clause
-        );
-
-        // Data query
-        let data_sql = format!(
-            r#"
-            SELECT
-                p.id, p.invoice_id, p.payment_option_id, p.chain_id, p.asset_type::text,
-                p.amount::text, p.asset_symbol, p.token_address, p.tx_hash, p.block_number,
-                p.detected_at, p.confirmed_at, p.from_address, p.reorged, p.extra,
-                p.credited_amount::text, p.rate_used::text, p.rate_applied_at
-            FROM payments p
-            {} {}
-            ORDER BY p.detected_at DESC
-            LIMIT ${} OFFSET ${}
-            "#,
-            join_clause, where_clause, bind_idx, bind_idx + 1
-        );
-
-        // Bind parameters to count query
-        let mut count_query = sqlx::query(&count_sql);
-        if let Some(store_id) = params.store_id {
-            count_query = count_query.bind(store_id.0);
+        let count_sql = format!("SELECT COUNT(*) as total FROM payments p {}", where_str);
+        let mut count_q = sqlx::query(&count_sql);
+        if let Some(ref store_id) = params.store_id {
+            count_q = count_q.bind(store_id.0.to_string());
         }
         if let Some(ref invoice_id) = params.invoice_id {
-            count_query = count_query.bind(invoice_id.as_str());
+            count_q = count_q.bind(invoice_id.as_str().to_string());
         }
 
-        let count_row = count_query
+        let count_row = count_q
             .fetch_one(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?;
-        let total: i64 = count_row.get("count");
+        let total: i64 = count_row.get("total");
 
-        // Bind parameters to data query
-        let mut data_query = sqlx::query(&data_sql);
-        if let Some(store_id) = params.store_id {
-            data_query = data_query.bind(store_id.0);
+        if params.limit == 0 {
+            return Ok((total, vec![]));
+        }
+
+        // Data query
+        let data_sql = format!(
+            "SELECT {} FROM payments p {} ORDER BY p.detected_at DESC LIMIT {} OFFSET {}",
+            PAYMENT_SELECT_COLS.replace("payments.", "p."),
+            where_str,
+            params.limit,
+            params.offset
+        );
+        let mut data_q = sqlx::query(&data_sql);
+        if let Some(ref store_id) = params.store_id {
+            data_q = data_q.bind(store_id.0.to_string());
         }
         if let Some(ref invoice_id) = params.invoice_id {
-            data_query = data_query.bind(invoice_id.as_str());
+            data_q = data_q.bind(invoice_id.as_str().to_string());
         }
-        data_query = data_query.bind(params.limit).bind(params.offset);
 
-        let rows = data_query
+        let rows = data_q
             .fetch_all(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?;
 
-        let payments: Result<Vec<PaymentData>, _> =
-            rows.iter().map(try_row_to_payment).collect();
-
-        Ok((total, payments?))
+        let payments: Vec<PaymentData> = rows.iter().map(try_row_to_payment).collect::<Result<_, _>>()?;
+        Ok((total, payments))
     }
 }
 
