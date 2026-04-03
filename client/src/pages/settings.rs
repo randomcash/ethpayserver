@@ -3,6 +3,8 @@
 //! Contains user settings, preferences, API keys, and admin-only server settings.
 
 use leptos::prelude::*;
+use leptos_use::use_fetch;
+use chrono::DateTime;
 
 /// Settings page with tabbed interface.
 #[component]
@@ -262,12 +264,55 @@ fn PreferencesTab() -> impl IntoView {
 /// API Keys tab.
 #[component]
 fn ApiKeysTab() -> impl IntoView {
-    // Mock API keys
-    let api_keys = vec![
-        ("ak_live_****1234", "Production Key", "Jan 15, 2024", true),
-        ("ak_test_****5678", "Test Key", "Jan 10, 2024", true),
-        ("ak_live_****9012", "Old Key", "Dec 1, 2023", false),
-    ];
+    use crate::client::{ApiKeyInfoResponse, CreateApiKeyPayload, ListApiKeysResponse};
+    use leptos::logging::warn;
+
+    // Load API keys from backend
+    let api_keys = create_resource(
+        || (),
+        |_| async {
+            let response = fetch(
+                "/api/users/api-keys",
+                FetchOptions::default(),
+            ).await;
+            
+            match response {
+                Ok(r) => r.json::<ListApiKeysResponse>().await.ok(),
+                Err(_) => None,
+            }
+        },
+    );
+
+    // Create API key action
+    let create_key = create_action(|input: &CreateApiKeyPayload| {
+        let payload = input.clone();
+        async move {
+            let response = fetch(
+                "/api/users/api-keys",
+                FetchOptions::default()
+                    .method("POST")
+                    .body(serde_json::to_string(&payload).unwrap()),
+            ).await;
+            
+            match response {
+                Ok(r) => r.json::<CreateApiKeyResponsePayload>().await.ok(),
+                Err(_) => None,
+            }
+        }
+    });
+
+    // Revoke API key action
+    let revoke_key = create_action(|key_id: &String| {
+        let id = key_id.clone();
+        async move {
+            let response = fetch(
+                &format!("/api/users/api-keys/{}", id),
+                FetchOptions::default().method("DELETE"),
+            ).await;
+            
+            response.is_ok()
+        }
+    });
 
     view! {
         <div class="settings-tab-api-keys">
@@ -276,39 +321,67 @@ fn ApiKeysTab() -> impl IntoView {
                     <h3 class="section-title">"API Keys"</h3>
                     <p class="section-desc">"Manage API keys for programmatic access"</p>
                 </div>
-                <button class="btn btn-primary btn-sm">
+                <button 
+                    class="btn btn-primary btn-sm"
+                    on:click=move |_| {
+                        create_key.dispatch(CreateApiKeyPayload {
+                            name: format!("Key {}", chrono::Utc::now().timestamp()),
+                            expires_at: None,
+                        });
+                    }
+                >
                     <IconPlus />
                     "Create API key"
                 </button>
             </div>
 
-            <div class="api-keys-list">
-                {api_keys.into_iter().map(|(key, name, created, active)| {
-                    let status_class = if active { "badge badge-success" } else { "badge badge-neutral" };
-                    let status_label = if active { "Active" } else { "Revoked" };
+            <Suspense fallback=move || view! { <p>"Loading API keys..."</p> }>
+                {move || {
+                    api_keys.get().map(|keys_opt| {
+                        match keys_opt {
+                            Some(ListApiKeysResponse { keys }) => {
+                                view! {
+                                    <div class="api-keys-list">
+                                        {keys.into_iter().map(|key: ApiKeyInfoResponse| {
+                                            let status_class = if key.is_active { "badge badge-success" } else { "badge badge-neutral" };
+                                            let status_label = if key.is_active { "Active" } else { "Revoked" };
+                                            let key_id = key.id.to_string();
+                                            let key_id_revoke = key.id.to_string();
 
-                    view! {
-                        <div class="api-key-item">
-                            <div class="api-key-info">
-                                <div class="api-key-header">
-                                    <span class="api-key-name">{name}</span>
-                                    <span class=status_class>{status_label}</span>
-                                </div>
-                                <code class="api-key-value">{key}</code>
-                                <span class="api-key-created">"Created "{created}</span>
-                            </div>
-                            <div class="api-key-actions">
-                                {active.then(|| view! {
-                                    <button class="btn btn-ghost btn-sm">"Revoke"</button>
-                                })}
-                                <button class="btn btn-ghost btn-sm btn-icon" title="Copy">
-                                    <IconCopy />
-                                </button>
-                            </div>
-                        </div>
-                    }
-                }).collect_view()}
-            </div>
+                                            view! {
+                                                <div class="api-key-item">
+                                                    <div class="api-key-info">
+                                                        <div class="api-key-header">
+                                                            <span class="api-key-name">{&key.name}</span>
+                                                            <span class=status_class>{status_label}</span>
+                                                        </div>
+                                                        <code class="api-key-value">{&key.key_prefix}</code>
+                                                        <span class="api-key-created">"Created "<time>{key.created_at.format("%Y-%m-%d")}</time></span>
+                                                    </div>
+                                                    <div class="api-key-actions">
+                                                        {key.is_active.then(|| view! {
+                                                            <button 
+                                                                class="btn btn-ghost btn-sm"
+                                                                on:click=move |_| revoke_key.dispatch(key_id_revoke.clone())
+                                                            >
+                                                                "Revoke"
+                                                            </button>
+                                                        })}
+                                                        <button class="btn btn-ghost btn-sm btn-icon" title="Copy">
+                                                            <IconCopy />
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            }
+                                        }).collect_view()}
+                                    </div>
+                                }.into_any()
+                            },
+                            None => view! { <p class="error">"Failed to load API keys"</p> }.into_any(),
+                        }
+                    })
+                }}
+            </Suspense>
 
             <div class="settings-info">
                 <IconInfo />
