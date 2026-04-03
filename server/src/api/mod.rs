@@ -10,10 +10,13 @@ use auth::AuthenticationService;
 
 use crate::state::PgAppState;
 
+pub mod dashboard;
 pub mod extractors;
 pub mod health;
 pub mod invoices;
 pub mod stores;
+pub mod users;
+pub mod ws;
 
 pub use extractors::{AdminAuth, AuthenticatedUser};
 
@@ -65,6 +68,12 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         // Payments
         invoices::list_payments,
         invoices::get_payment,
+        // Users
+        users::list_api_keys,
+        users::create_api_key,
+        users::revoke_api_key,
+        // Dashboard
+        dashboard::get_stats,
     ),
     components(schemas(
         health::HealthResponse,
@@ -90,6 +99,11 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::PaymentListResponse,
         invoices::PaymentOptionResponse,
         invoices::InvoiceStatusResponse,
+        users::ApiKeyListResponse,
+        users::ApiKeyInfoResponse,
+        users::CreateApiKeyPayload,
+        users::CreateApiKeyResponsePayload,
+        dashboard::DashboardStats,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -99,6 +113,8 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         (name = "tokens", description = "Token management (from EVM API)"),
         (name = "networks", description = "Network information (from EVM API)"),
         (name = "auth", description = "Authentication (from Auth API)"),
+        (name = "users", description = "User management (API keys)"),
+        (name = "dashboard", description = "Dashboard statistics"),
     )
 )]
 pub struct ApiDoc;
@@ -172,6 +188,23 @@ where
         .route("/{payment_id}", get(invoices::get_payment::<A>))
         .with_state(state.clone());
 
+    // User endpoints (API keys)
+    let user_routes = Router::new()
+        .route("/api-keys", get(users::list_api_keys::<A>))
+        .route("/api-keys", post(users::create_api_key::<A>))
+        .route("/api-keys/{id}", delete(users::revoke_api_key::<A>))
+        .with_state(state.clone());
+
+    // Dashboard endpoint
+    let dashboard_routes = Router::new()
+        .route("/stats", get(dashboard::get_stats::<A>))
+        .with_state(state.clone());
+
+    // WebSocket endpoint for real-time updates
+    let ws_route = Router::new()
+        .route("/ws", get(ws::ws_handler::<A>))
+        .with_state(state.clone());
+
     // Auth API from auth crate
     let auth_state = auth::api::AuthState::new(state.auth_service.clone());
     let auth_routes = auth::api::router(auth_state);
@@ -185,6 +218,9 @@ where
         .nest("/stores", store_routes)
         .nest("/invoices", invoice_routes)
         .nest("/payments", payment_routes)
+        .nest("/users", user_routes)
+        .nest("/dashboard", dashboard_routes)
+        .merge(ws_route)
         .nest("/auth", auth_routes)
         .nest("/evm", evm_routes);
 

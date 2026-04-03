@@ -243,12 +243,12 @@ pub struct Wallet {
 /// Dashboard statistics.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DashboardStats {
-    pub total_invoices: u64,
-    pub pending_invoices: u64,
-    pub paid_invoices: u64,
-    pub expired_invoices: u64,
-    pub total_payments: u64,
-    pub total_volume_usd: String,
+    pub total_invoices: i64,
+    pub pending_invoices: i64,
+    pub paid_invoices: i64,
+    pub expired_invoices: i64,
+    pub total_payments: i64,
+    pub total_stores: u32,
 }
 
 /// Create invoice request.
