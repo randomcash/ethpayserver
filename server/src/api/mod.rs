@@ -16,6 +16,7 @@ pub mod health;
 pub mod invoices;
 pub mod stores;
 pub mod users;
+pub mod ws;
 
 pub use extractors::{AdminAuth, AuthenticatedUser};
 
@@ -201,6 +202,11 @@ where
         .route("/{payment_id}", get(invoices::get_payment::<A>))
         .with_state(state.clone());
 
+    // WebSocket endpoint for real-time updates
+    let ws_route = Router::new()
+        .route("/ws", get(ws::ws_handler::<A>))
+        .with_state(state.clone());
+
     // Dashboard endpoint
     let dashboard_routes = Router::new()
         .route("/stats", get(dashboard::get_stats::<A>))
@@ -226,6 +232,7 @@ where
         .nest("/wallets", wallet_routes)
         .nest("/invoices", invoice_routes)
         .nest("/payments", payment_routes)
+        .merge(ws_route)
         .nest("/dashboard", dashboard_routes)
         .nest("/users", user_routes)
         .nest("/auth", auth_routes)

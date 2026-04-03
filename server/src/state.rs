@@ -12,6 +12,8 @@ use data_service::{
 use evm::api::EvmDataService;
 use rates::RateProvider;
 
+use crate::api::ws::WsBroadcast;
+
 /// Read-only data service trait for the application.
 ///
 /// Use this bound for handlers that only read from the database.
@@ -64,6 +66,9 @@ pub struct AppState<D, A, E> {
 
     /// Rate provider for fiat-to-crypto conversions.
     pub rate_provider: Arc<dyn RateProvider>,
+
+    /// WebSocket broadcast channel for real-time status updates.
+    pub ws_broadcast: Option<Arc<WsBroadcast>>,
 }
 
 // Manual Clone impl since we only need Arc::clone
@@ -74,6 +79,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             auth_service: Arc::clone(&self.auth_service),
             evm_monitor: self.evm_monitor.clone(),
             rate_provider: Arc::clone(&self.rate_provider),
+            ws_broadcast: self.ws_broadcast.clone(),
         }
     }
 }
@@ -91,6 +97,7 @@ impl<D, A, E> AppState<D, A, E> {
             auth_service,
             evm_monitor,
             rate_provider,
+            ws_broadcast: None,
         }
     }
 }

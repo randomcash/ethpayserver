@@ -147,13 +147,17 @@ async fn main() -> Result<()> {
     tracing::info!(provider = rate_config.provider, "Rate provider configured");
     let rate_provider = rate_config.create_provider();
 
+    // Create WebSocket broadcast channel
+    let ws_broadcast = Arc::new(server::api::ws::WsBroadcast::new(256));
+
     // Create application state
-    let state = AppState::new(
+    let mut state = AppState::new(
         Arc::clone(&data_service),
         auth_service,
         Some(evm_monitor),
         rate_provider,
     );
+    state.ws_broadcast = Some(ws_broadcast);
 
     // Build router with middleware
     let app = api::router(state, config.enable_swagger)
