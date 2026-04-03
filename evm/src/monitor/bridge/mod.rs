@@ -15,9 +15,9 @@ mod memory;
 #[cfg(feature = "redis")]
 mod redis;
 
-pub use memory::MemoryBridge;
 #[cfg(feature = "redis")]
 pub use self::redis::RedisBridge;
+pub use memory::MemoryBridge;
 
 use super::events::{MonitorCommand, MonitorEvent};
 use crate::error::EvmResult;
@@ -133,7 +133,11 @@ impl BridgeConfig {
         match self {
             Self::Memory => Ok(Box::new(MemoryBridge::new())),
             #[cfg(feature = "redis")]
-            Self::Redis { url, events_channel, commands_channel } => {
+            Self::Redis {
+                url,
+                events_channel,
+                commands_channel,
+            } => {
                 let bridge = RedisBridge::new(&url, &events_channel, &commands_channel).await?;
                 Ok(Box::new(bridge))
             }

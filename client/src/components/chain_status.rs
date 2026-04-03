@@ -2,8 +2,8 @@
 
 use leptos::prelude::*;
 use types::Network;
-use ui_kit::components::crypto::NetworkBadge;
 use ui_kit::components::Spinner;
+use ui_kit::components::crypto::NetworkBadge;
 
 /// Chain connection status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +50,8 @@ pub fn ChainStatus(
     /// Chain information.
     info: ChainInfo,
     /// Whether to show detailed info.
-    #[prop(default = false)] detailed: bool,
+    #[prop(default = false)]
+    detailed: bool,
 ) -> impl IntoView {
     let status_class = format!("evm-chain-status {}", info.status.class());
 

@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use sqlx::Row;
 use types::{Network, RepositoryResult, TokenData, TokenQueryParams, TokenReader, TokenWriter};
 
-use super::conversions::{try_db_to_network, try_network_to_db};
 use super::PgDataService;
-use crate::sqlx_to_repo_error;
+use super::conversions::{try_db_to_network, try_network_to_db};
 use crate::RepositoryError;
+use crate::sqlx_to_repo_error;
 
 /// Convert a database row to TokenData.
 fn row_to_token(row: &sqlx::postgres::PgRow) -> Result<TokenData, RepositoryError> {

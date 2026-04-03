@@ -7,14 +7,14 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use data_service::{PaymentOptionReader, StoreWebhookReader};
-use evm::{chain_id_to_network, get_any_chain_config};
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::{MonitorEvent, PaymentConfirmed, PaymentDetected, ReorgDetected};
+use evm::{chain_id_to_network, get_any_chain_config};
 use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
 use types::{
-    AssetType, InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter,
-    PaymentData, PaymentReader, PaymentWriter, TokenReader, WatchedAddressReader,
+    AssetType, InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentData,
+    PaymentReader, PaymentWriter, TokenReader, WatchedAddressReader,
 };
 use uuid::Uuid;
 
@@ -67,7 +67,12 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     webhook_service: Option<Arc<WebhookService<W>>>,
 }
 
-impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookDataService + 'static> EventConsumer<D, M, W> {
+impl<
+    D: EventConsumerDataService + 'static,
+    M: EVMMonitor + 'static,
+    W: WebhookDataService + 'static,
+> EventConsumer<D, M, W>
+{
     /// Create a new event consumer with optional services.
     pub fn new(
         bridge: Arc<dyn EventBridge>,
@@ -109,15 +114,9 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
     /// Handle a single monitor event.
     async fn handle_event(&self, event: MonitorEvent) -> Result<(), EventConsumerError> {
         match event {
-            MonitorEvent::PaymentDetected(payment) => {
-                self.handle_payment_detected(payment).await
-            }
-            MonitorEvent::PaymentConfirmed(payment) => {
-                self.handle_payment_confirmed(payment).await
-            }
-            MonitorEvent::ReorgDetected(reorg) => {
-                self.handle_reorg_detected(reorg).await
-            }
+            MonitorEvent::PaymentDetected(payment) => self.handle_payment_detected(payment).await,
+            MonitorEvent::PaymentConfirmed(payment) => self.handle_payment_confirmed(payment).await,
+            MonitorEvent::ReorgDetected(reorg) => self.handle_reorg_detected(reorg).await,
             // Log other events but don't process them
             MonitorEvent::MonitorStarted { chain_id } => {
                 tracing::info!(chain_id, "Monitor started");
@@ -167,7 +166,10 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
     /// Creates a payment record in the database. The DB trigger automatically:
     /// - Updates invoice.amount_received
     /// - Transitions invoice status: pending → processing
-    async fn handle_payment_detected(&self, event: PaymentDetected) -> Result<(), EventConsumerError> {
+    async fn handle_payment_detected(
+        &self,
+        event: PaymentDetected,
+    ) -> Result<(), EventConsumerError> {
         // Try to get network from chain_id (None for testnets)
         let network = chain_id_to_network(event.chain_id);
 
@@ -181,15 +183,14 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
         } else {
             // Look up the token symbol from the database
             let token_addr = event.token_address.ok_or_else(|| {
-                EventConsumerError::InvalidData(
-                    "ERC20 payment missing token_address".to_string()
-                )
+                EventConsumerError::InvalidData("ERC20 payment missing token_address".to_string())
             })?;
             let token_addr_str = format!("{:#x}", token_addr);
 
             // Try to look up token in DB (only if we have a known network)
             let symbol = if let Some(net) = network {
-                match TokenReader::get_by_address(&*self.data_service, net, &token_addr_str).await? {
+                match TokenReader::get_by_address(&*self.data_service, net, &token_addr_str).await?
+                {
                     Some(token) => token.symbol.unwrap_or_else(|| "ERC20".to_string()),
                     None => {
                         tracing::warn!(
@@ -215,7 +216,8 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             &payment_address_str,
             event.chain_id,
             token_address.as_deref(),
-        ).await?;
+        )
+        .await?;
 
         if payment_option_id.is_none() {
             tracing::warn!(
@@ -229,79 +231,80 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
 
         // Calculate converted amount if we have a payment option with rate info
         // IMPORTANT: Payments without credited_amount won't count toward amount_received
-        let (credited_amount, rate_used, rate_applied_at) =
-            if let Some(ref po_id) = payment_option_id {
-                match PaymentOptionReader::get(&*self.data_service, po_id).await? {
-                    Some(payment_option) => {
-                        if let Some(ref rate_str) = payment_option.rate {
-                            // Convert payment amount to invoice currency
-                            // Formula: (raw_amount / 10^decimals) / rate = invoice_currency_amount
-                            match self.convert_payment_to_invoice_currency(
-                                &event.amount.to_string(),
-                                rate_str,
-                                payment_option.decimals,
-                            ) {
-                                Ok(converted) => {
-                                    tracing::debug!(
-                                        invoice_id = %event.invoice_id,
-                                        raw_amount = %event.amount,
-                                        rate = %rate_str,
-                                        decimals = payment_option.decimals,
-                                        converted = %converted,
-                                        "Converted payment amount to invoice currency"
-                                    );
-                                    (Some(converted), Some(rate_str.clone()), Some(Utc::now()))
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        invoice_id = %event.invoice_id,
-                                        raw_amount = %event.amount,
-                                        error = %e,
-                                        "Failed to convert payment amount - payment will NOT count toward invoice total"
-                                    );
-                                    (None, None, None)
-                                }
+        let (credited_amount, rate_used, rate_applied_at) = if let Some(ref po_id) =
+            payment_option_id
+        {
+            match PaymentOptionReader::get(&*self.data_service, po_id).await? {
+                Some(payment_option) => {
+                    if let Some(ref rate_str) = payment_option.rate {
+                        // Convert payment amount to invoice currency
+                        // Formula: (raw_amount / 10^decimals) / rate = invoice_currency_amount
+                        match self.convert_payment_to_invoice_currency(
+                            &event.amount.to_string(),
+                            rate_str,
+                            payment_option.decimals,
+                        ) {
+                            Ok(converted) => {
+                                tracing::debug!(
+                                    invoice_id = %event.invoice_id,
+                                    raw_amount = %event.amount,
+                                    rate = %rate_str,
+                                    decimals = payment_option.decimals,
+                                    converted = %converted,
+                                    "Converted payment amount to invoice currency"
+                                );
+                                (Some(converted), Some(rate_str.clone()), Some(Utc::now()))
                             }
-                        } else {
-                            // No rate = asset-denominated invoice, convert to human-readable
-                            match self.convert_smallest_to_human(
-                                &event.amount.to_string(),
-                                payment_option.decimals,
-                            ) {
-                                Ok(human_amount) => {
-                                    tracing::debug!(
-                                        invoice_id = %event.invoice_id,
-                                        raw_amount = %event.amount,
-                                        decimals = payment_option.decimals,
-                                        human_amount = %human_amount,
-                                        "Same-asset payment, converted to human-readable"
-                                    );
-                                    (Some(human_amount), None, None)
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        invoice_id = %event.invoice_id,
-                                        raw_amount = %event.amount,
-                                        error = %e,
-                                        "Failed to convert same-asset payment - payment will NOT count toward invoice total"
-                                    );
-                                    (None, None, None)
-                                }
+                            Err(e) => {
+                                tracing::warn!(
+                                    invoice_id = %event.invoice_id,
+                                    raw_amount = %event.amount,
+                                    error = %e,
+                                    "Failed to convert payment amount - payment will NOT count toward invoice total"
+                                );
+                                (None, None, None)
+                            }
+                        }
+                    } else {
+                        // No rate = asset-denominated invoice, convert to human-readable
+                        match self.convert_smallest_to_human(
+                            &event.amount.to_string(),
+                            payment_option.decimals,
+                        ) {
+                            Ok(human_amount) => {
+                                tracing::debug!(
+                                    invoice_id = %event.invoice_id,
+                                    raw_amount = %event.amount,
+                                    decimals = payment_option.decimals,
+                                    human_amount = %human_amount,
+                                    "Same-asset payment, converted to human-readable"
+                                );
+                                (Some(human_amount), None, None)
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    invoice_id = %event.invoice_id,
+                                    raw_amount = %event.amount,
+                                    error = %e,
+                                    "Failed to convert same-asset payment - payment will NOT count toward invoice total"
+                                );
+                                (None, None, None)
                             }
                         }
                     }
-                    None => {
-                        tracing::warn!(
-                            invoice_id = %event.invoice_id,
-                            payment_option_id = %po_id.0,
-                            "Payment option not found in database - payment will NOT count toward invoice total"
-                        );
-                        (None, None, None)
-                    }
                 }
-            } else {
-                (None, None, None)
-            };
+                None => {
+                    tracing::warn!(
+                        invoice_id = %event.invoice_id,
+                        payment_option_id = %po_id.0,
+                        "Payment option not found in database - payment will NOT count toward invoice total"
+                    );
+                    (None, None, None)
+                }
+            }
+        } else {
+            (None, None, None)
+        };
 
         // Record metrics before asset_symbol is moved into PaymentData
         metrics::record_payment_detected(event.chain_id, &asset_symbol);
@@ -342,7 +345,8 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
         // Queue webhook notification
         let invoice_id = InvoiceId::from_string(event.invoice_id.to_string());
         if let Ok(Some(invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
-            self.queue_webhook(WebhookEventType::PaymentDetected, &invoice, Some(&payment)).await;
+            self.queue_webhook(WebhookEventType::PaymentDetected, &invoice, Some(&payment))
+                .await;
         }
 
         Ok(())
@@ -352,12 +356,16 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
     ///
     /// Updates payment confirmation status and transitions invoice to `paid`
     /// if amount_received >= amount.
-    async fn handle_payment_confirmed(&self, event: PaymentConfirmed) -> Result<(), EventConsumerError> {
+    async fn handle_payment_confirmed(
+        &self,
+        event: PaymentConfirmed,
+    ) -> Result<(), EventConsumerError> {
         let invoice_id = InvoiceId::from_string(event.invoice_id.to_string());
         let tx_hash = format!("{:#x}", event.tx_hash);
 
         // Find the payment by invoice_id + tx_hash (only non-reorged payments)
-        let payments = PaymentReader::get_valid_for_invoice(&*self.data_service, &invoice_id).await?;
+        let payments =
+            PaymentReader::get_valid_for_invoice(&*self.data_service, &invoice_id).await?;
         let payment = match payments.iter().find(|p| p.tx_hash == tx_hash) {
             Some(p) => p,
             None => {
@@ -372,11 +380,7 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
         };
 
         // Mark payment as confirmed
-        PaymentWriter::mark_confirmed(
-            &*self.data_service,
-            payment.id,
-            event.confirmed_at,
-        ).await?;
+        PaymentWriter::mark_confirmed(&*self.data_service, payment.id, event.confirmed_at).await?;
 
         tracing::info!(
             invoice_id = %event.invoice_id,
@@ -390,19 +394,20 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
         // Check if invoice is fully paid
         let invoice = InvoiceReader::get(&*self.data_service, &invoice_id)
             .await?
-            .ok_or_else(|| EventConsumerError::InvalidData(
-                format!("Invoice not found: {}", event.invoice_id)
-            ))?;
+            .ok_or_else(|| {
+                EventConsumerError::InvalidData(format!("Invoice not found: {}", event.invoice_id))
+            })?;
 
         // Compare amounts using rust_decimal
-        let amount_received: Decimal = invoice.amount_received.parse()
-            .map_err(|e| EventConsumerError::InvalidData(
-                format!("Invalid amount_received '{}': {}", invoice.amount_received, e)
-            ))?;
-        let amount_expected: Decimal = invoice.amount.parse()
-            .map_err(|e| EventConsumerError::InvalidData(
-                format!("Invalid amount '{}': {}", invoice.amount, e)
-            ))?;
+        let amount_received: Decimal = invoice.amount_received.parse().map_err(|e| {
+            EventConsumerError::InvalidData(format!(
+                "Invalid amount_received '{}': {}",
+                invoice.amount_received, e
+            ))
+        })?;
+        let amount_expected: Decimal = invoice.amount.parse().map_err(|e| {
+            EventConsumerError::InvalidData(format!("Invalid amount '{}': {}", invoice.amount, e))
+        })?;
 
         let is_fully_paid = amount_received >= amount_expected;
 
@@ -411,7 +416,12 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             InvoiceStatus::Processing | InvoiceStatus::PartiallyPaid => {
                 // Normal flow: transition to paid if fully paid
                 if is_fully_paid {
-                    InvoiceWriter::update_status(&*self.data_service, &invoice_id, InvoiceStatus::Paid).await?;
+                    InvoiceWriter::update_status(
+                        &*self.data_service,
+                        &invoice_id,
+                        InvoiceStatus::Paid,
+                    )
+                    .await?;
                     tracing::info!(
                         invoice_id = %event.invoice_id,
                         amount_received = %amount_received,
@@ -421,8 +431,15 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
                     metrics::record_invoice_paid();
 
                     // Queue webhook notification for payment confirmed
-                    if let Ok(Some(updated_invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
-                        self.queue_webhook(WebhookEventType::PaymentConfirmed, &updated_invoice, Some(payment)).await;
+                    if let Ok(Some(updated_invoice)) =
+                        InvoiceReader::get(&*self.data_service, &invoice_id).await
+                    {
+                        self.queue_webhook(
+                            WebhookEventType::PaymentConfirmed,
+                            &updated_invoice,
+                            Some(payment),
+                        )
+                        .await;
                     }
                 }
             }
@@ -430,7 +447,12 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
                 // Late payment: invoice expired but payment still came through
                 // Transition to LatePaid for merchant review
                 if is_fully_paid {
-                    InvoiceWriter::update_status(&*self.data_service, &invoice_id, InvoiceStatus::LatePaid).await?;
+                    InvoiceWriter::update_status(
+                        &*self.data_service,
+                        &invoice_id,
+                        InvoiceStatus::LatePaid,
+                    )
+                    .await?;
                     tracing::warn!(
                         invoice_id = %event.invoice_id,
                         amount_received = %amount_received,
@@ -439,8 +461,15 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
                     );
 
                     // Queue webhook notification for late payment
-                    if let Ok(Some(updated_invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
-                        self.queue_webhook(WebhookEventType::LatePaid, &updated_invoice, Some(payment)).await;
+                    if let Ok(Some(updated_invoice)) =
+                        InvoiceReader::get(&*self.data_service, &invoice_id).await
+                    {
+                        self.queue_webhook(
+                            WebhookEventType::LatePaid,
+                            &updated_invoice,
+                            Some(payment),
+                        )
+                        .await;
                     }
                 }
             }
@@ -503,33 +532,37 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
         };
 
         // Look up webhook config for the store
-        let webhook_config = match StoreWebhookReader::get_enabled_webhook(
-            &*self.data_service,
-            invoice.store_id.0,
-        ).await {
-            Ok(Some(config)) => config,
-            Ok(None) => {
-                tracing::trace!(
-                    store_id = %invoice.store_id.0,
-                    "No webhook configured for store"
-                );
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    store_id = %invoice.store_id.0,
-                    error = %e,
-                    "Failed to get webhook config"
-                );
-                return;
-            }
-        };
+        let webhook_config =
+            match StoreWebhookReader::get_enabled_webhook(&*self.data_service, invoice.store_id.0)
+                .await
+            {
+                Ok(Some(config)) => config,
+                Ok(None) => {
+                    tracing::trace!(
+                        store_id = %invoice.store_id.0,
+                        "No webhook configured for store"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        store_id = %invoice.store_id.0,
+                        error = %e,
+                        "Failed to get webhook config"
+                    );
+                    return;
+                }
+            };
 
         // Create webhook payload
         // With network-agnostic invoices, chain info comes from the payment
         let (asset_symbol, chain_id, network) = if let Some(p) = payment {
             let network = chain_id_to_network(p.chain_id);
-            (p.asset_symbol.clone(), Some(p.chain_id), network.map(|n| n.to_string()))
+            (
+                p.asset_symbol.clone(),
+                Some(p.chain_id),
+                network.map(|n| n.to_string()),
+            )
         } else {
             // No payment yet, use invoice currency as a placeholder
             (invoice.currency.clone(), None, None)
@@ -593,7 +626,8 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             let invoice_id = InvoiceId::from_string(invoice_uuid.to_string());
 
             // Mark payments from this chain at or after the fork block as reorged
-            let reorged_count = self.data_service
+            let reorged_count = self
+                .data_service
                 .mark_reorged(&invoice_id, event.chain_id, event.fork_block)
                 .await?;
 
@@ -614,7 +648,8 @@ impl<D: EventConsumerDataService + 'static, M: EVMMonitor + 'static, W: WebhookD
             );
 
             // Determine new invoice status based on remaining valid payments
-            let has_valid = PaymentReader::has_valid_payments(&*self.data_service, &invoice_id).await?;
+            let has_valid =
+                PaymentReader::has_valid_payments(&*self.data_service, &invoice_id).await?;
             let new_status = if has_valid {
                 InvoiceStatus::Processing
             } else {
@@ -721,7 +756,8 @@ mod tests {
             BinanceSmartChain => "BNB",
             // Non-EVM networks - shouldn't reach here
             _ => "UNKNOWN",
-        }.to_string()
+        }
+        .to_string()
     }
     use chrono::Utc;
     use data_service::InMemoryDataService;
@@ -781,7 +817,9 @@ mod tests {
             Ok(())
         }
 
-        async fn get_chain_health(&self) -> Result<Vec<evm::monitor::ChainHealth>, EVMMonitorError> {
+        async fn get_chain_health(
+            &self,
+        ) -> Result<Vec<evm::monitor::ChainHealth>, EVMMonitorError> {
             Ok(vec![])
         }
     }
@@ -825,12 +863,8 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
-            bridge.clone(),
-            ds.clone(),
-            None,
-            None,
-        );
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -858,7 +892,9 @@ mod tests {
         consumer.handle_payment_detected(event).await.unwrap();
 
         // Verify payment was created
-        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id).await.unwrap();
+        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+            .await
+            .unwrap();
         assert_eq!(payments.len(), 1);
         assert_eq!(payments[0].asset_symbol, "ETH");
         assert_eq!(payments[0].amount, "500000000000000000");
@@ -872,12 +908,8 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
-            bridge.clone(),
-            ds.clone(),
-            None,
-            None,
-        );
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -919,7 +951,9 @@ mod tests {
         consumer.handle_payment_detected(event).await.unwrap();
 
         // Verify payment was created with chain_id
-        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id).await.unwrap();
+        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+            .await
+            .unwrap();
         assert_eq!(payments.len(), 1);
         assert_eq!(payments[0].chain_id, 99999);
         assert_eq!(payments[0].asset_symbol, "ETH"); // Fallback for unknown chains
@@ -930,12 +964,8 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
-            bridge.clone(),
-            ds.clone(),
-            None,
-            None,
-        );
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -995,11 +1025,16 @@ mod tests {
         consumer.handle_payment_confirmed(event).await.unwrap();
 
         // Verify invoice was marked as paid
-        let invoice = InvoiceReader::get(&*ds, &invoice_id).await.unwrap().unwrap();
+        let invoice = InvoiceReader::get(&*ds, &invoice_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(invoice.status, InvoiceStatus::Paid);
 
         // Verify payment was marked as confirmed
-        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id).await.unwrap();
+        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+            .await
+            .unwrap();
         assert!(payments[0].confirmed_at.is_some());
     }
 
@@ -1008,12 +1043,8 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
-            bridge.clone(),
-            ds.clone(),
-            None,
-            None,
-        );
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1073,7 +1104,10 @@ mod tests {
         consumer.handle_payment_confirmed(event).await.unwrap();
 
         // Invoice should still be cancelled
-        let invoice = InvoiceReader::get(&*ds, &invoice_id).await.unwrap().unwrap();
+        let invoice = InvoiceReader::get(&*ds, &invoice_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(invoice.status, InvoiceStatus::Cancelled);
     }
 
@@ -1082,12 +1116,8 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
-            bridge.clone(),
-            ds.clone(),
-            None,
-            None,
-        );
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1145,11 +1175,16 @@ mod tests {
         consumer.handle_reorg_detected(event).await.unwrap();
 
         // Verify payment was marked as reorged
-        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id).await.unwrap();
+        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+            .await
+            .unwrap();
         assert!(payments[0].reorged);
 
         // Verify invoice was reverted to pending (no valid payments)
-        let invoice = InvoiceReader::get(&*ds, &invoice_id).await.unwrap().unwrap();
+        let invoice = InvoiceReader::get(&*ds, &invoice_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(invoice.status, InvoiceStatus::Pending);
     }
 
@@ -1158,12 +1193,8 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
-            bridge.clone(),
-            ds.clone(),
-            None,
-            None,
-        );
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1244,12 +1275,17 @@ mod tests {
         consumer.handle_reorg_detected(event).await.unwrap();
 
         // Verify only one payment was reorged
-        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id).await.unwrap();
+        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+            .await
+            .unwrap();
         let reorged_count = payments.iter().filter(|p| p.reorged).count();
         assert_eq!(reorged_count, 1);
 
         // Invoice should be processing (still has valid payments)
-        let invoice = InvoiceReader::get(&*ds, &invoice_id).await.unwrap().unwrap();
+        let invoice = InvoiceReader::get(&*ds, &invoice_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(invoice.status, InvoiceStatus::Processing);
     }
 
@@ -1258,12 +1294,8 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
-            bridge.clone(),
-            ds.clone(),
-            None,
-            None,
-        );
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1323,11 +1355,16 @@ mod tests {
         consumer.handle_payment_confirmed(event).await.unwrap();
 
         // Verify invoice was marked as LatePaid (not Paid)
-        let invoice = InvoiceReader::get(&*ds, &invoice_id).await.unwrap().unwrap();
+        let invoice = InvoiceReader::get(&*ds, &invoice_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(invoice.status, InvoiceStatus::LatePaid);
 
         // Verify payment was marked as confirmed
-        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id).await.unwrap();
+        let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+            .await
+            .unwrap();
         assert!(payments[0].confirmed_at.is_some());
     }
 

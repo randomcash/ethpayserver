@@ -5,7 +5,7 @@
 
 use axum::{
     extract::FromRequestParts,
-    http::{header::AUTHORIZATION, request::Parts, StatusCode},
+    http::{StatusCode, header::AUTHORIZATION, request::Parts},
 };
 
 use auth::{Permission, SessionId, SessionService, UserInfo};
@@ -37,19 +37,23 @@ pub struct AuthenticatedUser(pub UserInfo);
 
 /// Extract session ID from Authorization header.
 fn extract_session_id(parts: &Parts) -> Result<SessionId, (StatusCode, String)> {
-    let auth_header = parts
-        .headers
-        .get(AUTHORIZATION)
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing Authorization header".into()))?;
+    let auth_header = parts.headers.get(AUTHORIZATION).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Authorization header".into(),
+    ))?;
 
-    let auth_str = auth_header
-        .to_str()
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid Authorization header".into()))?;
+    let auth_str = auth_header.to_str().map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Invalid Authorization header".into(),
+        )
+    })?;
 
     // Expect "Bearer <session_id>" format
-    let token = auth_str
-        .strip_prefix("Bearer ")
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid Authorization format, expected 'Bearer <token>'".into()))?;
+    let token = auth_str.strip_prefix("Bearer ").ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Invalid Authorization format, expected 'Bearer <token>'".into(),
+    ))?;
 
     // Parse session ID as UUID
     let uuid = uuid::Uuid::parse_str(token)
@@ -77,10 +81,18 @@ where
             .auth_service
             .validate_session(session_id)
             .await
-            .map_err(|e| (StatusCode::UNAUTHORIZED, format!("Session validation failed: {}", e)))?;
+            .map_err(|e| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    format!("Session validation failed: {}", e),
+                )
+            })?;
 
         // Check admin permission
-        if !user_info.role.has_permission(Permission::ServerManageTokens) {
+        if !user_info
+            .role
+            .has_permission(Permission::ServerManageTokens)
+        {
             return Err((StatusCode::FORBIDDEN, "Admin access required".into()));
         }
 
@@ -107,7 +119,12 @@ where
             .auth_service
             .validate_session(session_id)
             .await
-            .map_err(|e| (StatusCode::UNAUTHORIZED, format!("Session validation failed: {}", e)))?;
+            .map_err(|e| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    format!("Session validation failed: {}", e),
+                )
+            })?;
 
         Ok(AuthenticatedUser(user_info))
     }

@@ -527,7 +527,10 @@ mod tests {
     fn test_invoice_status_all_css_classes() {
         assert_eq!(InvoiceStatus::Pending.css_class(), "badge badge-warning");
         assert_eq!(InvoiceStatus::Processing.css_class(), "badge badge-info");
-        assert_eq!(InvoiceStatus::PartiallyPaid.css_class(), "badge badge-warning");
+        assert_eq!(
+            InvoiceStatus::PartiallyPaid.css_class(),
+            "badge badge-warning"
+        );
         assert_eq!(InvoiceStatus::Expired.css_class(), "badge badge-error");
         assert_eq!(InvoiceStatus::Cancelled.css_class(), "badge badge-neutral");
         assert_eq!(InvoiceStatus::Refunded.css_class(), "badge badge-neutral");
@@ -707,7 +710,10 @@ mod tests {
         let pm: StorePaymentMethod = serde_json::from_str(json).unwrap();
         assert_eq!(pm.chain_id, 1);
         assert_eq!(pm.asset_symbol, "USDC");
-        assert_eq!(pm.token_address.as_deref(), Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"));
+        assert_eq!(
+            pm.token_address.as_deref(),
+            Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+        );
         assert!(!pm.enabled);
     }
 
@@ -739,7 +745,10 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["chain_id"], 137);
-        assert_eq!(json["token_address"], "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        assert_eq!(
+            json["token_address"],
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        );
         assert_eq!(json["decimals"], 6);
     }
 

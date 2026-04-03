@@ -8,7 +8,7 @@ use alloy::primitives::{Address, B256, U256};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
@@ -153,7 +153,11 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
 
     /// Remove an address from watch list.
     /// token_contract should be None for native, Some(addr) for ERC20.
-    pub async fn unwatch(&self, address: &Address, token_contract: Option<Address>) -> Option<WatchedAddress> {
+    pub async fn unwatch(
+        &self,
+        address: &Address,
+        token_contract: Option<Address>,
+    ) -> Option<WatchedAddress> {
         let key = (*address, token_contract);
         let removed = self.watched.write().await.remove(&key);
         if removed.is_some() {
@@ -206,18 +210,27 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// Start the monitor.
     pub async fn start(self: Arc<Self>) -> EvmResult<()> {
         let chain_id = self.chain_id();
-        info!(chain_id, chain = self.chain_name(), "starting chain monitor");
+        info!(
+            chain_id,
+            chain = self.chain_name(),
+            "starting chain monitor"
+        );
 
         // Get shutdown receiver
-        let mut shutdown_rx = self.shutdown_rx.write().await.take().ok_or_else(|| {
-            EvmError::Monitor("monitor already started".to_string())
-        })?;
+        let mut shutdown_rx = self
+            .shutdown_rx
+            .write()
+            .await
+            .take()
+            .ok_or_else(|| EvmError::Monitor("monitor already started".to_string()))?;
 
         // Subscribe to blocks
         let mut block_stream = self.source.subscribe_blocks().await?;
 
         // Emit start event
-        let _ = self.event_tx.send(MonitorEvent::MonitorStarted { chain_id });
+        let _ = self
+            .event_tx
+            .send(MonitorEvent::MonitorStarted { chain_id });
 
         // Confirmation check timer
         let mut confirm_interval = tokio::time::interval(tokio::time::Duration::from_secs(
@@ -344,7 +357,10 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 continue;
             }
 
-            let current_balance = self.source.get_balance(*address, Some(block.number)).await?;
+            let current_balance = self
+                .source
+                .get_balance(*address, Some(block.number))
+                .await?;
 
             if current_balance > watch.last_known_balance {
                 let increase = current_balance - watch.last_known_balance;
@@ -359,7 +375,10 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
 
         // Fetch transactions for this block to find the actual transfers
         let addresses: Vec<Address> = addresses_with_increase.iter().map(|(a, _, _)| *a).collect();
-        let transfers = self.source.find_native_transfers_to(block.number, &addresses).await?;
+        let transfers = self
+            .source
+            .find_native_transfers_to(block.number, &addresses)
+            .await?;
 
         // Create a lookup map for quick access
         let invoice_map: HashMap<Address, uuid::Uuid> = addresses_with_increase
@@ -427,7 +446,10 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 continue; // Skip ERC20
             }
 
-            let balance = self.source.get_balance(watch.address, Some(block_number)).await?;
+            let balance = self
+                .source
+                .get_balance(watch.address, Some(block_number))
+                .await?;
             watch.last_known_balance = balance;
         }
 

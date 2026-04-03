@@ -1,7 +1,7 @@
 //! Health check endpoints.
 
 use auth::SessionService;
-use axum::{extract::State, http::StatusCode, Json, response::IntoResponse};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use evm::monitor::{ChainHealth, SourceStatus};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -41,7 +41,9 @@ pub struct HealthResponse {
         (status = 503, description = "Service is unhealthy", body = HealthResponse),
     )
 )]
-pub async fn health_check<A>(State(state): State<PgAppState<A>>) -> (StatusCode, Json<HealthResponse>)
+pub async fn health_check<A>(
+    State(state): State<PgAppState<A>>,
+) -> (StatusCode, Json<HealthResponse>)
 where
     A: Send + Sync + 'static,
 {
@@ -58,7 +60,11 @@ where
     let all_healthy = db_healthy && redis_healthy.unwrap_or(true);
 
     let response = HealthResponse {
-        status: if all_healthy { "healthy".to_string() } else { "unhealthy".to_string() },
+        status: if all_healthy {
+            "healthy".to_string()
+        } else {
+            "unhealthy".to_string()
+        },
         version: env!("CARGO_PKG_VERSION").to_string(),
         database: db_healthy,
         redis: redis_healthy,

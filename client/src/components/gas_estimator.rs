@@ -30,7 +30,8 @@ pub fn GasEstimator(
     /// Chain ID to fetch gas prices for.
     chain_id: u64,
     /// Gas price in gwei (if known).
-    #[prop(optional)] gas_price: Option<GasPrice>,
+    #[prop(optional)]
+    gas_price: Option<GasPrice>,
 ) -> impl IntoView {
     let prices = Resource::new(
         move || chain_id,

@@ -40,10 +40,30 @@ impl Token {
 /// Common tokens available on most EVM chains.
 pub const COMMON_TOKENS: &[Token] = &[
     Token::native("ETH", "Ether"),
-    Token::erc20("USDC", "USD Coin", 6, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
-    Token::erc20("USDT", "Tether USD", 6, "0xdAC17F958D2ee523a2206206994597C13D831ec7"),
-    Token::erc20("DAI", "Dai Stablecoin", 18, "0x6B175474E89094C44Da98b954EescdeCB5BE00"),
-    Token::erc20("WETH", "Wrapped Ether", 18, "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+    Token::erc20(
+        "USDC",
+        "USD Coin",
+        6,
+        "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    ),
+    Token::erc20(
+        "USDT",
+        "Tether USD",
+        6,
+        "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    ),
+    Token::erc20(
+        "DAI",
+        "Dai Stablecoin",
+        18,
+        "0x6B175474E89094C44Da98b954EescdeCB5BE00",
+    ),
+    Token::erc20(
+        "WETH",
+        "Wrapped Ether",
+        18,
+        "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    ),
 ];
 
 /// Token selector component.
@@ -52,9 +72,11 @@ pub fn TokenSelector(
     /// Currently selected token symbol.
     selected: RwSignal<String>,
     /// Available tokens (defaults to common tokens).
-    #[prop(optional)] tokens: Option<Vec<Token>>,
+    #[prop(optional)]
+    tokens: Option<Vec<Token>>,
     /// Callback when selection changes.
-    #[prop(optional)] on_change: Option<Callback<String>>,
+    #[prop(optional)]
+    on_change: Option<Callback<String>>,
 ) -> impl IntoView {
     let token_list = tokens.unwrap_or_else(|| COMMON_TOKENS.to_vec());
 

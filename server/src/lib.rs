@@ -42,15 +42,14 @@ pub mod state;
 
 pub use config::Config;
 pub use services::{
-    CleanupConfig, CleanupError, CleanupStats, InvoiceCleanupService,
-    EVMMonitor, EVMMonitorError, EventConsumer, EventConsumerError,
-    RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
-    WebhookConfig, WebhookService,
+    CleanupConfig, CleanupError, CleanupStats, EVMMonitor, EVMMonitorError, EventConsumer,
+    EventConsumerError, InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig,
+    WatchRetryService, WebhookConfig, WebhookService,
 };
-pub use state::{AppState, AppDataService, AppDataServiceReader};
+pub use state::{AppDataService, AppDataServiceReader, AppState};
 
 // Re-export rates crate types for convenience
 pub use rates::{
-    ExchangeRate, KrakenRateProvider, RateError, RateProvider, RateProviderConfig,
-    is_crypto_currency, is_fiat_currency, FIAT_CURRENCIES,
+    ExchangeRate, FIAT_CURRENCIES, KrakenRateProvider, RateError, RateProvider, RateProviderConfig,
+    is_crypto_currency, is_fiat_currency,
 };

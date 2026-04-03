@@ -109,7 +109,9 @@ impl<D: EvmDataService, A, E> AppState<D, A, E> {
 #[async_trait]
 impl AppDataServiceReader for data_service::PgDataService {
     async fn health_check(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.health_check().await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        self.health_check()
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }
 

@@ -4,28 +4,28 @@
 //! for operations on specific stores.
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::{
-    SessionService, Store, StoreId, UserStore, UserId,
+    SessionService, Store, StoreId, UserId, UserStore,
     repository::{StoreRepository, StoreRoleRepository, UserStoreRepository},
 };
 use data_service::{
-    StorePaymentMethod, StorePaymentMethodReader, StorePaymentMethodWriter,
-    StoreWalletReader, StoreWalletWriter,
+    StorePaymentMethod, StorePaymentMethodReader, StorePaymentMethodWriter, StoreWalletReader,
+    StoreWalletWriter,
 };
-use types::{StoreWebhookReader, StoreWebhookWriter};
 use evm::validate_xpub;
+use types::{StoreWebhookReader, StoreWebhookWriter};
 
+use super::extractors::AuthenticatedUser;
 use crate::metrics;
 use crate::state::PgAppState;
-use super::extractors::AuthenticatedUser;
 
 /// Check if user can modify store settings (admin or has permission).
 async fn require_store_settings_permission<A: SessionService>(
@@ -39,11 +39,19 @@ async fn require_store_settings_permission<A: SessionService>(
 
     let has_permission = state
         .data_service
-        .user_has_store_permission(user.id, StoreId(store_id), "ethpay.store.canmodifystoresettings")
+        .user_has_store_permission(
+            user.id,
+            StoreId(store_id),
+            "ethpay.store.canmodifystoresettings",
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if has_permission { Ok(()) } else { Err(StatusCode::FORBIDDEN) }
+    if has_permission {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
 }
 
 /// Request to create a new store.
@@ -143,7 +151,8 @@ pub async fn list_stores<A>(
 where
     A: SessionService + 'static,
 {
-    let stores = state.data_service
+    let stores = state
+        .data_service
         .get_stores_for_user(user.id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -182,20 +191,23 @@ where
     }
 
     // Create the store
-    state.data_service
+    state
+        .data_service
         .create_store(&store)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Get the Owner role and add owner as member
-    let owner_role = state.data_service
+    let owner_role = state
+        .data_service
         .get_default_role_by_name("Owner")
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let user_store = UserStore::new(owner_id, store.id, owner_role.id);
-    state.data_service
+    state
+        .data_service
         .add_user_to_store(&user_store)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -230,7 +242,8 @@ pub async fn get_store<A>(
 where
     A: SessionService + 'static,
 {
-    let store = state.data_service
+    let store = state
+        .data_service
         .get_store(StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -238,7 +251,8 @@ where
 
     // Check user has access (is owner or member)
     let is_owner = store.owner_id == user.id;
-    let is_member = state.data_service
+    let is_member = state
+        .data_service
         .get_user_store(user.id, StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -280,8 +294,13 @@ where
     A: SessionService + 'static,
 {
     // Check permission
-    let has_permission = state.data_service
-        .user_has_store_permission(user.id, StoreId(store_id), "ethpay.store.canmodifystoresettings")
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(store_id),
+            "ethpay.store.canmodifystoresettings",
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -289,7 +308,8 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let mut store = state.data_service
+    let mut store = state
+        .data_service
         .get_store(StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -302,7 +322,8 @@ where
         store.website = Some(website);
     }
 
-    state.data_service
+    state
+        .data_service
         .update_store(&store)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -337,7 +358,8 @@ where
     A: SessionService + 'static,
 {
     // Only owner can delete
-    let store = state.data_service
+    let store = state
+        .data_service
         .get_store(StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -347,7 +369,8 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    state.data_service
+    state
+        .data_service
         .archive_store(StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -382,7 +405,8 @@ where
     A: SessionService + 'static,
 {
     // Check permission
-    let has_permission = state.data_service
+    let has_permission = state
+        .data_service
         .user_has_store_permission(user.id, StoreId(store_id), "ethpay.store.canviewstoreusers")
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -391,7 +415,8 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let user_stores = state.data_service
+    let user_stores = state
+        .data_service
         .get_store_users(StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -442,8 +467,13 @@ where
     A: SessionService + 'static,
 {
     // Check permission
-    let has_permission = state.data_service
-        .user_has_store_permission(user.id, StoreId(store_id), "ethpay.store.canmodifystoreusers")
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(store_id),
+            "ethpay.store.canmodifystoreusers",
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -452,37 +482,39 @@ where
     }
 
     // Verify store exists
-    let _ = state.data_service
+    let _ = state
+        .data_service
         .get_store(StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // Get the role by name
-    let role = state.data_service
+    let role = state
+        .data_service
         .get_default_role_by_name(&req.role)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    let user_store = UserStore::new(
-        UserId(req.user_id),
-        StoreId(store_id),
-        role.id,
-    );
+    let user_store = UserStore::new(UserId(req.user_id), StoreId(store_id), role.id);
 
-    state.data_service
+    state
+        .data_service
         .add_user_to_store(&user_store)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok((StatusCode::CREATED, Json(MemberResponse {
-        user_id: req.user_id,
-        store_id,
-        role_id: role.id.0,
-        role_name: role.role,
-        permissions: role.permissions,
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(MemberResponse {
+            user_id: req.user_id,
+            store_id,
+            role_id: role.id.0,
+            role_name: role.role,
+            permissions: role.permissions,
+        }),
+    ))
 }
 
 /// Update a member's role in a store.
@@ -515,8 +547,13 @@ where
     A: SessionService + 'static,
 {
     // Check permission
-    let has_permission = state.data_service
-        .user_has_store_permission(user.id, StoreId(store_id), "ethpay.store.canmodifystoreusers")
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(store_id),
+            "ethpay.store.canmodifystoreusers",
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -525,19 +562,17 @@ where
     }
 
     // Get the new role
-    let role = state.data_service
+    let role = state
+        .data_service
         .get_default_role_by_name(&req.role)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    let user_store = UserStore::new(
-        UserId(target_user_id),
-        StoreId(store_id),
-        role.id,
-    );
+    let user_store = UserStore::new(UserId(target_user_id), StoreId(store_id), role.id);
 
-    state.data_service
+    state
+        .data_service
         .update_user_store(&user_store)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -580,8 +615,13 @@ where
     A: SessionService + 'static,
 {
     // Check permission
-    let has_permission = state.data_service
-        .user_has_store_permission(user.id, StoreId(store_id), "ethpay.store.canmodifystoreusers")
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(store_id),
+            "ethpay.store.canmodifystoreusers",
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -590,7 +630,8 @@ where
     }
 
     // Cannot remove the store owner
-    let store = state.data_service
+    let store = state
+        .data_service
         .get_store(StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -600,7 +641,8 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    state.data_service
+    state
+        .data_service
         .remove_user_from_store(UserId(target_user_id), StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -675,7 +717,9 @@ where
 
     // Fetch wallet for each store
     for store in stores {
-        if let Ok(Some(wallet)) = StoreWalletReader::get_wallet(&*state.data_service, store.id.0).await {
+        if let Ok(Some(wallet)) =
+            StoreWalletReader::get_wallet(&*state.data_service, store.id.0).await
+        {
             wallets.push(WalletResponse {
                 id: wallet.id,
                 store_id: wallet.store_id,
@@ -717,7 +761,11 @@ where
     // Check permission
     let has_permission = state
         .data_service
-        .user_has_store_permission(user.id, StoreId(store_id), "ethpay.store.canviewstoresettings")
+        .user_has_store_permission(
+            user.id,
+            StoreId(store_id),
+            "ethpay.store.canviewstoresettings",
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -803,8 +851,8 @@ where
         &req.xpub,
         req.name.as_deref(),
     )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(WalletResponse {
         id: wallet.id,
@@ -978,7 +1026,8 @@ where
     require_store_settings_permission(&state, &user, store_id).await?;
 
     // Validate webhook URL - must be HTTPS (or localhost for dev)
-    if !req.webhook_url.starts_with("https://") && !req.webhook_url.starts_with("http://localhost") {
+    if !req.webhook_url.starts_with("https://") && !req.webhook_url.starts_with("http://localhost")
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -1000,8 +1049,8 @@ where
         &secret,
         req.enabled,
     )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(WebhookResponse {
         id: webhook.id,
@@ -1676,7 +1725,9 @@ mod tests {
             WalletResponse {
                 id: Uuid::nil(),
                 store_id: Uuid::nil(),
-                xpub_masked: mask_xpub("xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz"),
+                xpub_masked: mask_xpub(
+                    "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz",
+                ),
                 derivation_index: 0,
                 name: Some("ETH Wallet".to_string()),
                 created_at: Utc::now(),
@@ -1684,7 +1735,9 @@ mod tests {
             WalletResponse {
                 id: Uuid::new_v4(),
                 store_id: Uuid::new_v4(),
-                xpub_masked: mask_xpub("xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5"),
+                xpub_masked: mask_xpub(
+                    "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5",
+                ),
                 derivation_index: 5,
                 name: None,
                 created_at: Utc::now(),
