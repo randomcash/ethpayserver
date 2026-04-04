@@ -1,5 +1,7 @@
 //! Auth repository implementations for PostgreSQL.
 
+mod api_key;
+mod api_key_impl;
 mod challenge;
 mod device;
 mod passkey;
