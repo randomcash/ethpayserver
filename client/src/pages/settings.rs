@@ -4,7 +4,7 @@
 
 use leptos::prelude::*;
 
-use crate::api::{EvmApiClient, UserRole};
+use crate::api::EvmApiClient;
 
 /// Settings page with tabbed interface.
 #[component]
