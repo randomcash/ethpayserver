@@ -2,7 +2,7 @@
 //!
 //! Returns aggregated stats for the authenticated user's stores.
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -10,8 +10,8 @@ use auth::{SessionService, repository::StoreRepository};
 use data_service::{InvoiceQueryParams, InvoiceReader, PaymentQueryParams, PaymentReader};
 use types::InvoiceStatus;
 
-use crate::state::PgAppState;
 use super::extractors::AuthenticatedUser;
+use crate::state::PgAppState;
 
 /// Dashboard statistics response.
 #[derive(Debug, Serialize, ToSchema)]
@@ -70,7 +70,9 @@ where
         // Total invoices
         let (count, _) = InvoiceReader::query(
             ds,
-            &InvoiceQueryParams::new().with_store_id(store_id).with_limit(0),
+            &InvoiceQueryParams::new()
+                .with_store_id(store_id)
+                .with_limit(0),
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -115,7 +117,9 @@ where
         // Payments
         let (count, _) = PaymentReader::query(
             ds,
-            &PaymentQueryParams::new().with_store_id(store_id).with_limit(0),
+            &PaymentQueryParams::new()
+                .with_store_id(store_id)
+                .with_limit(0),
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

@@ -1,8 +1,8 @@
 //! Dashboard page - Stripe-inspired overview of EVM payment activity.
 
+use crate::api::EvmApiClient;
 use leptos::prelude::*;
 use leptos_router::components::A;
-use crate::api::{DashboardStats, EvmApiClient};
 
 /// Dashboard page component.
 #[component]
