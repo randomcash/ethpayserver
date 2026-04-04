@@ -16,7 +16,10 @@ use crate::services::EVMMonitor;
 /// Trait for data service requirements in WatchRetryService.
 pub trait WatchRetryDataService: WatchedAddressReader + WatchedAddressWriter + Send + Sync {}
 
-impl<T> WatchRetryDataService for T where T: WatchedAddressReader + WatchedAddressWriter + Send + Sync {}
+impl<T> WatchRetryDataService for T where
+    T: WatchedAddressReader + WatchedAddressWriter + Send + Sync
+{
+}
 
 /// Configuration for the watch retry service.
 #[derive(Debug, Clone)]
@@ -65,11 +68,7 @@ pub struct WatchRetryService<D: WatchRetryDataService, E: EVMMonitor> {
 
 impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryService<D, E> {
     /// Create a new watch retry service.
-    pub fn new(
-        data_service: Arc<D>,
-        evm_monitor: Arc<E>,
-        config: WatchRetryConfig,
-    ) -> Self {
+    pub fn new(data_service: Arc<D>, evm_monitor: Arc<E>, config: WatchRetryConfig) -> Self {
         Self {
             data_service,
             evm_monitor,
@@ -146,15 +145,19 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
                 .and_then(|s| s.parse::<U256>().ok());
 
             // Parse token contract if present
-            let token_contract: Option<Address> = watch
-                .token_address
-                .as_ref()
-                .and_then(|s| s.parse().ok());
+            let token_contract: Option<Address> =
+                watch.token_address.as_ref().and_then(|s| s.parse().ok());
 
             // Try to send WatchAddress command using chain_id (works for both mainnets and testnets)
             match self
                 .evm_monitor
-                .watch_address_by_chain_id(watch.chain_id, address, invoice_id, expected_amount, token_contract)
+                .watch_address_by_chain_id(
+                    watch.chain_id,
+                    address,
+                    invoice_id,
+                    expected_amount,
+                    token_contract,
+                )
                 .await
             {
                 Ok(()) => {
@@ -164,7 +167,9 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
                         &watch.address,
                         watch.chain_id,
                         watch.token_address.as_deref(),
-                    ).await {
+                    )
+                    .await
+                    {
                         tracing::error!(
                             address = %watch.address,
                             error = %e,

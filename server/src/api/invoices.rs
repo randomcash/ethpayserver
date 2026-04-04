@@ -19,9 +19,9 @@ use evm::{Address, U256, XpubDeriver};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use types::{
-    InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter,
-    PaymentMethodId, PaymentOptionData, PaymentOptionId, PaymentQueryParams, PaymentReader,
-    StoreId, StorePaymentMethodWriter, WatchedAddressWriter,
+    InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentMethodId,
+    PaymentOptionData, PaymentOptionId, PaymentQueryParams, PaymentReader, StoreId,
+    StorePaymentMethodWriter, WatchedAddressWriter,
     traits::{InvoiceData, PaymentData},
 };
 
@@ -57,7 +57,9 @@ fn convert_to_crypto_smallest_unit(
     }
 
     // Calculate crypto amount: amount * rate
-    let crypto_amount = parsed_amount.checked_mul(rate).ok_or("Overflow in rate multiplication")?;
+    let crypto_amount = parsed_amount
+        .checked_mul(rate)
+        .ok_or("Overflow in rate multiplication")?;
 
     // Convert to smallest units by multiplying by 10^decimals
     let smallest_units = multiply_by_decimals(crypto_amount, decimals)?;
@@ -94,9 +96,13 @@ fn multiply_by_decimals(value: Decimal, decimals: u8) -> Result<Decimal, &'stati
     let ten = Decimal::from(10);
     let mut multiplier = Decimal::ONE;
     for _ in 0..decimals {
-        multiplier = multiplier.checked_mul(ten).ok_or("Overflow computing multiplier")?;
+        multiplier = multiplier
+            .checked_mul(ten)
+            .ok_or("Overflow computing multiplier")?;
     }
-    value.checked_mul(multiplier).ok_or("Overflow in smallest units calculation")
+    value
+        .checked_mul(multiplier)
+        .ok_or("Overflow in smallest units calculation")
 }
 
 /// Convert a Decimal to an integer string (floor, then stringify).
@@ -509,25 +515,25 @@ where
     }
 
     // Get ALL enabled payment methods for the store
-    let payment_methods = StorePaymentMethodReader::get_enabled_payment_methods(
-        &*state.data_service,
-        req.store_id,
-    )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let payment_methods =
+        StorePaymentMethodReader::get_enabled_payment_methods(&*state.data_service, req.store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if payment_methods.is_empty() {
-        tracing::warn!(
-            "Store {} has no enabled payment methods",
-            req.store_id
-        );
+        tracing::warn!("Store {} has no enabled payment methods", req.store_id);
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Pre-validate: Fetch rates for cross-currency invoices to avoid creating orphan invoices
     // For same-asset invoices (e.g., ETH invoice paid with ETH), no rate needed
     // Stores (payment_method_index, crypto_amount, rate_string, rate_timestamp)
-    let mut validated_methods: Vec<(usize, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> = Vec::new();
+    let mut validated_methods: Vec<(
+        usize,
+        String,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = Vec::new();
     let invoice_currency_upper = req.currency.to_uppercase();
 
     for (idx, payment_method) in payment_methods.iter().enumerate() {
@@ -547,8 +553,8 @@ where
             } else {
                 // Crypto-denominated invoice with matching asset
                 // Amount is in human-readable format, convert to smallest units
-                convert_human_to_smallest_unit(&req.amount, payment_method.decimals)
-                    .map_err(|e| {
+                convert_human_to_smallest_unit(&req.amount, payment_method.decimals).map_err(
+                    |e| {
                         tracing::error!(
                             currency = %req.currency,
                             amount = %req.amount,
@@ -556,7 +562,8 @@ where
                             "Failed to convert amount to smallest units"
                         );
                         StatusCode::BAD_REQUEST
-                    })?
+                    },
+                )?
             };
 
             tracing::debug!(
@@ -569,7 +576,11 @@ where
             validated_methods.push((idx, amount, None, None));
         } else {
             // Cross-currency: need to fetch exchange rate
-            match state.rate_provider.get_rate(&req.currency, &payment_method.asset_symbol).await {
+            match state
+                .rate_provider
+                .get_rate(&req.currency, &payment_method.asset_symbol)
+                .await
+            {
                 Ok(exchange_rate) => {
                     // Validate rate is positive
                     if exchange_rate.rate <= Decimal::ZERO {
@@ -645,7 +656,9 @@ where
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
-    let expiration_secs = req.expiration_seconds.unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
+    let expiration_secs = req
+        .expiration_seconds
+        .unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
     let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
     // Create invoice (network-agnostic) - only after validating payment methods
@@ -693,7 +706,10 @@ where
         let payment_option = PaymentOptionData {
             id: PaymentOptionId(Uuid::new_v4()),
             invoice_id: invoice.id.clone(),
-            payment_method_id: PaymentMethodId::new(&payment_method.asset_symbol, payment_method.chain_id),
+            payment_method_id: PaymentMethodId::new(
+                &payment_method.asset_symbol,
+                payment_method.chain_id,
+            ),
             chain_id: payment_method.chain_id,
             asset_symbol: payment_method.asset_symbol.clone(),
             token_address: payment_method.token_address.clone(),
@@ -791,7 +807,10 @@ where
     }
 
     // Defensive check: should never happen since we pre-validate payment methods
-    debug_assert!(!created_options.is_empty(), "Pre-validation should ensure at least one valid method");
+    debug_assert!(
+        !created_options.is_empty(),
+        "Pre-validation should ensure at least one valid method"
+    );
 
     // Record metrics
     metrics::record_invoice_created(&invoice.currency);

@@ -5,8 +5,8 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    CleanupAddressInfo, PendingWatchInfo, RepositoryResult,
-    WatchedAddressReader, WatchedAddressWriter, sqlx_to_repo_error,
+    CleanupAddressInfo, PendingWatchInfo, RepositoryResult, WatchedAddressReader,
+    WatchedAddressWriter, sqlx_to_repo_error,
 };
 use types::{InvoiceId, PaymentOptionId};
 
@@ -95,7 +95,9 @@ impl WatchedAddressReader for PgDataService {
         }))
     }
 
-    async fn get_active(&self) -> RepositoryResult<Vec<(String, PaymentOptionId, u64, Option<String>)>> {
+    async fn get_active(
+        &self,
+    ) -> RepositoryResult<Vec<(String, PaymentOptionId, u64, Option<String>)>> {
         let rows = sqlx::query(
             r#"
             SELECT wa.address, wa.payment_option_id, wa.chain_id, wa.token_address
@@ -113,7 +115,12 @@ impl WatchedAddressReader for PgDataService {
             let payment_option_id: Uuid = r.get("payment_option_id");
             let chain_id: i64 = r.get("chain_id");
             let token_address: Option<String> = r.get("token_address");
-            result.push((address, PaymentOptionId(payment_option_id), chain_id as u64, token_address));
+            result.push((
+                address,
+                PaymentOptionId(payment_option_id),
+                chain_id as u64,
+                token_address,
+            ));
         }
         Ok(result)
     }
@@ -287,13 +294,11 @@ impl WatchedAddressWriter for PgDataService {
             .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(24));
 
         // Get the invoice_id from the payment option for the watched_addresses table
-        let invoice_id_row = sqlx::query(
-            r#"SELECT invoice_id FROM payment_options WHERE id = $1"#,
-        )
-        .bind(payment_option_id.0)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
+        let invoice_id_row = sqlx::query(r#"SELECT invoice_id FROM payment_options WHERE id = $1"#)
+            .bind(payment_option_id.0)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
 
         let invoice_id: String = invoice_id_row
             .map(|r| r.get("invoice_id"))

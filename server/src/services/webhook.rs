@@ -239,8 +239,8 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         redis_url: &str,
         config: WebhookConfig,
     ) -> Result<Self, WebhookError> {
-        let redis_client = redis::Client::open(redis_url)
-            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+        let redis_client =
+            redis::Client::open(redis_url).map_err(|e| WebhookError::Redis(e.to_string()))?;
 
         let http_client = reqwest::Client::builder()
             .timeout(config.request_timeout)
@@ -259,13 +259,14 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     ///
     /// This pushes the job to Redis for async processing.
     pub async fn queue_webhook(&self, job: WebhookJob) -> Result<(), WebhookError> {
-        let mut conn = self.redis_client
+        let mut conn = self
+            .redis_client
             .get_multiplexed_async_connection()
             .await
             .map_err(|e| WebhookError::Redis(e.to_string()))?;
 
-        let job_json = serde_json::to_string(&job)
-            .map_err(|e| WebhookError::Serialization(e.to_string()))?;
+        let job_json =
+            serde_json::to_string(&job).map_err(|e| WebhookError::Serialization(e.to_string()))?;
 
         redis::cmd("RPUSH")
             .arg(&self.config.queue_key)
@@ -316,7 +317,8 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     ///
     /// Returns Ok(true) if a job was processed, Ok(false) if queue was empty.
     async fn process_next_job(&self) -> Result<bool, WebhookError> {
-        let mut conn = self.redis_client
+        let mut conn = self
+            .redis_client
             .get_multiplexed_async_connection()
             .await
             .map_err(|e| WebhookError::Redis(e.to_string()))?;
@@ -334,8 +336,8 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             return Ok(false);
         };
 
-        let mut job: WebhookJob = serde_json::from_str(&json)
-            .map_err(|e| WebhookError::Serialization(e.to_string()))?;
+        let mut job: WebhookJob =
+            serde_json::from_str(&json).map_err(|e| WebhookError::Serialization(e.to_string()))?;
 
         // Check if job is scheduled for later
         if job.scheduled_at > Utc::now() {
@@ -380,10 +382,12 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                         "Webhook delivery exhausted, giving up"
                     );
                     metrics::record_webhook_failed(&job.payload.event_type.to_string());
-                    self.record_delivery_event(&job, false, Some(e.to_string())).await;
+                    self.record_delivery_event(&job, false, Some(e.to_string()))
+                        .await;
                 } else {
                     // Schedule retry
-                    job.scheduled_at = Utc::now() + chrono::Duration::from_std(job.retry_delay()).unwrap();
+                    job.scheduled_at =
+                        Utc::now() + chrono::Duration::from_std(job.retry_delay()).unwrap();
 
                     let job_json = serde_json::to_string(&job)
                         .map_err(|e| WebhookError::Serialization(e.to_string()))?;
@@ -427,7 +431,8 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         let signature = self.sign_payload(&payload_json, &job.webhook_secret);
 
         // Send request
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(&job.webhook_url)
             .header("Content-Type", "application/json")
             .header("X-Webhook-Signature", &signature)
@@ -456,8 +461,8 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
 
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
         mac.update(payload.as_bytes());
         let result = mac.finalize();
 
@@ -489,7 +494,9 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             None,
             event_type,
             Some(event_data),
-        ).await {
+        )
+        .await
+        {
             tracing::warn!(
                 error = %e,
                 invoice_id = %job.payload.invoice_id,
@@ -524,8 +531,8 @@ pub fn sign_webhook_payload(payload: &str, secret: &str) -> String {
 
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
     let result = mac.finalize();
 
@@ -538,10 +545,22 @@ mod tests {
 
     #[test]
     fn test_webhook_event_type_display() {
-        assert_eq!(WebhookEventType::PaymentDetected.to_string(), "payment_detected");
-        assert_eq!(WebhookEventType::PaymentConfirmed.to_string(), "payment_confirmed");
-        assert_eq!(WebhookEventType::InvoiceExpired.to_string(), "invoice_expired");
-        assert_eq!(WebhookEventType::InvoiceCancelled.to_string(), "invoice_cancelled");
+        assert_eq!(
+            WebhookEventType::PaymentDetected.to_string(),
+            "payment_detected"
+        );
+        assert_eq!(
+            WebhookEventType::PaymentConfirmed.to_string(),
+            "payment_confirmed"
+        );
+        assert_eq!(
+            WebhookEventType::InvoiceExpired.to_string(),
+            "invoice_expired"
+        );
+        assert_eq!(
+            WebhookEventType::InvoiceCancelled.to_string(),
+            "invoice_cancelled"
+        );
         assert_eq!(WebhookEventType::LatePaid.to_string(), "late_paid");
     }
 

@@ -39,7 +39,8 @@ impl RedisBridge {
     /// * `events_channel` - Channel for events (e.g., "evmmonitor:events")
     /// * `commands_channel` - Channel for commands (e.g., "evmmonitor:commands")
     pub async fn new(url: &str, events_channel: &str, commands_channel: &str) -> EvmResult<Self> {
-        let client = Client::open(url).map_err(|e| EvmError::Monitor(format!("redis connection failed: {}", e)))?;
+        let client = Client::open(url)
+            .map_err(|e| EvmError::Monitor(format!("redis connection failed: {}", e)))?;
 
         let publisher = ConnectionManager::new(client.clone())
             .await
@@ -66,7 +67,8 @@ impl RedisBridge {
     /// Get a value from Redis by key.
     pub async fn get_key(&self, key: &str) -> EvmResult<Option<String>> {
         let mut conn = self.publisher.clone();
-        let value: Option<String> = conn.get(key)
+        let value: Option<String> = conn
+            .get(key)
             .await
             .map_err(|e| EvmError::Monitor(format!("redis GET failed: {}", e)))?;
         Ok(value)
@@ -204,7 +206,9 @@ impl EventBridge for RedisBridge {
         if pong == "PONG" {
             Ok(())
         } else {
-            Err(EvmError::Monitor("redis health check: unexpected response".to_string()))
+            Err(EvmError::Monitor(
+                "redis health check: unexpected response".to_string(),
+            ))
         }
     }
 }

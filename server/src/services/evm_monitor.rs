@@ -5,9 +5,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use evm::monitor::{ChainHealth, EventBridge, RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
 use evm::monitor::events::{MonitorCommand, UnwatchAddressCommand, WatchAddressCommand};
-use evm::{network_to_chain_id, Address};
+use evm::monitor::{COMMANDS_CHANNEL, ChainHealth, EVENTS_CHANNEL, EventBridge, RedisBridge};
+use evm::{Address, network_to_chain_id};
 use types::Network;
 use uuid::Uuid;
 
@@ -110,10 +110,17 @@ impl EVMMonitor for RedisEVMMonitor {
         expected_amount: Option<evm::U256>,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
-        let chain_id = network_to_chain_id(network)
-            .ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
+        let chain_id =
+            network_to_chain_id(network).ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
 
-        self.watch_address_by_chain_id(chain_id, address, invoice_id, expected_amount, token_contract).await
+        self.watch_address_by_chain_id(
+            chain_id,
+            address,
+            invoice_id,
+            expected_amount,
+            token_contract,
+        )
+        .await
     }
 
     async fn watch_address_by_chain_id(
@@ -149,10 +156,11 @@ impl EVMMonitor for RedisEVMMonitor {
         address: Address,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
-        let chain_id = network_to_chain_id(network)
-            .ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
+        let chain_id =
+            network_to_chain_id(network).ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
 
-        self.unwatch_address_by_chain_id(chain_id, address, token_contract).await
+        self.unwatch_address_by_chain_id(chain_id, address, token_contract)
+            .await
     }
 
     async fn unwatch_address_by_chain_id(
@@ -161,7 +169,11 @@ impl EVMMonitor for RedisEVMMonitor {
         address: Address,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
-        let command = MonitorCommand::UnwatchAddress(UnwatchAddressCommand { chain_id, address, token_contract });
+        let command = MonitorCommand::UnwatchAddress(UnwatchAddressCommand {
+            chain_id,
+            address,
+            token_contract,
+        });
 
         self.bridge.publish_command(&command).await?;
         tracing::info!(
@@ -185,12 +197,12 @@ impl EVMMonitor for RedisEVMMonitor {
         let health_json: Option<String> = self.bridge.get_key(HEALTH_KEY).await?;
 
         match health_json {
-            Some(json) => {
-                serde_json::from_str(&json)
-                    .map_err(|e| EVMMonitorError::Bridge(
-                        evm::EvmError::Monitor(format!("failed to parse health JSON: {}", e))
-                    ))
-            }
+            Some(json) => serde_json::from_str(&json).map_err(|e| {
+                EVMMonitorError::Bridge(evm::EvmError::Monitor(format!(
+                    "failed to parse health JSON: {}",
+                    e
+                )))
+            }),
             None => Ok(vec![]), // No health data yet
         }
     }

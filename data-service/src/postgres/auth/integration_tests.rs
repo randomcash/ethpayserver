@@ -6,8 +6,7 @@ use chrono::{Duration, Utc};
 
 use auth::{
     ChallengeRepository, DeviceRepository, DeviceType, Role, Session, SessionId, SessionRepository,
-    User, UserId, UserRepository, WalletCredentialId, WalletRepository,
-    error::AuthError,
+    User, UserId, UserRepository, WalletCredentialId, WalletRepository, error::AuthError,
 };
 
 use super::PgDataService;
@@ -193,7 +192,13 @@ async fn integration_session_crud() {
     assert_eq!(fetched.user_id, user.id);
     assert_eq!(fetched.device_id, device.id);
     // PostgreSQL INET returns CIDR notation
-    assert!(fetched.ip_address.as_ref().unwrap().starts_with("127.0.0.1"));
+    assert!(
+        fetched
+            .ip_address
+            .as_ref()
+            .unwrap()
+            .starts_with("127.0.0.1")
+    );
 
     // Get sessions for user
     let sessions = service.get_sessions_for_user(user.id).await.unwrap();
@@ -205,7 +210,13 @@ async fn integration_session_crud() {
     service.update_session(&updated).await.unwrap();
 
     let fetched = service.get_session(session.id).await.unwrap().unwrap();
-    assert!(fetched.ip_address.as_ref().unwrap().starts_with("192.168.1.1"));
+    assert!(
+        fetched
+            .ip_address
+            .as_ref()
+            .unwrap()
+            .starts_with("192.168.1.1")
+    );
 
     // Delete session
     service.delete_session(session.id).await.unwrap();
@@ -289,7 +300,10 @@ async fn integration_wallet_crud() {
     assert!(!fetched.is_active);
 
     // Deactivated wallet should not be found by address
-    let fetched = service.get_wallet_by_address(&wallet.address).await.unwrap();
+    let fetched = service
+        .get_wallet_by_address(&wallet.address)
+        .await
+        .unwrap();
     assert!(fetched.is_none());
 
     // Delete wallet
@@ -349,7 +363,11 @@ async fn integration_wallet_challenge() {
         .unwrap();
 
     // Take challenge
-    let fetched = service.take_wallet_challenge(user_id).await.unwrap().unwrap();
+    let fetched = service
+        .take_wallet_challenge(user_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.challenge, challenge.challenge);
     assert_eq!(fetched.address, challenge.address);
 

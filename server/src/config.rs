@@ -105,27 +105,21 @@ impl Config {
         if !self.database_url.starts_with("postgres://")
             && !self.database_url.starts_with("postgresql://")
         {
-            anyhow::bail!(
-                "DATABASE_URL must start with 'postgres://' or 'postgresql://'"
-            );
+            anyhow::bail!("DATABASE_URL must start with 'postgres://' or 'postgresql://'");
         }
 
         // Validate REDIS_URL format (if provided)
-        if let Some(ref redis_url) = self.redis_url {
-            if !redis_url.starts_with("redis://") && !redis_url.starts_with("rediss://") {
-                anyhow::bail!(
-                    "REDIS_URL must start with 'redis://' or 'rediss://'"
-                );
-            }
+        if let Some(ref redis_url) = self.redis_url
+            && !redis_url.starts_with("redis://")
+            && !redis_url.starts_with("rediss://")
+        {
+            anyhow::bail!("REDIS_URL must start with 'redis://' or 'rediss://'");
         }
 
         // Validate LOG_LEVEL
         let log_level_lower = self.log_level.to_lowercase();
         if !VALID_LOG_LEVELS.contains(&log_level_lower.as_str()) {
-            anyhow::bail!(
-                "LOG_LEVEL must be one of: {}",
-                VALID_LOG_LEVELS.join(", ")
-            );
+            anyhow::bail!("LOG_LEVEL must be one of: {}", VALID_LOG_LEVELS.join(", "));
         }
 
         // Validate PORT range

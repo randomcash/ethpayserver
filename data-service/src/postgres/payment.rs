@@ -37,10 +37,7 @@ const PAYMENT_SELECT_COLS: &str = r#"
 #[async_trait]
 impl PaymentReader for PgDataService {
     async fn get(&self, id: Uuid) -> RepositoryResult<Option<PaymentData>> {
-        let query = format!(
-            "SELECT {} FROM payments WHERE id = $1",
-            PAYMENT_SELECT_COLS
-        );
+        let query = format!("SELECT {} FROM payments WHERE id = $1", PAYMENT_SELECT_COLS);
         let row = sqlx::query(&query)
             .bind(id)
             .fetch_optional(&self.pool)
@@ -80,7 +77,10 @@ impl PaymentReader for PgDataService {
         rows.iter().map(try_row_to_payment).collect()
     }
 
-    async fn get_valid_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentData>> {
+    async fn get_valid_for_invoice(
+        &self,
+        invoice_id: &InvoiceId,
+    ) -> RepositoryResult<Vec<PaymentData>> {
         let query = format!(
             "SELECT {} FROM payments WHERE invoice_id = $1 AND reorged = FALSE ORDER BY detected_at DESC",
             PAYMENT_SELECT_COLS
@@ -111,7 +111,10 @@ impl PaymentReader for PgDataService {
         Ok(row.get("has_payments"))
     }
 
-    async fn query(&self, params: &PaymentQueryParams) -> RepositoryResult<(i64, Vec<PaymentData>)> {
+    async fn query(
+        &self,
+        params: &PaymentQueryParams,
+    ) -> RepositoryResult<(i64, Vec<PaymentData>)> {
         // Build dynamic WHERE clause
         let mut conditions = Vec::new();
         let mut bind_idx = 1;
@@ -164,7 +167,10 @@ impl PaymentReader for PgDataService {
             ORDER BY p.detected_at DESC
             LIMIT ${} OFFSET ${}
             "#,
-            join_clause, where_clause, bind_idx, bind_idx + 1
+            join_clause,
+            where_clause,
+            bind_idx,
+            bind_idx + 1
         );
 
         // Bind parameters to count query
@@ -197,8 +203,7 @@ impl PaymentReader for PgDataService {
             .await
             .map_err(sqlx_to_repo_error)?;
 
-        let payments: Result<Vec<PaymentData>, _> =
-            rows.iter().map(try_row_to_payment).collect();
+        let payments: Result<Vec<PaymentData>, _> = rows.iter().map(try_row_to_payment).collect();
 
         Ok((total, payments?))
     }

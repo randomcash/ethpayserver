@@ -4,8 +4,11 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{RepositoryError, RepositoryResult, StoreWallet, StoreWalletReader, StoreWalletWriter, sqlx_to_repo_error};
 use super::PgDataService;
+use crate::{
+    RepositoryError, RepositoryResult, StoreWallet, StoreWalletReader, StoreWalletWriter,
+    sqlx_to_repo_error,
+};
 
 fn row_to_wallet(row: &sqlx::postgres::PgRow) -> StoreWallet {
     StoreWallet {

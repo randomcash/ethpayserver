@@ -7,7 +7,10 @@ use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map};
 use wasm_bindgen::JsCast;
 
-use crate::api::{CreatePaymentMethodRequest, CreateStoreRequest, EvmApiClient, Store, StorePaymentMethod, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest};
+use crate::api::{
+    CreatePaymentMethodRequest, CreateStoreRequest, EvmApiClient, Store, StorePaymentMethod,
+    StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest,
+};
 use crate::app::StoreContext;
 
 /// Helper to get chain name from chain ID.
@@ -37,9 +40,18 @@ fn format_date(iso: &str) -> String {
         let parts: Vec<&str> = date_part.split('-').collect();
         if parts.len() == 3 {
             let month = match parts[1] {
-                "01" => "Jan", "02" => "Feb", "03" => "Mar", "04" => "Apr",
-                "05" => "May", "06" => "Jun", "07" => "Jul", "08" => "Aug",
-                "09" => "Sep", "10" => "Oct", "11" => "Nov", "12" => "Dec",
+                "01" => "Jan",
+                "02" => "Feb",
+                "03" => "Mar",
+                "04" => "Apr",
+                "05" => "May",
+                "06" => "Jun",
+                "07" => "Jul",
+                "08" => "Aug",
+                "09" => "Sep",
+                "10" => "Oct",
+                "11" => "Nov",
+                "12" => "Dec",
                 _ => parts[1],
             };
             return format!("{} {}, {}", month, parts[2], parts[0]);
@@ -435,7 +447,11 @@ fn GeneralTab(store: Store) -> impl IntoView {
             leptos::task::spawn_local(async move {
                 let req = UpdateStoreRequest {
                     name: Some(new_name),
-                    website: Some(if new_website.is_empty() { String::new() } else { new_website }),
+                    website: Some(if new_website.is_empty() {
+                        String::new()
+                    } else {
+                        new_website
+                    }),
                 };
                 match api.update_store(&id, &req).await {
                     Ok(_) => {
@@ -591,7 +607,11 @@ fn PaymentMethodsTab(store_id: String) -> impl IntoView {
         };
         let token_address = {
             let addr = new_token_address.get_untracked();
-            if addr.trim().is_empty() { None } else { Some(addr.trim().to_string()) }
+            if addr.trim().is_empty() {
+                None
+            } else {
+                Some(addr.trim().to_string())
+            }
         };
         let api = api.get();
         let sid = store_id_create.clone();
@@ -809,7 +829,11 @@ fn PaymentMethodRow(
 ) -> impl IntoView {
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
     let network = chain_name(method.chain_id);
-    let asset_type = if method.token_address.is_some() { "ERC20" } else { "Native" };
+    let asset_type = if method.token_address.is_some() {
+        "ERC20"
+    } else {
+        "Native"
+    };
     let method_id = method.id.clone();
     let method_id_toggle = method.id.clone();
     let is_enabled = method.enabled;
@@ -851,8 +875,16 @@ fn PaymentMethodRow(
         }
     };
 
-    let status_class = if method.enabled { "badge badge-success" } else { "badge badge-neutral" };
-    let status_label = if method.enabled { "Enabled" } else { "Disabled" };
+    let status_class = if method.enabled {
+        "badge badge-success"
+    } else {
+        "badge badge-neutral"
+    };
+    let status_label = if method.enabled {
+        "Enabled"
+    } else {
+        "Disabled"
+    };
 
     view! {
         <tr class="payment-method-row">
@@ -1069,12 +1101,9 @@ fn WebhooksTab(store_id: String) -> impl IntoView {
                                             webhook_url: url,
                                             enabled,
                                         };
-                                        match api.configure_store_webhook(&sid, &req).await {
-                                            Ok(wh) => {
-                                                set_revealed_secret.set(wh.webhook_secret);
-                                                set_refresh_counter.update(|c| *c += 1);
-                                            }
-                                            Err(_) => {}
+                                        if let Ok(wh) = api.configure_store_webhook(&sid, &req).await {
+                                            set_revealed_secret.set(wh.webhook_secret);
+                                            set_refresh_counter.update(|c| *c += 1);
                                         }
                                     });
                                 }
@@ -1154,8 +1183,16 @@ fn WebhookConfig(
     on_regenerate: impl Fn(leptos::ev::MouseEvent) + 'static,
     on_delete: impl Fn(leptos::ev::MouseEvent) + 'static,
 ) -> impl IntoView {
-    let status_class = if webhook.enabled { "badge badge-success" } else { "badge badge-neutral" };
-    let status_label = if webhook.enabled { "Active" } else { "Disabled" };
+    let status_class = if webhook.enabled {
+        "badge badge-success"
+    } else {
+        "badge badge-neutral"
+    };
+    let status_label = if webhook.enabled {
+        "Active"
+    } else {
+        "Disabled"
+    };
     let updated_display = format_date(&webhook.updated_at);
 
     view! {
@@ -1188,9 +1225,7 @@ fn WebhookConfig(
 
 /// Empty webhook state.
 #[component]
-fn WebhookEmpty(
-    on_configure: impl Fn(leptos::ev::MouseEvent) + 'static,
-) -> impl IntoView {
+fn WebhookEmpty(on_configure: impl Fn(leptos::ev::MouseEvent) + 'static) -> impl IntoView {
     view! {
         <div class="detail-card">
             <div class="detail-card-body webhook-empty">

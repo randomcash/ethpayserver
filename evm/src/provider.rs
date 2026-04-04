@@ -3,8 +3,8 @@
 //! This module provides a wrapper around alloy's provider to interact
 //! with EVM-compatible blockchains via JSON-RPC.
 
-use crate::network::ChainConfig;
 use crate::error::{EvmError, EvmResult};
+use crate::network::ChainConfig;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use std::sync::Arc;

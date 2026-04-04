@@ -153,15 +153,15 @@ impl HdWallet {
 /// of the uncompressed public key (without the 0x04 prefix).
 fn public_key_to_address(public_key: &XPub) -> Address {
     use alloy::primitives::keccak256;
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
     use k256::PublicKey;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
 
     // Get compressed SEC1 bytes from XPub
     let compressed_bytes = public_key.to_sec1_bytes();
 
     // Parse as k256 PublicKey and convert to uncompressed format
-    let k256_pubkey = PublicKey::from_sec1_bytes(&compressed_bytes)
-        .expect("valid public key from XPub");
+    let k256_pubkey =
+        PublicKey::from_sec1_bytes(&compressed_bytes).expect("valid public key from XPub");
     let encoded = k256_pubkey.to_encoded_point(false); // false = uncompressed
     let pubkey_bytes = encoded.as_bytes();
 
@@ -191,15 +191,15 @@ pub fn generate_mnemonic(word_count: usize) -> EvmResult<String> {
             return Err(EvmError::InvalidMnemonic(format!(
                 "invalid word count: {}, must be 12, 15, 18, 21, or 24",
                 word_count
-            )))
+            )));
         }
     };
 
     let mut bytes = vec![0u8; entropy_bytes];
     rand::rng().fill(&mut bytes[..]);
 
-    let entropy = Entropy::from_slice(&bytes)
-        .map_err(|e| EvmError::InvalidMnemonic(e.to_string()))?;
+    let entropy =
+        Entropy::from_slice(&bytes).map_err(|e| EvmError::InvalidMnemonic(e.to_string()))?;
 
     let mnemonic = Mnemonic::<English>::new_from_entropy(entropy);
 
@@ -271,8 +271,7 @@ mod tests {
     use super::*;
 
     // Standard test mnemonic (DO NOT USE IN PRODUCTION)
-    const TEST_MNEMONIC: &str =
-        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     #[test]
     fn test_wallet_from_mnemonic() {

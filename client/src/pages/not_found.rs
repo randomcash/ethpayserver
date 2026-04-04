@@ -27,6 +27,7 @@ pub fn NotFoundPage() -> impl IntoView {
 }
 
 /// Not found page styles.
+#[allow(dead_code)]
 pub const NOT_FOUND_STYLES: &str = r#"
 .evm-not-found {
     display: flex;
