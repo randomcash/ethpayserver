@@ -29,13 +29,25 @@ use super::webhook::{
 ///
 /// A data service must implement all repository traits needed by the cleanup service.
 pub trait CleanupDataService:
-    InvoiceReader + InvoiceWriter + WatchedAddressReader + WatchedAddressWriter + StoreWebhookReader + Send + Sync
+    InvoiceReader
+    + InvoiceWriter
+    + WatchedAddressReader
+    + WatchedAddressWriter
+    + StoreWebhookReader
+    + Send
+    + Sync
 {
 }
 
 /// Blanket implementation for any type implementing the required traits.
 impl<T> CleanupDataService for T where
-    T: InvoiceReader + InvoiceWriter + WatchedAddressReader + WatchedAddressWriter + StoreWebhookReader + Send + Sync
+    T: InvoiceReader
+        + InvoiceWriter
+        + WatchedAddressReader
+        + WatchedAddressWriter
+        + StoreWebhookReader
+        + Send
+        + Sync
 {
 }
 
@@ -96,7 +108,9 @@ pub struct InvoiceCleanupService<D: CleanupDataService, M: EVMMonitor, W: Webhoo
     webhook_service: Option<Arc<WebhookService<W>>>,
 }
 
-impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'static> InvoiceCleanupService<D, M, W> {
+impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'static>
+    InvoiceCleanupService<D, M, W>
+{
     /// Create a new invoice cleanup service.
     pub fn new(
         data_service: Arc<D>,
@@ -196,27 +210,27 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         };
 
         // Look up webhook config for the store
-        let webhook_config = match StoreWebhookReader::get_enabled_webhook(
-            &*self.data_service,
-            invoice.store_id.0,
-        ).await {
-            Ok(Some(config)) => config,
-            Ok(None) => {
-                tracing::trace!(
-                    store_id = %invoice.store_id.0,
-                    "No webhook configured for store"
-                );
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    store_id = %invoice.store_id.0,
-                    error = %e,
-                    "Failed to get webhook config"
-                );
-                return;
-            }
-        };
+        let webhook_config =
+            match StoreWebhookReader::get_enabled_webhook(&*self.data_service, invoice.store_id.0)
+                .await
+            {
+                Ok(Some(config)) => config,
+                Ok(None) => {
+                    tracing::trace!(
+                        store_id = %invoice.store_id.0,
+                        "No webhook configured for store"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        store_id = %invoice.store_id.0,
+                        error = %e,
+                        "Failed to get webhook config"
+                    );
+                    return;
+                }
+            };
 
         // Create webhook payload
         // With network-agnostic invoices, we use the invoice currency for asset_symbol
@@ -231,7 +245,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
             amount: invoice.amount.clone(),
             amount_received: invoice.amount_received.clone(),
             asset_symbol: invoice.currency.clone(),
-            chain_id: 0, // No specific chain for network-agnostic invoices
+            chain_id: 0,   // No specific chain for network-agnostic invoices
             network: None, // Network-agnostic
             payment: None,
         };
@@ -259,16 +273,11 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
     /// 2. Unwatches addresses for paid invoices
     /// 3. Unwatches addresses for cancelled invoices
     pub async fn cleanup_addresses(&self) -> Result<CleanupStats, CleanupError> {
-        let mut stats = CleanupStats::default();
-
-        // Cleanup expired invoices past grace period
-        stats.expired = self.cleanup_expired_addresses().await?;
-
-        // Cleanup paid invoices
-        stats.paid = self.cleanup_paid_addresses().await?;
-
-        // Cleanup cancelled invoices
-        stats.cancelled = self.cleanup_cancelled_addresses().await?;
+        let stats = CleanupStats {
+            expired: self.cleanup_expired_addresses().await?,
+            paid: self.cleanup_paid_addresses().await?,
+            cancelled: self.cleanup_cancelled_addresses().await?,
+        };
 
         if stats.total() > 0 {
             tracing::info!(
@@ -292,7 +301,10 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
 
         let mut count = 0u64;
         for info in addresses {
-            if let Err(e) = self.unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref()).await {
+            if let Err(e) = self
+                .unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref())
+                .await
+            {
                 tracing::warn!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
@@ -320,7 +332,10 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
 
         let mut count = 0u64;
         for info in addresses {
-            if let Err(e) = self.unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref()).await {
+            if let Err(e) = self
+                .unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref())
+                .await
+            {
                 tracing::warn!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
@@ -344,11 +359,15 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
 
     /// Cleanup addresses for cancelled invoices.
     async fn cleanup_cancelled_addresses(&self) -> Result<u64, CleanupError> {
-        let addresses = WatchedAddressReader::get_cancelled_for_cleanup(&*self.data_service).await?;
+        let addresses =
+            WatchedAddressReader::get_cancelled_for_cleanup(&*self.data_service).await?;
 
         let mut count = 0u64;
         for info in addresses {
-            if let Err(e) = self.unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref()).await {
+            if let Err(e) = self
+                .unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref())
+                .await
+            {
                 tracing::warn!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
@@ -378,18 +397,21 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         token_address: Option<&str>,
     ) -> Result<(), CleanupError> {
         // Parse address
-        let addr: Address = address.parse().map_err(|_| {
-            CleanupError::InvalidAddress(address.to_string())
-        })?;
+        let addr: Address = address
+            .parse()
+            .map_err(|_| CleanupError::InvalidAddress(address.to_string()))?;
 
         // Parse token contract address
         let token_contract: Option<Address> = token_address.and_then(|t| t.parse().ok());
 
         // Send UnwatchAddress command to monitor (using chain_id for testnet support)
-        self.evm_monitor.unwatch_address_by_chain_id(chain_id, addr, token_contract).await?;
+        self.evm_monitor
+            .unwatch_address_by_chain_id(chain_id, addr, token_contract)
+            .await?;
 
         // Deactivate in database
-        WatchedAddressWriter::deactivate(&*self.data_service, address, chain_id, token_address).await?;
+        WatchedAddressWriter::deactivate(&*self.data_service, address, chain_id, token_address)
+            .await?;
 
         Ok(())
     }
@@ -408,9 +430,9 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
             "Starting invoice cleanup service"
         );
 
-        let mut interval = tokio::time::interval(
-            std::time::Duration::from_secs(self.config.fallback_interval_secs)
-        );
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            self.config.fallback_interval_secs,
+        ));
 
         loop {
             interval.tick().await;

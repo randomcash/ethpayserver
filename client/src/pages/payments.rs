@@ -6,18 +6,8 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::use_params_map;
 
-use crate::api::Payment;
-
-/// Extended payment data for display purposes.
-/// Wraps the API Payment with extra fields needed for UI that aren't in the API response.
-/// TODO: When wiring to real API, these extra fields come from PaymentOption or invoice context.
-#[allow(dead_code)]
-struct PaymentDisplay {
-    payment: Payment,
-    chain_id: u64,
-    invoice_id: String,
-    credited_amount: Option<String>,
-}
+use crate::api::{ApiError, EvmApiClient, Payment};
+use crate::app::StoreContext;
 
 /// Helper to get chain name from chain ID.
 fn chain_name(chain_id: u64) -> &'static str {
@@ -63,9 +53,18 @@ fn format_date(iso: &str) -> String {
         let parts: Vec<&str> = date_part.split('-').collect();
         if parts.len() == 3 {
             let month = match parts[1] {
-                "01" => "Jan", "02" => "Feb", "03" => "Mar", "04" => "Apr",
-                "05" => "May", "06" => "Jun", "07" => "Jul", "08" => "Aug",
-                "09" => "Sep", "10" => "Oct", "11" => "Nov", "12" => "Dec",
+                "01" => "Jan",
+                "02" => "Feb",
+                "03" => "Mar",
+                "04" => "Apr",
+                "05" => "May",
+                "06" => "Jun",
+                "07" => "Jul",
+                "08" => "Aug",
+                "09" => "Sep",
+                "10" => "Oct",
+                "11" => "Nov",
+                "12" => "Dec",
                 _ => parts[1],
             };
             return format!("{} {}, {}", month, parts[2], parts[0]);
@@ -77,66 +76,62 @@ fn format_date(iso: &str) -> String {
 /// Truncate address/hash for display.
 fn truncate_hash(hash: &str, prefix: usize, suffix: usize) -> String {
     if hash.len() > prefix + suffix + 3 {
-        format!("{}...{}", &hash[..prefix], &hash[hash.len()-suffix..])
+        format!("{}...{}", &hash[..prefix], &hash[hash.len() - suffix..])
     } else {
         hash.to_string()
     }
 }
 
+/// Number of payments per page.
+const PAGE_SIZE: i64 = 20;
+
 /// Payments list page.
 #[component]
 pub fn PaymentsPage() -> impl IntoView {
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
+
     // Filter state
     let (active_filter, set_active_filter) = signal("all".to_string());
     let (search_query, set_search_query) = signal(String::new());
+    let (current_offset, set_current_offset) = signal(0i64);
 
-    // Mock payments - will come from API
-    let mock_data: Vec<PaymentDisplay> = vec![
-        PaymentDisplay { chain_id: 1, invoice_id: "INV-0001".into(), credited_amount: Some("250.00".into()),
-            payment: Payment { id: "pay_001".into(), amount: "140000000000000000".into(), asset_symbol: "ETH".into(), token_address: None,
-                tx_hash: "0x1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890".into(),
-                block_number: Some(19234567), detected_at: "2024-01-15T10:45:00Z".into(),
-                confirmed_at: Some("2024-01-15T10:50:00Z".into()),
-                from_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".into()), reorged: false } },
-        PaymentDisplay { chain_id: 1, invoice_id: "INV-0001".into(), credited_amount: Some("250.00".into()),
-            payment: Payment { id: "pay_002".into(), amount: "250000000".into(), asset_symbol: "USDC".into(),
-                token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".into()),
-                tx_hash: "0x9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba".into(),
-                block_number: Some(19234612), detected_at: "2024-01-15T11:15:00Z".into(),
-                confirmed_at: Some("2024-01-15T11:20:00Z".into()),
-                from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".into()), reorged: false } },
-        PaymentDisplay { chain_id: 137, invoice_id: "INV-0002".into(), credited_amount: None,
-            payment: Payment { id: "pay_003".into(), amount: "89500000000000000000".into(), asset_symbol: "POL".into(), token_address: None,
-                tx_hash: "0xaabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344".into(),
-                block_number: None, detected_at: "2024-01-15T14:30:00Z".into(), confirmed_at: None,
-                from_address: Some("0x5555666677778888999900001111222233334444".into()), reorged: false } },
-        PaymentDisplay { chain_id: 42161, invoice_id: "INV-0003".into(), credited_amount: Some("500.00".into()),
-            payment: Payment { id: "pay_004".into(), amount: "500000000".into(), asset_symbol: "USDT".into(),
-                token_address: Some("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9".into()),
-                tx_hash: "0xeeeeffffaaaabbbbccccddddeeeeffffaaaabbbbccccddddeeeeffffaaaabbbb".into(),
-                block_number: Some(175234890), detected_at: "2024-01-14T16:00:00Z".into(),
-                confirmed_at: Some("2024-01-14T16:01:00Z".into()),
-                from_address: Some("0x1111222233334444555566667777888899990000".into()), reorged: false } },
-        PaymentDisplay { chain_id: 1, invoice_id: "INV-0004".into(), credited_amount: None,
-            payment: Payment { id: "pay_005".into(), amount: "75000000000000000".into(), asset_symbol: "ETH".into(), token_address: None,
-                tx_hash: "0x0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff".into(),
-                block_number: Some(19230000), detected_at: "2024-01-12T09:00:00Z".into(),
-                confirmed_at: Some("2024-01-12T09:05:00Z".into()),
-                from_address: Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into()), reorged: true } },
-        PaymentDisplay { chain_id: 8453, invoice_id: "INV-0005".into(), credited_amount: Some("800.00".into()),
-            payment: Payment { id: "pay_006".into(), amount: "320000000000000000".into(), asset_symbol: "ETH".into(), token_address: None,
-                tx_hash: "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".into(),
-                block_number: Some(8234567), detected_at: "2024-01-11T20:00:00Z".into(),
-                confirmed_at: Some("2024-01-11T20:02:00Z".into()),
-                from_address: Some("0xcafebabecafebabecafebabecafebabecafebabe".into()), reorged: false } },
-    ];
-    let payments: Vec<Payment> = mock_data.iter().map(|d| d.payment.clone()).collect();
+    // Reset offset when filter or store changes
+    let _reset_offset_on_filter = Effect::new(move || {
+        let _ = active_filter.get();
+        let _ = store_ctx.selected_store_id.get();
+        set_current_offset.set(0);
+    });
+
+    // Refresh counter for manual re-fetch
+    let (refresh, set_refresh) = signal(0u32);
+
+    // Convert active filter to API status param
+    let status_param = Signal::derive(move || match active_filter.get().as_str() {
+        "all" => None,
+        other => Some(other.to_string()),
+    });
+
+    let payments_resource = LocalResource::new(move || {
+        let api = api.get();
+        let store_id = store_ctx.selected_store_id.get();
+        let status = status_param.get();
+        let offset = current_offset.get();
+        let _ = refresh.get();
+
+        async move {
+            let Some(sid) = store_id else {
+                return Err(ApiError::Network("Please select a store first".to_string()));
+            };
+            api.list_payments(&sid, status.as_deref(), Some(PAGE_SIZE), Some(offset))
+                .await
+        }
+    });
 
     let filters = vec![
-        ("all", "All", None),
-        ("pending", "Pending", Some(1)),
-        ("confirmed", "Confirmed", Some(4)),
-        ("reorged", "Reorged", Some(1)),
+        ("all", "All"),
+        ("pending", "Pending"),
+        ("confirmed", "Confirmed"),
     ];
 
     view! {
@@ -158,7 +153,7 @@ pub fn PaymentsPage() -> impl IntoView {
             // Filters and Search
             <div class="payments-toolbar">
                 <div class="payments-filters">
-                    {filters.into_iter().map(|(key, label, count)| {
+                    {filters.into_iter().map(|(key, label)| {
                         let key_owned = key.to_string();
                         let key_for_click = key.to_string();
                         view! {
@@ -167,7 +162,6 @@ pub fn PaymentsPage() -> impl IntoView {
                                 on:click=move |_| set_active_filter.set(key_for_click.clone())
                             >
                                 {label}
-                                {count.map(|c| view! { <span class="filter-count">{c}</span> })}
                             </button>
                         }
                     }).collect_view()}
@@ -184,63 +178,132 @@ pub fn PaymentsPage() -> impl IntoView {
                 </div>
             </div>
 
-            // Payment Table (Desktop)
-            <div class="payments-table-container desktop-only">
-                <table class="payments-table">
-                    <thead>
-                        <tr>
-                            <th>"Transaction"</th>
-                            <th>"Amount"</th>
-                            <th>"Network"</th>
-                            <th>"Invoice"</th>
-                            <th>"Status"</th>
-                            <th>"Credited"</th>
-                            <th>"Date"</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {payments.clone().into_iter().map(|payment| {
-                            view! { <PaymentRow payment=payment /> }
-                        }).collect_view()}
-                    </tbody>
-                </table>
-            </div>
-
-            // Payment Cards (Mobile)
-            <div class="payments-cards mobile-only">
-                {payments.into_iter().map(|payment| {
-                    view! { <PaymentCard payment=payment /> }
-                }).collect_view()}
-            </div>
-
-            // Pagination
-            <div class="payments-pagination">
-                <div class="pagination-info">
-                    "Showing "<strong>"1-6"</strong>" of "<strong>"42"</strong>" payments"
+            // Content area with loading/error/data states
+            <Suspense fallback=move || view! {
+                <div class="loading-container">
+                    <div class="loading-spinner"></div>
+                    <p>"Loading payments..."</p>
                 </div>
-                <div class="pagination-controls">
-                    <button class="btn btn-ghost btn-sm" disabled>"Previous"</button>
-                    <button class="btn btn-ghost btn-sm">"Next"</button>
-                </div>
-            </div>
+            }>
+                {move || payments_resource.get().map(|result| match &*result {
+                    Err(e) => view! {
+                        <div class="error-container">
+                            <p class="error-message">{e.to_string()}</p>
+                            <button class="btn btn-secondary btn-sm" on:click=move |_| set_refresh.update(|n| *n += 1)>
+                                "Retry"
+                            </button>
+                        </div>
+                    }.into_any(),
+                    Ok(response) => {
+                        let total = response.total;
+                        let payments = response.payments.clone();
+                        let search = search_query.get();
+
+                        // Client-side search filter
+                        let filtered: Vec<Payment> = if search.is_empty() {
+                            payments
+                        } else {
+                            let q = search.to_lowercase();
+                            payments.into_iter().filter(|p| {
+                                p.tx_hash.to_lowercase().contains(&q)
+                                    || p.asset_symbol.to_lowercase().contains(&q)
+                                    || p.from_address.as_ref()
+                                        .map(|a| a.to_lowercase().contains(&q))
+                                        .unwrap_or(false)
+                                    || p.invoice_id.to_lowercase().contains(&q)
+                            }).collect()
+                        };
+
+                        if filtered.is_empty() {
+                            view! {
+                                <div class="empty-state">
+                                    <div class="empty-state-icon">
+                                        <IconSearch />
+                                    </div>
+                                    <h3>"No payments found"</h3>
+                                    <p>"Payments will appear here once invoices receive transactions."</p>
+                                </div>
+                            }.into_any()
+                        } else {
+                            let offset = current_offset.get();
+                            let showing_start = offset + 1;
+                            let showing_end = offset + filtered.len() as i64;
+                            let has_prev = offset > 0;
+                            let has_next = offset + PAGE_SIZE < total;
+
+                            view! {
+                                // Payment Table (Desktop)
+                                <div class="payments-table-container desktop-only">
+                                    <table class="payments-table">
+                                        <thead>
+                                            <tr>
+                                                <th>"Transaction"</th>
+                                                <th>"Amount"</th>
+                                                <th>"Network"</th>
+                                                <th>"Invoice"</th>
+                                                <th>"Status"</th>
+                                                <th>"Date"</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {filtered.clone().into_iter().map(|payment| {
+                                                view! { <PaymentRow payment=payment /> }
+                                            }).collect_view()}
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                // Payment Cards (Mobile)
+                                <div class="payments-cards mobile-only">
+                                    {filtered.into_iter().map(|payment| {
+                                        view! { <PaymentCard payment=payment /> }
+                                    }).collect_view()}
+                                </div>
+
+                                // Pagination
+                                <div class="payments-pagination">
+                                    <div class="pagination-info">
+                                        "Showing "<strong>{showing_start}"-"{showing_end}</strong>" of "<strong>{total}</strong>" payments"
+                                    </div>
+                                    <div class="pagination-controls">
+                                        <button
+                                            class="btn btn-ghost btn-sm"
+                                            disabled=move || !has_prev
+                                            on:click=move |_| set_current_offset.update(|o| *o = (*o - PAGE_SIZE).max(0))
+                                        >"Previous"</button>
+                                        <button
+                                            class="btn btn-ghost btn-sm"
+                                            disabled=move || !has_next
+                                            on:click=move |_| set_current_offset.update(|o| *o += PAGE_SIZE)
+                                        >"Next"</button>
+                                    </div>
+                                </div>
+                            }.into_any()
+                        }
+                    }
+                })}
+            </Suspense>
         </div>
     }
 }
 
 /// Payment table row.
-/// TODO: When wired to API, chain_id/invoice_id/credited will come from context.
 #[component]
 fn PaymentRow(payment: Payment) -> impl IntoView {
     let tx_display = truncate_hash(&payment.tx_hash, 10, 8);
-    let network = "—"; // chain_id not in API response yet
+    let network = chain_name(payment.chain_id);
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
     let date_display = format_date(&payment.detected_at);
-    let invoice_id = "—".to_string();
-    let invoice_link = String::new();
-    let credited = "—".to_string();
-    let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
+    let invoice_id = truncate_hash(&payment.invoice_id, 8, 4);
+    let invoice_link = payment.invoice_id.clone();
+    let payment_link = payment.id.clone();
+    let amount_display = format!(
+        "{} {}",
+        format_crypto_amount(&payment.amount, &payment.asset_symbol),
+        payment.asset_symbol
+    );
 
     view! {
         <tr class="payment-row">
@@ -267,15 +330,12 @@ fn PaymentRow(payment: Payment) -> impl IntoView {
                 <span class=status_class>{status}</span>
             </td>
             <td>
-                <span class="payment-credited">{credited}</span>
-            </td>
-            <td>
                 <span class="payment-date">{date_display}</span>
             </td>
             <td>
-                <button class="btn btn-ghost btn-sm btn-icon">
+                <A href=format!("/evm/payments/{}", payment_link) attr:class="btn btn-ghost btn-sm btn-icon">
                     <IconMore />
-                </button>
+                </A>
             </td>
         </tr>
     }
@@ -285,14 +345,18 @@ fn PaymentRow(payment: Payment) -> impl IntoView {
 #[component]
 fn PaymentCard(payment: Payment) -> impl IntoView {
     let tx_display = truncate_hash(&payment.tx_hash, 8, 6);
-    let network = "—";
+    let network = chain_name(payment.chain_id);
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
     let date_display = format_date(&payment.detected_at);
-    let invoice_id = "—".to_string();
-    let invoice_link = String::new();
-    let credited = "—".to_string();
-    let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
+    let invoice_id = truncate_hash(&payment.invoice_id, 8, 4);
+    let invoice_link = payment.invoice_id.clone();
+    let payment_link = payment.id.clone();
+    let amount_display = format!(
+        "{} {}",
+        format_crypto_amount(&payment.amount, &payment.asset_symbol),
+        payment.asset_symbol
+    );
 
     view! {
         <div class="payment-card">
@@ -318,15 +382,11 @@ fn PaymentCard(payment: Payment) -> impl IntoView {
                         {invoice_id}
                     </A>
                 </div>
-                <div class="payment-card-row">
-                    <span class="payment-card-label">"Credited"</span>
-                    <span class="payment-card-credited">{credited}</span>
-                </div>
             </div>
 
             <div class="payment-card-footer">
                 <span class="payment-card-date">{date_display}</span>
-                <A href=format!("/evm/payments/{}", payment.tx_hash) attr:class="btn btn-ghost btn-xs">
+                <A href=format!("/evm/payments/{}", payment_link) attr:class="btn btn-ghost btn-xs">
                     "Details"
                     <IconChevronRight />
                 </A>
@@ -338,51 +398,69 @@ fn PaymentCard(payment: Payment) -> impl IntoView {
 /// Payment detail page.
 #[component]
 pub fn PaymentDetailPage() -> impl IntoView {
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
     let params = use_params_map();
-    let tx_hash = move || params.get().get("id").unwrap_or_default();
+    let payment_id = move || params.get().get("id").unwrap_or_default();
 
-    // Mock payment data - will come from API
-    let payment = Payment {
-        id: "pay_001".to_string(),
-        amount: "140000000000000000".to_string(),
-        asset_symbol: "ETH".to_string(),
-        token_address: None,
-        tx_hash: tx_hash(),
-        block_number: Some(19234567),
-        detected_at: "2024-01-15T10:45:00Z".to_string(),
-        confirmed_at: Some("2024-01-15T10:50:00Z".to_string()),
-        from_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f0Ab3D".to_string()),
-        reorged: false,
-    };
-    // TODO: These come from invoice/payment option context when wired to API
-    let mock_chain_id: u64 = 1;
-    let mock_invoice_id = "INV-0001".to_string();
-    let mock_credited = Some("250.00".to_string());
-    let mock_rate = Some("1785.71".to_string());
+    let payment_resource = LocalResource::new(move || {
+        let api = api.get();
+        let id = payment_id();
+        async move { api.get_payment(&id).await }
+    });
 
-    let network = chain_name(mock_chain_id);
+    view! {
+        <Suspense fallback=move || view! {
+            <div class="loading-container">
+                <div class="loading-spinner"></div>
+                <p>"Loading payment..."</p>
+            </div>
+        }>
+            {move || payment_resource.get().map(|result| match &*result {
+                Err(e) => view! {
+                    <div class="error-container">
+                        <p class="error-message">{e.to_string()}</p>
+                        <A href="/evm/payments" attr:class="btn btn-secondary btn-sm">"Back to payments"</A>
+                    </div>
+                }.into_any(),
+                Ok(payment) => {
+                    let payment = payment.clone();
+                    view! { <PaymentDetailView payment=payment /> }.into_any()
+                }
+            })}
+        </Suspense>
+    }
+}
+
+/// Inner component that renders payment detail once data is loaded.
+#[component]
+fn PaymentDetailView(payment: Payment) -> impl IntoView {
+    let network = chain_name(payment.chain_id);
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
-    let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
+    let amount_display = format!(
+        "{} {}",
+        format_crypto_amount(&payment.amount, &payment.asset_symbol),
+        payment.asset_symbol
+    );
     let detected_display = format_date(&payment.detected_at);
-    let confirmed_display = payment.confirmed_at.as_ref()
+    let confirmed_display = payment
+        .confirmed_at
+        .as_ref()
         .map(|d| format_date(d))
         .unwrap_or_else(|| "Pending".to_string());
-    let from_address = payment.from_address.clone().unwrap_or_else(|| "Unknown".to_string());
-    let block_number = payment.block_number
+    let from_address = payment
+        .from_address
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
+    let block_number = payment
+        .block_number
         .map(|b| b.to_string())
         .unwrap_or_else(|| "Pending".to_string());
-    let credited = mock_credited
-        .map(|c| format!("${}", c))
-        .unwrap_or_else(|| "—".to_string());
-    let rate = mock_rate
-        .map(|r| format!("${}/{}",r, payment.asset_symbol))
-        .unwrap_or_else(|| "—".to_string());
-    let invoice_id = mock_invoice_id.clone();
-    let invoice_link = mock_invoice_id;
+    let invoice_id = payment.invoice_id.clone();
+    let invoice_link = payment.invoice_id.clone();
 
     // Explorer URL based on chain
-    let explorer_base = match mock_chain_id {
+    let explorer_base = match payment.chain_id {
         1 => "https://etherscan.io",
         137 => "https://polygonscan.com",
         42161 => "https://arbiscan.io",
@@ -470,14 +548,6 @@ pub fn PaymentDetailPage() -> impl IntoView {
                                 <span class="detail-label">"Amount Received"</span>
                                 <span class="detail-value detail-value-lg">{amount_display}</span>
                             </div>
-                            <div class="detail-row">
-                                <span class="detail-label">"Exchange Rate"</span>
-                                <span class="detail-value">{rate}</span>
-                            </div>
-                            <div class="detail-row">
-                                <span class="detail-label">"Credited Amount"</span>
-                                <span class="detail-value detail-value-success">{credited}</span>
-                            </div>
                             {payment.token_address.clone().map(|addr| view! {
                                 <div class="detail-row">
                                     <span class="detail-label">"Token Contract"</span>
@@ -499,7 +569,6 @@ pub fn PaymentDetailPage() -> impl IntoView {
                         </div>
                         <div class="detail-card-body">
                             <div class="timeline">
-                                // Timeline shows newest events first (top to bottom = newest to oldest)
                                 {payment.confirmed_at.is_some().then(|| view! {
                                     <div class="timeline-item timeline-item-success">
                                         <div class="timeline-dot"></div>
@@ -551,7 +620,7 @@ pub fn PaymentDetailPage() -> impl IntoView {
                             <A href=format!("/evm/invoices/{}", invoice_link) attr:class="related-invoice-link">
                                 <div class="related-invoice-info">
                                     <IconInvoice />
-                                    <span>{invoice_id}</span>
+                                    <span>{truncate_hash(&invoice_id, 8, 4)}</span>
                                 </div>
                                 <IconChevronRight />
                             </A>
@@ -586,12 +655,16 @@ pub fn PaymentDetailPage() -> impl IntoView {
                         <div class="detail-card-body">
                             <pre class="metadata-json">{format!(r#"{{
   "id": "{}",
+  "chain_id": {},
+  "invoice_id": "{}",
   "tx_hash": "{}",
   "amount": "{}",
   "asset_symbol": "{}",
   "block_number": {}
 }}"#,
                                 payment.id,
+                                payment.chain_id,
+                                payment.invoice_id,
                                 payment.tx_hash,
                                 payment.amount,
                                 payment.asset_symbol,

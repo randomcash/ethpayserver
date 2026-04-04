@@ -3,7 +3,10 @@
 use async_trait::async_trait;
 use sqlx::Row;
 
-use auth::{Device, DeviceId, DeviceRepository, UserId, error::{AuthError, Result}};
+use auth::{
+    Device, DeviceId, DeviceRepository, UserId,
+    error::{AuthError, Result},
+};
 
 use super::{PgDataService, db_to_device_type, device_type_to_db, sqlx_to_auth_error};
 

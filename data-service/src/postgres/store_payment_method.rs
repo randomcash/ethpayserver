@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
+use super::PgDataService;
 use crate::{RepositoryError, RepositoryResult, sqlx_to_repo_error};
 use types::StorePaymentMethod;
 use types::{StorePaymentMethodReader, StorePaymentMethodWriter};
-use super::PgDataService;
 
 fn row_to_payment_method(row: &sqlx::postgres::PgRow) -> StorePaymentMethod {
     let decimals: i16 = row.get("decimals");
@@ -27,7 +27,10 @@ fn row_to_payment_method(row: &sqlx::postgres::PgRow) -> StorePaymentMethod {
 
 #[async_trait]
 impl StorePaymentMethodReader for PgDataService {
-    async fn get_payment_methods(&self, store_id: Uuid) -> RepositoryResult<Vec<StorePaymentMethod>> {
+    async fn get_payment_methods(
+        &self,
+        store_id: Uuid,
+    ) -> RepositoryResult<Vec<StorePaymentMethod>> {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, chain_id, token_address, asset_symbol, decimals, xpub, derivation_index, enabled, created_at
@@ -44,7 +47,10 @@ impl StorePaymentMethodReader for PgDataService {
         Ok(rows.iter().map(row_to_payment_method).collect())
     }
 
-    async fn get_enabled_payment_methods(&self, store_id: Uuid) -> RepositoryResult<Vec<StorePaymentMethod>> {
+    async fn get_enabled_payment_methods(
+        &self,
+        store_id: Uuid,
+    ) -> RepositoryResult<Vec<StorePaymentMethod>> {
         let rows = sqlx::query(
             r#"
             SELECT id, store_id, chain_id, token_address, asset_symbol, decimals, xpub, derivation_index, enabled, created_at

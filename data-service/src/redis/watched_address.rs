@@ -15,7 +15,9 @@ use redis::AsyncCommands;
 use tracing::warn;
 
 use super::RedisDataService;
-use crate::{LiveWatchedAddressReader, LiveWatchedAddressWriter, RepositoryError, RepositoryResult};
+use crate::{
+    LiveWatchedAddressReader, LiveWatchedAddressWriter, RepositoryError, RepositoryResult,
+};
 use types::InvoiceId;
 
 /// Key prefix for watched addresses.
@@ -77,7 +79,9 @@ impl LiveWatchedAddressReader for RedisDataService {
         Ok(result.map(InvoiceId::from_string))
     }
 
-    async fn get_all_watched(&self) -> RepositoryResult<Vec<(String, InvoiceId, u64, Option<String>)>> {
+    async fn get_all_watched(
+        &self,
+    ) -> RepositoryResult<Vec<(String, InvoiceId, u64, Option<String>)>> {
         let mut conn = self.conn.clone();
         let pattern = format!("{}:*", KEY_PREFIX);
         let mut result = Vec::new();
@@ -103,8 +107,14 @@ impl LiveWatchedAddressReader for RedisDataService {
                     .map_err(|e| RepositoryError::Database(format!("redis get failed: {}", e)))?;
 
                 if let Some(invoice_id_str) = value {
-                    if let Some((chain_id, address, token)) = Self::parse_watched_address_key(&key) {
-                        result.push((address, InvoiceId::from_string(invoice_id_str), chain_id, token));
+                    if let Some((chain_id, address, token)) = Self::parse_watched_address_key(&key)
+                    {
+                        result.push((
+                            address,
+                            InvoiceId::from_string(invoice_id_str),
+                            chain_id,
+                            token,
+                        ));
                     } else {
                         warn!(key = %key, "failed to parse watched address key");
                     }
@@ -237,7 +247,9 @@ mod tests {
     #[test]
     fn test_parse_invalid_key() {
         assert!(RedisDataService::parse_watched_address_key("invalid").is_none());
-        assert!(RedisDataService::parse_watched_address_key("evmwatch:wrong:1:0x123:native").is_none());
+        assert!(
+            RedisDataService::parse_watched_address_key("evmwatch:wrong:1:0x123:native").is_none()
+        );
         assert!(RedisDataService::parse_watched_address_key("evmwatch:addr").is_none());
         // Old format without token should fail
         assert!(RedisDataService::parse_watched_address_key("evmwatch:addr:1:0x123").is_none());

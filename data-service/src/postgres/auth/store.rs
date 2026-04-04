@@ -3,13 +3,15 @@
 use async_trait::async_trait;
 
 use auth::{
-    error::{AuthError, Result},
-    store::{Store, StoreId, StoreInfo, StoreRole, StoreRoleId, StoreRoleInfo, UserStore, UserStoreInfo},
-    repository::{StoreRepository, StoreRoleRepository, UserStoreRepository},
     UserId,
+    error::{AuthError, Result},
+    repository::{StoreRepository, StoreRoleRepository, UserStoreRepository},
+    store::{
+        Store, StoreId, StoreInfo, StoreRole, StoreRoleId, StoreRoleInfo, UserStore, UserStoreInfo,
+    },
 };
 
-use super::{sqlx_to_auth_error, PgDataService};
+use super::{PgDataService, sqlx_to_auth_error};
 
 #[async_trait]
 impl StoreRepository for PgDataService {
@@ -75,16 +77,15 @@ impl StoreRepository for PgDataService {
     }
 
     async fn update_store(&self, store: &Store) -> Result<()> {
-        let result = sqlx::query(
-            "UPDATE stores SET name = $2, website = $3, archived = $4 WHERE id = $1",
-        )
-        .bind(store.id.0)
-        .bind(&store.name)
-        .bind(&store.website)
-        .bind(store.archived)
-        .execute(self.pool())
-        .await
-        .map_err(sqlx_to_auth_error)?;
+        let result =
+            sqlx::query("UPDATE stores SET name = $2, website = $3, archived = $4 WHERE id = $1")
+                .bind(store.id.0)
+                .bind(&store.name)
+                .bind(&store.website)
+                .bind(store.archived)
+                .execute(self.pool())
+                .await
+                .map_err(sqlx_to_auth_error)?;
 
         if result.rows_affected() == 0 {
             return Err(AuthError::StoreNotFound(store.id.to_string()));
@@ -189,15 +190,14 @@ impl StoreRoleRepository for PgDataService {
         let permissions_json = serde_json::to_value(&role.permissions)
             .map_err(|e| AuthError::Repository(e.to_string()))?;
 
-        let result = sqlx::query(
-            "UPDATE store_roles SET role = $2, permissions = $3 WHERE id = $1",
-        )
-        .bind(role.id.0)
-        .bind(&role.role)
-        .bind(permissions_json)
-        .execute(self.pool())
-        .await
-        .map_err(sqlx_to_auth_error)?;
+        let result =
+            sqlx::query("UPDATE store_roles SET role = $2, permissions = $3 WHERE id = $1")
+                .bind(role.id.0)
+                .bind(&role.role)
+                .bind(permissions_json)
+                .execute(self.pool())
+                .await
+                .map_err(sqlx_to_auth_error)?;
 
         if result.rows_affected() == 0 {
             return Err(AuthError::StoreRoleNotFound(role.id.to_string()));
@@ -233,7 +233,11 @@ impl UserStoreRepository for PgDataService {
         Ok(())
     }
 
-    async fn get_user_store(&self, user_id: UserId, store_id: StoreId) -> Result<Option<UserStore>> {
+    async fn get_user_store(
+        &self,
+        user_id: UserId,
+        store_id: StoreId,
+    ) -> Result<Option<UserStore>> {
         let row = sqlx::query_as::<_, UserStoreRow>(
             "SELECT user_id, store_id, store_role_id FROM user_stores WHERE user_id = $1 AND store_id = $2",
         )
@@ -325,7 +329,11 @@ impl UserStoreRepository for PgDataService {
         Ok(result)
     }
 
-    async fn get_user_store_info(&self, user_id: UserId, store_id: StoreId) -> Result<Option<UserStoreInfo>> {
+    async fn get_user_store_info(
+        &self,
+        user_id: UserId,
+        store_id: StoreId,
+    ) -> Result<Option<UserStoreInfo>> {
         let row = sqlx::query_as::<_, UserStoreInfoRow>(
             r#"
             SELECT

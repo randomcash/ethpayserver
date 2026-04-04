@@ -81,6 +81,10 @@ pub struct Invoice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
     pub id: String,
+    /// Chain ID (EIP-155).
+    pub chain_id: u64,
+    /// Invoice ID this payment belongs to.
+    pub invoice_id: String,
     /// Transaction hash.
     pub tx_hash: String,
     /// Amount received (smallest unit as string).
@@ -368,7 +372,6 @@ pub struct CreateApiKeyResponsePayload {
     pub expires_at: Option<String>,
     pub key: String,
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +409,8 @@ mod tests {
     fn test_payment_serialization() {
         let payment = Payment {
             id: "pay_001".to_string(),
+            chain_id: 1,
+            invoice_id: "inv_001".to_string(),
             amount: "50000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
             token_address: None,
@@ -421,6 +426,8 @@ mod tests {
         let parsed: Payment = serde_json::from_str(&json).unwrap();
 
         assert_eq!(payment.id, parsed.id);
+        assert_eq!(payment.chain_id, parsed.chain_id);
+        assert_eq!(payment.invoice_id, parsed.invoice_id);
         assert_eq!(payment.confirmed_at, parsed.confirmed_at);
     }
 
@@ -557,7 +564,10 @@ mod tests {
     fn test_invoice_status_all_css_classes() {
         assert_eq!(InvoiceStatus::Pending.css_class(), "badge badge-warning");
         assert_eq!(InvoiceStatus::Processing.css_class(), "badge badge-info");
-        assert_eq!(InvoiceStatus::PartiallyPaid.css_class(), "badge badge-warning");
+        assert_eq!(
+            InvoiceStatus::PartiallyPaid.css_class(),
+            "badge badge-warning"
+        );
         assert_eq!(InvoiceStatus::Expired.css_class(), "badge badge-error");
         assert_eq!(InvoiceStatus::Cancelled.css_class(), "badge badge-neutral");
         assert_eq!(InvoiceStatus::Refunded.css_class(), "badge badge-neutral");
@@ -613,6 +623,8 @@ mod tests {
             "payments": [
                 {
                     "id": "pay-1",
+                    "chain_id": 1,
+                    "invoice_id": "inv-1",
                     "tx_hash": "0xabc123",
                     "amount": "50000000000000000",
                     "asset_symbol": "ETH",
@@ -735,7 +747,10 @@ mod tests {
         let pm: StorePaymentMethod = serde_json::from_str(json).unwrap();
         assert_eq!(pm.chain_id, 1);
         assert_eq!(pm.asset_symbol, "USDC");
-        assert_eq!(pm.token_address.as_deref(), Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"));
+        assert_eq!(
+            pm.token_address.as_deref(),
+            Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+        );
         assert!(!pm.enabled);
     }
 
@@ -767,7 +782,10 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["chain_id"], 137);
-        assert_eq!(json["token_address"], "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        assert_eq!(
+            json["token_address"],
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        );
         assert_eq!(json["decimals"], 6);
     }
 

@@ -106,13 +106,17 @@ async fn integration_invoice_expired() {
     let mut expired_invoice = test_invoice();
     expired_invoice.expires_at = Utc::now() - Duration::hours(1);
     expired_invoice.status = InvoiceStatus::Pending;
-    InvoiceWriter::upsert(&service, &expired_invoice).await.unwrap();
+    InvoiceWriter::upsert(&service, &expired_invoice)
+        .await
+        .unwrap();
 
     // Create a non-expired invoice
     let mut active_invoice = test_invoice();
     active_invoice.expires_at = Utc::now() + Duration::hours(1);
     active_invoice.status = InvoiceStatus::Pending;
-    InvoiceWriter::upsert(&service, &active_invoice).await.unwrap();
+    InvoiceWriter::upsert(&service, &active_invoice)
+        .await
+        .unwrap();
 
     // Get expired invoices
     let expired = InvoiceReader::get_expired(&service).await.unwrap();

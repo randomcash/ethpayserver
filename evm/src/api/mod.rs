@@ -16,11 +16,11 @@
 
 use std::sync::Arc;
 
-use axum::{
-    routing::{delete, get, post, put},
-    Router,
-};
 use auth::SessionService;
+use axum::{
+    Router,
+    routing::{delete, get, post, put},
+};
 use types::{TokenReader, TokenWriter};
 use utoipa::OpenApi;
 
@@ -65,7 +65,10 @@ impl<D, A> Clone for EvmState<D, A> {
 
 impl<D, A> EvmState<D, A> {
     pub fn new(data_service: Arc<D>, auth_service: Arc<A>) -> Self {
-        Self { data_service, auth_service }
+        Self {
+            data_service,
+            auth_service,
+        }
     }
 }
 

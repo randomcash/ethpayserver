@@ -4,8 +4,11 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{RepositoryError, RepositoryResult, StoreWallet, StoreWalletReader, StoreWalletWriter, sqlx_to_repo_error};
 use super::PgDataService;
+use crate::{
+    RepositoryError, RepositoryResult, StoreWallet, StoreWalletReader, StoreWalletWriter,
+    sqlx_to_repo_error,
+};
 
 fn row_to_wallet(row: &sqlx::postgres::PgRow) -> StoreWallet {
     StoreWallet {
@@ -37,6 +40,18 @@ impl StoreWalletReader for PgDataService {
             "SELECT id, store_id, xpub, derivation_index, name, created_at FROM store_wallets WHERE store_id = $1",
         )
         .bind(store_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(row.as_ref().map(row_to_wallet))
+    }
+
+    async fn get_wallet_by_id(&self, wallet_id: Uuid) -> RepositoryResult<Option<StoreWallet>> {
+        let row = sqlx::query(
+            "SELECT id, store_id, xpub, derivation_index, name, created_at FROM store_wallets WHERE id = $1",
+        )
+        .bind(wallet_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;

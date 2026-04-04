@@ -10,8 +10,8 @@ use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::{Block, BlockNumberOrTag, BlockTransactionsKind, Filter, Log};
-use std::collections::HashSet;
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
@@ -45,7 +45,11 @@ pub struct RpcSourceConfig {
 
 impl RpcSourceConfig {
     /// Create config for WebSocket + HTTP.
-    pub fn with_websocket(ws_url: impl Into<String>, http_url: impl Into<String>, chain_id: u64) -> Self {
+    pub fn with_websocket(
+        ws_url: impl Into<String>,
+        http_url: impl Into<String>,
+        chain_id: u64,
+    ) -> Self {
         Self {
             ws_url: Some(ws_url.into()),
             http_url: http_url.into(),
@@ -94,8 +98,9 @@ impl RpcBlockSource {
 
         // Validate WS URL if provided
         if let Some(ref ws_url) = config.ws_url {
-            let _ws_url = Url::parse(ws_url)
-                .map_err(|e| EvmError::InvalidChainConfig(format!("invalid WebSocket URL: {}", e)))?;
+            let _ws_url = Url::parse(ws_url).map_err(|e| {
+                EvmError::InvalidChainConfig(format!("invalid WebSocket URL: {}", e))
+            })?;
         }
 
         // Create HTTP provider
@@ -130,9 +135,11 @@ impl RpcBlockSource {
 
     /// Create a WebSocket block stream.
     async fn create_ws_stream(&self) -> EvmResult<BlockStream> {
-        let ws_url = self.config.ws_url.as_ref().ok_or_else(|| {
-            EvmError::Connection("WebSocket URL not configured".to_string())
-        })?;
+        let ws_url = self
+            .config
+            .ws_url
+            .as_ref()
+            .ok_or_else(|| EvmError::Connection("WebSocket URL not configured".to_string()))?;
 
         self.status.store(STATUS_CONNECTING, Ordering::SeqCst);
 
@@ -258,7 +265,9 @@ impl BlockSource for RpcBlockSource {
             STATUS_CONNECTING => SourceStatus::Connecting,
             STATUS_DISCONNECTED => SourceStatus::Disconnected,
             STATUS_FAILED => {
-                let msg = self.error_message.try_read()
+                let msg = self
+                    .error_message
+                    .try_read()
                     .ok()
                     .and_then(|guard| guard.clone())
                     .unwrap_or_else(|| "unknown error".to_string());
@@ -284,10 +293,15 @@ impl BlockSource for RpcBlockSource {
 
         // Fallback to polling
         if self.config.fallback_to_polling || self.config.ws_url.is_none() {
-            info!(chain_id = self.config.chain_id, "using HTTP polling for blocks");
+            info!(
+                chain_id = self.config.chain_id,
+                "using HTTP polling for blocks"
+            );
             Ok(self.create_polling_stream())
         } else {
-            Err(EvmError::Connection("no block source available".to_string()))
+            Err(EvmError::Connection(
+                "no block source available".to_string(),
+            ))
         }
     }
 

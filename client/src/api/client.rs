@@ -1,14 +1,15 @@
 //! HTTP client for ethpayserver API.
 
 use gloo_net::http::{Request, RequestBuilder};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
     ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
-    InvoiceListResponse, InvoiceStatusResponse, Payment, Store, StorePaymentMethod, StoreWebhook,
-    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, Wallet,
+    InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, Store,
+    StorePaymentMethod, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
+    UpdateWebhookRequest, Wallet,
 };
 
 /// API client errors.
@@ -212,18 +213,58 @@ impl EvmApiClient {
     }
 
     /// Create a new invoice.
-    pub async fn create_invoice(&self, request: &CreateInvoiceRequest) -> Result<Invoice, ApiError> {
+    pub async fn create_invoice(
+        &self,
+        request: &CreateInvoiceRequest,
+    ) -> Result<Invoice, ApiError> {
         self.post("/api/invoices", request).await
     }
 
     /// Get payments for an invoice.
     pub async fn get_invoice_payments(&self, invoice_id: &str) -> Result<Vec<Payment>, ApiError> {
-        self.get(&format!("/api/invoices/{}/payments", invoice_id)).await
+        self.get(&format!("/api/invoices/{}/payments", invoice_id))
+            .await
     }
 
     /// Get invoice status (includes payment options and payments).
-    pub async fn get_invoice_status(&self, invoice_id: &str) -> Result<InvoiceStatusResponse, ApiError> {
-        self.get(&format!("/api/invoices/{}/status", invoice_id)).await
+    pub async fn get_invoice_status(
+        &self,
+        invoice_id: &str,
+    ) -> Result<InvoiceStatusResponse, ApiError> {
+        self.get(&format!("/api/invoices/{}/status", invoice_id))
+            .await
+    }
+
+    // =========================================================================
+    // Payments (store-scoped)
+    // =========================================================================
+
+    /// List payments with filters and pagination.
+    ///
+    /// `store_id` is required for non-admin users.
+    pub async fn list_payments(
+        &self,
+        store_id: &str,
+        status: Option<&str>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<PaymentListResponse, ApiError> {
+        let mut query = format!("/api/payments?store_id={}", store_id);
+        if let Some(s) = status {
+            query.push_str(&format!("&status={}", s));
+        }
+        if let Some(l) = limit {
+            query.push_str(&format!("&limit={}", l));
+        }
+        if let Some(o) = offset {
+            query.push_str(&format!("&offset={}", o));
+        }
+        self.get(&query).await
+    }
+
+    /// Get a single payment by ID.
+    pub async fn get_payment(&self, id: &str) -> Result<Payment, ApiError> {
+        self.get(&format!("/api/payments/{}", id)).await
     }
 
     // =========================================================================
@@ -246,7 +287,11 @@ impl EvmApiClient {
     }
 
     /// Update a store.
-    pub async fn update_store(&self, id: &str, request: &UpdateStoreRequest) -> Result<Store, ApiError> {
+    pub async fn update_store(
+        &self,
+        id: &str,
+        request: &UpdateStoreRequest,
+    ) -> Result<Store, ApiError> {
         self.put(&format!("/api/stores/{}", id), request).await
     }
 
@@ -260,23 +305,52 @@ impl EvmApiClient {
     // =========================================================================
 
     /// List payment methods for a store.
-    pub async fn list_payment_methods(&self, store_id: &str) -> Result<Vec<StorePaymentMethod>, ApiError> {
-        self.get(&format!("/api/stores/{}/payment-methods", store_id)).await
+    pub async fn list_payment_methods(
+        &self,
+        store_id: &str,
+    ) -> Result<Vec<StorePaymentMethod>, ApiError> {
+        self.get(&format!("/api/stores/{}/payment-methods", store_id))
+            .await
     }
 
     /// Create a payment method for a store.
-    pub async fn create_payment_method(&self, store_id: &str, request: &CreatePaymentMethodRequest) -> Result<StorePaymentMethod, ApiError> {
-        self.post(&format!("/api/stores/{}/payment-methods", store_id), request).await
+    pub async fn create_payment_method(
+        &self,
+        store_id: &str,
+        request: &CreatePaymentMethodRequest,
+    ) -> Result<StorePaymentMethod, ApiError> {
+        self.post(
+            &format!("/api/stores/{}/payment-methods", store_id),
+            request,
+        )
+        .await
     }
 
     /// Update a payment method.
-    pub async fn update_payment_method(&self, store_id: &str, method_id: &str, request: &UpdatePaymentMethodRequest) -> Result<StorePaymentMethod, ApiError> {
-        self.put(&format!("/api/stores/{}/payment-methods/{}", store_id, method_id), request).await
+    pub async fn update_payment_method(
+        &self,
+        store_id: &str,
+        method_id: &str,
+        request: &UpdatePaymentMethodRequest,
+    ) -> Result<StorePaymentMethod, ApiError> {
+        self.put(
+            &format!("/api/stores/{}/payment-methods/{}", store_id, method_id),
+            request,
+        )
+        .await
     }
 
     /// Delete a payment method.
-    pub async fn delete_payment_method(&self, store_id: &str, method_id: &str) -> Result<(), ApiError> {
-        self.delete(&format!("/api/stores/{}/payment-methods/{}", store_id, method_id)).await
+    pub async fn delete_payment_method(
+        &self,
+        store_id: &str,
+        method_id: &str,
+    ) -> Result<(), ApiError> {
+        self.delete(&format!(
+            "/api/stores/{}/payment-methods/{}",
+            store_id, method_id
+        ))
+        .await
     }
 
     // =========================================================================
@@ -290,13 +364,19 @@ impl EvmApiClient {
 
     /// Configure (create or update) webhook for a store.
     /// Returns the webhook with the secret visible (only time it's shown).
-    pub async fn configure_store_webhook(&self, store_id: &str, request: &UpdateWebhookRequest) -> Result<StoreWebhook, ApiError> {
-        self.put(&format!("/api/stores/{}/webhook", store_id), request).await
+    pub async fn configure_store_webhook(
+        &self,
+        store_id: &str,
+        request: &UpdateWebhookRequest,
+    ) -> Result<StoreWebhook, ApiError> {
+        self.put(&format!("/api/stores/{}/webhook", store_id), request)
+            .await
     }
 
     /// Delete webhook configuration for a store.
     pub async fn delete_store_webhook(&self, store_id: &str) -> Result<(), ApiError> {
-        self.delete(&format!("/api/stores/{}/webhook", store_id)).await
+        self.delete(&format!("/api/stores/{}/webhook", store_id))
+            .await
     }
 
     // =========================================================================
@@ -346,8 +426,8 @@ mod tests {
 
     #[test]
     fn test_api_client_with_token() {
-        let client = EvmApiClient::new("http://localhost:5000")
-            .with_token(Some("test-token".to_string()));
+        let client =
+            EvmApiClient::new("http://localhost:5000").with_token(Some("test-token".to_string()));
 
         assert_eq!(client.token, Some("test-token".to_string()));
     }

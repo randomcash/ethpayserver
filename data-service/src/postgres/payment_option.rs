@@ -4,9 +4,7 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{
-    PaymentOptionReader, PaymentOptionWriter, RepositoryResult, sqlx_to_repo_error,
-};
+use crate::{PaymentOptionReader, PaymentOptionWriter, RepositoryResult, sqlx_to_repo_error};
 use types::{InvoiceId, PaymentMethodId, PaymentOptionData, PaymentOptionId};
 
 use super::PgDataService;
@@ -115,9 +113,8 @@ impl PaymentOptionReader for PgDataService {
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<PaymentOptionData>> {
         let row = match token_address {
-            Some(token) => {
-                sqlx::query(
-                    r#"
+            Some(token) => sqlx::query(
+                r#"
                     SELECT
                         id, invoice_id, payment_method_id, chain_id, asset_symbol,
                         token_address, decimals, payment_address, amount::text,
@@ -125,17 +122,15 @@ impl PaymentOptionReader for PgDataService {
                     FROM payment_options
                     WHERE payment_address = $1 AND chain_id = $2 AND token_address = $3
                     "#,
-                )
-                .bind(address)
-                .bind(chain_id as i64)
-                .bind(token)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(sqlx_to_repo_error)?
-            }
-            None => {
-                sqlx::query(
-                    r#"
+            )
+            .bind(address)
+            .bind(chain_id as i64)
+            .bind(token)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?,
+            None => sqlx::query(
+                r#"
                     SELECT
                         id, invoice_id, payment_method_id, chain_id, asset_symbol,
                         token_address, decimals, payment_address, amount::text,
@@ -143,13 +138,12 @@ impl PaymentOptionReader for PgDataService {
                     FROM payment_options
                     WHERE payment_address = $1 AND chain_id = $2 AND token_address IS NULL
                     "#,
-                )
-                .bind(address)
-                .bind(chain_id as i64)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(sqlx_to_repo_error)?
-            }
+            )
+            .bind(address)
+            .bind(chain_id as i64)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?,
         };
 
         match row {
@@ -163,7 +157,11 @@ impl PaymentOptionReader for PgDataService {
 impl PaymentOptionWriter for PgDataService {
     async fn create(&self, option: &PaymentOptionData) -> RepositoryResult<()> {
         // Derive asset_type from token_address: NULL = native, NOT NULL = erc20
-        let asset_type = if option.token_address.is_some() { "erc20" } else { "native" };
+        let asset_type = if option.token_address.is_some() {
+            "erc20"
+        } else {
+            "native"
+        };
 
         sqlx::query(
             r#"

@@ -6,7 +6,10 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::use_params_map;
 
-use crate::api::{ApiError, CreateInvoiceRequest, EvmApiClient, Invoice, InvoiceStatus, InvoiceStatusExt, InvoiceStatusResponse, Payment};
+use crate::api::{
+    ApiError, CreateInvoiceRequest, EvmApiClient, Invoice, InvoiceStatusExt, InvoiceStatusResponse,
+    Payment,
+};
 use crate::app::StoreContext;
 
 /// Helper to get chain name from chain ID.
@@ -74,11 +77,9 @@ pub fn InvoicesPage() -> impl IntoView {
     let (show_create_modal, set_show_create_modal) = signal(false);
 
     // Convert active filter to API status param
-    let status_param = Signal::derive(move || {
-        match active_filter.get().as_str() {
-            "all" => None,
-            other => Some(other.to_string()),
-        }
+    let status_param = Signal::derive(move || match active_filter.get().as_str() {
+        "all" => None,
+        other => Some(other.to_string()),
     });
 
     let invoices_resource = LocalResource::new(move || {
@@ -92,12 +93,8 @@ pub fn InvoicesPage() -> impl IntoView {
             let Some(sid) = store_id else {
                 return Err(ApiError::Network("Please select a store first".to_string()));
             };
-            api.list_invoices(
-                &sid,
-                status.as_deref(),
-                Some(PAGE_SIZE),
-                Some(offset),
-            ).await
+            api.list_invoices(&sid, status.as_deref(), Some(PAGE_SIZE), Some(offset))
+                .await
         }
     });
 
@@ -418,7 +415,9 @@ fn CreateInvoiceModal(
 
 /// Helper to extract a field from invoice metadata.
 fn get_metadata_field(invoice: &Invoice, field: &str) -> Option<String> {
-    invoice.metadata.as_ref()
+    invoice
+        .metadata
+        .as_ref()
         .and_then(|m: &serde_json::Value| m.get(field))
         .and_then(|v: &serde_json::Value| v.as_str())
         .map(|s: &str| s.to_string())
@@ -433,9 +432,18 @@ fn format_date(iso: &str) -> String {
         let parts: Vec<&str> = date_part.split('-').collect();
         if parts.len() == 3 {
             let month = match parts[1] {
-                "01" => "Jan", "02" => "Feb", "03" => "Mar", "04" => "Apr",
-                "05" => "May", "06" => "Jun", "07" => "Jul", "08" => "Aug",
-                "09" => "Sep", "10" => "Oct", "11" => "Nov", "12" => "Dec",
+                "01" => "Jan",
+                "02" => "Feb",
+                "03" => "Mar",
+                "04" => "Apr",
+                "05" => "May",
+                "06" => "Jun",
+                "07" => "Jul",
+                "08" => "Aug",
+                "09" => "Sep",
+                "10" => "Oct",
+                "11" => "Nov",
+                "12" => "Dec",
                 _ => parts[1],
             };
             return format!("{} {}, {}", month, parts[2], parts[0]);
@@ -591,9 +599,7 @@ pub fn InvoiceDetailPage() -> impl IntoView {
 /// Inner content of the invoice detail page (rendered after data loads).
 #[component]
 fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
-    let order_id = status.payments.first()
-        .and_then(|_| None::<String>); // metadata not on status response
-    let customer_email = None::<String>;
+    let order_id = status.payments.first().and(None::<String>); // metadata not on status response
     let created_display = "—".to_string(); // created_at not on status response
     let expires_display = format_date(&status.expires_at);
     let payment_count = status.payment_count;
@@ -821,13 +827,11 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                     <div class="detail-card-body">
                         <div class="customer-info">
                             <div class="customer-avatar">
-                                {customer_email.clone()
-                                    .map(|e| e.chars().next().unwrap_or('?').to_uppercase().to_string())
-                                    .unwrap_or("?".to_string())}
+                                {"?"}
                             </div>
                             <div class="customer-details">
                                 <span class="customer-email">
-                                    {customer_email.unwrap_or_else(|| "No email".to_string())}
+                                    {"No email"}
                                 </span>
                             </div>
                         </div>
@@ -857,6 +861,7 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::InvoiceStatus;
 
     #[test]
     fn test_format_date_iso() {
@@ -867,13 +872,26 @@ mod tests {
     #[test]
     fn test_format_date_all_months() {
         let months = [
-            ("01", "Jan"), ("02", "Feb"), ("03", "Mar"), ("04", "Apr"),
-            ("05", "May"), ("06", "Jun"), ("07", "Jul"), ("08", "Aug"),
-            ("09", "Sep"), ("10", "Oct"), ("11", "Nov"), ("12", "Dec"),
+            ("01", "Jan"),
+            ("02", "Feb"),
+            ("03", "Mar"),
+            ("04", "Apr"),
+            ("05", "May"),
+            ("06", "Jun"),
+            ("07", "Jul"),
+            ("08", "Aug"),
+            ("09", "Sep"),
+            ("10", "Oct"),
+            ("11", "Nov"),
+            ("12", "Dec"),
         ];
         for (num, name) in months {
             let input = format!("2024-{}-01T00:00:00Z", num);
-            assert!(format_date(&input).starts_with(name), "Failed for month {}", num);
+            assert!(
+                format_date(&input).starts_with(name),
+                "Failed for month {}",
+                num
+            );
         }
     }
 
@@ -899,12 +917,18 @@ mod tests {
     #[test]
     fn test_payment_status_confirmed() {
         let p = Payment {
-            id: "p1".into(), amount: "100".into(),
-            asset_symbol: "ETH".into(), token_address: None,
-            tx_hash: "0xabc".into(), block_number: Some(1),
+            id: "p1".into(),
+            chain_id: 1,
+            invoice_id: "inv-1".into(),
+            amount: "100".into(),
+            asset_symbol: "ETH".into(),
+            token_address: None,
+            tx_hash: "0xabc".into(),
+            block_number: Some(1),
             detected_at: "2024-01-01T00:00:00Z".into(),
             confirmed_at: Some("2024-01-01T00:05:00Z".into()),
-            from_address: None, reorged: false,
+            from_address: None,
+            reorged: false,
         };
         assert_eq!(payment_status(&p), "confirmed");
         assert_eq!(payment_status_class(&p), "badge badge-success");
@@ -913,12 +937,18 @@ mod tests {
     #[test]
     fn test_payment_status_confirming() {
         let p = Payment {
-            id: "p2".into(), amount: "100".into(),
-            asset_symbol: "ETH".into(), token_address: None,
-            tx_hash: "0xdef".into(), block_number: None,
+            id: "p2".into(),
+            chain_id: 1,
+            invoice_id: "inv-1".into(),
+            amount: "100".into(),
+            asset_symbol: "ETH".into(),
+            token_address: None,
+            tx_hash: "0xdef".into(),
+            block_number: None,
             detected_at: "2024-01-01T00:00:00Z".into(),
             confirmed_at: None,
-            from_address: None, reorged: false,
+            from_address: None,
+            reorged: false,
         };
         assert_eq!(payment_status(&p), "confirming");
         assert_eq!(payment_status_class(&p), "badge badge-warning");
@@ -927,12 +957,18 @@ mod tests {
     #[test]
     fn test_payment_status_reorged() {
         let p = Payment {
-            id: "p3".into(), amount: "100".into(),
-            asset_symbol: "ETH".into(), token_address: None,
-            tx_hash: "0xghi".into(), block_number: Some(1),
+            id: "p3".into(),
+            chain_id: 1,
+            invoice_id: "inv-1".into(),
+            amount: "100".into(),
+            asset_symbol: "ETH".into(),
+            token_address: None,
+            tx_hash: "0xghi".into(),
+            block_number: Some(1),
             detected_at: "2024-01-01T00:00:00Z".into(),
             confirmed_at: Some("2024-01-01T00:05:00Z".into()),
-            from_address: None, reorged: true,
+            from_address: None,
+            reorged: true,
         };
         assert_eq!(payment_status(&p), "reorged");
         assert_eq!(payment_status_class(&p), "badge badge-error");
@@ -941,24 +977,34 @@ mod tests {
     #[test]
     fn test_get_metadata_field() {
         let invoice = Invoice {
-            id: "inv-1".into(), currency: "USD".into(),
-            status: InvoiceStatus::Pending, amount: "100".into(),
+            id: "inv-1".into(),
+            currency: "USD".into(),
+            status: InvoiceStatus::Pending,
+            amount: "100".into(),
             amount_received: "0".into(),
             created_at: "2024-01-01T00:00:00Z".into(),
             expires_at: "2024-01-02T00:00:00Z".into(),
             metadata: Some(serde_json::json!({"order_id": "ORD-1", "customer_email": "a@b.com"})),
             payment_options: vec![],
         };
-        assert_eq!(get_metadata_field(&invoice, "order_id"), Some("ORD-1".to_string()));
-        assert_eq!(get_metadata_field(&invoice, "customer_email"), Some("a@b.com".to_string()));
+        assert_eq!(
+            get_metadata_field(&invoice, "order_id"),
+            Some("ORD-1".to_string())
+        );
+        assert_eq!(
+            get_metadata_field(&invoice, "customer_email"),
+            Some("a@b.com".to_string())
+        );
         assert_eq!(get_metadata_field(&invoice, "nonexistent"), None);
     }
 
     #[test]
     fn test_get_metadata_field_no_metadata() {
         let invoice = Invoice {
-            id: "inv-2".into(), currency: "USD".into(),
-            status: InvoiceStatus::Pending, amount: "50".into(),
+            id: "inv-2".into(),
+            currency: "USD".into(),
+            status: InvoiceStatus::Pending,
+            amount: "50".into(),
             amount_received: "0".into(),
             created_at: "2024-01-01T00:00:00Z".into(),
             expires_at: "2024-01-02T00:00:00Z".into(),
