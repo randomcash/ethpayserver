@@ -16,9 +16,9 @@ mod watched_address;
 pub use watched_address::PendingWatch;
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod tests;
 
 /// PostgreSQL data service implementation.
 #[derive(Clone)]

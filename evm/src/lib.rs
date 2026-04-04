@@ -40,14 +40,17 @@ pub mod tokens;
 pub mod wallet;
 
 // Re-export commonly used items
-pub use network::{get_any_chain_config, get_chain_config, get_chain_config_by_id, ChainConfig, EvmNetwork, ALL_CHAINS};
+pub use alloy::providers::RootProvider;
+pub use error::{EvmError, EvmResult};
+pub use network::{
+    ALL_CHAINS, ChainConfig, EvmNetwork, get_any_chain_config, get_chain_config,
+    get_chain_config_by_id,
+};
 #[cfg(feature = "types")]
 pub use network::{chain_id_to_network, network_to_chain_id};
-pub use error::{EvmError, EvmResult};
-pub use alloy::providers::RootProvider;
 pub use provider::EvmProvider;
-pub use tokens::{discover_token, get_token_balance, get_token_info, EvmTokenStandard, Token};
-pub use wallet::{generate_mnemonic, validate_mnemonic, validate_xpub, HdWallet, XpubDeriver};
+pub use tokens::{EvmTokenStandard, Token, discover_token, get_token_balance, get_token_info};
+pub use wallet::{HdWallet, XpubDeriver, generate_mnemonic, validate_mnemonic, validate_xpub};
 
 // Re-export alloy primitives that users will commonly need
 pub use alloy::primitives::{Address, B256, U256};

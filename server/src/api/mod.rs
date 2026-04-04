@@ -163,8 +163,14 @@ where
         .route("/", get(invoices::list_invoices::<A>))
         .route("/", post(invoices::create_invoice::<A>))
         .route("/{invoice_id}", get(invoices::get_invoice::<A>))
-        .route("/{invoice_id}/payments", get(invoices::get_invoice_payments::<A>))
-        .route("/{invoice_id}/status", get(invoices::get_invoice_status::<A>))
+        .route(
+            "/{invoice_id}/payments",
+            get(invoices::get_invoice_payments::<A>),
+        )
+        .route(
+            "/{invoice_id}/status",
+            get(invoices::get_invoice_status::<A>),
+        )
         .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
         .with_state(state.clone());
 

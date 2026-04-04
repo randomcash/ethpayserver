@@ -24,11 +24,14 @@ pub fn NetworkSelector(
     /// Currently selected chain ID.
     selected: RwSignal<Option<u64>>,
     /// Callback when selection changes.
-    #[prop(optional)] on_change: Option<Callback<Option<u64>>>,
+    #[prop(optional)]
+    on_change: Option<Callback<Option<u64>>>,
     /// Whether multiple selection is allowed.
-    #[prop(default = false)] multi: bool,
+    #[prop(default = false)]
+    multi: bool,
     /// Multiple selected chain IDs (for multi mode).
-    #[prop(optional)] selected_multi: Option<RwSignal<Vec<u64>>>,
+    #[prop(optional)]
+    selected_multi: Option<RwSignal<Vec<u64>>>,
 ) -> impl IntoView {
     if multi {
         view! { <MultiNetworkSelector selected=selected_multi.unwrap_or_else(|| RwSignal::new(vec![])) /> }.into_any()
@@ -106,6 +109,7 @@ fn MultiNetworkSelector(selected: RwSignal<Vec<u64>>) -> impl IntoView {
 }
 
 /// Network selector styles.
+#[allow(dead_code)]
 pub const NETWORK_SELECTOR_STYLES: &str = r#"
 .evm-network-selector {
     display: flex;

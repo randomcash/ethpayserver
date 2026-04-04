@@ -2,7 +2,10 @@
 
 use chrono::{Duration, Utc};
 
-use auth::{Device, DeviceId, DeviceType, Role, Session, SessionId, User, UserId, WalletChallenge, WalletCredential, WalletCredentialId};
+use auth::{
+    Device, DeviceId, DeviceType, Role, Session, SessionId, User, UserId, WalletChallenge,
+    WalletCredential, WalletCredentialId,
+};
 use crypto::{EncryptedBlob, KdfParams};
 
 use super::{db_to_device_type, device_type_to_db};

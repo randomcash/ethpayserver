@@ -5,9 +5,13 @@
 
 use std::collections::HashSet;
 
-use types::{InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentOptionWriter, PaymentReader, PaymentWriter};
+use types::{
+    InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentOptionWriter, PaymentReader, PaymentWriter,
+};
 
-use super::{create_test_service, test_invoice, test_payment_option_with_rate, test_payment_with_credit};
+use super::{
+    create_test_service, test_invoice, test_payment_option_with_rate, test_payment_with_credit,
+};
 
 /// E2E test: Multi-currency payment aggregation
 ///
@@ -33,26 +37,30 @@ async fn integration_multi_currency_payment_aggregation() {
     // Create ETH payment option (rate: 1 USD = 0.0005 ETH)
     let eth_po = test_payment_option_with_rate(
         &invoice.id,
-        1,                          // Ethereum mainnet
+        1, // Ethereum mainnet
         "ETH",
         None,                       // Native asset
         18,                         // ETH decimals
         "50000000000000000",        // 0.05 ETH in wei (for $100)
         Some("0.0005".to_string()), // rate
     );
-    PaymentOptionWriter::create(&service, &eth_po).await.unwrap();
+    PaymentOptionWriter::create(&service, &eth_po)
+        .await
+        .unwrap();
 
     // Create USDC payment option (rate: 1 USD = 1 USDC)
     let usdc_po = test_payment_option_with_rate(
         &invoice.id,
-        1,                          // Ethereum mainnet
+        1, // Ethereum mainnet
         "USDC",
         Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
-        6,                          // USDC decimals
-        "100000000",                // 100 USDC (6 decimals) for $100
-        Some("1".to_string()),      // rate
+        6,                     // USDC decimals
+        "100000000",           // 100 USDC (6 decimals) for $100
+        Some("1".to_string()), // rate
     );
-    PaymentOptionWriter::create(&service, &usdc_po).await.unwrap();
+    PaymentOptionWriter::create(&service, &usdc_po)
+        .await
+        .unwrap();
 
     // Payment 1: User pays $60 worth of ETH
     // 0.03 ETH = 30000000000000000 wei
@@ -69,7 +77,10 @@ async fn integration_multi_currency_payment_aggregation() {
     PaymentWriter::upsert(&service, &eth_payment).await.unwrap();
 
     // Check intermediate state: amount_received should be $60
-    let fetched = InvoiceReader::get(&service, &invoice.id).await.unwrap().unwrap();
+    let fetched = InvoiceReader::get(&service, &invoice.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.amount_received, "60",
         "After ETH payment, amount_received should be $60"
@@ -87,10 +98,15 @@ async fn integration_multi_currency_payment_aggregation() {
         Some("40".to_string()),
         Some("1".to_string()),
     );
-    PaymentWriter::upsert(&service, &usdc_payment).await.unwrap();
+    PaymentWriter::upsert(&service, &usdc_payment)
+        .await
+        .unwrap();
 
     // Check final state: amount_received should be $100 (60 + 40)
-    let fetched = InvoiceReader::get(&service, &invoice.id).await.unwrap().unwrap();
+    let fetched = InvoiceReader::get(&service, &invoice.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.amount_received, "100",
         "After both payments, amount_received should be $100"
@@ -104,7 +120,9 @@ async fn integration_multi_currency_payment_aggregation() {
     );
 
     // Verify both payments are recorded
-    let payments = PaymentReader::get_for_invoice(&service, &invoice.id).await.unwrap();
+    let payments = PaymentReader::get_for_invoice(&service, &invoice.id)
+        .await
+        .unwrap();
     assert_eq!(payments.len(), 2, "Should have 2 payments recorded");
 
     // Verify each payment has correct credited_amount
@@ -143,7 +161,9 @@ async fn integration_same_asset_payment_no_conversion() {
         "1500000000000000000",
         None, // No rate - same asset
     );
-    PaymentOptionWriter::create(&service, &eth_po).await.unwrap();
+    PaymentOptionWriter::create(&service, &eth_po)
+        .await
+        .unwrap();
 
     // User pays 1.5 ETH
     // credited_amount = 1500000000000000000 / 10^18 = 1.5 ETH
@@ -159,7 +179,10 @@ async fn integration_same_asset_payment_no_conversion() {
     PaymentWriter::upsert(&service, &payment).await.unwrap();
 
     // Verify amount_received matches
-    let fetched = InvoiceReader::get(&service, &invoice.id).await.unwrap().unwrap();
+    let fetched = InvoiceReader::get(&service, &invoice.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.amount_received, "1.5",
         "amount_received should be 1.5 ETH"
@@ -197,11 +220,16 @@ async fn integration_payment_without_credit_not_counted() {
     PaymentWriter::upsert(&service, &payment).await.unwrap();
 
     // Verify payment is recorded
-    let payments = PaymentReader::get_for_invoice(&service, &invoice.id).await.unwrap();
+    let payments = PaymentReader::get_for_invoice(&service, &invoice.id)
+        .await
+        .unwrap();
     assert_eq!(payments.len(), 1, "Payment should be recorded");
 
     // But amount_received should still be 0 (payment not counted)
-    let fetched = InvoiceReader::get(&service, &invoice.id).await.unwrap().unwrap();
+    let fetched = InvoiceReader::get(&service, &invoice.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.amount_received, "0",
         "Payment without credited_amount should not be counted"
@@ -240,7 +268,9 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
         "50000000000000000",
         Some("0.0005".to_string()),
     );
-    PaymentOptionWriter::create(&service, &eth_po).await.unwrap();
+    PaymentOptionWriter::create(&service, &eth_po)
+        .await
+        .unwrap();
 
     // Payment 1: $60
     let payment1 = test_payment_with_credit(
@@ -267,7 +297,10 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
     PaymentWriter::upsert(&service, &payment2).await.unwrap();
 
     // Verify total is $110
-    let fetched = InvoiceReader::get(&service, &invoice.id).await.unwrap().unwrap();
+    let fetched = InvoiceReader::get(&service, &invoice.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.amount_received, "110");
 
     // Reorg: payment1 gets invalidated
@@ -276,7 +309,10 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
         .unwrap();
 
     // Verify amount_received is now only $50
-    let fetched = InvoiceReader::get(&service, &invoice.id).await.unwrap().unwrap();
+    let fetched = InvoiceReader::get(&service, &invoice.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.amount_received, "50",
         "Reorged payment should not be counted"
@@ -312,7 +348,9 @@ async fn integration_multi_chain_payment_aggregation() {
         "50000000000000000",
         Some("0.0005".to_string()),
     );
-    PaymentOptionWriter::create(&service, &eth_po).await.unwrap();
+    PaymentOptionWriter::create(&service, &eth_po)
+        .await
+        .unwrap();
 
     // POL payment option on Polygon
     let pol_po = test_payment_option_with_rate(
@@ -324,7 +362,9 @@ async fn integration_multi_chain_payment_aggregation() {
         "200000000000000000000", // 200 POL for $100 (assuming 1 POL = $0.50)
         Some("2".to_string()),   // 1 USD = 2 POL
     );
-    PaymentOptionWriter::create(&service, &pol_po).await.unwrap();
+    PaymentOptionWriter::create(&service, &pol_po)
+        .await
+        .unwrap();
 
     // Payment on Ethereum: $50 worth of ETH
     let eth_payment = test_payment_with_credit(
@@ -351,14 +391,19 @@ async fn integration_multi_chain_payment_aggregation() {
     PaymentWriter::upsert(&service, &pol_payment).await.unwrap();
 
     // Verify total
-    let fetched = InvoiceReader::get(&service, &invoice.id).await.unwrap().unwrap();
+    let fetched = InvoiceReader::get(&service, &invoice.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.amount_received, "100",
         "Multi-chain payments should aggregate correctly"
     );
 
     // Verify payments are on different chains
-    let payments = PaymentReader::get_for_invoice(&service, &invoice.id).await.unwrap();
+    let payments = PaymentReader::get_for_invoice(&service, &invoice.id)
+        .await
+        .unwrap();
     let chains: HashSet<_> = payments.iter().map(|p| p.chain_id).collect();
     assert!(chains.contains(&1), "Should have payment on Ethereum");
     assert!(chains.contains(&137), "Should have payment on Polygon");
@@ -392,7 +437,9 @@ async fn integration_fractional_amounts_aggregate() {
         "50000000000000000",
         Some("0.0005".to_string()),
     );
-    PaymentOptionWriter::create(&service, &eth_po).await.unwrap();
+    PaymentOptionWriter::create(&service, &eth_po)
+        .await
+        .unwrap();
 
     // Three payments with fractional amounts
     for (i, amount) in ["33.33", "33.33", "33.34"].iter().enumerate() {
@@ -409,7 +456,10 @@ async fn integration_fractional_amounts_aggregate() {
     }
 
     // Verify total is exactly $100
-    let fetched = InvoiceReader::get(&service, &invoice.id).await.unwrap().unwrap();
+    let fetched = InvoiceReader::get(&service, &invoice.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fetched.amount_received, "100.00",
         "Fractional amounts should sum to exactly $100"

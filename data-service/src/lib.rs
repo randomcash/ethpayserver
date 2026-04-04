@@ -21,7 +21,7 @@
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
-pub use postgres::{PgDataService, PendingWatch};
+pub use postgres::{PendingWatch, PgDataService};
 
 #[cfg(feature = "redis")]
 pub mod redis;
@@ -37,31 +37,63 @@ pub use test_utils::InMemoryDataService;
 
 // Re-export repository traits and types from the types crate for convenience.
 pub use types::{
+    // Watched Address (for PostgreSQL persistence)
+    CleanupAddressInfo,
     // Combined traits
-    DataService, DataServiceReader, DataServiceWriter,
+    DataService,
+    DataServiceReader,
+    DataServiceWriter,
     // Invoice
-    InvoiceQueryParams, InvoiceReader, InvoiceRepository, InvoiceWriter,
+    InvoiceQueryParams,
+    InvoiceReader,
+    InvoiceRepository,
+    InvoiceWriter,
     // Live Watched Address (for evmmonitor/Redis)
-    LiveWatchedAddressReader, LiveWatchedAddressRepository, LiveWatchedAddressWriter,
-    // Payment
-    PaymentQueryParams, PaymentReader, PaymentRepository, PaymentWriter,
+    LiveWatchedAddressReader,
+    LiveWatchedAddressRepository,
+    LiveWatchedAddressWriter,
     // Payment Event
     PaymentEventWriter,
     // Payment Option
-    PaymentMethodId, PaymentOptionData, PaymentOptionId, PaymentOptionReader, PaymentOptionRepository, PaymentOptionWriter,
-    // Store Payment Method
-    StorePaymentMethod, StorePaymentMethodReader, StorePaymentMethodRepository, StorePaymentMethodWriter,
-    // Store Wallet (deprecated)
-    StoreWallet, StoreWalletReader, StoreWalletRepository, StoreWalletWriter,
-    // Store Webhook
-    StoreWebhook, StoreWebhookReader, StoreWebhookRepository, StoreWebhookWriter,
-    // Token
-    TokenData, TokenQueryParams, TokenReader, TokenRepository, TokenWriter,
-    // Watched Address (for PostgreSQL persistence)
-    CleanupAddressInfo, PendingWatchInfo, WatchedAddressReader, WatchedAddressRepository,
-    WatchedAddressWriter,
+    PaymentMethodId,
+    PaymentOptionData,
+    PaymentOptionId,
+    PaymentOptionReader,
+    PaymentOptionRepository,
+    PaymentOptionWriter,
+    // Payment
+    PaymentQueryParams,
+    PaymentReader,
+    PaymentRepository,
+    PaymentWriter,
+    PendingWatchInfo,
     // Errors
-    RepositoryError, RepositoryResult,
+    RepositoryError,
+    RepositoryResult,
+    // Store Payment Method
+    StorePaymentMethod,
+    StorePaymentMethodReader,
+    StorePaymentMethodRepository,
+    StorePaymentMethodWriter,
+    // Store Wallet (deprecated)
+    StoreWallet,
+    StoreWalletReader,
+    StoreWalletRepository,
+    StoreWalletWriter,
+    // Store Webhook
+    StoreWebhook,
+    StoreWebhookReader,
+    StoreWebhookRepository,
+    StoreWebhookWriter,
+    // Token
+    TokenData,
+    TokenQueryParams,
+    TokenReader,
+    TokenRepository,
+    TokenWriter,
+    WatchedAddressReader,
+    WatchedAddressRepository,
+    WatchedAddressWriter,
 };
 
 /// Convert sqlx::Error to RepositoryError.
@@ -100,10 +132,7 @@ mod tests {
         InvoiceWriter::update_status(&ds, &invoice.id, InvoiceStatus::Paid)
             .await
             .unwrap();
-        let updated = InvoiceReader::get(&ds, &invoice.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let updated = InvoiceReader::get(&ds, &invoice.id).await.unwrap().unwrap();
         assert_eq!(updated.status, InvoiceStatus::Paid);
     }
 

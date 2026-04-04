@@ -9,7 +9,7 @@ use alloy::primitives::Address;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -86,10 +86,7 @@ impl<S: BlockSource + 'static> MonitorCoordinator<S> {
     }
 
     /// Add and start a chain monitor.
-    pub async fn add_chain(
-        &self,
-        monitor: Arc<ChainMonitor<S>>,
-    ) -> EvmResult<()> {
+    pub async fn add_chain(&self, monitor: Arc<ChainMonitor<S>>) -> EvmResult<()> {
         let chain_id = monitor.chain_id();
         let chain_name = monitor.chain_name().to_string();
 

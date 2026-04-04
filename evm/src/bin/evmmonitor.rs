@@ -46,9 +46,7 @@
 
 use chrono::Utc;
 use clap::Parser;
-use data_service::{
-    LiveWatchedAddressReader, LiveWatchedAddressWriter, RedisDataService,
-};
+use data_service::{LiveWatchedAddressReader, LiveWatchedAddressWriter, RedisDataService};
 use evm::error::{EvmError, EvmResult};
 use evm::monitor::bridge::{EventBridge, RedisBridge};
 use evm::monitor::events::{AddressUnwatched, AddressWatched, StatusReport, WatchedAddressInfo};
@@ -63,7 +61,7 @@ use std::sync::Arc;
 use tokio::signal;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use types::InvoiceId;
 
 #[derive(Parser, Debug)]
@@ -80,11 +78,19 @@ struct Args {
     redis_url: Option<String>,
 
     /// Redis channel for events (monitor -> API server)
-    #[arg(long, env = "EVMMONITOR_EVENTS_CHANNEL", default_value = "evmmonitor:events")]
+    #[arg(
+        long,
+        env = "EVMMONITOR_EVENTS_CHANNEL",
+        default_value = "evmmonitor:events"
+    )]
     events_channel: String,
 
     /// Redis channel for commands (API server -> monitor)
-    #[arg(long, env = "EVMMONITOR_COMMANDS_CHANNEL", default_value = "evmmonitor:commands")]
+    #[arg(
+        long,
+        env = "EVMMONITOR_COMMANDS_CHANNEL",
+        default_value = "evmmonitor:commands"
+    )]
     commands_channel: String,
 
     /// Chain IDs to monitor (comma-separated)
@@ -148,7 +154,6 @@ impl EventHandler for BridgeHandler {
     }
 }
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file if present
@@ -172,9 +177,15 @@ async fn main() -> anyhow::Result<()> {
         .or(config.bridge.redis_url.clone())
         .ok_or_else(|| anyhow::anyhow!("redis_url is required"))?;
 
-    let events_channel = config.bridge.events_channel.clone()
+    let events_channel = config
+        .bridge
+        .events_channel
+        .clone()
         .unwrap_or_else(|| args.events_channel.clone());
-    let commands_channel = config.bridge.commands_channel.clone()
+    let commands_channel = config
+        .bridge
+        .commands_channel
+        .clone()
         .unwrap_or_else(|| args.commands_channel.clone());
 
     // Get chain configs - merge CLI chains with config file
@@ -252,7 +263,13 @@ async fn main() -> anyhow::Result<()> {
     let command_bridge = bridge.clone();
     let command_persistence = persistence.clone();
     let command_handle = tokio::spawn(async move {
-        handle_commands(commands_stream, command_coordinator, command_bridge, command_persistence).await;
+        handle_commands(
+            commands_stream,
+            command_coordinator,
+            command_bridge,
+            command_persistence,
+        )
+        .await;
     });
 
     // Spawn health publisher task
@@ -313,7 +330,8 @@ async fn restore_watched_addresses(
                     };
 
                     // Parse token contract address if present
-                    let token_contract: Option<alloy::primitives::Address> = token_address.as_ref().and_then(|t| t.parse().ok());
+                    let token_contract: Option<alloy::primitives::Address> =
+                        token_address.as_ref().and_then(|t| t.parse().ok());
 
                     let watched = WatchedAddress {
                         address: parsed_address,
@@ -327,7 +345,10 @@ async fn restore_watched_addresses(
                     restored_count += 1;
                 }
             }
-            info!(count = restored_count, "restored watched addresses from persistence");
+            info!(
+                count = restored_count,
+                "restored watched addresses from persistence"
+            );
         }
         Err(e) => {
             warn!(error = %e, "failed to restore watched addresses from persistence");
@@ -358,12 +379,15 @@ async fn handle_commands(
                 let invoice_id = InvoiceId::from_string(cmd.invoice_id.to_string());
                 let address_str = cmd.address.to_string().to_lowercase();
                 let token_address_str = cmd.token_contract.map(|a| a.to_string().to_lowercase());
-                if let Err(e) = persistence.watch_address(
-                    &address_str,
-                    &invoice_id,
-                    cmd.chain_id,
-                    token_address_str.as_deref(),
-                ).await {
+                if let Err(e) = persistence
+                    .watch_address(
+                        &address_str,
+                        &invoice_id,
+                        cmd.chain_id,
+                        token_address_str.as_deref(),
+                    )
+                    .await
+                {
                     error!(error = %e, "failed to persist watched address");
                 }
 
@@ -409,7 +433,10 @@ async fn handle_commands(
                 // Remove from persistence (using chain_id directly for testnet support)
                 let address_str = cmd.address.to_string().to_lowercase();
                 let token_address_str = cmd.token_contract.map(|a| a.to_string().to_lowercase());
-                if let Err(e) = persistence.unwatch_address(&address_str, cmd.chain_id, token_address_str.as_deref()).await {
+                if let Err(e) = persistence
+                    .unwatch_address(&address_str, cmd.chain_id, token_address_str.as_deref())
+                    .await
+                {
                     debug!(error = %e, "failed to remove watched address from persistence");
                 }
 
@@ -616,14 +643,18 @@ fn get_chain_configs(
     Ok(configs)
 }
 
-async fn create_chain_monitor(rpc_config: &ChainRpcConfig) -> EvmResult<Arc<ChainMonitor<RpcBlockSource>>> {
+async fn create_chain_monitor(
+    rpc_config: &ChainRpcConfig,
+) -> EvmResult<Arc<ChainMonitor<RpcBlockSource>>> {
     use evm::monitor::RpcSourceConfig;
 
     let chain_config = get_any_chain_config(rpc_config.chain_id)
         .ok_or_else(|| EvmError::Monitor(format!("unknown chain id: {}", rpc_config.chain_id)))?;
 
     let source_config = match &rpc_config.rpc_ws {
-        Some(ws_url) => RpcSourceConfig::with_websocket(ws_url, &rpc_config.rpc_http, rpc_config.chain_id),
+        Some(ws_url) => {
+            RpcSourceConfig::with_websocket(ws_url, &rpc_config.rpc_http, rpc_config.chain_id)
+        }
         None => RpcSourceConfig::http_only(&rpc_config.rpc_http, rpc_config.chain_id),
     };
 

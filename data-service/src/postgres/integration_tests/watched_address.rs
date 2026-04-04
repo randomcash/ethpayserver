@@ -16,7 +16,9 @@ async fn integration_watched_address_crud() {
 
     // Create payment option (watched_addresses link to payment_options now)
     let payment_option = test_payment_option(&invoice.id, 1);
-    PaymentOptionWriter::create(&service, &payment_option).await.unwrap();
+    PaymentOptionWriter::create(&service, &payment_option)
+        .await
+        .unwrap();
 
     let address = unique_address();
     let chain_id = 1u64;
@@ -62,7 +64,9 @@ async fn integration_watched_address_get_active() {
 
     // Create payment option
     let payment_option = test_payment_option(&invoice.id, 1);
-    PaymentOptionWriter::create(&service, &payment_option).await.unwrap();
+    PaymentOptionWriter::create(&service, &payment_option)
+        .await
+        .unwrap();
 
     let address = unique_address();
     let chain_id = 1u64;
@@ -76,9 +80,9 @@ async fn integration_watched_address_get_active() {
     let active = WatchedAddressReader::get_active(&service).await.unwrap();
 
     // Should include our address
-    assert!(active
-        .iter()
-        .any(|(a, po_id, cid, _)| a == &address && po_id == &payment_option.id && *cid == chain_id));
+    assert!(active.iter().any(|(a, po_id, cid, _)| a == &address
+        && po_id == &payment_option.id
+        && *cid == chain_id));
 
     // Deactivate it
     WatchedAddressWriter::deactivate(&service, &address, chain_id, None)

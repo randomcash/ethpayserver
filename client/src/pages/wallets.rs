@@ -16,9 +16,18 @@ fn format_date(iso: &str) -> String {
         let parts: Vec<&str> = date_part.split('-').collect();
         if parts.len() == 3 {
             let month = match parts[1] {
-                "01" => "Jan", "02" => "Feb", "03" => "Mar", "04" => "Apr",
-                "05" => "May", "06" => "Jun", "07" => "Jul", "08" => "Aug",
-                "09" => "Sep", "10" => "Oct", "11" => "Nov", "12" => "Dec",
+                "01" => "Jan",
+                "02" => "Feb",
+                "03" => "Mar",
+                "04" => "Apr",
+                "05" => "May",
+                "06" => "Jun",
+                "07" => "Jul",
+                "08" => "Aug",
+                "09" => "Sep",
+                "10" => "Oct",
+                "11" => "Nov",
+                "12" => "Dec",
                 _ => parts[1],
             };
             return format!("{} {}, {}", month, parts[2], parts[0]);
@@ -30,7 +39,7 @@ fn format_date(iso: &str) -> String {
 /// Truncate address for display.
 fn truncate_address(address: &str) -> String {
     if address.len() > 16 {
-        format!("{}...{}", &address[..8], &address[address.len()-6..])
+        format!("{}...{}", &address[..8], &address[address.len() - 6..])
     } else {
         address.to_string()
     }
