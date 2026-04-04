@@ -229,14 +229,14 @@ pub struct UserStoreInfo {
     pub role: StoreRole,
 }
 
-/// Wallet data from the API (legacy, kept for compatibility).
+/// Wallet data from the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wallet {
     pub id: String,
-    pub name: String,
-    pub address: String,
-    pub derivation_path: String,
-    pub enabled_chains: Vec<u64>,
+    pub store_id: String,
+    pub xpub_masked: String,
+    pub derivation_index: i32,
+    pub name: Option<String>,
     pub created_at: String,
 }
 
@@ -452,10 +452,10 @@ mod tests {
     fn test_wallet_serialization() {
         let wallet = Wallet {
             id: "wallet_001".to_string(),
-            name: "Main Wallet".to_string(),
-            address: "0x1234...".to_string(),
-            derivation_path: "m/44'/60'/0'/0/0".to_string(),
-            enabled_chains: vec![1, 137, 42161],
+            store_id: "store_001".to_string(),
+            xpub_masked: "xpub6CUG...Ht4QRnxv".to_string(),
+            derivation_index: 3,
+            name: Some("Main Wallet".to_string()),
             created_at: "2024-01-01T00:00:00Z".to_string(),
         };
 
@@ -463,7 +463,10 @@ mod tests {
         let parsed: Wallet = serde_json::from_str(&json).unwrap();
 
         assert_eq!(wallet.id, parsed.id);
-        assert_eq!(wallet.derivation_path, parsed.derivation_path);
+        assert_eq!(wallet.store_id, parsed.store_id);
+        assert_eq!(wallet.xpub_masked, parsed.xpub_masked);
+        assert_eq!(wallet.derivation_index, parsed.derivation_index);
+        assert_eq!(wallet.name, parsed.name);
     }
 
     #[test]

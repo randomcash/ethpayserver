@@ -48,6 +48,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::configure_store_wallet,
         stores::delete_store_wallet,
         stores::list_wallets,
+        stores::get_wallet_by_id,
         stores::get_store_webhook,
         stores::configure_store_webhook,
         stores::delete_store_webhook,
@@ -186,6 +187,7 @@ where
     // Wallet endpoints (cross-store)
     let wallet_routes = Router::new()
         .route("/", get(stores::list_wallets::<A>))
+        .route("/{wallet_id}", get(stores::get_wallet_by_id::<A>))
         .with_state(state.clone());
 
     // Payment endpoints (store-scoped)
