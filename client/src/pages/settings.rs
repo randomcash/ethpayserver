@@ -2,6 +2,7 @@
 //!
 //! Contains user settings, preferences, API keys, and admin-only server settings.
 
+use crate::api::{ApiKeyInfo, CreateApiKeyRequest, CreateApiKeyResponsePayload, EvmApiClient};
 use leptos::prelude::*;
 
 /// Settings page with tabbed interface.
@@ -262,12 +263,59 @@ fn PreferencesTab() -> impl IntoView {
 /// API Keys tab.
 #[component]
 fn ApiKeysTab() -> impl IntoView {
-    // Mock API keys
-    let api_keys = vec![
-        ("ak_live_****1234", "Production Key", "Jan 15, 2024", true),
-        ("ak_test_****5678", "Test Key", "Jan 10, 2024", true),
-        ("ak_live_****9012", "Old Key", "Dec 1, 2023", false),
-    ];
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+
+    // Track version to trigger refetches after create/revoke
+    let (version, set_version) = signal(0u32);
+
+    // Load API keys from backend
+    let keys_resource = LocalResource::new(move || {
+        let client = api.get();
+        let _v = version.get();
+        async move { client.list_api_keys().await.ok() }
+    });
+
+    // State for create form
+    let (show_create, set_show_create) = signal(false);
+    let (new_key_name, set_new_key_name) = signal(String::new());
+    let (created_key, set_created_key) = signal(Option::<CreateApiKeyResponsePayload>::None);
+    let (loading, set_loading) = signal(false);
+
+    // Create handler
+    let on_create = move |_| {
+        let name = new_key_name.get();
+        if name.trim().is_empty() {
+            return;
+        }
+        let client = api.get();
+        let request = CreateApiKeyRequest {
+            name: name.trim().to_string(),
+            expires_at: None,
+        };
+        set_loading.set(true);
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(resp) = client.create_api_key(&request).await {
+                set_created_key.set(Some(resp));
+                set_show_create.set(false);
+                set_new_key_name.set(String::new());
+                set_version.update(|v| *v += 1);
+            }
+            set_loading.set(false);
+        });
+    };
+
+    // Revoke handler factory
+    let make_revoke_handler = move |key_id: String| {
+        let client = api.get();
+        move |_| {
+            let client = client.clone();
+            let id = key_id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ = client.revoke_api_key(&id).await;
+                set_version.update(|v| *v += 1);
+            });
+        }
+    };
 
     view! {
         <div class="settings-tab-api-keys">
@@ -276,39 +324,117 @@ fn ApiKeysTab() -> impl IntoView {
                     <h3 class="section-title">"API Keys"</h3>
                     <p class="section-desc">"Manage API keys for programmatic access"</p>
                 </div>
-                <button class="btn btn-primary btn-sm">
+                <button
+                    class="btn btn-primary btn-sm"
+                    on:click=move |_| set_show_create.set(true)
+                >
                     <IconPlus />
                     "Create API key"
                 </button>
             </div>
 
-            <div class="api-keys-list">
-                {api_keys.into_iter().map(|(key, name, created, active)| {
-                    let status_class = if active { "badge badge-success" } else { "badge badge-neutral" };
-                    let status_label = if active { "Active" } else { "Revoked" };
-
-                    view! {
-                        <div class="api-key-item">
-                            <div class="api-key-info">
-                                <div class="api-key-header">
-                                    <span class="api-key-name">{name}</span>
-                                    <span class=status_class>{status_label}</span>
-                                </div>
-                                <code class="api-key-value">{key}</code>
-                                <span class="api-key-created">"Created "{created}</span>
-                            </div>
-                            <div class="api-key-actions">
-                                {active.then(|| view! {
-                                    <button class="btn btn-ghost btn-sm">"Revoke"</button>
-                                })}
-                                <button class="btn btn-ghost btn-sm btn-icon" title="Copy">
-                                    <IconCopy />
-                                </button>
-                            </div>
+            // Create form
+            {move || show_create.get().then(|| view! {
+                <div class="detail-card" style="margin-bottom: 16px;">
+                    <div class="detail-card-header">
+                        <h3>"Create new API key"</h3>
+                    </div>
+                    <div class="detail-card-body">
+                        <div class="form-group">
+                            <label class="form-label">"Key name"</label>
+                            <input
+                                type="text"
+                                class="form-input"
+                                placeholder="e.g., Production Key"
+                                prop:value=move || new_key_name.get()
+                                on:input=move |ev| set_new_key_name.set(event_target_value(&ev))
+                            />
                         </div>
+                        <div class="form-actions">
+                            <button
+                                class="btn btn-primary btn-sm"
+                                prop:disabled=move || loading.get()
+                                on:click=on_create
+                            >
+                                {move || if loading.get() { "Creating..." } else { "Create key" }}
+                            </button>
+                            <button
+                                class="btn btn-ghost btn-sm"
+                                on:click=move |_| set_show_create.set(false)
+                            >
+                                "Cancel"
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            })}
+
+            // Show newly created key (plaintext shown once)
+            {move || created_key.get().map(|key| view! {
+                <div class="detail-card" style="margin-bottom: 16px; border-color: var(--color-success);">
+                    <div class="detail-card-body">
+                        <p><strong>"Your new API key has been created. Copy it now — it will not be shown again."</strong></p>
+                        <code class="api-key-value" style="display: block; margin: 8px 0; padding: 8px; background: var(--color-bg-secondary); word-break: break-all;">
+                            {key.key.clone()}
+                        </code>
+                        <button
+                            class="btn btn-ghost btn-sm"
+                            on:click=move |_| set_created_key.set(None)
+                        >
+                            "Dismiss"
+                        </button>
+                    </div>
+                </div>
+            })}
+
+            // API keys list
+            <Suspense fallback=move || view! { <p>"Loading API keys..."</p> }>
+                {move || Suspend::new(async move {
+                    match keys_resource.await {
+                        Some(resp) => {
+                            let keys = resp.keys;
+                            if keys.is_empty() {
+                                view! { <p class="empty-state">"No API keys yet. Create one to get started."</p> }.into_any()
+                            } else {
+                                view! {
+                                    <div class="api-keys-list">
+                                        {keys.into_iter().map(|key: ApiKeyInfo| {
+                                            let status_class = if key.is_active { "badge badge-success" } else { "badge badge-neutral" };
+                                            let status_label = if key.is_active { "Active" } else { "Revoked" };
+                                            let is_active = key.is_active;
+                                            let revoke_handler = make_revoke_handler(key.id.clone());
+
+                                            view! {
+                                                <div class="api-key-item">
+                                                    <div class="api-key-info">
+                                                        <div class="api-key-header">
+                                                            <span class="api-key-name">{key.name}</span>
+                                                            <span class=status_class>{status_label}</span>
+                                                        </div>
+                                                        <code class="api-key-value">{key.key_prefix}</code>
+                                                        <span class="api-key-created">"Created "{key.created_at}</span>
+                                                    </div>
+                                                    <div class="api-key-actions">
+                                                        {is_active.then(|| view! {
+                                                            <button
+                                                                class="btn btn-ghost btn-sm"
+                                                                on:click=revoke_handler
+                                                            >
+                                                                "Revoke"
+                                                            </button>
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            }
+                                        }).collect_view()}
+                                    </div>
+                                }.into_any()
+                            }
+                        }
+                        None => view! { <p class="error">"Failed to load API keys"</p> }.into_any(),
                     }
-                }).collect_view()}
-            </div>
+                })}
+            </Suspense>
 
             <div class="settings-info">
                 <IconInfo />
