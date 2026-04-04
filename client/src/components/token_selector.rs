@@ -152,6 +152,7 @@ mod tests {
 }
 
 /// Token selector styles.
+#[allow(dead_code)]
 pub const TOKEN_SELECTOR_STYLES: &str = r#"
 .evm-token-selector {
     display: flex;

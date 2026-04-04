@@ -109,6 +109,7 @@ fn MultiNetworkSelector(selected: RwSignal<Vec<u64>>) -> impl IntoView {
 }
 
 /// Network selector styles.
+#[allow(dead_code)]
 pub const NETWORK_SELECTOR_STYLES: &str = r#"
 .evm-network-selector {
     display: flex;

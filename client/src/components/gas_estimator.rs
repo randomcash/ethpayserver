@@ -135,6 +135,7 @@ mod tests {
 }
 
 /// Gas estimator styles.
+#[allow(dead_code)]
 pub const GAS_ESTIMATOR_STYLES: &str = r#"
 .evm-gas-estimator {
     padding: var(--ps-spacing-sm);

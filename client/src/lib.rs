@@ -8,6 +8,8 @@
 //!
 //! Can run standalone or be loaded as a module in the dashboard aggregator.
 
+#![allow(clippy::items_after_test_module)]
+
 pub mod api;
 pub mod app;
 pub mod components;

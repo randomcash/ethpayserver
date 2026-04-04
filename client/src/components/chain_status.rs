@@ -93,6 +93,7 @@ pub fn ChainStatus(
 }
 
 /// Chain status list component.
+#[allow(dead_code)]
 #[component]
 pub fn ChainStatusList(
     /// List of chain info.
@@ -150,6 +151,7 @@ mod tests {
 }
 
 /// Chain status styles.
+#[allow(dead_code)]
 pub const CHAIN_STATUS_STYLES: &str = r#"
 .evm-chain-status {
     padding: var(--ps-spacing-md);

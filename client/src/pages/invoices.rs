@@ -600,7 +600,6 @@ pub fn InvoiceDetailPage() -> impl IntoView {
 #[component]
 fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
     let order_id = status.payments.first().and(None::<String>); // metadata not on status response
-    let customer_email = None::<String>;
     let created_display = "—".to_string(); // created_at not on status response
     let expires_display = format_date(&status.expires_at);
     let payment_count = status.payment_count;
@@ -828,13 +827,11 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                     <div class="detail-card-body">
                         <div class="customer-info">
                             <div class="customer-avatar">
-                                {customer_email.clone()
-                                    .map(|e| e.chars().next().unwrap_or('?').to_uppercase().to_string())
-                                    .unwrap_or("?".to_string())}
+                                {"?"}
                             </div>
                             <div class="customer-details">
                                 <span class="customer-email">
-                                    {customer_email.unwrap_or_else(|| "No email".to_string())}
+                                    {"No email"}
                                 </span>
                             </div>
                         </div>
@@ -864,6 +861,7 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::InvoiceStatus;
 
     #[test]
     fn test_format_date_iso() {
