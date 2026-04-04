@@ -3,9 +3,9 @@
 //! All endpoints require authentication via session token.
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, SessionService};
 
-use crate::state::PgAppState;
 use super::extractors::AuthenticatedUser;
+use crate::state::PgAppState;
 
 /// Response for listing API keys.
 #[derive(Debug, Serialize, ToSchema)]
@@ -130,7 +130,11 @@ where
     }
 
     // Generate a random API key
-    let raw_key = format!("ak_{}_{}", generate_key_segment(4), generate_key_segment(32));
+    let raw_key = format!(
+        "ak_{}_{}",
+        generate_key_segment(4),
+        generate_key_segment(32)
+    );
     let key_prefix = format!("{}****{}", &raw_key[..8], &raw_key[raw_key.len() - 4..]);
 
     // Hash the key for storage

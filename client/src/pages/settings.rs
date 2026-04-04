@@ -2,8 +2,8 @@
 //!
 //! Contains user settings, preferences, API keys, and admin-only server settings.
 
-use leptos::prelude::*;
 use crate::api::{ApiKeyInfo, CreateApiKeyRequest, CreateApiKeyResponsePayload, EvmApiClient};
+use leptos::prelude::*;
 
 /// Settings page with tabbed interface.
 #[component]

@@ -5,11 +5,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
-    CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
-    InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, Store,
-    StorePaymentMethod, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
-    UpdateWebhookRequest, Wallet,
+    ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload, CreateInvoiceRequest,
+    CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice, InvoiceListResponse,
+    InvoiceStatusResponse, Payment, PaymentListResponse, Store, StorePaymentMethod, StoreWebhook,
+    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, Wallet,
 };
 
 /// API client errors.
@@ -403,7 +402,10 @@ impl EvmApiClient {
     }
 
     /// Create a new API key.
-    pub async fn create_api_key(&self, request: &CreateApiKeyRequest) -> Result<CreateApiKeyResponsePayload, ApiError> {
+    pub async fn create_api_key(
+        &self,
+        request: &CreateApiKeyRequest,
+    ) -> Result<CreateApiKeyResponsePayload, ApiError> {
         self.post("/api/users/api-keys", request).await
     }
 
