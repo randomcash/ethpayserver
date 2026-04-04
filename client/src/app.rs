@@ -11,7 +11,6 @@ use ui_kit::hooks::use_storage::{get_local, set_local};
 use ui_kit::{AuthGuard, AuthProvider, LoginPage, RegisterPage, use_auth};
 
 use crate::api::{EvmApiClient, Store};
-use crate::components::ErrorState;
 use crate::pages::{
     DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage, PaymentsPage,
     SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage, WalletsPage,

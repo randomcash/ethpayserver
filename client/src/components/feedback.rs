@@ -4,9 +4,7 @@ use leptos::prelude::*;
 
 /// Full-page loading spinner with optional message.
 #[component]
-pub fn LoadingState(
-    #[prop(default = "Loading...")] message: &'static str,
-) -> impl IntoView {
+pub fn LoadingState(#[prop(default = "Loading...")] message: &'static str) -> impl IntoView {
     view! {
         <div class="loading-container">
             <div class="loading-spinner"></div>
@@ -17,9 +15,7 @@ pub fn LoadingState(
 
 /// Inline loading indicator (for use inside cards/sections).
 #[component]
-pub fn LoadingInline(
-    #[prop(default = "Loading...")] message: &'static str,
-) -> impl IntoView {
+pub fn LoadingInline(#[prop(default = "Loading...")] message: &'static str) -> impl IntoView {
     view! {
         <div class="loading-inline">
             <div class="loading-spinner-sm"></div>
@@ -58,10 +54,7 @@ pub fn ErrorState(
 
 /// Empty state placeholder.
 #[component]
-pub fn EmptyState(
-    #[prop(into)] title: String,
-    #[prop(into)] description: String,
-) -> impl IntoView {
+pub fn EmptyState(#[prop(into)] title: String, #[prop(into)] description: String) -> impl IntoView {
     view! {
         <div class="empty-state">
             <div class="empty-state-icon">
