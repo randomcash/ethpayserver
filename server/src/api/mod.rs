@@ -15,7 +15,6 @@ pub mod extractors;
 pub mod health;
 pub mod invoices;
 pub mod stores;
-pub mod users;
 pub mod ws;
 
 pub use extractors::{AdminAuth, AuthenticatedUser};

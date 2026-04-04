@@ -2,7 +2,8 @@
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use web_sys::WebSocket;
 
@@ -12,10 +13,7 @@ use web_sys::WebSocket;
 pub enum StatusUpdate {
     /// Invoice status changed.
     #[serde(rename = "invoice_status")]
-    InvoiceStatus {
-        invoice_id: String,
-        status: String,
-    },
+    InvoiceStatus { invoice_id: String, status: String },
     /// Payment received or updated.
     #[serde(rename = "payment_update")]
     PaymentUpdate {
@@ -41,11 +39,17 @@ pub enum StatusUpdate {
 /// // Read ws.connected() signal, ws.last_update() signal
 /// ```
 pub struct WebSocketService {
-    ws: Arc<Mutex<Option<WebSocket>>>,
+    ws: Rc<RefCell<Option<WebSocket>>>,
     connected: ReadSignal<bool>,
     set_connected: WriteSignal<bool>,
     last_update: ReadSignal<Option<StatusUpdate>>,
     set_last_update: WriteSignal<Option<StatusUpdate>>,
+}
+
+impl Default for WebSocketService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WebSocketService {
@@ -54,7 +58,7 @@ impl WebSocketService {
         let (connected, set_connected) = signal(false);
         let (last_update, set_last_update) = signal(None::<StatusUpdate>);
         Self {
-            ws: Arc::new(Mutex::new(None)),
+            ws: Rc::new(RefCell::new(None)),
             connected,
             set_connected,
             last_update,
@@ -100,10 +104,10 @@ impl WebSocketService {
         // On message
         let set_update = self.set_last_update;
         let onmessage = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
-            if let Some(text) = event.data().as_string() {
-                if let Ok(update) = serde_json::from_str::<StatusUpdate>(&text) {
-                    set_update.set(Some(update));
-                }
+            if let Some(text) = event.data().as_string()
+                && let Ok(update) = serde_json::from_str::<StatusUpdate>(&text)
+            {
+                set_update.set(Some(update));
             }
         }) as Box<dyn FnMut(web_sys::MessageEvent)>);
         ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
@@ -118,13 +122,13 @@ impl WebSocketService {
         ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
         onerror.forget();
 
-        *self.ws.lock().unwrap() = Some(ws_clone);
+        *self.ws.borrow_mut() = Some(ws_clone);
         Ok(())
     }
 
     /// Disconnect from WebSocket.
     pub fn disconnect(&self) {
-        if let Some(ws) = self.ws.lock().unwrap().take() {
+        if let Some(ws) = self.ws.borrow_mut().take() {
             let _ = ws.close();
         }
         self.set_connected.set(false);

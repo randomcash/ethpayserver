@@ -5,7 +5,10 @@
 //! via a `token` query parameter (session ID).
 
 use axum::{
-    extract::{Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{
+        Query, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
@@ -29,10 +32,7 @@ pub struct WsQuery {
 pub enum StatusUpdate {
     /// Invoice status changed.
     #[serde(rename = "invoice_status")]
-    InvoiceStatus {
-        invoice_id: String,
-        status: String,
-    },
+    InvoiceStatus { invoice_id: String, status: String },
     /// Payment received or updated.
     #[serde(rename = "payment_update")]
     PaymentUpdate {
@@ -133,9 +133,8 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<StatusUpda
     // Spawn a task to handle incoming messages (ping/pong, close)
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
-            match msg {
-                Message::Close(_) => break,
-                _ => {} // Ignore other client messages
+            if let Message::Close(_) = msg {
+                break;
             }
         }
     });
