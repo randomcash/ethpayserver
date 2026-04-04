@@ -116,7 +116,10 @@ fn WalletsEmpty() -> impl IntoView {
 #[component]
 fn WalletCard(wallet: Wallet) -> impl IntoView {
     let wallet_link = wallet.id.clone();
-    let wallet_name = wallet.name.clone().unwrap_or_else(|| "Unnamed Wallet".to_string());
+    let wallet_name = wallet
+        .name
+        .clone()
+        .unwrap_or_else(|| "Unnamed Wallet".to_string());
     let xpub_display = truncate_address(&wallet.xpub_masked);
     let created_display = format_date(&wallet.created_at);
 
@@ -169,10 +172,7 @@ pub fn WalletDetailPage() -> impl IntoView {
     // Active tab state
     let (active_tab, set_active_tab) = signal("general".to_string());
 
-    let tabs = vec![
-        ("general", "General"),
-        ("addresses", "Addresses"),
-    ];
+    let tabs = vec![("general", "General"), ("addresses", "Addresses")];
 
     view! {
         <div class="wallet-detail-page">
