@@ -9,10 +9,10 @@
 //! - `watched_address`: Watched address management tests
 //! - `aggregation`: Multi-currency payment aggregation E2E tests
 
+mod aggregation;
 mod invoice;
 mod payment;
 mod watched_address;
-mod aggregation;
 
 use chrono::Utc;
 use types::{PaymentMethodId, PaymentOptionData, PaymentOptionId};
@@ -24,7 +24,10 @@ use super::tests::{create_test_service, test_invoice, test_payment, unique_addre
 // =============================================================================
 
 /// Create a basic payment option for testing.
-pub(crate) fn test_payment_option(invoice_id: &types::InvoiceId, chain_id: u64) -> PaymentOptionData {
+pub(crate) fn test_payment_option(
+    invoice_id: &types::InvoiceId,
+    chain_id: u64,
+) -> PaymentOptionData {
     PaymentOptionData {
         id: PaymentOptionId::new(),
         invoice_id: invoice_id.clone(),

@@ -4,10 +4,10 @@
 
 use axum::{
     extract::FromRequestParts,
-    http::{header::AUTHORIZATION, request::Parts, StatusCode},
+    http::{StatusCode, header::AUTHORIZATION, request::Parts},
 };
 
-use auth::{Permission, Role, SessionId, SessionService, UserInfo, UserId};
+use auth::{Permission, Role, SessionId, SessionService, UserId, UserInfo};
 
 use crate::state::PgAppState;
 

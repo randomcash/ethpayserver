@@ -46,6 +46,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::get_store_wallet,
         stores::configure_store_wallet,
         stores::delete_store_wallet,
+        stores::list_wallets,
         stores::get_store_webhook,
         stores::configure_store_webhook,
         stores::delete_store_webhook,
@@ -161,9 +162,20 @@ where
         .route("/", get(invoices::list_invoices::<A>))
         .route("/", post(invoices::create_invoice::<A>))
         .route("/{invoice_id}", get(invoices::get_invoice::<A>))
-        .route("/{invoice_id}/payments", get(invoices::get_invoice_payments::<A>))
-        .route("/{invoice_id}/status", get(invoices::get_invoice_status::<A>))
+        .route(
+            "/{invoice_id}/payments",
+            get(invoices::get_invoice_payments::<A>),
+        )
+        .route(
+            "/{invoice_id}/status",
+            get(invoices::get_invoice_status::<A>),
+        )
         .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
+        .with_state(state.clone());
+
+    // Wallet endpoints (cross-store)
+    let wallet_routes = Router::new()
+        .route("/", get(stores::list_wallets::<A>))
         .with_state(state.clone());
 
     // Payment endpoints (store-scoped)
@@ -183,6 +195,7 @@ where
     let mut app = Router::new()
         .merge(health_routes)
         .nest("/stores", store_routes)
+        .nest("/wallets", wallet_routes)
         .nest("/invoices", invoice_routes)
         .nest("/payments", payment_routes)
         .nest("/auth", auth_routes)

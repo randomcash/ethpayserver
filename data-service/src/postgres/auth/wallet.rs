@@ -31,10 +31,10 @@ impl WalletRepository for PgDataService {
         .execute(&self.pool)
         .await
         .map_err(|e| {
-            if let sqlx::Error::Database(ref db_err) = e {
-                if db_err.is_unique_violation() {
-                    return AuthError::WalletAlreadyRegistered;
-                }
+            if let sqlx::Error::Database(ref db_err) = e
+                && db_err.is_unique_violation()
+            {
+                return AuthError::WalletAlreadyRegistered;
             }
             sqlx_to_auth_error(e)
         })?;
@@ -111,12 +111,11 @@ impl WalletRepository for PgDataService {
     }
 
     async fn deactivate_wallet(&self, id: WalletCredentialId) -> Result<()> {
-        let result =
-            sqlx::query("UPDATE wallet_credentials SET is_active = FALSE WHERE id = $1")
-                .bind(id.0)
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_to_auth_error)?;
+        let result = sqlx::query("UPDATE wallet_credentials SET is_active = FALSE WHERE id = $1")
+            .bind(id.0)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_auth_error)?;
 
         if result.rows_affected() == 0 {
             return Err(AuthError::WalletNotFound(id.to_string()));

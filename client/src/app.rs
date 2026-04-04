@@ -1,14 +1,14 @@
 //! Root application component with Stripe-inspired layout.
 
-use leptos::prelude::*;
 use leptos::children::{Children, ChildrenFn};
+use leptos::prelude::*;
 use leptos_router::{
-    components::{Route, Router, Routes, A},
+    components::{A, Route, Router, Routes},
     hooks::use_location,
     path,
 };
-use ui_kit::{AuthProvider, AuthGuard, LoginPage, RegisterPage, use_auth};
 use ui_kit::hooks::use_storage::{get_local, set_local};
+use ui_kit::{AuthGuard, AuthProvider, LoginPage, RegisterPage, use_auth};
 
 use crate::api::{EvmApiClient, Store};
 use crate::components::ErrorState;
@@ -173,19 +173,19 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
             match api.list_stores().await {
                 Ok(fetched) => {
                     // If selected store no longer exists, clear selection.
-                    if let Some(ref id) = selected_store_id.get_untracked() {
-                        if !fetched.iter().any(|s| &s.id == id) {
-                            set_selected_store_id.set(None);
-                            ui_kit::hooks::use_storage::remove_local(SELECTED_STORE_KEY);
-                        }
+                    if let Some(ref id) = selected_store_id.get_untracked()
+                        && !fetched.iter().any(|s| &s.id == id)
+                    {
+                        set_selected_store_id.set(None);
+                        ui_kit::hooks::use_storage::remove_local(SELECTED_STORE_KEY);
                     }
                     // Auto-select the first store if none is selected.
-                    if selected_store_id.get_untracked().is_none() {
-                        if let Some(first) = fetched.first() {
-                            let id = first.id.clone();
-                            let _ = set_local(SELECTED_STORE_KEY, &id);
-                            set_selected_store_id.set(Some(id));
-                        }
+                    if selected_store_id.get_untracked().is_none()
+                        && let Some(first) = fetched.first()
+                    {
+                        let id = first.id.clone();
+                        let _ = set_local(SELECTED_STORE_KEY, &id);
+                        set_selected_store_id.set(Some(id));
                     }
                     set_stores.set(fetched);
                 }
@@ -227,10 +227,7 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
 
 /// Sidebar navigation component.
 #[component]
-fn Sidebar<F>(
-    open: ReadSignal<bool>,
-    on_close: F,
-) -> impl IntoView
+fn Sidebar<F>(open: ReadSignal<bool>, on_close: F) -> impl IntoView
 where
     F: Fn(web_sys::MouseEvent) + 'static + Clone,
 {
@@ -247,11 +244,9 @@ where
     // Selected store name for display
     let selected_name = {
         let store_ctx = store_ctx.clone();
-        move || {
-            match store_ctx.selected_store() {
-                Some(s) => s.name.clone(),
-                None => "All Stores".to_string(),
-            }
+        move || match store_ctx.selected_store() {
+            Some(s) => s.name.clone(),
+            None => "All Stores".to_string(),
         }
     };
 
@@ -357,7 +352,7 @@ where
                 </div>
             </div>
 
-            <nav class="sidebar-nav" on:click=move |e| on_close_link(e)>
+            <nav class="sidebar-nav" on:click=on_close_link>
                 // Main Navigation
                 <div class="sidebar-section">
                     <SidebarLink href="/" label="Dashboard">
@@ -398,11 +393,7 @@ where
 
 /// Sidebar navigation link.
 #[component]
-fn SidebarLink(
-    href: &'static str,
-    label: &'static str,
-    children: Children,
-) -> impl IntoView {
+fn SidebarLink(href: &'static str, label: &'static str, children: Children) -> impl IntoView {
     let location = use_location();
     let is_active = move || {
         let path = location.pathname.get();

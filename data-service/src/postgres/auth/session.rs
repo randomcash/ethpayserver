@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use sqlx::Row;
 
-use auth::{DeviceId, Session, SessionId, SessionRepository, UserId, error::{AuthError, Result}};
+use auth::{
+    DeviceId, Session, SessionId, SessionRepository, UserId,
+    error::{AuthError, Result},
+};
 
 use super::{PgDataService, sqlx_to_auth_error};
 
@@ -119,12 +122,10 @@ impl SessionRepository for PgDataService {
                 .await
                 .map_err(sqlx_to_auth_error)?
             }
-            None => {
-                sqlx::query("DELETE FROM sessions WHERE expires_at < NOW()")
-                    .execute(&self.pool)
-                    .await
-                    .map_err(sqlx_to_auth_error)?
-            }
+            None => sqlx::query("DELETE FROM sessions WHERE expires_at < NOW()")
+                .execute(&self.pool)
+                .await
+                .map_err(sqlx_to_auth_error)?,
         };
         Ok(result.rows_affected())
     }

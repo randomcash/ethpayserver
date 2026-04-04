@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 
-use auth::{User, UserId, UserRepository, error::{AuthError, Result}};
+use auth::{
+    User, UserId, UserRepository,
+    error::{AuthError, Result},
+};
 
 use super::{PgDataService, sqlx_to_auth_error};
 
@@ -162,12 +165,11 @@ impl UserRepository for PgDataService {
     }
 
     async fn reset_failed_logins(&self, id: UserId) -> Result<()> {
-        let result =
-            sqlx::query("UPDATE users SET failed_login_attempts = 0 WHERE id = $1")
-                .bind(id.0)
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_to_auth_error)?;
+        let result = sqlx::query("UPDATE users SET failed_login_attempts = 0 WHERE id = $1")
+            .bind(id.0)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_auth_error)?;
 
         if result.rows_affected() == 0 {
             return Err(AuthError::UserNotFound(id.to_string()));
