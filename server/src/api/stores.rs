@@ -1815,4 +1815,60 @@ mod tests {
         let json = serde_json::to_value(&wallets).unwrap();
         assert!(json.as_array().unwrap().is_empty());
     }
+
+    // =========================================================================
+    // get_wallet_by_id response
+    // =========================================================================
+
+    #[test]
+    fn test_wallet_by_id_response_masks_xpub() {
+        let xpub = "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz";
+        let response = WalletResponse {
+            id: Uuid::new_v4(),
+            store_id: Uuid::new_v4(),
+            xpub_masked: mask_xpub(xpub),
+            derivation_index: 7,
+            name: Some("Hot Wallet".to_string()),
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        let masked = json["xpub_masked"].as_str().unwrap();
+        assert!(masked.contains("..."));
+        assert!(!masked.contains(xpub));
+        assert_eq!(json["derivation_index"], 7);
+        assert_eq!(json["name"], "Hot Wallet");
+    }
+
+    #[test]
+    fn test_wallet_by_id_response_without_name() {
+        let response = WalletResponse {
+            id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            xpub_masked: "xpub6CUG...3fDVmz".to_string(),
+            derivation_index: 0,
+            name: None,
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["name"].is_null());
+        assert_eq!(json["derivation_index"], 0);
+    }
+
+    #[test]
+    fn test_wallet_by_id_response_contains_store_id() {
+        let store_id = Uuid::new_v4();
+        let response = WalletResponse {
+            id: Uuid::new_v4(),
+            store_id,
+            xpub_masked: "xpub6D4B...cLW5".to_string(),
+            derivation_index: 3,
+            name: Some("Cold Storage".to_string()),
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["store_id"].as_str().unwrap(), store_id.to_string());
+    }
 }
