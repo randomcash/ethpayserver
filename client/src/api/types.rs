@@ -1116,4 +1116,72 @@ mod tests {
         assert!(json.get("expiration_seconds").is_none());
         assert!(json.get("metadata").is_none());
     }
+
+    #[test]
+    fn test_user_role_default_is_user() {
+        assert_eq!(UserRole::default(), UserRole::User);
+    }
+
+    #[test]
+    fn test_user_role_labels() {
+        assert_eq!(UserRole::ServerAdmin.label(), "Server Admin");
+        assert_eq!(UserRole::User.label(), "User");
+    }
+
+    #[test]
+    fn test_user_role_is_admin() {
+        assert!(UserRole::ServerAdmin.is_admin());
+        assert!(!UserRole::User.is_admin());
+    }
+
+    #[test]
+    fn test_user_role_serde_roundtrip() {
+        let admin_json = serde_json::to_value(UserRole::ServerAdmin).unwrap();
+        assert_eq!(admin_json, serde_json::json!("server_admin"));
+
+        let user_json = serde_json::to_value(UserRole::User).unwrap();
+        assert_eq!(user_json, serde_json::json!("user"));
+
+        let parsed: UserRole = serde_json::from_str("\"server_admin\"").unwrap();
+        assert_eq!(parsed, UserRole::ServerAdmin);
+
+        let parsed: UserRole = serde_json::from_str("\"user\"").unwrap();
+        assert_eq!(parsed, UserRole::User);
+    }
+
+    #[test]
+    fn test_user_info_deserialize_full() {
+        let json = serde_json::json!({
+            "id": "usr_123",
+            "email": "alice@example.com",
+            "primary_wallet_address": "0xabc",
+            "created_at": "2026-01-01T00:00:00Z",
+            "last_login_at": "2026-04-04T12:00:00Z",
+            "role": "server_admin"
+        });
+        let user: UserInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(user.id, "usr_123");
+        assert_eq!(user.email.as_deref(), Some("alice@example.com"));
+        assert_eq!(user.primary_wallet_address.as_deref(), Some("0xabc"));
+        assert_eq!(user.last_login_at.as_deref(), Some("2026-04-04T12:00:00Z"));
+        assert!(user.role.is_admin());
+    }
+
+    #[test]
+    fn test_user_info_deserialize_minimal() {
+        let json = serde_json::json!({
+            "id": "usr_456",
+            "email": null,
+            "primary_wallet_address": null,
+            "created_at": "2026-03-15T10:00:00Z",
+            "last_login_at": null,
+            "role": "user"
+        });
+        let user: UserInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(user.id, "usr_456");
+        assert!(user.email.is_none());
+        assert!(user.primary_wallet_address.is_none());
+        assert!(user.last_login_at.is_none());
+        assert!(!user.role.is_admin());
+    }
 }

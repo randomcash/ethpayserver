@@ -704,3 +704,28 @@ fn IconInfo() -> impl IntoView {
         </svg>
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_date_with_time() {
+        assert_eq!(format_date("2026-04-04T12:30:00Z"), "2026-04-04");
+    }
+
+    #[test]
+    fn test_format_date_date_only() {
+        assert_eq!(format_date("2026-04-04"), "2026-04-04");
+    }
+
+    #[test]
+    fn test_format_date_with_offset() {
+        assert_eq!(format_date("2026-04-04T12:30:00+05:00"), "2026-04-04");
+    }
+
+    #[test]
+    fn test_format_date_empty_string() {
+        assert_eq!(format_date(""), "");
+    }
+}
