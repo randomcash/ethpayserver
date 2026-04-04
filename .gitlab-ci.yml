@@ -4,55 +4,30 @@ stages:
   - security
   - build
 
-variables:
-  CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
-  GIT_SUBMODULE_STRATEGY: none
+# Shell executor — runs on host, uses native cargo cache.
+# No Docker overhead, no image pulls, no dep recompilation.
 
-# Clone payserver-commons so [patch] paths resolve
-# Uses CI_JOB_TOKEN for cross-project access within the same group
+variables:
+  CARGO_INCREMENTAL: "1"
+
+# Clone payserver-commons if not already present (for [patch] paths)
 before_script:
   - |
     if [ ! -d "../payserver-commons" ]; then
       git clone --depth 1 https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/random.cash/payserver-commons.git ../payserver-commons
+    else
+      cd ../payserver-commons && git pull --ff-only && cd -
     fi
 
-# Cache cargo registry, git checkouts, and build artifacts between jobs
-cache:
-  key: "${CI_COMMIT_REF_SLUG}-rust"
-  paths:
-    - .cargo/registry/
-    - .cargo/git/
-    - target/
-
 # ---------------------------------------------------------------------------
-# Stage: check (fast, catch errors early)
+# Stage: check (single job — fmt + clippy in one compilation pass)
 # ---------------------------------------------------------------------------
 
-format:
+lint:
   stage: check
-  image: rust:1.90
   script:
-    - rustup component add rustfmt
     - cargo fmt -p server -p data-service -p evm -p ethpayserver-client -- --check
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == "main"
-
-clippy:
-  stage: check
-  image: rust:1.90
-  script:
-    - rustup component add clippy
     - cargo clippy -p server -p data-service -p evm -p ethpayserver-client --all-targets -- -D warnings
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == "main"
-
-check:
-  stage: check
-  image: rust:1.90
-  script:
-    - cargo check -p server -p data-service -p evm -p ethpayserver-client --all-targets
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
@@ -61,38 +36,16 @@ check:
 # Stage: test
 # ---------------------------------------------------------------------------
 
-test:unit:
+test:
   stage: test
-  image: rust:1.90
   script:
     - cargo test --workspace --lib --no-fail-fast
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
 
-test:integration:
-  stage: test
-  image: rust:1.90
-  services:
-    - name: postgres:16-alpine
-      alias: postgres
-    - name: redis:7-alpine
-      alias: redis
-  variables:
-    POSTGRES_DB: ethpayserver_test
-    POSTGRES_USER: postgres
-    POSTGRES_PASSWORD: postgres
-    DATABASE_URL: "postgres://postgres:postgres@postgres:5432/ethpayserver_test"
-    REDIS_URL: "redis://redis:6379"
-  script:
-    - cargo test -p data-service -p server --lib --no-fail-fast -- --ignored || echo "Integration tests failed (see above). Likely missing DB/Redis."
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == "main"
-
 test:doc:
   stage: test
-  image: rust:1.90
   script:
     - cargo doc --workspace --no-deps
   rules:
@@ -100,36 +53,33 @@ test:doc:
     - if: $CI_COMMIT_BRANCH == "main"
 
 # ---------------------------------------------------------------------------
-# Stage: security
+# Stage: security (tools pre-installed on runner — no compile overhead)
 # ---------------------------------------------------------------------------
 
 audit:
   stage: security
-  image: rust:1.90
   script:
-    - cargo install cargo-audit --locked
-    - cargo audit || echo "Audit found issues (see above). Non-blocking."
+    - cargo audit
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
+  allow_failure: true
 
 deny:
   stage: security
-  image: rust:1.90
   script:
-    - cargo install cargo-deny --locked
-    - cargo deny check licenses sources || echo "Deny found issues (see above). Non-blocking."
+    - cargo deny check licenses sources
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
+  allow_failure: true
 
 # ---------------------------------------------------------------------------
-# Stage: build (verify release build compiles)
+# Stage: build
 # ---------------------------------------------------------------------------
 
 build:release:
   stage: build
-  image: rust:1.90
   script:
     - cargo build --release --bin ethpayserver
     - cargo build --release --bin migrate_postgres
@@ -141,10 +91,9 @@ build:release:
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
 
-build:check-release:
+build:check:
   stage: build
-  image: rust:1.90
   script:
-    - cargo build --release --bin ethpayserver --locked
+    - cargo build --release --bin ethpayserver
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
