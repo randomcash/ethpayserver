@@ -134,7 +134,6 @@ mod tests {
 
     #[test]
     fn test_common_tokens_list() {
-        assert!(!COMMON_TOKENS.is_empty());
         // First token should be ETH (native)
         assert_eq!(COMMON_TOKENS[0].symbol, "ETH");
         assert!(COMMON_TOKENS[0].address.is_none());
