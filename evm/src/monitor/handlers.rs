@@ -238,8 +238,7 @@ mod tests {
     #[async_trait]
     impl EventHandler for CountingHandler {
         async fn handle(&self, _event: &MonitorEvent) -> EvmResult<()> {
-            self.count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
     }

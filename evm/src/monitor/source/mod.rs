@@ -8,8 +8,8 @@ pub mod rpc;
 // pub mod infura;
 
 use crate::error::EvmResult;
-use alloy::primitives::{Address, BlockNumber, U256, B256};
-use alloy::rpc::types::{Log, Block};
+use alloy::primitives::{Address, B256, BlockNumber, U256};
+use alloy::rpc::types::{Block, Log};
 use async_trait::async_trait;
 use std::pin::Pin;
 use tokio_stream::Stream;
@@ -71,16 +71,17 @@ impl LogFilter {
     pub fn erc20_transfers_to(_addresses: Vec<Address>) -> Self {
         // Transfer(address indexed from, address indexed to, uint256 value)
         // topic0 = keccak256("Transfer(address,address,uint256)")
-        let transfer_topic: B256 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-            .parse()
-            .expect("valid transfer topic");
+        let transfer_topic: B256 =
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+                .parse()
+                .expect("valid transfer topic");
 
         Self {
             addresses: vec![], // All token contracts
             topics: vec![
-                Some(transfer_topic),  // topic0: Transfer event
-                None,                   // topic1: from (any)
-                // topic2 would be 'to', but we filter after
+                Some(transfer_topic), // topic0: Transfer event
+                None,                 // topic1: from (any)
+                                      // topic2 would be 'to', but we filter after
             ],
             from_block: None,
             to_block: None,

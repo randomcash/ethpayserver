@@ -67,20 +67,20 @@ impl InvoiceReader for InMemoryDataService {
         let mut results: Vec<InvoiceData> = invoices
             .values()
             .filter(|inv| {
-                if let Some(store_id) = params.store_id {
-                    if inv.store_id != store_id {
-                        return false;
-                    }
+                if let Some(store_id) = params.store_id
+                    && inv.store_id != store_id
+                {
+                    return false;
                 }
-                if let Some(status) = params.status {
-                    if inv.status != status {
-                        return false;
-                    }
+                if let Some(status) = params.status
+                    && inv.status != status
+                {
+                    return false;
                 }
-                if let Some(ref currency) = params.currency {
-                    if inv.currency != *currency {
-                        return false;
-                    }
+                if let Some(ref currency) = params.currency
+                    && inv.currency != *currency
+                {
+                    return false;
                 }
                 true
             })
@@ -145,11 +145,11 @@ impl InvoiceWriter for InMemoryDataService {
 
     async fn expire(&self, id: &InvoiceId) -> RepositoryResult<bool> {
         let mut invoices = self.invoices.write().unwrap();
-        if let Some(invoice) = invoices.get_mut(&id.0) {
-            if invoice.status == InvoiceStatus::Pending {
-                invoice.status = InvoiceStatus::Expired;
-                return Ok(true);
-            }
+        if let Some(invoice) = invoices.get_mut(&id.0)
+            && invoice.status == InvoiceStatus::Pending
+        {
+            invoice.status = InvoiceStatus::Expired;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -180,7 +180,10 @@ impl PaymentReader for InMemoryDataService {
             .collect())
     }
 
-    async fn get_valid_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentData>> {
+    async fn get_valid_for_invoice(
+        &self,
+        invoice_id: &InvoiceId,
+    ) -> RepositoryResult<Vec<PaymentData>> {
         let payments = self.payments.read().unwrap();
         Ok(payments
             .values()
@@ -196,22 +199,23 @@ impl PaymentReader for InMemoryDataService {
             .any(|p| p.invoice_id == *invoice_id && !p.reorged))
     }
 
-    async fn query(&self, params: &PaymentQueryParams) -> RepositoryResult<(i64, Vec<PaymentData>)> {
+    async fn query(
+        &self,
+        params: &PaymentQueryParams,
+    ) -> RepositoryResult<(i64, Vec<PaymentData>)> {
         let payments = self.payments.read().unwrap();
         let invoices = self.invoices.read().unwrap();
 
         let mut filtered: Vec<PaymentData> = payments
             .values()
             .filter(|p| {
-                if let Some(ref invoice_id) = params.invoice_id {
-                    if p.invoice_id != *invoice_id {
-                        return false;
-                    }
+                if let Some(ref invoice_id) = params.invoice_id
+                    && p.invoice_id != *invoice_id
+                {
+                    return false;
                 }
                 if let Some(store_id) = params.store_id {
-                    let invoice_store_id = invoices
-                        .get(&p.invoice_id.0)
-                        .map(|i| i.store_id);
+                    let invoice_store_id = invoices.get(&p.invoice_id.0).map(|i| i.store_id);
                     if invoice_store_id != Some(store_id) {
                         return false;
                     }
@@ -249,10 +253,10 @@ impl PaymentWriter for InMemoryDataService {
 
     async fn mark_confirmed(&self, id: Uuid, confirmed_at: DateTime<Utc>) -> RepositoryResult<()> {
         let mut payments = self.payments.write().unwrap();
-        if let Some(payment) = payments.get_mut(&id) {
-            if payment.confirmed_at.is_none() {
-                payment.confirmed_at = Some(confirmed_at);
-            }
+        if let Some(payment) = payments.get_mut(&id)
+            && payment.confirmed_at.is_none()
+        {
+            payment.confirmed_at = Some(confirmed_at);
         }
         Ok(())
     }
@@ -287,7 +291,10 @@ impl PaymentOptionReader for InMemoryDataService {
         Ok(options.get(&id.0).cloned())
     }
 
-    async fn get_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentOptionData>> {
+    async fn get_for_invoice(
+        &self,
+        invoice_id: &InvoiceId,
+    ) -> RepositoryResult<Vec<PaymentOptionData>> {
         let options = self.payment_options.read().unwrap();
         Ok(options
             .values()
@@ -308,7 +315,10 @@ impl PaymentOptionReader for InMemoryDataService {
             .cloned())
     }
 
-    async fn get_active_for_invoice(&self, invoice_id: &InvoiceId) -> RepositoryResult<Vec<PaymentOptionData>> {
+    async fn get_active_for_invoice(
+        &self,
+        invoice_id: &InvoiceId,
+    ) -> RepositoryResult<Vec<PaymentOptionData>> {
         let options = self.payment_options.read().unwrap();
         Ok(options
             .values()
@@ -353,11 +363,11 @@ impl PaymentOptionWriter for InMemoryDataService {
 
     async fn deactivate(&self, id: &PaymentOptionId) -> RepositoryResult<bool> {
         let mut options = self.payment_options.write().unwrap();
-        if let Some(po) = options.get_mut(&id.0) {
-            if po.is_active {
-                po.is_active = false;
-                return Ok(true);
-            }
+        if let Some(po) = options.get_mut(&id.0)
+            && po.is_active
+        {
+            po.is_active = false;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -386,10 +396,13 @@ impl WatchedAddressReader for InMemoryDataService {
         let addresses = self.addresses.read().unwrap();
         let options = self.payment_options.read().unwrap();
 
-        if let Some(po_id) = addresses.get(&(address.to_string(), chain_id, token_address.map(String::from))) {
-            if let Some(po) = options.get(&po_id.0) {
-                return Ok(Some(po.invoice_id.clone()));
-            }
+        if let Some(po_id) = addresses.get(&(
+            address.to_string(),
+            chain_id,
+            token_address.map(String::from),
+        )) && let Some(po) = options.get(&po_id.0)
+        {
+            return Ok(Some(po.invoice_id.clone()));
         }
         Ok(None)
     }
@@ -402,11 +415,17 @@ impl WatchedAddressReader for InMemoryDataService {
     ) -> RepositoryResult<Option<PaymentOptionId>> {
         let addresses = self.addresses.read().unwrap();
         Ok(addresses
-            .get(&(address.to_string(), chain_id, token_address.map(String::from)))
+            .get(&(
+                address.to_string(),
+                chain_id,
+                token_address.map(String::from),
+            ))
             .cloned())
     }
 
-    async fn get_active(&self) -> RepositoryResult<Vec<(String, PaymentOptionId, u64, Option<String>)>> {
+    async fn get_active(
+        &self,
+    ) -> RepositoryResult<Vec<(String, PaymentOptionId, u64, Option<String>)>> {
         let addresses = self.addresses.read().unwrap();
         Ok(addresses
             .iter()
@@ -532,7 +551,11 @@ impl WatchedAddressWriter for InMemoryDataService {
     ) -> RepositoryResult<()> {
         let mut addresses = self.addresses.write().unwrap();
         addresses.insert(
-            (address.to_string(), chain_id, token_address.map(String::from)),
+            (
+                address.to_string(),
+                chain_id,
+                token_address.map(String::from),
+            ),
             payment_option_id.clone(),
         );
         Ok(())
@@ -555,7 +578,11 @@ impl WatchedAddressWriter for InMemoryDataService {
         token_address: Option<&str>,
     ) -> RepositoryResult<bool> {
         let mut addresses = self.addresses.write().unwrap();
-        let key = (address.to_string(), chain_id, token_address.map(String::from));
+        let key = (
+            address.to_string(),
+            chain_id,
+            token_address.map(String::from),
+        );
         if addresses.remove(&key).is_some() {
             Ok(true)
         } else {
@@ -622,29 +649,28 @@ impl TokenReader for InMemoryDataService {
         let mut results: Vec<TokenData> = tokens
             .values()
             .filter(|t| {
-                if let Some(ref token_type) = params.token_type {
-                    if t.token_type != *token_type {
-                        return false;
-                    }
+                if let Some(ref token_type) = params.token_type
+                    && t.token_type != *token_type
+                {
+                    return false;
                 }
-                if let Some(network) = params.network {
-                    if t.network != network {
-                        return false;
-                    }
+                if let Some(network) = params.network
+                    && t.network != network
+                {
+                    return false;
                 }
-                if let Some(enabled) = params.enabled {
-                    if t.enabled != enabled {
-                        return false;
-                    }
+                if let Some(enabled) = params.enabled
+                    && t.enabled != enabled
+                {
+                    return false;
                 }
-                if let Some(ref symbol) = params.symbol {
-                    if !t
+                if let Some(ref symbol) = params.symbol
+                    && !t
                         .symbol
                         .as_ref()
                         .is_some_and(|s| s.eq_ignore_ascii_case(symbol))
-                    {
-                        return false;
-                    }
+                {
+                    return false;
                 }
                 true
             })
@@ -697,8 +723,8 @@ impl TokenWriter for InMemoryDataService {
         })?;
 
         let mut tokens = self.tokens.write().unwrap();
-        if tokens.contains_key(&id) {
-            tokens.insert(id, token.clone());
+        if let std::collections::hash_map::Entry::Occupied(mut e) = tokens.entry(id) {
+            e.insert(token.clone());
             Ok(())
         } else {
             Err(types::RepositoryError::NotFound(format!(
@@ -743,10 +769,7 @@ impl StoreWebhookReader for InMemoryDataService {
 
     async fn get_enabled_webhook(&self, store_id: Uuid) -> RepositoryResult<Option<StoreWebhook>> {
         let webhooks = self.webhooks.read().unwrap();
-        Ok(webhooks
-            .get(&store_id)
-            .filter(|w| w.enabled)
-            .cloned())
+        Ok(webhooks.get(&store_id).filter(|w| w.enabled).cloned())
     }
 }
 
@@ -800,7 +823,10 @@ pub fn create_test_payment_option(invoice_id: &InvoiceId) -> PaymentOptionData {
 }
 
 /// Create a test payment.
-pub fn create_test_payment(invoice_id: &InvoiceId, payment_option_id: Option<&PaymentOptionId>) -> PaymentData {
+pub fn create_test_payment(
+    invoice_id: &InvoiceId,
+    payment_option_id: Option<&PaymentOptionId>,
+) -> PaymentData {
     PaymentData {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),

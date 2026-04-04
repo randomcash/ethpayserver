@@ -15,13 +15,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::{AuthConfig, AuthService};
 use data_service::PgDataService;
+use evm::monitor::bridge::{COMMANDS_CHANNEL, EVENTS_CHANNEL, RedisBridge};
 use rates::RateProviderConfig;
 use server::{
-    api, config::Config, metrics, AppState, CleanupConfig, EventConsumer,
-    InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig,
-    WatchRetryService, WebhookConfig, WebhookService,
+    AppState, CleanupConfig, EventConsumer, InvoiceCleanupService, RedisEVMMonitor,
+    WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService, api, config::Config,
+    metrics,
 };
-use evm::monitor::bridge::{RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,9 +46,11 @@ async fn main() -> Result<()> {
 
     // Create auth service with custom config
     // Note: PgDataService implements AuthRepository (all required traits)
-    let mut auth_config = AuthConfig::default();
-    // Increase wallet challenge timeout to 10 minutes for registration flow
-    auth_config.wallet_challenge_duration = chrono::Duration::minutes(10);
+    let mut auth_config = AuthConfig {
+        // Increase wallet challenge timeout to 10 minutes for registration flow
+        wallet_challenge_duration: chrono::Duration::minutes(10),
+        ..AuthConfig::default()
+    };
     // WebAuthn config from environment
     if let Ok(rp_id) = std::env::var("WEBAUTHN_RP_ID") {
         auth_config.rp_id = rp_id;
@@ -60,21 +62,28 @@ async fn main() -> Result<()> {
         auth_config.rp_name = rp_name;
     }
     tracing::info!(rp_id = %auth_config.rp_id, rp_origin = %auth_config.rp_origin, "WebAuthn configured");
-    let auth_service = Arc::new(AuthService::with_config(Arc::clone(&data_service), auth_config));
+    let auth_service = Arc::new(AuthService::with_config(
+        Arc::clone(&data_service),
+        auth_config,
+    ));
 
     // Connect to Redis (REQUIRED for event processing)
-    let redis_url = config.redis_url.as_ref()
+    let redis_url = config
+        .redis_url
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("REDIS_URL is required for event processing"))?;
 
     tracing::info!("Connecting to Redis...");
-    let events_channel = std::env::var("REDIS_EVENTS_CHANNEL")
-        .unwrap_or_else(|_| EVENTS_CHANNEL.to_string());
-    let commands_channel = std::env::var("REDIS_COMMANDS_CHANNEL")
-        .unwrap_or_else(|_| COMMANDS_CHANNEL.to_string());
-    tracing::debug!(events_channel, commands_channel, "Redis channels configured");
-    let bridge = Arc::new(
-        RedisBridge::new(redis_url, &events_channel, &commands_channel).await?
+    let events_channel =
+        std::env::var("REDIS_EVENTS_CHANNEL").unwrap_or_else(|_| EVENTS_CHANNEL.to_string());
+    let commands_channel =
+        std::env::var("REDIS_COMMANDS_CHANNEL").unwrap_or_else(|_| COMMANDS_CHANNEL.to_string());
+    tracing::debug!(
+        events_channel,
+        commands_channel,
+        "Redis channels configured"
     );
+    let bridge = Arc::new(RedisBridge::new(redis_url, &events_channel, &commands_channel).await?);
     tracing::info!("Redis connected");
 
     // Create EVM monitor using shared bridge (concrete type for generics)
@@ -85,13 +94,11 @@ async fn main() -> Result<()> {
     //    Created first because cleanup service needs it for expiration webhooks
     let webhook_config = WebhookConfig::from_env();
     tracing::debug!(?webhook_config, "Webhook config loaded");
-    let webhook_service = Arc::new(
-        WebhookService::new(
-            Arc::clone(&data_service),
-            redis_url,
-            webhook_config,
-        )?
-    );
+    let webhook_service = Arc::new(WebhookService::new(
+        Arc::clone(&data_service),
+        redis_url,
+        webhook_config,
+    )?);
     tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
 

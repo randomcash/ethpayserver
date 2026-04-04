@@ -3,7 +3,10 @@
 use async_trait::async_trait;
 use sqlx::Row;
 
-use auth::{PasskeyCredential, PasskeyId, PasskeyRepository, UserId, error::{AuthError, Result}};
+use auth::{
+    PasskeyCredential, PasskeyId, PasskeyRepository, UserId,
+    error::{AuthError, Result},
+};
 
 use super::{PgDataService, sqlx_to_auth_error};
 
@@ -49,7 +52,10 @@ impl PasskeyRepository for PgDataService {
         row.map(|r| row_to_passkey(&r)).transpose()
     }
 
-    async fn get_passkey_by_credential_id(&self, credential_id: &[u8]) -> Result<Option<PasskeyCredential>> {
+    async fn get_passkey_by_credential_id(
+        &self,
+        credential_id: &[u8],
+    ) -> Result<Option<PasskeyCredential>> {
         // The credential ID is stored as base64url (URL-safe, no padding) in the passkey JSON
         // under "cred" -> "cred_id". We need to encode our bytes the same way.
         use base64::Engine;
@@ -115,12 +121,11 @@ impl PasskeyRepository for PgDataService {
     }
 
     async fn deactivate_passkey(&self, id: PasskeyId) -> Result<()> {
-        let result =
-            sqlx::query("UPDATE passkey_credentials SET is_active = FALSE WHERE id = $1")
-                .bind(id.0)
-                .execute(&self.pool)
-                .await
-                .map_err(sqlx_to_auth_error)?;
+        let result = sqlx::query("UPDATE passkey_credentials SET is_active = FALSE WHERE id = $1")
+            .bind(id.0)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_auth_error)?;
 
         if result.rows_affected() == 0 {
             return Err(AuthError::PasskeyNotFound(id.to_string()));

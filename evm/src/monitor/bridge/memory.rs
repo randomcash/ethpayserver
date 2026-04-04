@@ -12,8 +12,8 @@ use crate::error::EvmResult;
 use crate::monitor::events::{MonitorCommand, MonitorEvent};
 use async_trait::async_trait;
 use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 /// In-memory event bridge using tokio broadcast channels.
 pub struct MemoryBridge {
@@ -33,7 +33,10 @@ impl MemoryBridge {
     pub fn with_capacity(capacity: usize) -> Self {
         let (events_tx, _) = broadcast::channel(capacity);
         let (commands_tx, _) = broadcast::channel(capacity);
-        Self { events_tx, commands_tx }
+        Self {
+            events_tx,
+            commands_tx,
+        }
     }
 
     /// Get a raw broadcast sender for events (for direct use).
@@ -150,13 +153,10 @@ mod tests {
         bridge.publish(&event).await.unwrap();
 
         // Receive event
-        let received = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            stream.next(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
 
         match received {
             MonitorEvent::PaymentDetected(p) => {
@@ -178,13 +178,10 @@ mod tests {
         bridge.publish_command(&command).await.unwrap();
 
         // Receive command
-        let received = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            stream.next(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
 
         match received {
             MonitorCommand::WatchAddress(w) => {

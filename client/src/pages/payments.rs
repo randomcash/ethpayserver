@@ -53,9 +53,18 @@ fn format_date(iso: &str) -> String {
         let parts: Vec<&str> = date_part.split('-').collect();
         if parts.len() == 3 {
             let month = match parts[1] {
-                "01" => "Jan", "02" => "Feb", "03" => "Mar", "04" => "Apr",
-                "05" => "May", "06" => "Jun", "07" => "Jul", "08" => "Aug",
-                "09" => "Sep", "10" => "Oct", "11" => "Nov", "12" => "Dec",
+                "01" => "Jan",
+                "02" => "Feb",
+                "03" => "Mar",
+                "04" => "Apr",
+                "05" => "May",
+                "06" => "Jun",
+                "07" => "Jul",
+                "08" => "Aug",
+                "09" => "Sep",
+                "10" => "Oct",
+                "11" => "Nov",
+                "12" => "Dec",
                 _ => parts[1],
             };
             return format!("{} {}, {}", month, parts[2], parts[0]);
@@ -67,7 +76,7 @@ fn format_date(iso: &str) -> String {
 /// Truncate address/hash for display.
 fn truncate_hash(hash: &str, prefix: usize, suffix: usize) -> String {
     if hash.len() > prefix + suffix + 3 {
-        format!("{}...{}", &hash[..prefix], &hash[hash.len()-suffix..])
+        format!("{}...{}", &hash[..prefix], &hash[hash.len() - suffix..])
     } else {
         hash.to_string()
     }
@@ -98,11 +107,9 @@ pub fn PaymentsPage() -> impl IntoView {
     let (refresh, set_refresh) = signal(0u32);
 
     // Convert active filter to API status param
-    let status_param = Signal::derive(move || {
-        match active_filter.get().as_str() {
-            "all" => None,
-            other => Some(other.to_string()),
-        }
+    let status_param = Signal::derive(move || match active_filter.get().as_str() {
+        "all" => None,
+        other => Some(other.to_string()),
     });
 
     let payments_resource = LocalResource::new(move || {
@@ -116,12 +123,8 @@ pub fn PaymentsPage() -> impl IntoView {
             let Some(sid) = store_id else {
                 return Err(ApiError::Network("Please select a store first".to_string()));
             };
-            api.list_payments(
-                &sid,
-                status.as_deref(),
-                Some(PAGE_SIZE),
-                Some(offset),
-            ).await
+            api.list_payments(&sid, status.as_deref(), Some(PAGE_SIZE), Some(offset))
+                .await
         }
     });
 
@@ -296,7 +299,11 @@ fn PaymentRow(payment: Payment) -> impl IntoView {
     let invoice_id = truncate_hash(&payment.invoice_id, 8, 4);
     let invoice_link = payment.invoice_id.clone();
     let payment_link = payment.id.clone();
-    let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
+    let amount_display = format!(
+        "{} {}",
+        format_crypto_amount(&payment.amount, &payment.asset_symbol),
+        payment.asset_symbol
+    );
 
     view! {
         <tr class="payment-row">
@@ -345,7 +352,11 @@ fn PaymentCard(payment: Payment) -> impl IntoView {
     let invoice_id = truncate_hash(&payment.invoice_id, 8, 4);
     let invoice_link = payment.invoice_id.clone();
     let payment_link = payment.id.clone();
-    let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
+    let amount_display = format!(
+        "{} {}",
+        format_crypto_amount(&payment.amount, &payment.asset_symbol),
+        payment.asset_symbol
+    );
 
     view! {
         <div class="payment-card">
@@ -394,9 +405,7 @@ pub fn PaymentDetailPage() -> impl IntoView {
     let payment_resource = LocalResource::new(move || {
         let api = api.get();
         let id = payment_id();
-        async move {
-            api.get_payment(&id).await
-        }
+        async move { api.get_payment(&id).await }
     });
 
     view! {
@@ -428,13 +437,23 @@ fn PaymentDetailView(payment: Payment) -> impl IntoView {
     let network = chain_name(payment.chain_id);
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
-    let amount_display = format!("{} {}", format_crypto_amount(&payment.amount, &payment.asset_symbol), payment.asset_symbol);
+    let amount_display = format!(
+        "{} {}",
+        format_crypto_amount(&payment.amount, &payment.asset_symbol),
+        payment.asset_symbol
+    );
     let detected_display = format_date(&payment.detected_at);
-    let confirmed_display = payment.confirmed_at.as_ref()
+    let confirmed_display = payment
+        .confirmed_at
+        .as_ref()
         .map(|d| format_date(d))
         .unwrap_or_else(|| "Pending".to_string());
-    let from_address = payment.from_address.clone().unwrap_or_else(|| "Unknown".to_string());
-    let block_number = payment.block_number
+    let from_address = payment
+        .from_address
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
+    let block_number = payment
+        .block_number
         .map(|b| b.to_string())
         .unwrap_or_else(|| "Pending".to_string());
     let invoice_id = payment.invoice_id.clone();

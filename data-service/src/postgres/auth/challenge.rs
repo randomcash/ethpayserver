@@ -20,8 +20,8 @@ impl ChallengeRepository for PgDataService {
         email: &str,
         state: PasskeyRegistration,
     ) -> Result<()> {
-        let state_json = serde_json::to_value(&state)
-            .map_err(|e| AuthError::Repository(e.to_string()))?;
+        let state_json =
+            serde_json::to_value(&state).map_err(|e| AuthError::Repository(e.to_string()))?;
 
         sqlx::query(
             r#"
@@ -77,8 +77,8 @@ impl ChallengeRepository for PgDataService {
         user_id: UserId,
         state: PasskeyAuthentication,
     ) -> Result<()> {
-        let state_json = serde_json::to_value(&state)
-            .map_err(|e| AuthError::Repository(e.to_string()))?;
+        let state_json =
+            serde_json::to_value(&state).map_err(|e| AuthError::Repository(e.to_string()))?;
 
         sqlx::query(
             r#"
@@ -130,8 +130,8 @@ impl ChallengeRepository for PgDataService {
         challenge_id: uuid::Uuid,
         state: DiscoverableAuthentication,
     ) -> Result<()> {
-        let state_json = serde_json::to_value(&state)
-            .map_err(|e| AuthError::Repository(e.to_string()))?;
+        let state_json =
+            serde_json::to_value(&state).map_err(|e| AuthError::Repository(e.to_string()))?;
 
         sqlx::query(
             r#"
@@ -243,7 +243,7 @@ impl ChallengeRepository for PgDataService {
         .map_err(sqlx_to_auth_error)?;
 
         let r3 = sqlx::query(
-            "DELETE FROM wallet_challenges WHERE created_at < NOW() - INTERVAL '10 minutes'"
+            "DELETE FROM wallet_challenges WHERE created_at < NOW() - INTERVAL '10 minutes'",
         )
         .execute(&self.pool)
         .await
