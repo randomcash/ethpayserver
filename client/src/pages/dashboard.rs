@@ -188,8 +188,8 @@ fn DashboardCharts() -> impl IntoView {
 fn VolumeChart() -> impl IntoView {
     // Mock data for chart bars
     let data = vec![
-        35, 42, 28, 55, 48, 62, 45, 72, 58, 65, 78, 52, 88, 75, 92,
-        68, 85, 72, 95, 82, 78, 88, 92, 85, 98, 75, 82, 90, 95, 100,
+        35, 42, 28, 55, 48, 62, 45, 72, 58, 65, 78, 52, 88, 75, 92, 68, 85, 72, 95, 82, 78, 88, 92,
+        85, 98, 75, 82, 90, 95, 100,
     ];
     let max = 100.0_f64;
 
@@ -275,11 +275,41 @@ fn DashboardActivity() -> impl IntoView {
 #[component]
 fn RecentPayments() -> impl IntoView {
     let payments = vec![
-        ("0x1a2b...3c4d", "0.5 ETH", "$892.50", "Completed", "2 min ago"),
-        ("0x5e6f...7g8h", "150 USDC", "$150.00", "Completed", "15 min ago"),
-        ("0x9i0j...1k2l", "0.25 ETH", "$446.25", "Processing", "32 min ago"),
-        ("0x3m4n...5o6p", "500 USDT", "$500.00", "Completed", "1 hour ago"),
-        ("0x7q8r...9s0t", "0.1 ETH", "$178.50", "Completed", "2 hours ago"),
+        (
+            "0x1a2b...3c4d",
+            "0.5 ETH",
+            "$892.50",
+            "Completed",
+            "2 min ago",
+        ),
+        (
+            "0x5e6f...7g8h",
+            "150 USDC",
+            "$150.00",
+            "Completed",
+            "15 min ago",
+        ),
+        (
+            "0x9i0j...1k2l",
+            "0.25 ETH",
+            "$446.25",
+            "Processing",
+            "32 min ago",
+        ),
+        (
+            "0x3m4n...5o6p",
+            "500 USDT",
+            "$500.00",
+            "Completed",
+            "1 hour ago",
+        ),
+        (
+            "0x7q8r...9s0t",
+            "0.1 ETH",
+            "$178.50",
+            "Completed",
+            "2 hours ago",
+        ),
     ];
 
     view! {

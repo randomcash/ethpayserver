@@ -82,7 +82,9 @@ async fn integration_payment_get_awaiting_confirmation() {
     PaymentWriter::upsert(&service, &confirmed).await.unwrap();
 
     // Get awaiting confirmation
-    let awaiting = PaymentReader::get_awaiting_confirmation(&service).await.unwrap();
+    let awaiting = PaymentReader::get_awaiting_confirmation(&service)
+        .await
+        .unwrap();
 
     // Should include our unconfirmed payment
     assert!(awaiting.iter().any(|p| p.id == unconfirmed.id));

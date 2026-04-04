@@ -60,27 +60,29 @@
 //! ```
 
 pub mod bridge;
-pub mod events;
-mod source;
 mod chain;
 mod coordinator;
+pub mod events;
 mod handlers;
+mod source;
 
-pub use source::{BlockSource, BlockNotification, ChainHealth, LogFilter, SourceStatus};
 pub use source::rpc::{RpcBlockSource, RpcSourceConfig};
+pub use source::{BlockNotification, BlockSource, ChainHealth, LogFilter, SourceStatus};
 // pub use source::alchemy::AlchemyBlockSource;
 // pub use source::infura::InfuraBlockSource;
 
-pub use bridge::{CommandStream, EventBridge, EventStream, BridgeConfig, MemoryBridge, EVENTS_CHANNEL, COMMANDS_CHANNEL};
 #[cfg(feature = "redis")]
 pub use bridge::RedisBridge;
+pub use bridge::{
+    BridgeConfig, COMMANDS_CHANNEL, CommandStream, EVENTS_CHANNEL, EventBridge, EventStream,
+    MemoryBridge,
+};
 
 pub use chain::{ChainMonitor, ChainMonitorConfig, WatchedAddress};
-pub use coordinator::{MonitorCoordinator, CoordinatorConfig};
+pub use coordinator::{CoordinatorConfig, MonitorCoordinator};
 pub use events::{
-    MonitorEvent, MonitorCommand,
-    PaymentDetected, PaymentConfirmed, ReorgDetected,
-    WatchAddressCommand, UnwatchAddressCommand, GetStatusCommand,
-    AddressWatched, AddressUnwatched, StatusReport,
+    AddressUnwatched, AddressWatched, GetStatusCommand, MonitorCommand, MonitorEvent,
+    PaymentConfirmed, PaymentDetected, ReorgDetected, StatusReport, UnwatchAddressCommand,
+    WatchAddressCommand,
 };
 pub use handlers::{EventHandler, EventHandlerFn, LoggingHandler};

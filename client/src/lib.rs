@@ -8,6 +8,8 @@
 //!
 //! Can run standalone or be loaded as a module in the dashboard aggregator.
 
+#![allow(clippy::items_after_test_module)]
+
 pub mod api;
 pub mod app;
 pub mod components;
@@ -89,18 +91,22 @@ fn render_network_badge(_chain_id: u64, network_name: &str) -> leptos::prelude::
 
     view! {
         <NetworkBadge network=network />
-    }.into_any()
+    }
+    .into_any()
 }
 
 fn render_amount_details(chain_id: u64, _amount: &str) -> Option<leptos::prelude::AnyView> {
     use leptos::prelude::*;
 
     // Show gas info for EVM chains
-    Some(view! {
-        <div class="evm-amount-details">
-            <span class="evm-chain-info">"Chain ID: " {chain_id}</span>
-        </div>
-    }.into_any())
+    Some(
+        view! {
+            <div class="evm-amount-details">
+                <span class="evm-chain-info">"Chain ID: " {chain_id}</span>
+            </div>
+        }
+        .into_any(),
+    )
 }
 
 fn render_qr_code(payment_request: &str) -> leptos::prelude::AnyView {
@@ -111,20 +117,27 @@ fn render_qr_code(payment_request: &str) -> leptos::prelude::AnyView {
 
     view! {
         <QrCodeCard data=data label="Scan to pay" size=250 />
-    }.into_any()
+    }
+    .into_any()
 }
 
-fn render_wallet_actions(_payment_address: &str, _chain_id: u64) -> Option<leptos::prelude::AnyView> {
+fn render_wallet_actions(
+    _payment_address: &str,
+    _chain_id: u64,
+) -> Option<leptos::prelude::AnyView> {
     use leptos::prelude::*;
 
     // WalletConnect integration would go here
-    Some(view! {
-        <div class="evm-wallet-actions">
-            <button class="ps-btn ps-btn-primary">
-                "Connect Wallet"
-            </button>
-        </div>
-    }.into_any())
+    Some(
+        view! {
+            <div class="evm-wallet-actions">
+                <button class="ps-btn ps-btn-primary">
+                    "Connect Wallet"
+                </button>
+            </div>
+        }
+        .into_any(),
+    )
 }
 
 /// Initialize and mount the app (called when loaded as WASM module).

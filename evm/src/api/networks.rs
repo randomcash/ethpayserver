@@ -2,18 +2,18 @@
 //!
 //! These endpoints are public and do not require authentication.
 
+use auth::SessionService;
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
-use auth::SessionService;
 use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::{EvmDataServiceReader, EvmState};
-use crate::network::{ChainConfig, ALL_CHAINS};
 use crate::EvmNetwork;
+use crate::network::{ALL_CHAINS, ChainConfig};
 
 /// Network information.
 #[derive(Debug, Serialize, ToSchema)]
@@ -99,9 +99,12 @@ where
     D: EvmDataServiceReader + 'static,
     A: SessionService + 'static,
 {
-    let evm_network: EvmNetwork = network
-        .parse()
-        .map_err(|_| (StatusCode::NOT_FOUND, format!("network '{}' not found", network)))?;
+    let evm_network: EvmNetwork = network.parse().map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("network '{}' not found", network),
+        )
+    })?;
 
     let config = crate::get_chain_config(evm_network);
     Ok(Json(NetworkInfo::from(config)))

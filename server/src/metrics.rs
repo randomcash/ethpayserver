@@ -3,7 +3,7 @@
 //! Provides application-level metrics for monitoring invoice processing,
 //! payment detection, webhook delivery, and service health.
 
-use metrics::{counter, gauge, describe_counter, describe_gauge};
+use metrics::{counter, describe_counter, describe_gauge, gauge};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::sync::OnceLock;
 
@@ -117,10 +117,7 @@ fn describe_gauges() {
         "ethpayserver_registered_users",
         "Total number of registered users"
     );
-    describe_gauge!(
-        "ethpayserver_stores",
-        "Total number of stores"
-    );
+    describe_gauge!("ethpayserver_stores", "Total number of stores");
 }
 
 // ============================================================================
@@ -129,7 +126,8 @@ fn describe_gauges() {
 
 /// Record an invoice creation.
 pub fn record_invoice_created(currency: &str) {
-    counter!("ethpayserver_invoices_created_total", "currency" => currency.to_string()).increment(1);
+    counter!("ethpayserver_invoices_created_total", "currency" => currency.to_string())
+        .increment(1);
 }
 
 /// Record an invoice paid.
@@ -153,7 +151,8 @@ pub fn record_payment_detected(chain_id: u64, asset_symbol: &str) {
         "ethpayserver_payments_detected_total",
         "chain_id" => chain_id.to_string(),
         "asset_symbol" => asset_symbol.to_string()
-    ).increment(1);
+    )
+    .increment(1);
 }
 
 /// Record a payment confirmation.
@@ -162,7 +161,8 @@ pub fn record_payment_confirmed(chain_id: u64, asset_symbol: &str) {
         "ethpayserver_payments_confirmed_total",
         "chain_id" => chain_id.to_string(),
         "asset_symbol" => asset_symbol.to_string()
-    ).increment(1);
+    )
+    .increment(1);
 }
 
 /// Record a webhook queued.
@@ -170,7 +170,8 @@ pub fn record_webhook_queued(event_type: &str) {
     counter!(
         "ethpayserver_webhooks_queued_total",
         "event_type" => event_type.to_string()
-    ).increment(1);
+    )
+    .increment(1);
 }
 
 /// Record a successful webhook delivery.
@@ -178,7 +179,8 @@ pub fn record_webhook_delivered(event_type: &str) {
     counter!(
         "ethpayserver_webhooks_delivered_total",
         "event_type" => event_type.to_string()
-    ).increment(1);
+    )
+    .increment(1);
 }
 
 /// Record a failed webhook delivery.
@@ -186,7 +188,8 @@ pub fn record_webhook_failed(event_type: &str) {
     counter!(
         "ethpayserver_webhooks_failed_total",
         "event_type" => event_type.to_string()
-    ).increment(1);
+    )
+    .increment(1);
 }
 
 /// Update the webhook queue depth gauge.
@@ -199,7 +202,8 @@ pub fn set_watched_addresses(chain_id: u64, count: usize) {
     gauge!(
         "ethpayserver_watched_addresses",
         "chain_id" => chain_id.to_string()
-    ).set(count as f64);
+    )
+    .set(count as f64);
 }
 
 /// Update the registered users gauge.

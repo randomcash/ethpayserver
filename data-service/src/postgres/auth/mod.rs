@@ -9,9 +9,9 @@ mod user;
 mod wallet;
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod tests;
 
 use auth::{DeviceType, error::AuthError};
 

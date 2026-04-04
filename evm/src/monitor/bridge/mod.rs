@@ -15,9 +15,9 @@ mod memory;
 #[cfg(feature = "redis")]
 mod redis;
 
-pub use memory::MemoryBridge;
 #[cfg(feature = "redis")]
 pub use self::redis::RedisBridge;
+pub use memory::MemoryBridge;
 
 use super::events::{MonitorCommand, MonitorEvent};
 use crate::error::EvmResult;
@@ -82,9 +82,10 @@ pub trait EventBridge: Send + Sync {
 }
 
 /// Configuration for event bridges.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum BridgeConfig {
     /// In-memory bridge (for testing or single-process deployments).
+    #[default]
     Memory,
     /// Redis pub/sub bridge.
     #[cfg(feature = "redis")]
@@ -95,12 +96,6 @@ pub enum BridgeConfig {
         /// Channel for commands (API server -> monitor).
         commands_channel: String,
     },
-}
-
-impl Default for BridgeConfig {
-    fn default() -> Self {
-        Self::Memory
-    }
 }
 
 impl BridgeConfig {
@@ -133,7 +128,11 @@ impl BridgeConfig {
         match self {
             Self::Memory => Ok(Box::new(MemoryBridge::new())),
             #[cfg(feature = "redis")]
-            Self::Redis { url, events_channel, commands_channel } => {
+            Self::Redis {
+                url,
+                events_channel,
+                commands_channel,
+            } => {
                 let bridge = RedisBridge::new(&url, &events_channel, &commands_channel).await?;
                 Ok(Box::new(bridge))
             }

@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 
 use crate::{
     InvoiceQueryParams, InvoiceReader, InvoiceWriter, RepositoryError, RepositoryResult,
@@ -13,8 +13,8 @@ use crate::{
 };
 use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
 
-use super::conversions::{status_to_db, try_db_to_status};
 use super::PgDataService;
+use super::conversions::{status_to_db, try_db_to_status};
 
 #[async_trait]
 impl InvoiceReader for PgDataService {
@@ -39,7 +39,10 @@ impl InvoiceReader for PgDataService {
         }
     }
 
-    async fn query(&self, params: &InvoiceQueryParams) -> RepositoryResult<(i64, Vec<InvoiceData>)> {
+    async fn query(
+        &self,
+        params: &InvoiceQueryParams,
+    ) -> RepositoryResult<(i64, Vec<InvoiceData>)> {
         // Build dynamic query for filtering
         let mut conditions = Vec::new();
         let mut bind_idx = 1;
@@ -138,8 +141,7 @@ impl InvoiceReader for PgDataService {
             .await
             .map_err(sqlx_to_repo_error)?;
 
-        let invoices: Result<Vec<InvoiceData>, _> =
-            rows.iter().map(try_row_to_invoice).collect();
+        let invoices: Result<Vec<InvoiceData>, _> = rows.iter().map(try_row_to_invoice).collect();
 
         Ok((total, invoices?))
     }
@@ -159,8 +161,7 @@ impl InvoiceReader for PgDataService {
         .await
         .map_err(sqlx_to_repo_error)?;
 
-        let invoices: Result<Vec<InvoiceData>, _> =
-            rows.iter().map(try_row_to_invoice).collect();
+        let invoices: Result<Vec<InvoiceData>, _> = rows.iter().map(try_row_to_invoice).collect();
 
         invoices
     }

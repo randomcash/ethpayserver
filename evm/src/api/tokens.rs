@@ -2,17 +2,17 @@
 //!
 //! All endpoints require admin authentication.
 
+use auth::SessionService;
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
-use auth::SessionService;
 use serde::{Deserialize, Serialize};
 use types::{Network, TokenData, TokenQueryParams, TokenReader, TokenWriter};
 use utoipa::{IntoParams, ToSchema};
 
-use super::{extractors::AdminAuth, EvmDataService, EvmDataServiceReader, EvmState};
+use super::{EvmDataService, EvmDataServiceReader, EvmState, extractors::AdminAuth};
 use crate::EvmTokenStandard;
 
 /// Request to create a new token.

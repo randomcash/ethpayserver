@@ -6,8 +6,8 @@
 
 mod watched_address;
 
-use redis::aio::ConnectionManager;
 use redis::Client;
+use redis::aio::ConnectionManager;
 
 use crate::RepositoryError;
 
