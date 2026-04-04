@@ -294,14 +294,11 @@ fn ApiKeysTab() -> impl IntoView {
         };
         set_loading.set(true);
         wasm_bindgen_futures::spawn_local(async move {
-            match client.create_api_key(&request).await {
-                Ok(resp) => {
-                    set_created_key.set(Some(resp));
-                    set_show_create.set(false);
-                    set_new_key_name.set(String::new());
-                    set_version.update(|v| *v += 1);
-                }
-                Err(_) => {}
+            if let Ok(resp) = client.create_api_key(&request).await {
+                set_created_key.set(Some(resp));
+                set_show_create.set(false);
+                set_new_key_name.set(String::new());
+                set_version.update(|v| *v += 1);
             }
             set_loading.set(false);
         });
