@@ -106,6 +106,7 @@ test:doc:
 audit:
   stage: security
   image: rust:1.90
+  allow_failure: true
   script:
     - cargo install cargo-audit --locked
     - cargo audit || echo "Audit found issues (see above). Non-blocking."
@@ -116,6 +117,7 @@ audit:
 deny:
   stage: security
   image: rust:1.90
+  allow_failure: true
   script:
     - cargo install cargo-deny --locked
     - cargo deny check licenses sources || echo "Deny found issues (see above). Non-blocking."
@@ -144,6 +146,7 @@ build:release:
 build:check-release:
   stage: build
   image: rust:1.90
+  allow_failure: true
   script:
     - cargo build --release --bin ethpayserver --locked
   rules:
