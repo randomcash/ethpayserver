@@ -8,7 +8,7 @@ use super::{
     ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload, CreateInvoiceRequest,
     CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice, InvoiceListResponse,
     InvoiceStatusResponse, Payment, PaymentListResponse, Store, StorePaymentMethod, StoreWebhook,
-    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, Wallet,
+    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, UserInfo, Wallet,
 };
 
 /// API client errors.
@@ -168,6 +168,15 @@ impl EvmApiClient {
             .json()
             .await
             .map_err(|e| ApiError::Parse(e.to_string()))
+    }
+
+    // =========================================================================
+    // Auth / User
+    // =========================================================================
+
+    /// Get the current authenticated user's info.
+    pub async fn get_me(&self) -> Result<UserInfo, ApiError> {
+        self.get("/api/auth/me").await
     }
 
     // =========================================================================
