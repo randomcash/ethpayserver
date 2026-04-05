@@ -24,6 +24,7 @@ use super::webhook::{
     WebhookDataService, WebhookEventType, WebhookJob, WebhookPayload, WebhookPaymentInfo,
     WebhookService,
 };
+use crate::api::ws::{StatusUpdate, WsBroadcast};
 use crate::metrics;
 
 /// Trait for data service requirements in EventConsumer.
@@ -65,6 +66,7 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     data_service: Arc<D>,
     cleanup_service: Option<Arc<InvoiceCleanupService<D, M, W>>>,
     webhook_service: Option<Arc<WebhookService<W>>>,
+    ws_broadcast: Option<Arc<WsBroadcast>>,
 }
 
 impl<
@@ -79,12 +81,14 @@ impl<
         data_service: Arc<D>,
         cleanup_service: Option<Arc<InvoiceCleanupService<D, M, W>>>,
         webhook_service: Option<Arc<WebhookService<W>>>,
+        ws_broadcast: Option<Arc<WsBroadcast>>,
     ) -> Self {
         Self {
             bridge,
             data_service,
             cleanup_service,
             webhook_service,
+            ws_broadcast,
         }
     }
 
@@ -342,6 +346,16 @@ impl<
 
         PaymentWriter::upsert(&*self.data_service, &payment).await?;
 
+        // Broadcast payment detected via WebSocket
+        if let Some(ref ws) = self.ws_broadcast {
+            ws.send(StatusUpdate::PaymentUpdate {
+                payment_id: payment.id.to_string(),
+                invoice_id: event.invoice_id.to_string(),
+                status: "detected".to_string(),
+                amount: payment.credited_amount.clone(),
+            });
+        }
+
         // Queue webhook notification
         let invoice_id = InvoiceId::from_string(event.invoice_id.to_string());
         if let Ok(Some(invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
@@ -430,6 +444,14 @@ impl<
                     );
                     metrics::record_invoice_paid();
 
+                    // Broadcast invoice paid via WebSocket
+                    if let Some(ref ws) = self.ws_broadcast {
+                        ws.send(StatusUpdate::InvoiceStatus {
+                            invoice_id: event.invoice_id.to_string(),
+                            status: InvoiceStatus::Paid.to_string(),
+                        });
+                    }
+
                     // Queue webhook notification for payment confirmed
                     if let Ok(Some(updated_invoice)) =
                         InvoiceReader::get(&*self.data_service, &invoice_id).await
@@ -459,6 +481,14 @@ impl<
                         amount_expected = %amount_expected,
                         "Late payment received on expired invoice - requires merchant review"
                     );
+
+                    // Broadcast late payment via WebSocket
+                    if let Some(ref ws) = self.ws_broadcast {
+                        ws.send(StatusUpdate::InvoiceStatus {
+                            invoice_id: event.invoice_id.to_string(),
+                            status: InvoiceStatus::LatePaid.to_string(),
+                        });
+                    }
 
                     // Queue webhook notification for late payment
                     if let Ok(Some(updated_invoice)) =
@@ -657,6 +687,14 @@ impl<
             };
 
             InvoiceWriter::update_status(&*self.data_service, &invoice_id, new_status).await?;
+
+            // Broadcast reorg-induced status change via WebSocket
+            if let Some(ref ws) = self.ws_broadcast {
+                ws.send(StatusUpdate::InvoiceStatus {
+                    invoice_id: invoice_uuid.to_string(),
+                    status: new_status.to_string(),
+                });
+            }
 
             tracing::info!(
                 invoice_id = %invoice_uuid,
@@ -864,7 +902,7 @@ mod tests {
         let bridge = Arc::new(MemoryBridge::new());
 
         let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -909,7 +947,7 @@ mod tests {
         let bridge = Arc::new(MemoryBridge::new());
 
         let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -965,7 +1003,7 @@ mod tests {
         let bridge = Arc::new(MemoryBridge::new());
 
         let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1044,7 +1082,7 @@ mod tests {
         let bridge = Arc::new(MemoryBridge::new());
 
         let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1117,7 +1155,7 @@ mod tests {
         let bridge = Arc::new(MemoryBridge::new());
 
         let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1194,7 +1232,7 @@ mod tests {
         let bridge = Arc::new(MemoryBridge::new());
 
         let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1295,7 +1333,7 @@ mod tests {
         let bridge = Arc::new(MemoryBridge::new());
 
         let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None);
+            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
