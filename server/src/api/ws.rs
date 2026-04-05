@@ -145,3 +145,107 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<StatusUpda
         _ = &mut recv_task => send_task.abort(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status_update_serde_invoice_status() {
+        let update = StatusUpdate::InvoiceStatus {
+            invoice_id: "inv_1".to_string(),
+            status: "paid".to_string(),
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["type"], "invoice_status");
+        assert_eq!(json["invoice_id"], "inv_1");
+        assert_eq!(json["status"], "paid");
+
+        let parsed: StatusUpdate = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(parsed, StatusUpdate::InvoiceStatus { invoice_id, status } if invoice_id == "inv_1" && status == "paid")
+        );
+    }
+
+    #[test]
+    fn test_status_update_serde_payment_update() {
+        let update = StatusUpdate::PaymentUpdate {
+            payment_id: "pay_1".to_string(),
+            invoice_id: "inv_1".to_string(),
+            status: "confirmed".to_string(),
+            amount: Some("1.5".to_string()),
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["type"], "payment_update");
+        assert_eq!(json["payment_id"], "pay_1");
+        assert_eq!(json["amount"], "1.5");
+
+        // amount = None
+        let update_no_amount = StatusUpdate::PaymentUpdate {
+            payment_id: "pay_2".to_string(),
+            invoice_id: "inv_2".to_string(),
+            status: "detecting".to_string(),
+            amount: None,
+        };
+        let json2 = serde_json::to_value(&update_no_amount).unwrap();
+        assert!(json2.get("amount").unwrap().is_null());
+    }
+
+    #[test]
+    fn test_status_update_serde_connected_and_ping() {
+        let connected_json = serde_json::to_string(&StatusUpdate::Connected).unwrap();
+        assert_eq!(connected_json, r#"{"type":"connected"}"#);
+
+        let ping_json = serde_json::to_string(&StatusUpdate::Ping).unwrap();
+        assert_eq!(ping_json, r#"{"type":"ping"}"#);
+
+        let parsed: StatusUpdate = serde_json::from_str(&connected_json).unwrap();
+        assert!(matches!(parsed, StatusUpdate::Connected));
+    }
+
+    #[test]
+    fn test_ws_query_deserialize() {
+        let json = serde_json::json!({ "token": "abc-123" });
+        let query: WsQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(query.token, "abc-123");
+    }
+
+    #[test]
+    fn test_ws_broadcast_send_no_receivers() {
+        let broadcast = WsBroadcast::new(16);
+        // Should not panic even with no receivers
+        broadcast.send(StatusUpdate::Ping);
+    }
+
+    #[tokio::test]
+    async fn test_ws_broadcast_send_receive() {
+        let broadcast = WsBroadcast::new(16);
+        let mut rx = broadcast.subscribe();
+
+        broadcast.send(StatusUpdate::Connected);
+        broadcast.send(StatusUpdate::InvoiceStatus {
+            invoice_id: "inv_1".to_string(),
+            status: "paid".to_string(),
+        });
+
+        let msg1 = rx.recv().await.unwrap();
+        assert!(matches!(msg1, StatusUpdate::Connected));
+
+        let msg2 = rx.recv().await.unwrap();
+        assert!(
+            matches!(msg2, StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "inv_1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ws_broadcast_multiple_subscribers() {
+        let broadcast = WsBroadcast::new(16);
+        let mut rx1 = broadcast.subscribe();
+        let mut rx2 = broadcast.subscribe();
+
+        broadcast.send(StatusUpdate::Ping);
+
+        assert!(matches!(rx1.recv().await.unwrap(), StatusUpdate::Ping));
+        assert!(matches!(rx2.recv().await.unwrap(), StatusUpdate::Ping));
+    }
+}

@@ -140,3 +140,80 @@ impl Drop for WebSocketService {
         self.disconnect();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status_update_serde_invoice_status() {
+        let update = StatusUpdate::InvoiceStatus {
+            invoice_id: "inv_1".to_string(),
+            status: "paid".to_string(),
+        };
+        let json = serde_json::to_string(&update).unwrap();
+        let parsed: StatusUpdate = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(parsed, StatusUpdate::InvoiceStatus { invoice_id, status } if invoice_id == "inv_1" && status == "paid")
+        );
+    }
+
+    #[test]
+    fn test_status_update_serde_payment_update_with_amount() {
+        let update = StatusUpdate::PaymentUpdate {
+            payment_id: "pay_1".to_string(),
+            invoice_id: "inv_1".to_string(),
+            status: "confirmed".to_string(),
+            amount: Some("1.5".to_string()),
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["type"], "payment_update");
+        assert_eq!(json["amount"], "1.5");
+    }
+
+    #[test]
+    fn test_status_update_serde_payment_update_without_amount() {
+        let update = StatusUpdate::PaymentUpdate {
+            payment_id: "pay_2".to_string(),
+            invoice_id: "inv_2".to_string(),
+            status: "detecting".to_string(),
+            amount: None,
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert!(json.get("amount").unwrap().is_null());
+    }
+
+    #[test]
+    fn test_status_update_connected_and_ping() {
+        assert_eq!(
+            serde_json::to_string(&StatusUpdate::Connected).unwrap(),
+            r#"{"type":"connected"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&StatusUpdate::Ping).unwrap(),
+            r#"{"type":"ping"}"#
+        );
+    }
+
+    #[test]
+    fn test_status_update_roundtrip_all_variants() {
+        let variants = vec![
+            StatusUpdate::InvoiceStatus {
+                invoice_id: "i".to_string(),
+                status: "s".to_string(),
+            },
+            StatusUpdate::PaymentUpdate {
+                payment_id: "p".to_string(),
+                invoice_id: "i".to_string(),
+                status: "s".to_string(),
+                amount: None,
+            },
+            StatusUpdate::Connected,
+            StatusUpdate::Ping,
+        ];
+        for v in variants {
+            let json = serde_json::to_string(&v).unwrap();
+            let _: StatusUpdate = serde_json::from_str(&json).unwrap();
+        }
+    }
+}
