@@ -135,3 +135,69 @@ where
         total_stores,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dashboard_stats_serialization() {
+        let stats = DashboardStats {
+            total_invoices: 42,
+            pending_invoices: 5,
+            paid_invoices: 30,
+            expired_invoices: 7,
+            total_payments: 35,
+            total_stores: 3,
+        };
+        let json = serde_json::to_value(&stats).unwrap();
+        assert_eq!(json["total_invoices"], 42);
+        assert_eq!(json["pending_invoices"], 5);
+        assert_eq!(json["paid_invoices"], 30);
+        assert_eq!(json["expired_invoices"], 7);
+        assert_eq!(json["total_payments"], 35);
+        assert_eq!(json["total_stores"], 3);
+    }
+
+    #[test]
+    fn test_dashboard_stats_zero_stores() {
+        let stats = DashboardStats {
+            total_invoices: 0,
+            pending_invoices: 0,
+            paid_invoices: 0,
+            expired_invoices: 0,
+            total_payments: 0,
+            total_stores: 0,
+        };
+        let json = serde_json::to_value(&stats).unwrap();
+        assert_eq!(json["total_stores"], 0);
+        assert_eq!(json["total_invoices"], 0);
+    }
+
+    #[test]
+    fn test_dashboard_stats_field_names_match_client() {
+        // Verify the JSON field names match what the client expects
+        let stats = DashboardStats {
+            total_invoices: 1,
+            pending_invoices: 2,
+            paid_invoices: 3,
+            expired_invoices: 4,
+            total_payments: 5,
+            total_stores: 6,
+        };
+        let json = serde_json::to_value(&stats).unwrap();
+        let obj = json.as_object().unwrap();
+        let expected_fields = [
+            "total_invoices",
+            "pending_invoices",
+            "paid_invoices",
+            "expired_invoices",
+            "total_payments",
+            "total_stores",
+        ];
+        for field in &expected_fields {
+            assert!(obj.contains_key(*field), "missing field: {}", field);
+        }
+        assert_eq!(obj.len(), expected_fields.len(), "unexpected extra fields");
+    }
+}

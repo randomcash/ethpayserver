@@ -512,7 +512,45 @@ mod tests {
 
         assert_eq!(stats.total_invoices, 0);
         assert_eq!(stats.pending_invoices, 0);
+        assert_eq!(stats.paid_invoices, 0);
+        assert_eq!(stats.expired_invoices, 0);
         assert_eq!(stats.total_payments, 0);
+        assert_eq!(stats.total_stores, 0);
+    }
+
+    #[test]
+    fn test_dashboard_stats_deserialize_from_backend() {
+        let json = serde_json::json!({
+            "total_invoices": 42,
+            "pending_invoices": 5,
+            "paid_invoices": 30,
+            "expired_invoices": 7,
+            "total_payments": 35,
+            "total_stores": 3
+        });
+        let stats: DashboardStats = serde_json::from_value(json).unwrap();
+        assert_eq!(stats.total_invoices, 42);
+        assert_eq!(stats.pending_invoices, 5);
+        assert_eq!(stats.paid_invoices, 30);
+        assert_eq!(stats.expired_invoices, 7);
+        assert_eq!(stats.total_payments, 35);
+        assert_eq!(stats.total_stores, 3);
+    }
+
+    #[test]
+    fn test_dashboard_stats_roundtrip() {
+        let stats = DashboardStats {
+            total_invoices: 100,
+            pending_invoices: 10,
+            paid_invoices: 80,
+            expired_invoices: 10,
+            total_payments: 95,
+            total_stores: 2,
+        };
+        let json = serde_json::to_value(&stats).unwrap();
+        let parsed: DashboardStats = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.total_invoices, 100);
+        assert_eq!(parsed.total_stores, 2);
     }
 
     // =========================================================================
