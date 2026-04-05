@@ -10,6 +10,7 @@ use auth::AuthenticationService;
 
 use crate::state::PgAppState;
 
+pub mod dashboard;
 pub mod extractors;
 pub mod health;
 pub mod invoices;
@@ -68,6 +69,8 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         // Payments
         invoices::list_payments,
         invoices::get_payment,
+        // Dashboard
+        dashboard::get_stats,
         // Users
         users::list_api_keys,
         users::create_api_key,
@@ -97,6 +100,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::PaymentListResponse,
         invoices::PaymentOptionResponse,
         invoices::InvoiceStatusResponse,
+        dashboard::DashboardStats,
         users::ApiKeyListResponse,
         users::ApiKeyInfoResponse,
         users::CreateApiKeyPayload,
@@ -110,6 +114,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         (name = "tokens", description = "Token management (from EVM API)"),
         (name = "networks", description = "Network information (from EVM API)"),
         (name = "auth", description = "Authentication (from Auth API)"),
+        (name = "dashboard", description = "Dashboard statistics"),
         (name = "users", description = "User management (API keys)"),
     )
 )]
@@ -196,6 +201,11 @@ where
         .route("/{payment_id}", get(invoices::get_payment::<A>))
         .with_state(state.clone());
 
+    // Dashboard endpoint
+    let dashboard_routes = Router::new()
+        .route("/stats", get(dashboard::get_stats::<A>))
+        .with_state(state.clone());
+
     // User endpoints (API keys)
     let user_routes = Router::new()
         .route("/api-keys", get(users::list_api_keys::<A>))
@@ -216,6 +226,7 @@ where
         .nest("/wallets", wallet_routes)
         .nest("/invoices", invoice_routes)
         .nest("/payments", payment_routes)
+        .nest("/dashboard", dashboard_routes)
         .nest("/users", user_routes)
         .nest("/auth", auth_routes)
         .nest("/evm", evm_routes);

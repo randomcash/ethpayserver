@@ -1,5 +1,6 @@
 //! Dashboard page - Stripe-inspired overview of EVM payment activity.
 
+use crate::api::EvmApiClient;
 use leptos::prelude::*;
 use leptos_router::components::A;
 
@@ -39,40 +40,78 @@ fn DashboardHeader() -> impl IntoView {
     }
 }
 
-/// Key metrics section.
+/// Key metrics section — fetches real data from the dashboard stats API.
 #[component]
 fn DashboardMetrics() -> impl IntoView {
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+
+    let stats_resource = LocalResource::new(move || {
+        let client = api.get();
+        async move { client.get_dashboard_stats().await.ok() }
+    });
+
     view! {
-        <div class="metrics-grid">
-            <MetricCard
-                label="Gross volume"
-                value="$45,231.89"
-                change="+20.1%"
-                trend="up"
-                period="vs last month"
-            />
-            <MetricCard
-                label="Successful payments"
-                value="142"
-                change="+12.5%"
-                trend="up"
-                period="vs last month"
-            />
-            <MetricCard
-                label="Pending invoices"
-                value="12"
-                change="+3"
-                trend="neutral"
-                period="awaiting payment"
-            />
-            <MetricCard
-                label="Average payment"
-                value="$318.53"
-                change="-2.4%"
-                trend="down"
-                period="vs last month"
-            />
-        </div>
+        <Suspense fallback=move || view! {
+            <div class="metrics-grid">
+                <MetricCard label="Total invoices" value="--" change="" trend="neutral" period="loading" />
+                <MetricCard label="Paid invoices" value="--" change="" trend="neutral" period="loading" />
+                <MetricCard label="Pending invoices" value="--" change="" trend="neutral" period="loading" />
+                <MetricCard label="Total payments" value="--" change="" trend="neutral" period="loading" />
+            </div>
+        }>
+            {move || Suspend::new(async move {
+                match stats_resource.await {
+                    Some(stats) => {
+                        let total_inv = stats.total_invoices.to_string();
+                        let paid = stats.paid_invoices.to_string();
+                        let pending = stats.pending_invoices.to_string();
+                        let payments = stats.total_payments.to_string();
+                        let stores_label = format!("{} stores", stats.total_stores);
+
+                        view! {
+                            <div class="metrics-grid">
+                                <MetricCard
+                                    label="Total invoices"
+                                    value=total_inv
+                                    change=""
+                                    trend="neutral"
+                                    period=stores_label.clone()
+                                />
+                                <MetricCard
+                                    label="Paid invoices"
+                                    value=paid
+                                    change=""
+                                    trend="up"
+                                    period="completed"
+                                />
+                                <MetricCard
+                                    label="Pending invoices"
+                                    value=pending
+                                    change=""
+                                    trend="neutral"
+                                    period="awaiting payment"
+                                />
+                                <MetricCard
+                                    label="Total payments"
+                                    value=payments
+                                    change=""
+                                    trend="up"
+                                    period="received"
+                                />
+                            </div>
+                        }.into_any()
+                    }
+                    None => view! {
+                        <div class="metrics-grid">
+                            <MetricCard label="Total invoices" value="--" change="" trend="neutral" period="unavailable" />
+                            <MetricCard label="Paid invoices" value="--" change="" trend="neutral" period="unavailable" />
+                            <MetricCard label="Pending invoices" value="--" change="" trend="neutral" period="unavailable" />
+                            <MetricCard label="Total payments" value="--" change="" trend="neutral" period="unavailable" />
+                        </div>
+                    }.into_any(),
+                }
+            })}
+        </Suspense>
     }
 }
 
@@ -80,10 +119,10 @@ fn DashboardMetrics() -> impl IntoView {
 #[component]
 fn MetricCard(
     label: &'static str,
-    value: &'static str,
+    #[prop(into)] value: String,
     change: &'static str,
     trend: &'static str,
-    period: &'static str,
+    #[prop(into)] period: String,
 ) -> impl IntoView {
     let trend_class = match trend {
         "up" => "metric-trend metric-trend-up",
