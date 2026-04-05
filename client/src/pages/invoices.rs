@@ -7,10 +7,10 @@ use leptos_router::components::A;
 use leptos_router::hooks::use_params_map;
 
 use crate::api::{
-    ApiError, CreateInvoiceRequest, EvmApiClient, Invoice, InvoiceStatusExt, InvoiceStatusResponse,
-    Payment,
+    ApiError, EvmApiClient, Invoice, InvoiceStatusExt, InvoiceStatusResponse, Payment,
 };
 use crate::app::StoreContext;
+use crate::components::CreateInvoiceSignal;
 
 /// Helper to get chain name from chain ID.
 fn chain_name(chain_id: u64) -> &'static str {
@@ -73,8 +73,16 @@ pub fn InvoicesPage() -> impl IntoView {
     // Refresh counter for manual re-fetch
     let (refresh, set_refresh) = signal(0u32);
 
-    // Create invoice modal state
-    let (show_create_modal, set_show_create_modal) = signal(false);
+    // Use the shared create-invoice modal signal
+    let create_invoice_signal =
+        use_context::<CreateInvoiceSignal>().expect("CreateInvoiceSignal must be provided");
+
+    // Refresh the list when the modal closes (invoice may have been created)
+    Effect::new(move || {
+        if !create_invoice_signal.show.get() {
+            set_refresh.update(|n| *n += 1);
+        }
+    });
 
     // Convert active filter to API status param
     let status_param = Signal::derive(move || match active_filter.get().as_str() {
@@ -119,7 +127,7 @@ pub fn InvoicesPage() -> impl IntoView {
                         <IconExport />
                         "Export"
                     </button>
-                    <button class="btn btn-primary btn-sm" on:click=move |_| set_show_create_modal.set(true)>
+                    <button class="btn btn-primary btn-sm" on:click=move |_| create_invoice_signal.open()>
                         <IconPlus />
                         "Create invoice"
                     </button>
@@ -260,156 +268,9 @@ pub fn InvoicesPage() -> impl IntoView {
                 })}
             </Suspense>
 
-            // Create Invoice Modal
-            <CreateInvoiceModal
-                show=show_create_modal
-                set_show=set_show_create_modal
-                on_created=move || set_refresh.update(|n| *n += 1)
-            />
+            // Create Invoice Modal is rendered at the layout level (app.rs)
+            // via the shared CreateInvoiceSignal context.
         </div>
-    }
-}
-
-/// Create invoice modal form.
-#[component]
-fn CreateInvoiceModal(
-    show: ReadSignal<bool>,
-    set_show: WriteSignal<bool>,
-    on_created: impl Fn() + 'static + Clone + Send + Sync,
-) -> impl IntoView {
-    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
-    let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
-
-    let (amount, set_amount) = signal(String::new());
-    let (currency, set_currency) = signal("USD".to_string());
-    let (expiration_minutes, set_expiration_minutes) = signal("15".to_string());
-    let (error, set_error) = signal(Option::<String>::None);
-    let (submitting, set_submitting) = signal(false);
-
-    let on_submit = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
-        let api = api.get();
-        let store_id = store_ctx.selected_store_id.get();
-        let amount_val = amount.get();
-        let currency_val = currency.get();
-        let exp_min = expiration_minutes.get();
-        let on_created = on_created.clone();
-
-        set_error.set(None);
-        set_submitting.set(true);
-
-        leptos::task::spawn_local(async move {
-            let Some(store_id) = store_id else {
-                set_error.set(Some("Please select a store first".to_string()));
-                set_submitting.set(false);
-                return;
-            };
-
-            if amount_val.is_empty() {
-                set_error.set(Some("Amount is required".to_string()));
-                set_submitting.set(false);
-                return;
-            }
-
-            let exp_seconds = exp_min.parse::<u64>().ok().map(|m| m * 60);
-
-            let request = CreateInvoiceRequest {
-                store_id,
-                currency: currency_val,
-                amount: amount_val,
-                expiration_seconds: exp_seconds,
-                metadata: None,
-                webhook_url: None,
-                redirect_url: None,
-            };
-
-            match api.create_invoice(&request).await {
-                Ok(_invoice) => {
-                    set_show.set(false);
-                    set_amount.set(String::new());
-                    set_currency.set("USD".to_string());
-                    set_expiration_minutes.set("15".to_string());
-                    on_created();
-                }
-                Err(e) => {
-                    set_error.set(Some(e.to_string()));
-                }
-            }
-            set_submitting.set(false);
-        });
-    };
-
-    move || {
-        if !show.get() {
-            return None;
-        }
-        Some(view! {
-            <div class="modal-overlay" on:click=move |_| set_show.set(false)>
-                <div class="modal" on:click=|ev| ev.stop_propagation()>
-                    <div class="modal-header">
-                        <h2>"Create Invoice"</h2>
-                        <button class="btn btn-ghost btn-sm btn-icon" on:click=move |_| set_show.set(false)>
-                            <IconClose />
-                        </button>
-                    </div>
-                    <form on:submit=on_submit.clone()>
-                        <div class="modal-body">
-                            {move || error.get().map(|e| view! {
-                                <div class="form-error">{e}</div>
-                            })}
-
-                            <div class="form-group">
-                                <label for="amount">"Amount"</label>
-                                <input
-                                    type="text"
-                                    id="amount"
-                                    class="form-input"
-                                    placeholder="100.00"
-                                    prop:value=move || amount.get()
-                                    on:input=move |ev| set_amount.set(event_target_value(&ev))
-                                    required
-                                />
-                            </div>
-
-                            <div class="form-group">
-                                <label for="currency">"Currency"</label>
-                                <select
-                                    id="currency"
-                                    class="form-input"
-                                    prop:value=move || currency.get()
-                                    on:change=move |ev| set_currency.set(event_target_value(&ev))
-                                >
-                                    <option value="USD">"USD"</option>
-                                    <option value="EUR">"EUR"</option>
-                                    <option value="ETH">"ETH"</option>
-                                    <option value="BTC">"BTC"</option>
-                                </select>
-                            </div>
-
-                            <div class="form-group">
-                                <label for="expiration">"Expiration (minutes)"</label>
-                                <input
-                                    type="number"
-                                    id="expiration"
-                                    class="form-input"
-                                    placeholder="15"
-                                    prop:value=move || expiration_minutes.get()
-                                    on:input=move |ev| set_expiration_minutes.set(event_target_value(&ev))
-                                />
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary btn-sm" on:click=move |_| set_show.set(false)>
-                                "Cancel"
-                            </button>
-                            <button type="submit" class="btn btn-primary btn-sm" disabled=move || submitting.get()>
-                                {move || if submitting.get() { "Creating..." } else { "Create Invoice" }}
-                            </button>
-                        </div>
-                    </form>
-                </div>
-            </div>
-        })
     }
 }
 

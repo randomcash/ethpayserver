@@ -11,6 +11,7 @@ use ui_kit::hooks::use_storage::{get_local, set_local};
 use ui_kit::{AuthGuard, AuthProvider, LoginPage, RegisterPage, use_auth};
 
 use crate::api::{EvmApiClient, Store};
+use crate::components::{CreateInvoiceModal, CreateInvoiceSignal};
 use crate::pages::{
     DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage, PaymentsPage,
     SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage, WalletsPage,
@@ -203,6 +204,14 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
     };
     provide_context(store_ctx);
 
+    // Create invoice modal signal — shared between header button and invoices page.
+    let (show_create_invoice, set_show_create_invoice) = signal(false);
+    let create_invoice_signal = CreateInvoiceSignal {
+        show: show_create_invoice,
+        set_show: set_show_create_invoice,
+    };
+    provide_context(create_invoice_signal);
+
     view! {
         <AuthGuard redirect_to="/login".to_string()>
             <div class="app-layout">
@@ -220,6 +229,7 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
                     </main>
                 </div>
             </div>
+            <CreateInvoiceModal />
         </AuthGuard>
     }
 }
@@ -422,6 +432,9 @@ fn MainHeader<F>(on_menu_click: F) -> impl IntoView
 where
     F: Fn(web_sys::MouseEvent) + 'static,
 {
+    let create_invoice =
+        use_context::<CreateInvoiceSignal>().expect("CreateInvoiceSignal must be provided");
+
     view! {
         <header class="main-header">
             <div class="main-header-inner">
@@ -439,7 +452,7 @@ where
                     <button class="btn btn-ghost btn-sm">
                         <IconBell />
                     </button>
-                    <button class="btn btn-primary btn-sm">
+                    <button class="btn btn-primary btn-sm" on:click=move |_| create_invoice.open()>
                         <span>"Create Invoice"</span>
                     </button>
                 </div>
