@@ -7,6 +7,8 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 
+use types::currency::{EXPIRATION_PRESETS, INVOICE_CURRENCY_OPTIONS};
+
 use crate::api::{CreateInvoiceRequest, EvmApiClient};
 use crate::app::StoreContext;
 
@@ -22,26 +24,6 @@ impl CreateInvoiceSignal {
         self.set_show.set(true);
     }
 }
-
-/// Supported invoice currencies.
-const CURRENCIES: &[(&str, &str)] = &[
-    ("USD", "USD - US Dollar"),
-    ("EUR", "EUR - Euro"),
-    ("GBP", "GBP - British Pound"),
-    ("ETH", "ETH - Ether"),
-    ("BTC", "BTC - Bitcoin"),
-    ("USDC", "USDC"),
-    ("USDT", "USDT"),
-    ("DAI", "DAI"),
-];
-
-/// Expiration presets in minutes.
-const EXPIRATION_PRESETS: &[(&str, &str)] = &[
-    ("15", "15 minutes"),
-    ("30", "30 minutes"),
-    ("60", "1 hour"),
-    ("1440", "24 hours"),
-];
 
 /// Create invoice modal form.
 ///
@@ -236,7 +218,7 @@ pub fn CreateInvoiceModal() -> impl IntoView {
                                         prop:value=move || currency.get()
                                         on:change=move |ev| set_currency.set(event_target_value(&ev))
                                     >
-                                        {CURRENCIES.iter().map(|(value, label)| {
+                                        {INVOICE_CURRENCY_OPTIONS.iter().map(|(value, label)| {
                                             view! { <option value=*value>{*label}</option> }
                                         }).collect_view()}
                                     </select>
