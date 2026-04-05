@@ -976,7 +976,10 @@ mod tests {
         // Short hex stays as-is
         assert_eq!(truncate_hex("0xabc", 10, 8), "0xabc");
         // Exactly at boundary
-        assert_eq!(truncate_hex("0x1234567890abcdef12", 10, 8), "0x1234567890abcdef12");
+        assert_eq!(
+            truncate_hex("0x1234567890abcdef12", 10, 8),
+            "0x1234567890abcdef12"
+        );
     }
 }
 
