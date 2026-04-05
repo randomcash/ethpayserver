@@ -38,9 +38,11 @@ pub fn CreateInvoiceModal() -> impl IntoView {
     let navigate = use_navigate();
 
     // Form fields
+    let default_currency = INVOICE_CURRENCY_OPTIONS[0].0.to_string();
+    let default_expiration = EXPIRATION_PRESETS[0].0.to_string();
     let (amount, set_amount) = signal(String::new());
-    let (currency, set_currency) = signal("USD".to_string());
-    let (expiration_minutes, set_expiration_minutes) = signal("15".to_string());
+    let (currency, set_currency) = signal(default_currency.clone());
+    let (expiration_minutes, set_expiration_minutes) = signal(default_expiration.clone());
     let (order_id, set_order_id) = signal(String::new());
     let (buyer_email, set_buyer_email) = signal(String::new());
     let (notification_url, set_notification_url) = signal(String::new());
@@ -55,8 +57,8 @@ pub fn CreateInvoiceModal() -> impl IntoView {
     Effect::new(move || {
         if !modal_signal.show.get() {
             set_amount.set(String::new());
-            set_currency.set("USD".to_string());
-            set_expiration_minutes.set("15".to_string());
+            set_currency.set(default_currency.clone());
+            set_expiration_minutes.set(default_expiration.clone());
             set_order_id.set(String::new());
             set_buyer_email.set(String::new());
             set_notification_url.set(String::new());

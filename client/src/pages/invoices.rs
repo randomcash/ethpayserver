@@ -76,10 +76,13 @@ pub fn InvoicesPage() -> impl IntoView {
         use_context::<CreateInvoiceSignal>().expect("CreateInvoiceSignal must be provided");
 
     // Refresh the list when the modal closes (invoice may have been created)
+    let was_showing = StoredValue::new(false);
     Effect::new(move || {
-        if !create_invoice_signal.show.get() {
+        let showing = create_invoice_signal.show.get();
+        if was_showing.get_value() && !showing {
             set_refresh.update(|n| *n += 1);
         }
+        was_showing.set_value(showing);
     });
 
     // Convert active filter to API status param
