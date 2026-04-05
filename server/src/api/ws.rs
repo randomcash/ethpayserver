@@ -321,10 +321,9 @@ mod tests {
     async fn test_handle_socket_sends_connected_on_open() {
         let (addr, _broadcast) = spawn_test_ws_server().await;
 
-        let (mut ws, _) =
-            tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-                .await
-                .expect("client connect failed");
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .expect("client connect failed");
 
         // First message must be the Connected acknowledgement
         let msg = ws.next().await.unwrap().unwrap();
@@ -336,10 +335,9 @@ mod tests {
     async fn test_handle_socket_forwards_broadcast() {
         let (addr, broadcast) = spawn_test_ws_server().await;
 
-        let (mut ws, _) =
-            tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-                .await
-                .expect("client connect failed");
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .expect("client connect failed");
 
         // Consume the Connected message
         let _ = ws.next().await.unwrap().unwrap();
@@ -362,10 +360,9 @@ mod tests {
     async fn test_handle_socket_client_close() {
         let (addr, broadcast) = spawn_test_ws_server().await;
 
-        let (mut ws, _) =
-            tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-                .await
-                .expect("client connect failed");
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .expect("client connect failed");
 
         // Consume Connected
         let _ = ws.next().await.unwrap().unwrap();
@@ -401,11 +398,14 @@ mod tests {
             status: "paid".to_string(),
         };
         let json = serde_json::to_value(&invoice).unwrap();
-        assert_eq!(json, serde_json::json!({
-            "type": "invoice_status",
-            "invoice_id": "inv_1",
-            "status": "paid"
-        }));
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "invoice_status",
+                "invoice_id": "inv_1",
+                "status": "paid"
+            })
+        );
 
         // PaymentUpdate with amount
         let payment = StatusUpdate::PaymentUpdate {
@@ -415,13 +415,16 @@ mod tests {
             amount: Some("1.5".to_string()),
         };
         let json = serde_json::to_value(&payment).unwrap();
-        assert_eq!(json, serde_json::json!({
-            "type": "payment_update",
-            "payment_id": "pay_1",
-            "invoice_id": "inv_1",
-            "status": "confirmed",
-            "amount": "1.5"
-        }));
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "payment_update",
+                "payment_id": "pay_1",
+                "invoice_id": "inv_1",
+                "status": "confirmed",
+                "amount": "1.5"
+            })
+        );
 
         // PaymentUpdate without amount
         let payment_no_amt = StatusUpdate::PaymentUpdate {

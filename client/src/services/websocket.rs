@@ -240,11 +240,14 @@ mod tests {
             status: "paid".to_string(),
         };
         let json = serde_json::to_value(&invoice).unwrap();
-        assert_eq!(json, serde_json::json!({
-            "type": "invoice_status",
-            "invoice_id": "inv_1",
-            "status": "paid"
-        }));
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "invoice_status",
+                "invoice_id": "inv_1",
+                "status": "paid"
+            })
+        );
 
         // PaymentUpdate with amount
         let payment = StatusUpdate::PaymentUpdate {
@@ -254,13 +257,16 @@ mod tests {
             amount: Some("1.5".to_string()),
         };
         let json = serde_json::to_value(&payment).unwrap();
-        assert_eq!(json, serde_json::json!({
-            "type": "payment_update",
-            "payment_id": "pay_1",
-            "invoice_id": "inv_1",
-            "status": "confirmed",
-            "amount": "1.5"
-        }));
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "payment_update",
+                "payment_id": "pay_1",
+                "invoice_id": "inv_1",
+                "status": "confirmed",
+                "amount": "1.5"
+            })
+        );
 
         // PaymentUpdate without amount
         let payment_no_amt = StatusUpdate::PaymentUpdate {
