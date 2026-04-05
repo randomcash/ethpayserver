@@ -18,6 +18,7 @@ use futures::StreamExt;
 use types::{InvoiceReader, InvoiceWriter, WatchedAddressReader, WatchedAddressWriter};
 use uuid::Uuid;
 
+use crate::api::ws::{StatusUpdate, WsBroadcast};
 use crate::metrics;
 
 use super::evm_monitor::EVMMonitor;
@@ -106,6 +107,7 @@ pub struct InvoiceCleanupService<D: CleanupDataService, M: EVMMonitor, W: Webhoo
     evm_monitor: Arc<M>,
     config: CleanupConfig,
     webhook_service: Option<Arc<WebhookService<W>>>,
+    ws_broadcast: Option<Arc<WsBroadcast>>,
 }
 
 impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'static>
@@ -117,12 +119,14 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         evm_monitor: Arc<M>,
         config: CleanupConfig,
         webhook_service: Option<Arc<WebhookService<W>>>,
+        ws_broadcast: Option<Arc<WsBroadcast>>,
     ) -> Self {
         Self {
             data_service,
             evm_monitor,
             config,
             webhook_service,
+            ws_broadcast,
         }
     }
 
@@ -156,6 +160,13 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                                 "Expired invoice"
                             );
                             metrics::record_invoice_expired();
+                            // Broadcast invoice expired via WebSocket
+                            if let Some(ref ws) = self.ws_broadcast {
+                                ws.send(StatusUpdate::InvoiceStatus {
+                                    invoice_id: invoice_id.as_str().to_string(),
+                                    status: "expired".to_string(),
+                                });
+                            }
                             // Queue webhook notification for expiration
                             self.queue_expiration_webhook(&invoice_id).await;
                         }
