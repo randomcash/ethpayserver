@@ -734,6 +734,61 @@ where
     Ok(Json(wallets))
 }
 
+/// Get a wallet by ID.
+///
+/// User must be a member of the wallet's store.
+#[utoipa::path(
+    get,
+    path = "/wallets/{wallet_id}",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("wallet_id" = Uuid, Path, description = "Wallet ID")
+    ),
+    responses(
+        (status = 200, description = "Wallet details", body = WalletResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not a member of this wallet's store"),
+        (status = 404, description = "Wallet not found"),
+    )
+)]
+pub async fn get_wallet_by_id<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(wallet_id): Path<Uuid>,
+) -> Result<Json<WalletResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let wallet = StoreWalletReader::get_wallet_by_id(&*state.data_service, wallet_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Verify user has access to the wallet's store
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(wallet.store_id),
+            "ethpay.store.canviewstoresettings",
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !has_permission {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(Json(WalletResponse {
+        id: wallet.id,
+        store_id: wallet.store_id,
+        xpub_masked: mask_xpub(&wallet.xpub),
+        derivation_index: wallet.derivation_index,
+        name: wallet.name,
+        created_at: wallet.created_at,
+    }))
+}
 /// Get wallet configuration for a store.
 #[utoipa::path(
     get,
@@ -1759,5 +1814,61 @@ mod tests {
         let wallets: Vec<WalletResponse> = vec![];
         let json = serde_json::to_value(&wallets).unwrap();
         assert!(json.as_array().unwrap().is_empty());
+    }
+
+    // =========================================================================
+    // get_wallet_by_id response
+    // =========================================================================
+
+    #[test]
+    fn test_wallet_by_id_response_masks_xpub() {
+        let xpub = "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz";
+        let response = WalletResponse {
+            id: Uuid::new_v4(),
+            store_id: Uuid::new_v4(),
+            xpub_masked: mask_xpub(xpub),
+            derivation_index: 7,
+            name: Some("Hot Wallet".to_string()),
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        let masked = json["xpub_masked"].as_str().unwrap();
+        assert!(masked.contains("..."));
+        assert!(!masked.contains(xpub));
+        assert_eq!(json["derivation_index"], 7);
+        assert_eq!(json["name"], "Hot Wallet");
+    }
+
+    #[test]
+    fn test_wallet_by_id_response_without_name() {
+        let response = WalletResponse {
+            id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            xpub_masked: "xpub6CUG...3fDVmz".to_string(),
+            derivation_index: 0,
+            name: None,
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["name"].is_null());
+        assert_eq!(json["derivation_index"], 0);
+    }
+
+    #[test]
+    fn test_wallet_by_id_response_contains_store_id() {
+        let store_id = Uuid::new_v4();
+        let response = WalletResponse {
+            id: Uuid::new_v4(),
+            store_id,
+            xpub_masked: "xpub6D4B...cLW5".to_string(),
+            derivation_index: 3,
+            name: Some("Cold Storage".to_string()),
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["store_id"].as_str().unwrap(), store_id.to_string());
     }
 }

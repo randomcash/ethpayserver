@@ -2,6 +2,7 @@
 //!
 //! Contains user settings, preferences, API keys, and admin-only server settings.
 
+use crate::api::{ApiKeyInfo, CreateApiKeyRequest, CreateApiKeyResponsePayload, EvmApiClient};
 use leptos::prelude::*;
 
 /// Settings page with tabbed interface.
@@ -10,21 +11,26 @@ pub fn SettingsPage() -> impl IntoView {
     // Active tab state
     let (active_tab, set_active_tab) = signal("account".to_string());
 
-    // Mock: In production, this would come from user session/context
-    let is_admin = true;
+    // Load user role to conditionally show admin tab
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let (is_admin, set_is_admin) = signal(false);
 
-    // Tabs available to all users
-    let mut tabs = vec![
+    leptos::task::spawn_local({
+        let api = api.get_untracked();
+        async move {
+            if let Ok(user) = api.get_me().await {
+                set_is_admin.set(user.role.is_admin());
+            }
+        }
+    });
+
+    // Base tabs available to all users
+    let base_tabs: Vec<(&str, &str)> = vec![
         ("account", "Account"),
         ("preferences", "Preferences"),
         ("api_keys", "API Keys"),
         ("notifications", "Notifications"),
     ];
-
-    // Add admin tab only for admins
-    if is_admin {
-        tabs.push(("admin", "Server Admin"));
-    }
 
     view! {
         <div class="settings-page">
@@ -38,34 +44,42 @@ pub fn SettingsPage() -> impl IntoView {
 
             // Tabs
             <div class="settings-tabs">
-                {tabs.into_iter().map(|(key, label)| {
+                {base_tabs.into_iter().map(|(key, label)| {
                     let key_owned = key.to_string();
                     let key_for_click = key.to_string();
-                    let is_admin_tab = key == "admin";
                     view! {
                         <button
                             class=move || {
-                                let mut class = if active_tab.get() == key_owned {
+                                if active_tab.get() == key_owned {
                                     "settings-tab active".to_string()
                                 } else {
                                     "settings-tab".to_string()
-                                };
-                                if is_admin_tab {
-                                    class.push_str(" settings-tab-admin");
                                 }
-                                class
                             }
                             on:click=move |_| set_active_tab.set(key_for_click.clone())
                         >
-                            <span class="settings-tab-label">
-                                {label}
-                                {is_admin_tab.then(|| view! {
-                                    <IconShield />
-                                })}
-                            </span>
+                            <span class="settings-tab-label">{label}</span>
                         </button>
                     }
                 }).collect_view()}
+                // Admin tab - only shown for server admins
+                <Show when=move || is_admin.get()>
+                    <button
+                        class=move || {
+                            if active_tab.get() == "admin" {
+                                "settings-tab active settings-tab-admin".to_string()
+                            } else {
+                                "settings-tab settings-tab-admin".to_string()
+                            }
+                        }
+                        on:click=move |_| set_active_tab.set("admin".to_string())
+                    >
+                        <span class="settings-tab-label">
+                            "Server Admin"
+                            <IconShield />
+                        </span>
+                    </button>
+                </Show>
             </div>
 
             // Tab Content
@@ -75,7 +89,7 @@ pub fn SettingsPage() -> impl IntoView {
                     "preferences" => view! { <PreferencesTab /> }.into_any(),
                     "api_keys" => view! { <ApiKeysTab /> }.into_any(),
                     "notifications" => view! { <NotificationsTab /> }.into_any(),
-                    "admin" if is_admin => view! { <AdminTab /> }.into_any(),
+                    "admin" if is_admin.get() => view! { <AdminTab /> }.into_any(),
                     _ => view! { <AccountTab /> }.into_any(),
                 }}
             </div>
@@ -83,87 +97,137 @@ pub fn SettingsPage() -> impl IntoView {
     }
 }
 
-/// Account settings tab.
+/// Format an ISO 8601 date string for display.
+fn format_date(iso: &str) -> String {
+    if let Some(date_part) = iso.split('T').next() {
+        date_part.to_string()
+    } else {
+        iso.to_string()
+    }
+}
+
+/// Account settings tab — loads profile from `/auth/me`.
 #[component]
 fn AccountTab() -> impl IntoView {
-    let (email, set_email) = signal("user@example.com".to_string());
-    let (display_name, set_display_name) = signal("John Doe".to_string());
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+
+    let user_resource = LocalResource::new(move || {
+        let api = api.get();
+        async move { api.get_me().await }
+    });
 
     view! {
         <div class="settings-tab-account">
-            <div class="detail-card">
-                <div class="detail-card-header">
-                    <h3>"Profile Information"</h3>
+            <Suspense fallback=move || view! {
+                <div style="text-align: center; padding: 3rem; color: var(--text-muted);">
+                    "Loading profile..."
                 </div>
-                <div class="detail-card-body">
-                    <div class="form-group">
-                        <label class="form-label">"Email Address"</label>
-                        <input
-                            type="email"
-                            class="form-input"
-                            prop:value=move || email.get()
-                            on:input=move |ev| set_email.set(event_target_value(&ev))
-                        />
-                        <p class="form-help">"Your email is used for login and notifications"</p>
-                    </div>
+            }>
+                {move || user_resource.get().map(|result| match &*result {
+                    Ok(user) => {
+                        let email_display = user.email.clone().unwrap_or_else(|| "Not set".to_string());
+                        let wallet_display = user.primary_wallet_address.clone().unwrap_or_else(|| "Not set".to_string());
+                        let role_label = user.role.label().to_string();
+                        let role_class = if user.role.is_admin() { "badge badge-warning" } else { "badge badge-neutral" };
+                        let created = format_date(&user.created_at);
+                        let last_login = user.last_login_at.as_deref().map(format_date).unwrap_or_else(|| "Never".to_string());
+                        let user_id = user.id.clone();
+                        let has_email = user.email.is_some();
+                        let has_wallet = user.primary_wallet_address.is_some();
 
-                    <div class="form-group">
-                        <label class="form-label">"Display Name"</label>
-                        <input
-                            type="text"
-                            class="form-input"
-                            prop:value=move || display_name.get()
-                            on:input=move |ev| set_display_name.set(event_target_value(&ev))
-                        />
-                    </div>
+                        view! {
+                            <div class="detail-card">
+                                <div class="detail-card-header">
+                                    <h3>"Profile Information"</h3>
+                                    <span class=role_class>{role_label}</span>
+                                </div>
+                                <div class="detail-card-body">
+                                    <div class="form-group">
+                                        <label class="form-label">"User ID"</label>
+                                        <div class="form-static">
+                                            <code>{user_id}</code>
+                                        </div>
+                                    </div>
 
-                    <div class="form-actions">
-                        <button class="btn btn-primary btn-sm">"Save changes"</button>
-                    </div>
-                </div>
-            </div>
+                                    <div class="form-group">
+                                        <label class="form-label">"Email Address"</label>
+                                        <div class="form-static">
+                                            {if has_email {
+                                                view! { <span>{email_display}</span> }.into_any()
+                                            } else {
+                                                view! { <span class="text-muted">"Not set (wallet-only account)"</span> }.into_any()
+                                            }}
+                                        </div>
+                                    </div>
 
-            <div class="detail-card">
-                <div class="detail-card-header">
-                    <h3>"Password"</h3>
-                </div>
-                <div class="detail-card-body">
-                    <div class="form-group">
-                        <label class="form-label">"Current Password"</label>
-                        <input type="password" class="form-input" />
-                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">"Wallet Address"</label>
+                                        <div class="form-static">
+                                            {if has_wallet {
+                                                view! { <code>{wallet_display}</code> }.into_any()
+                                            } else {
+                                                view! { <span class="text-muted">"Not set (email-only account)"</span> }.into_any()
+                                            }}
+                                        </div>
+                                    </div>
 
-                    <div class="form-group">
-                        <label class="form-label">"New Password"</label>
-                        <input type="password" class="form-input" />
-                        <p class="form-help">"Minimum 8 characters with at least one number"</p>
-                    </div>
+                                    <div class="settings-grid">
+                                        <div class="form-group">
+                                            <label class="form-label">"Account Created"</label>
+                                            <div class="form-static">{created}</div>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">"Last Login"</label>
+                                            <div class="form-static">{last_login}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
 
-                    <div class="form-group">
-                        <label class="form-label">"Confirm New Password"</label>
-                        <input type="password" class="form-input" />
-                    </div>
+                            <div class="detail-card">
+                                <div class="detail-card-header">
+                                    <h3>"Security"</h3>
+                                </div>
+                                <div class="detail-card-body">
+                                    <p class="form-help" style="margin-bottom: 16px;">
+                                        "This server uses passwordless authentication. Manage your passkeys and connected wallets to control access to your account."
+                                    </p>
+                                    <div class="form-actions">
+                                        <button class="btn btn-secondary btn-sm" disabled=true>
+                                            "Manage passkeys"
+                                        </button>
+                                        <button class="btn btn-secondary btn-sm" disabled=true>
+                                            "Manage wallets"
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
 
-                    <div class="form-actions">
-                        <button class="btn btn-secondary btn-sm">"Update password"</button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="detail-card detail-card-danger">
-                <div class="detail-card-header">
-                    <h3>"Danger Zone"</h3>
-                </div>
-                <div class="detail-card-body">
-                    <div class="danger-action">
-                        <div class="danger-action-info">
-                            <span class="danger-action-title">"Delete account"</span>
-                            <span class="danger-action-desc">"Permanently delete your account and all associated data"</span>
+                            <div class="detail-card detail-card-danger">
+                                <div class="detail-card-header">
+                                    <h3>"Danger Zone"</h3>
+                                </div>
+                                <div class="detail-card-body">
+                                    <div class="danger-action">
+                                        <div class="danger-action-info">
+                                            <span class="danger-action-title">"Delete account"</span>
+                                            <span class="danger-action-desc">"Permanently delete your account and all associated data"</span>
+                                        </div>
+                                        <button class="btn btn-danger btn-sm" disabled=true>"Delete account"</button>
+                                    </div>
+                                </div>
+                            </div>
+                        }.into_any()
+                    }
+                    Err(e) => view! {
+                        <div class="detail-card">
+                            <div class="detail-card-body">
+                                <p class="text-error">"Failed to load profile: "{e.to_string()}</p>
+                            </div>
                         </div>
-                        <button class="btn btn-danger btn-sm">"Delete account"</button>
-                    </div>
-                </div>
-            </div>
+                    }.into_any(),
+                })}
+            </Suspense>
         </div>
     }
 }
@@ -262,12 +326,59 @@ fn PreferencesTab() -> impl IntoView {
 /// API Keys tab.
 #[component]
 fn ApiKeysTab() -> impl IntoView {
-    // Mock API keys
-    let api_keys = vec![
-        ("ak_live_****1234", "Production Key", "Jan 15, 2024", true),
-        ("ak_test_****5678", "Test Key", "Jan 10, 2024", true),
-        ("ak_live_****9012", "Old Key", "Dec 1, 2023", false),
-    ];
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+
+    // Track version to trigger refetches after create/revoke
+    let (version, set_version) = signal(0u32);
+
+    // Load API keys from backend
+    let keys_resource = LocalResource::new(move || {
+        let client = api.get();
+        let _v = version.get();
+        async move { client.list_api_keys().await.ok() }
+    });
+
+    // State for create form
+    let (show_create, set_show_create) = signal(false);
+    let (new_key_name, set_new_key_name) = signal(String::new());
+    let (created_key, set_created_key) = signal(Option::<CreateApiKeyResponsePayload>::None);
+    let (loading, set_loading) = signal(false);
+
+    // Create handler
+    let on_create = move |_| {
+        let name = new_key_name.get();
+        if name.trim().is_empty() {
+            return;
+        }
+        let client = api.get();
+        let request = CreateApiKeyRequest {
+            name: name.trim().to_string(),
+            expires_at: None,
+        };
+        set_loading.set(true);
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(resp) = client.create_api_key(&request).await {
+                set_created_key.set(Some(resp));
+                set_show_create.set(false);
+                set_new_key_name.set(String::new());
+                set_version.update(|v| *v += 1);
+            }
+            set_loading.set(false);
+        });
+    };
+
+    // Revoke handler factory
+    let make_revoke_handler = move |key_id: String| {
+        let client = api.get();
+        move |_| {
+            let client = client.clone();
+            let id = key_id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ = client.revoke_api_key(&id).await;
+                set_version.update(|v| *v += 1);
+            });
+        }
+    };
 
     view! {
         <div class="settings-tab-api-keys">
@@ -276,39 +387,117 @@ fn ApiKeysTab() -> impl IntoView {
                     <h3 class="section-title">"API Keys"</h3>
                     <p class="section-desc">"Manage API keys for programmatic access"</p>
                 </div>
-                <button class="btn btn-primary btn-sm">
+                <button
+                    class="btn btn-primary btn-sm"
+                    on:click=move |_| set_show_create.set(true)
+                >
                     <IconPlus />
                     "Create API key"
                 </button>
             </div>
 
-            <div class="api-keys-list">
-                {api_keys.into_iter().map(|(key, name, created, active)| {
-                    let status_class = if active { "badge badge-success" } else { "badge badge-neutral" };
-                    let status_label = if active { "Active" } else { "Revoked" };
-
-                    view! {
-                        <div class="api-key-item">
-                            <div class="api-key-info">
-                                <div class="api-key-header">
-                                    <span class="api-key-name">{name}</span>
-                                    <span class=status_class>{status_label}</span>
-                                </div>
-                                <code class="api-key-value">{key}</code>
-                                <span class="api-key-created">"Created "{created}</span>
-                            </div>
-                            <div class="api-key-actions">
-                                {active.then(|| view! {
-                                    <button class="btn btn-ghost btn-sm">"Revoke"</button>
-                                })}
-                                <button class="btn btn-ghost btn-sm btn-icon" title="Copy">
-                                    <IconCopy />
-                                </button>
-                            </div>
+            // Create form
+            {move || show_create.get().then(|| view! {
+                <div class="detail-card" style="margin-bottom: 16px;">
+                    <div class="detail-card-header">
+                        <h3>"Create new API key"</h3>
+                    </div>
+                    <div class="detail-card-body">
+                        <div class="form-group">
+                            <label class="form-label">"Key name"</label>
+                            <input
+                                type="text"
+                                class="form-input"
+                                placeholder="e.g., Production Key"
+                                prop:value=move || new_key_name.get()
+                                on:input=move |ev| set_new_key_name.set(event_target_value(&ev))
+                            />
                         </div>
+                        <div class="form-actions">
+                            <button
+                                class="btn btn-primary btn-sm"
+                                prop:disabled=move || loading.get()
+                                on:click=on_create
+                            >
+                                {move || if loading.get() { "Creating..." } else { "Create key" }}
+                            </button>
+                            <button
+                                class="btn btn-ghost btn-sm"
+                                on:click=move |_| set_show_create.set(false)
+                            >
+                                "Cancel"
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            })}
+
+            // Show newly created key (plaintext shown once)
+            {move || created_key.get().map(|key| view! {
+                <div class="detail-card" style="margin-bottom: 16px; border-color: var(--color-success);">
+                    <div class="detail-card-body">
+                        <p><strong>"Your new API key has been created. Copy it now — it will not be shown again."</strong></p>
+                        <code class="api-key-value" style="display: block; margin: 8px 0; padding: 8px; background: var(--color-bg-secondary); word-break: break-all;">
+                            {key.key.clone()}
+                        </code>
+                        <button
+                            class="btn btn-ghost btn-sm"
+                            on:click=move |_| set_created_key.set(None)
+                        >
+                            "Dismiss"
+                        </button>
+                    </div>
+                </div>
+            })}
+
+            // API keys list
+            <Suspense fallback=move || view! { <p>"Loading API keys..."</p> }>
+                {move || Suspend::new(async move {
+                    match keys_resource.await {
+                        Some(resp) => {
+                            let keys = resp.keys;
+                            if keys.is_empty() {
+                                view! { <p class="empty-state">"No API keys yet. Create one to get started."</p> }.into_any()
+                            } else {
+                                view! {
+                                    <div class="api-keys-list">
+                                        {keys.into_iter().map(|key: ApiKeyInfo| {
+                                            let status_class = if key.is_active { "badge badge-success" } else { "badge badge-neutral" };
+                                            let status_label = if key.is_active { "Active" } else { "Revoked" };
+                                            let is_active = key.is_active;
+                                            let revoke_handler = make_revoke_handler(key.id.clone());
+
+                                            view! {
+                                                <div class="api-key-item">
+                                                    <div class="api-key-info">
+                                                        <div class="api-key-header">
+                                                            <span class="api-key-name">{key.name}</span>
+                                                            <span class=status_class>{status_label}</span>
+                                                        </div>
+                                                        <code class="api-key-value">{key.key_prefix}</code>
+                                                        <span class="api-key-created">"Created "{key.created_at}</span>
+                                                    </div>
+                                                    <div class="api-key-actions">
+                                                        {is_active.then(|| view! {
+                                                            <button
+                                                                class="btn btn-ghost btn-sm"
+                                                                on:click=revoke_handler
+                                                            >
+                                                                "Revoke"
+                                                            </button>
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            }
+                                        }).collect_view()}
+                                    </div>
+                                }.into_any()
+                            }
+                        }
+                        None => view! { <p class="error">"Failed to load API keys"</p> }.into_any(),
                     }
-                }).collect_view()}
-            </div>
+                })}
+            </Suspense>
 
             <div class="settings-info">
                 <IconInfo />
@@ -637,5 +826,30 @@ fn IconInfo() -> impl IntoView {
             <line x1="12" y1="16" x2="12" y2="12"></line>
             <line x1="12" y1="8" x2="12.01" y2="8"></line>
         </svg>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_date_with_time() {
+        assert_eq!(format_date("2026-04-04T12:30:00Z"), "2026-04-04");
+    }
+
+    #[test]
+    fn test_format_date_date_only() {
+        assert_eq!(format_date("2026-04-04"), "2026-04-04");
+    }
+
+    #[test]
+    fn test_format_date_with_offset() {
+        assert_eq!(format_date("2026-04-04T12:30:00+05:00"), "2026-04-04");
+    }
+
+    #[test]
+    fn test_format_date_empty_string() {
+        assert_eq!(format_date(""), "");
     }
 }

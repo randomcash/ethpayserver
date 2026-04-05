@@ -229,15 +229,52 @@ pub struct UserStoreInfo {
     pub role: StoreRole,
 }
 
-/// Wallet data from the API (legacy, kept for compatibility).
+/// Wallet data from the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wallet {
     pub id: String,
-    pub name: String,
-    pub address: String,
-    pub derivation_path: String,
-    pub enabled_chains: Vec<u64>,
+    pub store_id: String,
+    pub xpub_masked: String,
+    pub derivation_index: i32,
+    pub name: Option<String>,
     pub created_at: String,
+}
+
+/// User role.
+///
+/// Mirrors `Role` from the auth crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UserRole {
+    ServerAdmin,
+    #[default]
+    User,
+}
+
+impl UserRole {
+    pub fn label(&self) -> &'static str {
+        match self {
+            UserRole::ServerAdmin => "Server Admin",
+            UserRole::User => "User",
+        }
+    }
+
+    pub fn is_admin(&self) -> bool {
+        matches!(self, UserRole::ServerAdmin)
+    }
+}
+
+/// Authenticated user info from `/auth/me`.
+///
+/// Mirrors `UserInfo` from the auth crate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInfo {
+    pub id: String,
+    pub email: Option<String>,
+    pub primary_wallet_address: Option<String>,
+    pub created_at: String,
+    pub last_login_at: Option<String>,
+    pub role: UserRole,
 }
 
 /// Dashboard statistics.
@@ -335,6 +372,43 @@ pub struct PaymentListResponse {
     pub payments: Vec<Payment>,
 }
 
+/// API key info (returned for list/get).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyInfo {
+    pub id: String,
+    pub name: String,
+    pub key_prefix: String,
+    pub is_active: bool,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// Response for listing API keys.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyListResponse {
+    pub keys: Vec<ApiKeyInfo>,
+}
+
+/// Request to create a new API key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateApiKeyRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// Response after creating an API key (includes plaintext key).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateApiKeyResponsePayload {
+    pub id: String,
+    pub name: String,
+    pub key_prefix: String,
+    pub is_active: bool,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub key: String,
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,10 +489,10 @@ mod tests {
     fn test_wallet_serialization() {
         let wallet = Wallet {
             id: "wallet_001".to_string(),
-            name: "Main Wallet".to_string(),
-            address: "0x1234...".to_string(),
-            derivation_path: "m/44'/60'/0'/0/0".to_string(),
-            enabled_chains: vec![1, 137, 42161],
+            store_id: "store_001".to_string(),
+            xpub_masked: "xpub6CUG...Ht4QRnxv".to_string(),
+            derivation_index: 3,
+            name: Some("Main Wallet".to_string()),
             created_at: "2024-01-01T00:00:00Z".to_string(),
         };
 
@@ -426,7 +500,10 @@ mod tests {
         let parsed: Wallet = serde_json::from_str(&json).unwrap();
 
         assert_eq!(wallet.id, parsed.id);
-        assert_eq!(wallet.derivation_path, parsed.derivation_path);
+        assert_eq!(wallet.store_id, parsed.store_id);
+        assert_eq!(wallet.xpub_masked, parsed.xpub_masked);
+        assert_eq!(wallet.derivation_index, parsed.derivation_index);
+        assert_eq!(wallet.name, parsed.name);
     }
 
     #[test]
@@ -1078,5 +1155,73 @@ mod tests {
         // Optional fields should not be present in JSON
         assert!(json.get("expiration_seconds").is_none());
         assert!(json.get("metadata").is_none());
+    }
+
+    #[test]
+    fn test_user_role_default_is_user() {
+        assert_eq!(UserRole::default(), UserRole::User);
+    }
+
+    #[test]
+    fn test_user_role_labels() {
+        assert_eq!(UserRole::ServerAdmin.label(), "Server Admin");
+        assert_eq!(UserRole::User.label(), "User");
+    }
+
+    #[test]
+    fn test_user_role_is_admin() {
+        assert!(UserRole::ServerAdmin.is_admin());
+        assert!(!UserRole::User.is_admin());
+    }
+
+    #[test]
+    fn test_user_role_serde_roundtrip() {
+        let admin_json = serde_json::to_value(UserRole::ServerAdmin).unwrap();
+        assert_eq!(admin_json, serde_json::json!("server_admin"));
+
+        let user_json = serde_json::to_value(UserRole::User).unwrap();
+        assert_eq!(user_json, serde_json::json!("user"));
+
+        let parsed: UserRole = serde_json::from_str("\"server_admin\"").unwrap();
+        assert_eq!(parsed, UserRole::ServerAdmin);
+
+        let parsed: UserRole = serde_json::from_str("\"user\"").unwrap();
+        assert_eq!(parsed, UserRole::User);
+    }
+
+    #[test]
+    fn test_user_info_deserialize_full() {
+        let json = serde_json::json!({
+            "id": "usr_123",
+            "email": "alice@example.com",
+            "primary_wallet_address": "0xabc",
+            "created_at": "2026-01-01T00:00:00Z",
+            "last_login_at": "2026-04-04T12:00:00Z",
+            "role": "server_admin"
+        });
+        let user: UserInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(user.id, "usr_123");
+        assert_eq!(user.email.as_deref(), Some("alice@example.com"));
+        assert_eq!(user.primary_wallet_address.as_deref(), Some("0xabc"));
+        assert_eq!(user.last_login_at.as_deref(), Some("2026-04-04T12:00:00Z"));
+        assert!(user.role.is_admin());
+    }
+
+    #[test]
+    fn test_user_info_deserialize_minimal() {
+        let json = serde_json::json!({
+            "id": "usr_456",
+            "email": null,
+            "primary_wallet_address": null,
+            "created_at": "2026-03-15T10:00:00Z",
+            "last_login_at": null,
+            "role": "user"
+        });
+        let user: UserInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(user.id, "usr_456");
+        assert!(user.email.is_none());
+        assert!(user.primary_wallet_address.is_none());
+        assert!(user.last_login_at.is_none());
+        assert!(!user.role.is_admin());
     }
 }

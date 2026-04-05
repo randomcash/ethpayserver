@@ -68,6 +68,7 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+getrandom = "0.3"
 
 # Database migrations
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "migrate"] }
