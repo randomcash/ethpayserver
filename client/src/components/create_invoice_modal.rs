@@ -96,9 +96,9 @@ pub fn CreateInvoiceModal() -> impl IntoView {
             return;
         }
 
-        // Validate amount is a positive number
+        // Validate amount is a positive finite number
         match amount_val.parse::<f64>() {
-            Ok(n) if n <= 0.0 => {
+            Ok(n) if !n.is_finite() || n <= 0.0 => {
                 set_error.set(Some("Amount must be greater than zero".to_string()));
                 return;
             }
@@ -354,9 +354,11 @@ fn build_metadata(order_id: &str, buyer_email: &str) -> Option<serde_json::Value
     Some(serde_json::Value::Object(map))
 }
 
-/// Basic URL validation: must start with http:// or https://.
+/// Basic URL validation: must start with http:// or https:// followed by content.
 fn is_valid_url(url: &str) -> bool {
-    url.starts_with("http://") || url.starts_with("https://")
+    let lower = url.to_ascii_lowercase();
+    (lower.starts_with("http://") && url.len() > "http://".len())
+        || (lower.starts_with("https://") && url.len() > "https://".len())
 }
 
 // ===== Icons (local to this component) =====
@@ -461,6 +463,13 @@ mod tests {
         assert!(!is_valid_url("not-a-url"));
         assert!(!is_valid_url("example.com"));
         assert!(!is_valid_url(" https://example.com"));
-        assert!(!is_valid_url("HTTP://EXAMPLE.COM"));
+        assert!(!is_valid_url("http://"));
+        assert!(!is_valid_url("https://"));
+    }
+
+    #[test]
+    fn test_is_valid_url_accepts_case_insensitive_scheme() {
+        assert!(is_valid_url("HTTP://EXAMPLE.COM"));
+        assert!(is_valid_url("Https://Example.Com/path"));
     }
 }
