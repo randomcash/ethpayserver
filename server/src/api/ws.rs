@@ -149,6 +149,8 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<StatusUpda
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::routing;
+    use futures::StreamExt;
 
     #[test]
     fn test_status_update_serde_invoice_status() {
@@ -247,5 +249,188 @@ mod tests {
 
         assert!(matches!(rx1.recv().await.unwrap(), StatusUpdate::Ping));
         assert!(matches!(rx2.recv().await.unwrap(), StatusUpdate::Ping));
+    }
+
+    #[tokio::test]
+    async fn test_ws_broadcast_capacity_overflow_lags_receiver() {
+        let broadcast = WsBroadcast::new(2);
+        let mut rx = broadcast.subscribe();
+
+        // Send more messages than the channel capacity
+        broadcast.send(StatusUpdate::Ping);
+        broadcast.send(StatusUpdate::Connected);
+        broadcast.send(StatusUpdate::Ping);
+
+        // The receiver should report lagged (missed messages)
+        let result = rx.recv().await;
+        assert!(
+            matches!(result, Err(broadcast::error::RecvError::Lagged(count)) if count > 0),
+            "expected Lagged error, got {result:?}"
+        );
+
+        // After the lag error, the remaining buffered messages are still receivable
+        let msg1 = rx.recv().await.unwrap();
+        assert!(matches!(msg1, StatusUpdate::Connected));
+        let msg2 = rx.recv().await.unwrap();
+        assert!(matches!(msg2, StatusUpdate::Ping));
+    }
+
+    #[test]
+    fn test_ws_query_missing_token_fails() {
+        let json = serde_json::json!({});
+        let result = serde_json::from_value::<WsQuery>(json);
+        assert!(result.is_err(), "WsQuery should require a token field");
+    }
+
+    #[test]
+    fn test_ws_query_wrong_type_fails() {
+        let json = serde_json::json!({ "token": 12345 });
+        let result = serde_json::from_value::<WsQuery>(json);
+        assert!(result.is_err(), "WsQuery token must be a string");
+    }
+
+    /// Helper handler for integration tests — upgrades to WebSocket and delegates
+    /// to `handle_socket` with the broadcast receiver from state.
+    async fn test_upgrade(
+        ws: WebSocketUpgrade,
+        axum::extract::State(bc): axum::extract::State<WsBroadcast>,
+    ) -> impl IntoResponse {
+        let rx = bc.subscribe();
+        ws.on_upgrade(move |socket| handle_socket(socket, rx))
+    }
+
+    /// Spin up a one-shot axum server that exposes `handle_socket` at `/ws`.
+    /// Returns the server address and the `WsBroadcast` sender.
+    async fn spawn_test_ws_server() -> (std::net::SocketAddr, WsBroadcast) {
+        let broadcast = WsBroadcast::new(16);
+        let app = axum::Router::new()
+            .route("/ws", routing::get(test_upgrade))
+            .with_state(broadcast.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (addr, broadcast)
+    }
+
+    #[tokio::test]
+    async fn test_handle_socket_sends_connected_on_open() {
+        let (addr, _broadcast) = spawn_test_ws_server().await;
+
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+                .await
+                .expect("client connect failed");
+
+        // First message must be the Connected acknowledgement
+        let msg = ws.next().await.unwrap().unwrap();
+        let update: StatusUpdate = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert!(matches!(update, StatusUpdate::Connected));
+    }
+
+    #[tokio::test]
+    async fn test_handle_socket_forwards_broadcast() {
+        let (addr, broadcast) = spawn_test_ws_server().await;
+
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+                .await
+                .expect("client connect failed");
+
+        // Consume the Connected message
+        let _ = ws.next().await.unwrap().unwrap();
+
+        // Broadcast a status update
+        broadcast.send(StatusUpdate::InvoiceStatus {
+            invoice_id: "inv_42".to_string(),
+            status: "paid".to_string(),
+        });
+
+        let msg = ws.next().await.unwrap().unwrap();
+        let update: StatusUpdate = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert!(
+            matches!(update, StatusUpdate::InvoiceStatus { ref invoice_id, ref status }
+                if invoice_id == "inv_42" && status == "paid")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_socket_client_close() {
+        let (addr, broadcast) = spawn_test_ws_server().await;
+
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+                .await
+                .expect("client connect failed");
+
+        // Consume Connected
+        let _ = ws.next().await.unwrap().unwrap();
+
+        // Client sends close frame
+        ws.close(None).await.unwrap();
+
+        // Server should handle the close gracefully — sending after close
+        // should not panic (the broadcast just goes nowhere).
+        broadcast.send(StatusUpdate::Ping);
+    }
+
+    /// Verify the exact JSON contract that the client crate relies on.
+    /// Both server and client define identical `StatusUpdate` enums. This test
+    /// asserts the canonical JSON so any serde-attribute drift is caught.
+    #[test]
+    fn test_status_update_json_contract() {
+        // Connected
+        assert_eq!(
+            serde_json::to_string(&StatusUpdate::Connected).unwrap(),
+            r#"{"type":"connected"}"#,
+        );
+
+        // Ping
+        assert_eq!(
+            serde_json::to_string(&StatusUpdate::Ping).unwrap(),
+            r#"{"type":"ping"}"#,
+        );
+
+        // InvoiceStatus
+        let invoice = StatusUpdate::InvoiceStatus {
+            invoice_id: "inv_1".to_string(),
+            status: "paid".to_string(),
+        };
+        let json = serde_json::to_value(&invoice).unwrap();
+        assert_eq!(json, serde_json::json!({
+            "type": "invoice_status",
+            "invoice_id": "inv_1",
+            "status": "paid"
+        }));
+
+        // PaymentUpdate with amount
+        let payment = StatusUpdate::PaymentUpdate {
+            payment_id: "pay_1".to_string(),
+            invoice_id: "inv_1".to_string(),
+            status: "confirmed".to_string(),
+            amount: Some("1.5".to_string()),
+        };
+        let json = serde_json::to_value(&payment).unwrap();
+        assert_eq!(json, serde_json::json!({
+            "type": "payment_update",
+            "payment_id": "pay_1",
+            "invoice_id": "inv_1",
+            "status": "confirmed",
+            "amount": "1.5"
+        }));
+
+        // PaymentUpdate without amount
+        let payment_no_amt = StatusUpdate::PaymentUpdate {
+            payment_id: "pay_2".to_string(),
+            invoice_id: "inv_2".to_string(),
+            status: "detecting".to_string(),
+            amount: None,
+        };
+        let json = serde_json::to_value(&payment_no_amt).unwrap();
+        assert_eq!(json["amount"], serde_json::Value::Null);
     }
 }

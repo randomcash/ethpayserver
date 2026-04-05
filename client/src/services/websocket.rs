@@ -216,4 +216,60 @@ mod tests {
             let _: StatusUpdate = serde_json::from_str(&json).unwrap();
         }
     }
+
+    /// Mirror of the server-side `test_status_update_json_contract` test.
+    /// Both tests assert the exact same JSON so any serde-attribute drift
+    /// between client and server `StatusUpdate` definitions is caught.
+    #[test]
+    fn test_status_update_json_contract() {
+        // Connected
+        assert_eq!(
+            serde_json::to_string(&StatusUpdate::Connected).unwrap(),
+            r#"{"type":"connected"}"#,
+        );
+
+        // Ping
+        assert_eq!(
+            serde_json::to_string(&StatusUpdate::Ping).unwrap(),
+            r#"{"type":"ping"}"#,
+        );
+
+        // InvoiceStatus
+        let invoice = StatusUpdate::InvoiceStatus {
+            invoice_id: "inv_1".to_string(),
+            status: "paid".to_string(),
+        };
+        let json = serde_json::to_value(&invoice).unwrap();
+        assert_eq!(json, serde_json::json!({
+            "type": "invoice_status",
+            "invoice_id": "inv_1",
+            "status": "paid"
+        }));
+
+        // PaymentUpdate with amount
+        let payment = StatusUpdate::PaymentUpdate {
+            payment_id: "pay_1".to_string(),
+            invoice_id: "inv_1".to_string(),
+            status: "confirmed".to_string(),
+            amount: Some("1.5".to_string()),
+        };
+        let json = serde_json::to_value(&payment).unwrap();
+        assert_eq!(json, serde_json::json!({
+            "type": "payment_update",
+            "payment_id": "pay_1",
+            "invoice_id": "inv_1",
+            "status": "confirmed",
+            "amount": "1.5"
+        }));
+
+        // PaymentUpdate without amount
+        let payment_no_amt = StatusUpdate::PaymentUpdate {
+            payment_id: "pay_2".to_string(),
+            invoice_id: "inv_2".to_string(),
+            status: "detecting".to_string(),
+            amount: None,
+        };
+        let json = serde_json::to_value(&payment_no_amt).unwrap();
+        assert_eq!(json["amount"], serde_json::Value::Null);
+    }
 }
