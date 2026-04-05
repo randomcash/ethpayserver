@@ -433,11 +433,32 @@ mod tests {
     }
 
     #[test]
-    fn test_is_valid_url() {
+    fn test_is_valid_url_accepts_http_and_https() {
         assert!(is_valid_url("https://example.com/webhook"));
         assert!(is_valid_url("http://localhost:3000/callback"));
-        assert!(!is_valid_url("ftp://bad.com"));
-        assert!(!is_valid_url("not-a-url"));
+        assert!(is_valid_url("https://api.example.com/v1/notify?token=abc"));
+        assert!(is_valid_url("http://192.168.1.1:8080/hook"));
+        assert!(is_valid_url(
+            "https://example.com/path/to/resource#fragment"
+        ));
+    }
+
+    #[test]
+    fn test_is_valid_url_rejects_non_http_schemes() {
+        assert!(!is_valid_url("ftp://files.example.com"));
+        assert!(!is_valid_url("ws://example.com/ws"));
+        assert!(!is_valid_url("wss://example.com/ws"));
+        assert!(!is_valid_url("javascript:alert(1)"));
+        assert!(!is_valid_url("data:text/html,<h1>hi</h1>"));
+        assert!(!is_valid_url("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn test_is_valid_url_rejects_invalid_input() {
         assert!(!is_valid_url(""));
+        assert!(!is_valid_url("not-a-url"));
+        assert!(!is_valid_url("example.com"));
+        assert!(!is_valid_url(" https://example.com"));
+        assert!(!is_valid_url("HTTP://EXAMPLE.COM"));
     }
 }
