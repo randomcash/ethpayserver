@@ -5,10 +5,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
-    InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, Store,
-    StorePaymentMethod, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
-    UpdateWebhookRequest, Wallet,
+    ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload, CreateInvoiceRequest,
+    CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice, InvoiceListResponse,
+    InvoiceStatusResponse, Payment, PaymentListResponse, Store, StorePaymentMethod, StoreWebhook,
+    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, UserInfo, Wallet,
 };
 
 /// API client errors.
@@ -168,6 +168,15 @@ impl EvmApiClient {
             .json()
             .await
             .map_err(|e| ApiError::Parse(e.to_string()))
+    }
+
+    // =========================================================================
+    // Auth / User
+    // =========================================================================
+
+    /// Get the current authenticated user's info.
+    pub async fn get_me(&self) -> Result<UserInfo, ApiError> {
+        self.get("/api/auth/me").await
     }
 
     // =========================================================================
@@ -390,6 +399,28 @@ impl EvmApiClient {
     /// Get a wallet by ID.
     pub async fn get_wallet(&self, id: &str) -> Result<Wallet, ApiError> {
         self.get(&format!("/api/wallets/{}", id)).await
+    }
+
+    // =========================================================================
+    // API Keys
+    // =========================================================================
+
+    /// List API keys for the authenticated user.
+    pub async fn list_api_keys(&self) -> Result<ApiKeyListResponse, ApiError> {
+        self.get("/api/users/api-keys").await
+    }
+
+    /// Create a new API key.
+    pub async fn create_api_key(
+        &self,
+        request: &CreateApiKeyRequest,
+    ) -> Result<CreateApiKeyResponsePayload, ApiError> {
+        self.post("/api/users/api-keys", request).await
+    }
+
+    /// Revoke an API key.
+    pub async fn revoke_api_key(&self, id: &str) -> Result<(), ApiError> {
+        self.delete(&format!("/api/users/api-keys/{}", id)).await
     }
 }
 
