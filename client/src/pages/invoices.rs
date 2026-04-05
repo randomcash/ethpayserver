@@ -1065,7 +1065,6 @@ fn IconArrowLeft() -> impl IntoView {
     }
 }
 
-
 #[component]
 fn IconCopy() -> impl IntoView {
     view! {
