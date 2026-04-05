@@ -24,7 +24,7 @@ rates = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
 types = { git = "https://gitlab.com/random.cash/payserver-commons.git", features = ["openapi"] }
 
 # Web framework
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "timeout"] }
 

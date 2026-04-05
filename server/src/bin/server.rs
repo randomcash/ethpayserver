@@ -89,6 +89,9 @@ async fn main() -> Result<()> {
     // Create EVM monitor using shared bridge (concrete type for generics)
     let evm_monitor = Arc::new(RedisEVMMonitor::new(Arc::clone(&bridge)));
 
+    // Create WebSocket broadcast channel (shared by services and HTTP handler)
+    let ws_broadcast = Arc::new(server::api::ws::WsBroadcast::new(256));
+
     // Start background services
     // 1. Webhook delivery service - sends webhook notifications
     //    Created first because cleanup service needs it for expiration webhooks
@@ -111,6 +114,7 @@ async fn main() -> Result<()> {
         Arc::clone(&evm_monitor),
         cleanup_config,
         Some(Arc::clone(&webhook_service)),
+        Some(Arc::clone(&ws_broadcast)),
     ));
     tokio::spawn(Arc::clone(&cleanup_service).run());
     tracing::info!("Invoice cleanup service started");
@@ -123,6 +127,7 @@ async fn main() -> Result<()> {
         Arc::clone(&data_service),
         Some(cleanup_service),
         Some(webhook_service),
+        Some(Arc::clone(&ws_broadcast)),
     );
     tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
@@ -148,12 +153,13 @@ async fn main() -> Result<()> {
     let rate_provider = rate_config.create_provider();
 
     // Create application state
-    let state = AppState::new(
+    let mut state = AppState::new(
         Arc::clone(&data_service),
         auth_service,
         Some(evm_monitor),
         rate_provider,
     );
+    state.ws_broadcast = Some(ws_broadcast);
 
     // Build router with middleware
     let app = api::router(state, config.enable_swagger)
