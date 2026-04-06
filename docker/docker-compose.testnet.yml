@@ -1,0 +1,112 @@
+# Testnet deployment for ethpayserver
+#
+# Deployed to testnet.random.cash via CI/CD.
+# Uses pre-built images from GitLab Container Registry.
+#
+# Usage:
+#   docker compose -f docker-compose.testnet.yml --env-file .env.testnet up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ethpayserver_testnet_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ethpayserver}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ethpayserver_testnet}
+    volumes:
+      - testnet_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ethpayserver}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: ethpayserver_testnet_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - testnet_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - internal
+
+  migrate:
+    image: ${SERVER_IMAGE:-registry.gitlab.com/random.cash/ethpayserver:testnet-latest}
+    container_name: ethpayserver_testnet_migrate
+    entrypoint: ["migrate_postgres"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ethpayserver}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-ethpayserver_testnet}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+
+  server:
+    image: ${SERVER_IMAGE:-registry.gitlab.com/random.cash/ethpayserver:testnet-latest}
+    container_name: ethpayserver_testnet_server
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ethpayserver}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-ethpayserver_testnet}
+      REDIS_URL: redis://redis:6379
+      HOST: 0.0.0.0
+      PORT: 3000
+      RUST_LOG: ${RUST_LOG:-info}
+      ENABLE_SWAGGER: ${ENABLE_SWAGGER:-true}
+    ports:
+      - "${SERVER_PORT:-3100}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+      - external
+
+  evmmonitor:
+    image: ${MONITOR_IMAGE:-registry.gitlab.com/random.cash/ethpayserver/evmmonitor:testnet-latest}
+    container_name: ethpayserver_testnet_evmmonitor
+    environment:
+      EVMMONITOR_REDIS_URL: redis://redis:6379
+      EVMMONITOR_CHAINS: ${EVMMONITOR_CHAINS:?EVMMONITOR_CHAINS is required}
+      EVMMONITOR_CHAIN_11155111_RPC_HTTP: ${EVMMONITOR_CHAIN_11155111_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_11155111_RPC_WS: ${EVMMONITOR_CHAIN_11155111_RPC_WS:-}
+      EVMMONITOR_CHAIN_80002_RPC_HTTP: ${EVMMONITOR_CHAIN_80002_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_80002_RPC_WS: ${EVMMONITOR_CHAIN_80002_RPC_WS:-}
+      EVMMONITOR_CHAIN_421614_RPC_HTTP: ${EVMMONITOR_CHAIN_421614_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_421614_RPC_WS: ${EVMMONITOR_CHAIN_421614_RPC_WS:-}
+      EVMMONITOR_CHAIN_11155420_RPC_HTTP: ${EVMMONITOR_CHAIN_11155420_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_11155420_RPC_WS: ${EVMMONITOR_CHAIN_11155420_RPC_WS:-}
+      EVMMONITOR_CHAIN_84532_RPC_HTTP: ${EVMMONITOR_CHAIN_84532_RPC_HTTP:-}
+      EVMMONITOR_CHAIN_84532_RPC_WS: ${EVMMONITOR_CHAIN_84532_RPC_WS:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+  external:
+    driver: bridge
+
+volumes:
+  testnet_postgres_data:
+  testnet_redis_data:

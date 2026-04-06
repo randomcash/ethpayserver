@@ -1,3 +1,6 @@
 /target
 /memos
 .env
+.env.*
+!.env.*.example
+.claude/
