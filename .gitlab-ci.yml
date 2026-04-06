@@ -2,6 +2,7 @@ stages:
   - check
   - build
   - docker
+  - notify
 
 # Shell executor — runs on host, uses native cargo cache.
 
@@ -40,7 +41,23 @@ lint:
 test:
   stage: check
   script:
+    # Unit tests
     - cargo test --workspace --lib --no-fail-fast
+    # Integration tests against ephemeral Postgres
+    - |
+      PGPORT=15432
+      PGCONTAINER="ci_postgres_$$"
+      docker run -d --name $PGCONTAINER -p $PGPORT:5432 \
+        -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ethpayserver_test \
+        postgres:16-alpine
+      for i in $(seq 1 30); do
+        docker exec $PGCONTAINER pg_isready -U test && break || sleep 1
+      done
+      DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_test" \
+        cargo run --release --bin migrate_postgres
+      DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_test" \
+        cargo test -p data-service -- --ignored --no-fail-fast
+      docker rm -f $PGCONTAINER
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
@@ -167,3 +184,21 @@ docker:client:
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
+
+# ---------------------------------------------------------------------------
+# Stage: notify — trigger downstream deploy (if configured)
+# ---------------------------------------------------------------------------
+
+notify:deploy:
+  stage: notify
+  before_script: []
+  script:
+    - >
+      curl -s -X POST
+      -F "token=$DEPLOY_TRIGGER_TOKEN"
+      -F "ref=main"
+      -F "variables[UPSTREAM_BRANCH]=$CI_COMMIT_BRANCH"
+      "$DEPLOY_TRIGGER_URL"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "testnet" && $DEPLOY_TRIGGER_URL
+    - if: $CI_COMMIT_BRANCH == "main" && $DEPLOY_TRIGGER_URL
