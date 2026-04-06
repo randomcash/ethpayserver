@@ -199,7 +199,6 @@ notify:deploy:
       curl -s -X POST
       -F "token=$DEPLOY_TRIGGER_TOKEN"
       -F "ref=main"
-      -F "variables[UPSTREAM_BRANCH]=$CI_COMMIT_BRANCH"
       "$DEPLOY_TRIGGER_URL"
   rules:
     - if: $CI_COMMIT_BRANCH == "testnet" && $DEPLOY_TRIGGER_URL
