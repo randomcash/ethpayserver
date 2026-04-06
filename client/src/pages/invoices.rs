@@ -6,11 +6,9 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::use_params_map;
 
-use crate::api::{
-    ApiError, CreateInvoiceRequest, EvmApiClient, Invoice, InvoiceStatusExt, InvoiceStatusResponse,
-    Payment,
-};
+use crate::api::{ApiError, EvmApiClient, Invoice, InvoiceStatusExt, Payment};
 use crate::app::StoreContext;
+use crate::components::CreateInvoiceSignal;
 
 /// Helper to get chain name from chain ID.
 fn chain_name(chain_id: u64) -> &'static str {
@@ -73,8 +71,19 @@ pub fn InvoicesPage() -> impl IntoView {
     // Refresh counter for manual re-fetch
     let (refresh, set_refresh) = signal(0u32);
 
-    // Create invoice modal state
-    let (show_create_modal, set_show_create_modal) = signal(false);
+    // Use the shared create-invoice modal signal
+    let create_invoice_signal =
+        use_context::<CreateInvoiceSignal>().expect("CreateInvoiceSignal must be provided");
+
+    // Refresh the list when the modal closes (invoice may have been created)
+    let was_showing = StoredValue::new(false);
+    Effect::new(move || {
+        let showing = create_invoice_signal.show.get();
+        if was_showing.get_value() && !showing {
+            set_refresh.update(|n| *n += 1);
+        }
+        was_showing.set_value(showing);
+    });
 
     // Convert active filter to API status param
     let status_param = Signal::derive(move || match active_filter.get().as_str() {
@@ -119,7 +128,7 @@ pub fn InvoicesPage() -> impl IntoView {
                         <IconExport />
                         "Export"
                     </button>
-                    <button class="btn btn-primary btn-sm" on:click=move |_| set_show_create_modal.set(true)>
+                    <button class="btn btn-primary btn-sm" on:click=move |_| create_invoice_signal.open()>
                         <IconPlus />
                         "Create invoice"
                     </button>
@@ -260,156 +269,9 @@ pub fn InvoicesPage() -> impl IntoView {
                 })}
             </Suspense>
 
-            // Create Invoice Modal
-            <CreateInvoiceModal
-                show=show_create_modal
-                set_show=set_show_create_modal
-                on_created=move || set_refresh.update(|n| *n += 1)
-            />
+            // Create Invoice Modal is rendered at the layout level (app.rs)
+            // via the shared CreateInvoiceSignal context.
         </div>
-    }
-}
-
-/// Create invoice modal form.
-#[component]
-fn CreateInvoiceModal(
-    show: ReadSignal<bool>,
-    set_show: WriteSignal<bool>,
-    on_created: impl Fn() + 'static + Clone + Send + Sync,
-) -> impl IntoView {
-    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
-    let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
-
-    let (amount, set_amount) = signal(String::new());
-    let (currency, set_currency) = signal("USD".to_string());
-    let (expiration_minutes, set_expiration_minutes) = signal("15".to_string());
-    let (error, set_error) = signal(Option::<String>::None);
-    let (submitting, set_submitting) = signal(false);
-
-    let on_submit = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
-        let api = api.get();
-        let store_id = store_ctx.selected_store_id.get();
-        let amount_val = amount.get();
-        let currency_val = currency.get();
-        let exp_min = expiration_minutes.get();
-        let on_created = on_created.clone();
-
-        set_error.set(None);
-        set_submitting.set(true);
-
-        leptos::task::spawn_local(async move {
-            let Some(store_id) = store_id else {
-                set_error.set(Some("Please select a store first".to_string()));
-                set_submitting.set(false);
-                return;
-            };
-
-            if amount_val.is_empty() {
-                set_error.set(Some("Amount is required".to_string()));
-                set_submitting.set(false);
-                return;
-            }
-
-            let exp_seconds = exp_min.parse::<u64>().ok().map(|m| m * 60);
-
-            let request = CreateInvoiceRequest {
-                store_id,
-                currency: currency_val,
-                amount: amount_val,
-                expiration_seconds: exp_seconds,
-                metadata: None,
-                webhook_url: None,
-                redirect_url: None,
-            };
-
-            match api.create_invoice(&request).await {
-                Ok(_invoice) => {
-                    set_show.set(false);
-                    set_amount.set(String::new());
-                    set_currency.set("USD".to_string());
-                    set_expiration_minutes.set("15".to_string());
-                    on_created();
-                }
-                Err(e) => {
-                    set_error.set(Some(e.to_string()));
-                }
-            }
-            set_submitting.set(false);
-        });
-    };
-
-    move || {
-        if !show.get() {
-            return None;
-        }
-        Some(view! {
-            <div class="modal-overlay" on:click=move |_| set_show.set(false)>
-                <div class="modal" on:click=|ev| ev.stop_propagation()>
-                    <div class="modal-header">
-                        <h2>"Create Invoice"</h2>
-                        <button class="btn btn-ghost btn-sm btn-icon" on:click=move |_| set_show.set(false)>
-                            <IconClose />
-                        </button>
-                    </div>
-                    <form on:submit=on_submit.clone()>
-                        <div class="modal-body">
-                            {move || error.get().map(|e| view! {
-                                <div class="form-error">{e}</div>
-                            })}
-
-                            <div class="form-group">
-                                <label for="amount">"Amount"</label>
-                                <input
-                                    type="text"
-                                    id="amount"
-                                    class="form-input"
-                                    placeholder="100.00"
-                                    prop:value=move || amount.get()
-                                    on:input=move |ev| set_amount.set(event_target_value(&ev))
-                                    required
-                                />
-                            </div>
-
-                            <div class="form-group">
-                                <label for="currency">"Currency"</label>
-                                <select
-                                    id="currency"
-                                    class="form-input"
-                                    prop:value=move || currency.get()
-                                    on:change=move |ev| set_currency.set(event_target_value(&ev))
-                                >
-                                    <option value="USD">"USD"</option>
-                                    <option value="EUR">"EUR"</option>
-                                    <option value="ETH">"ETH"</option>
-                                    <option value="BTC">"BTC"</option>
-                                </select>
-                            </div>
-
-                            <div class="form-group">
-                                <label for="expiration">"Expiration (minutes)"</label>
-                                <input
-                                    type="number"
-                                    id="expiration"
-                                    class="form-input"
-                                    placeholder="15"
-                                    prop:value=move || expiration_minutes.get()
-                                    on:input=move |ev| set_expiration_minutes.set(event_target_value(&ev))
-                                />
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary btn-sm" on:click=move |_| set_show.set(false)>
-                                "Cancel"
-                            </button>
-                            <button type="submit" class="btn btn-primary btn-sm" disabled=move || submitting.get()>
-                                {move || if submitting.get() { "Creating..." } else { "Create Invoice" }}
-                            </button>
-                        </div>
-                    </form>
-                </div>
-            </div>
-        })
     }
 }
 
@@ -554,7 +416,7 @@ fn IconChevronRight() -> impl IntoView {
     }
 }
 
-/// Invoice detail page - fetches from GET /invoices/{id}/status.
+/// Invoice detail page - fetches from GET /invoices/{id} and GET /invoices/{id}/payments.
 #[component]
 pub fn InvoiceDetailPage() -> impl IntoView {
     let params = use_params_map();
@@ -562,14 +424,20 @@ pub fn InvoiceDetailPage() -> impl IntoView {
 
     let invoice_id = Signal::derive(move || params.get().get("id").unwrap_or_default());
 
-    let status_resource = LocalResource::new(move || {
+    // Refresh counter for retry on error
+    let (refresh, set_refresh) = signal(0u32);
+
+    let detail_resource = LocalResource::new(move || {
         let api = api.get();
         let id = invoice_id.get();
+        let _ = refresh.get();
         async move {
             if id.is_empty() {
                 return Err(ApiError::Network("No invoice ID".to_string()));
             }
-            api.get_invoice_status(&id).await
+            let invoice = api.get_invoice(&id).await?;
+            let payments = api.get_invoice_payments(&id).await?;
+            Ok((invoice, payments))
         }
     });
 
@@ -581,14 +449,19 @@ pub fn InvoiceDetailPage() -> impl IntoView {
                     <p>"Loading invoice..."</p>
                 </div>
             }>
-                {move || status_resource.get().map(|result| match &*result {
+                {move || detail_resource.get().map(|result| match &*result {
                     Err(e) => view! {
                         <div class="error-container">
                             <p class="error-message">{e.to_string()}</p>
+                            <button class="btn btn-secondary btn-sm" on:click=move |_| set_refresh.update(|n| *n += 1)>
+                                "Retry"
+                            </button>
                         </div>
                     }.into_any(),
-                    Ok(status) => {
-                        view! { <InvoiceDetailContent status=status.clone() /> }.into_any()
+                    Ok((invoice, payments)) => {
+                        view! {
+                            <InvoiceDetailContent invoice=invoice.clone() payments=payments.clone() />
+                        }.into_any()
                     }
                 })}
             </Suspense>
@@ -596,14 +469,44 @@ pub fn InvoiceDetailPage() -> impl IntoView {
     }
 }
 
+/// Count confirmed (non-reorged) payments.
+fn confirmed_payment_count(payments: &[Payment]) -> usize {
+    payments
+        .iter()
+        .filter(|p| p.confirmed_at.is_some() && !p.reorged)
+        .count()
+}
+
+/// Truncate a hex string for display (e.g., "0x1234abcd...5678ef01").
+fn truncate_hex(s: &str, prefix_len: usize, suffix_len: usize) -> String {
+    if s.len() > prefix_len + suffix_len + 3 {
+        format!("{}...{}", &s[..prefix_len], &s[s.len() - suffix_len..])
+    } else {
+        s.to_string()
+    }
+}
+
 /// Inner content of the invoice detail page (rendered after data loads).
 #[component]
-fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
-    let order_id = status.payments.first().and(None::<String>); // metadata not on status response
-    let created_display = "—".to_string(); // created_at not on status response
-    let expires_display = format_date(&status.expires_at);
-    let payment_count = status.payment_count;
-    let payments = status.payments.clone();
+fn InvoiceDetailContent(invoice: Invoice, payments: Vec<Payment>) -> impl IntoView {
+    let order_id = get_metadata_field(&invoice, "order_id");
+    let buyer_email = get_metadata_field(&invoice, "buyer_email");
+    let created_display = format_date(&invoice.created_at);
+    let expires_display = format_date(&invoice.expires_at);
+    let confirmed_count = confirmed_payment_count(&payments);
+    let payment_count = payments.len();
+    let is_paid = invoice.status == types::InvoiceStatus::Paid;
+    let is_expired = invoice.status == types::InvoiceStatus::Expired;
+
+    // Customer avatar: first letter of email, or "?"
+    let avatar_letter = buyer_email
+        .as_ref()
+        .and_then(|e| e.chars().next())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let email_display = buyer_email
+        .clone()
+        .unwrap_or_else(|| "No email".to_string());
 
     view! {
         // Title row
@@ -614,8 +517,8 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                     "Invoices"
                 </A>
                 <div class="invoice-detail-title-row">
-                    <h1 class="invoice-detail-title">{status.id.clone()}</h1>
-                    <span class=status.status.css_class()>{status.status.label()}</span>
+                    <h1 class="invoice-detail-title">{invoice.id.clone()}</h1>
+                    <span class=invoice.status.css_class()>{invoice.status.label()}</span>
                 </div>
                 {order_id.clone().map(|oid| view! {
                     <p class="invoice-detail-subtitle">"Order: "{oid}</p>
@@ -646,20 +549,24 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                         <div class="detail-row">
                             <span class="detail-label">"Amount due"</span>
                             <span class="detail-value detail-value-lg">
-                                {format!("{} {}", status.amount, status.currency)}
+                                {format_amount(&invoice.amount, &invoice.currency)}
                             </span>
                         </div>
                         <div class="detail-row">
                             <span class="detail-label">"Amount received"</span>
                             <span class="detail-value detail-value-success">
-                                {format!("{} {}", status.amount_received, status.currency)}
+                                {format_amount(&invoice.amount_received, &invoice.currency)}
                             </span>
                         </div>
                         <div class="detail-row">
                             <span class="detail-label">"Payments"</span>
                             <span class="detail-value">
-                                {format!("{} confirmed / {} total", status.confirmed_count, status.payment_count)}
+                                {format!("{} confirmed / {} total", confirmed_count, payment_count)}
                             </span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">"Created"</span>
+                            <span class="detail-value">{created_display.clone()}</span>
                         </div>
                         <div class="detail-row">
                             <span class="detail-label">"Expires"</span>
@@ -696,20 +603,12 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                                         </thead>
                                         <tbody>
                                             {payments.clone().into_iter().map(|payment| {
-                                                let tx_display = if payment.tx_hash.len() > 18 {
-                                                    format!("{}...{}",
-                                                        &payment.tx_hash[..10],
-                                                        &payment.tx_hash[payment.tx_hash.len()-8..])
-                                                } else {
-                                                    payment.tx_hash.clone()
-                                                };
+                                                let tx_display = truncate_hex(&payment.tx_hash, 10, 8);
                                                 let pstatus = payment_status(&payment);
                                                 let pstatus_class = payment_status_class(&payment);
                                                 let from_display = payment.from_address.as_ref()
-                                                    .map(|a| if a.len() > 18 {
-                                                        format!("{}...{}", &a[..8], &a[a.len()-6..])
-                                                    } else { a.clone() })
-                                                    .unwrap_or_else(|| "—".to_string());
+                                                    .map(|a| truncate_hex(a, 8, 6))
+                                                    .unwrap_or_else(|| "\u{2014}".to_string());
 
                                                 view! {
                                                     <tr class="payment-row">
@@ -742,8 +641,8 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                 </div>
 
                 // Payment Options Card (show available payment methods)
-                {(!status.payment_options.is_empty()).then(|| {
-                    let options = status.payment_options.clone();
+                {(!invoice.payment_options.is_empty()).then(|| {
+                    let options = invoice.payment_options.clone();
                     view! {
                         <div class="detail-card">
                             <div class="detail-card-header">
@@ -751,11 +650,7 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                             </div>
                             <div class="detail-card-body">
                                 {options.into_iter().map(|opt| {
-                                    let addr_display = if opt.payment_address.len() > 18 {
-                                        format!("{}...{}", &opt.payment_address[..10], &opt.payment_address[opt.payment_address.len()-6..])
-                                    } else {
-                                        opt.payment_address.clone()
-                                    };
+                                    let addr_display = truncate_hex(&opt.payment_address, 10, 6);
                                     view! {
                                         <div class="detail-row">
                                             <span class="detail-label">
@@ -777,7 +672,7 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                     </div>
                     <div class="detail-card-body">
                         <div class="timeline">
-                            {(status.is_paid).then(|| view! {
+                            {is_paid.then(|| view! {
                                 <div class="timeline-item timeline-item-success">
                                     <div class="timeline-dot"></div>
                                     <div class="timeline-content">
@@ -785,7 +680,7 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                                     </div>
                                 </div>
                             })}
-                            {(status.is_expired && !status.is_paid).then(|| view! {
+                            {(is_expired && !is_paid).then(|| view! {
                                 <div class="timeline-item timeline-item-error">
                                     <div class="timeline-dot"></div>
                                     <div class="timeline-content">
@@ -827,11 +722,11 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                     <div class="detail-card-body">
                         <div class="customer-info">
                             <div class="customer-avatar">
-                                {"?"}
+                                {avatar_letter}
                             </div>
                             <div class="customer-details">
                                 <span class="customer-email">
-                                    {"No email"}
+                                    {email_display}
                                 </span>
                             </div>
                         </div>
@@ -845,11 +740,11 @@ fn InvoiceDetailContent(status: InvoiceStatusResponse) -> impl IntoView {
                     <div class="detail-card-body">
                         <div class="detail-row">
                             <span class="detail-label">"Paid"</span>
-                            <span class="detail-value">{if status.is_paid { "Yes" } else { "No" }}</span>
+                            <span class="detail-value">{if is_paid { "Yes" } else { "No" }}</span>
                         </div>
                         <div class="detail-row">
                             <span class="detail-label">"Expired"</span>
-                            <span class="detail-value">{if status.is_expired { "Yes" } else { "No" }}</span>
+                            <span class="detail-value">{if is_expired { "Yes" } else { "No" }}</span>
                         </div>
                     </div>
                 </div>
@@ -1013,6 +908,82 @@ mod tests {
         };
         assert_eq!(get_metadata_field(&invoice, "order_id"), None);
     }
+
+    #[test]
+    fn test_format_amount() {
+        assert_eq!(format_amount("100.00", "USD"), "$100.00 USD");
+        assert_eq!(format_amount("50.00", "EUR"), "\u{20ac}50.00 EUR");
+        assert_eq!(format_amount("25.00", "GBP"), "\u{00a3}25.00 GBP");
+        assert_eq!(format_amount("1.5", "ETH"), "1.5 ETH");
+        assert_eq!(format_amount("0.001", "BTC"), "0.001 BTC");
+    }
+
+    #[test]
+    fn test_confirmed_payment_count() {
+        let payments = vec![
+            Payment {
+                id: "p1".into(),
+                chain_id: 1,
+                invoice_id: "inv-1".into(),
+                amount: "100".into(),
+                asset_symbol: "ETH".into(),
+                token_address: None,
+                tx_hash: "0xabc".into(),
+                block_number: Some(1),
+                detected_at: "2024-01-01T00:00:00Z".into(),
+                confirmed_at: Some("2024-01-01T00:05:00Z".into()),
+                from_address: None,
+                reorged: false,
+            },
+            Payment {
+                id: "p2".into(),
+                chain_id: 1,
+                invoice_id: "inv-1".into(),
+                amount: "50".into(),
+                asset_symbol: "ETH".into(),
+                token_address: None,
+                tx_hash: "0xdef".into(),
+                block_number: None,
+                detected_at: "2024-01-01T00:00:00Z".into(),
+                confirmed_at: None,
+                from_address: None,
+                reorged: false,
+            },
+            Payment {
+                id: "p3".into(),
+                chain_id: 1,
+                invoice_id: "inv-1".into(),
+                amount: "75".into(),
+                asset_symbol: "ETH".into(),
+                token_address: None,
+                tx_hash: "0xghi".into(),
+                block_number: Some(2),
+                detected_at: "2024-01-01T00:00:00Z".into(),
+                confirmed_at: Some("2024-01-01T00:10:00Z".into()),
+                from_address: None,
+                reorged: true,
+            },
+        ];
+        // Only p1 is confirmed and not reorged
+        assert_eq!(confirmed_payment_count(&payments), 1);
+        assert_eq!(confirmed_payment_count(&[]), 0);
+    }
+
+    #[test]
+    fn test_truncate_hex() {
+        // Long hex gets truncated
+        assert_eq!(
+            truncate_hex("0x1234567890abcdef1234567890abcdef", 10, 8),
+            "0x12345678...90abcdef"
+        );
+        // Short hex stays as-is
+        assert_eq!(truncate_hex("0xabc", 10, 8), "0xabc");
+        // Exactly at boundary
+        assert_eq!(
+            truncate_hex("0x1234567890abcdef12", 10, 8),
+            "0x1234567890abcdef12"
+        );
+    }
 }
 
 /// Clock icon for empty payments state.
@@ -1090,16 +1061,6 @@ fn IconArrowLeft() -> impl IntoView {
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="19" y1="12" x2="5" y2="12"></line>
             <polyline points="12 19 5 12 12 5"></polyline>
-        </svg>
-    }
-}
-
-#[component]
-fn IconClose() -> impl IntoView {
-    view! {
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18"></line>
-            <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
     }
 }

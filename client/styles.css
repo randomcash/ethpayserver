@@ -947,6 +947,141 @@ a:hover {
     color: var(--color-error);
 }
 
+.form-optional {
+    font-weight: 400;
+    color: var(--text-muted);
+}
+
+.form-alert {
+    padding: var(--space-3);
+    border-radius: var(--border-radius-md);
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-4);
+}
+
+.form-alert-error {
+    background: color-mix(in srgb, var(--color-error) 10%, transparent);
+    color: var(--color-error);
+    border: 1px solid color-mix(in srgb, var(--color-error) 20%, transparent);
+}
+
+.form-row {
+    display: flex;
+    gap: var(--space-3);
+    align-items: flex-start;
+}
+
+.form-group-grow {
+    flex: 1;
+}
+
+.form-store-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-secondary);
+    border-radius: var(--border-radius-md);
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    margin-bottom: var(--space-4);
+}
+
+.form-advanced-toggle {
+    margin-top: var(--space-2);
+    margin-bottom: var(--space-2);
+}
+
+.form-advanced-section {
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border-color);
+}
+
+/* ============================================
+   Modal
+   ============================================ */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(2px);
+    animation: modal-fade-in 0.15s ease-out;
+}
+
+.modal {
+    background: var(--bg-primary);
+    border-radius: var(--border-radius-lg);
+    box-shadow: var(--shadow-lg);
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    animation: modal-slide-in 0.15s ease-out;
+}
+
+.modal-md {
+    max-width: 520px;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-5);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header h2 {
+    margin: 0;
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.modal-body {
+    padding: var(--space-5);
+}
+
+.modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-5);
+    border-top: 1px solid var(--border-color);
+}
+
+@keyframes modal-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes modal-slide-in {
+    from {
+        opacity: 0;
+        transform: translateY(-8px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+/* Mobile: full-width modal */
+@media (max-width: 640px) {
+    .modal {
+        margin: var(--space-3);
+    }
+    .modal-md {
+        max-width: none;
+    }
+    .form-row {
+        flex-direction: column;
+    }
+}
+
 /* ============================================
    Badges & Status
    ============================================ */

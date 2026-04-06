@@ -30,9 +30,7 @@ use crate::metrics;
 use crate::services::EVMMonitor;
 use crate::state::PgAppState;
 use rates::{RateError, is_fiat_currency};
-
-/// Default invoice expiration time in seconds (15 minutes).
-const DEFAULT_INVOICE_EXPIRATION_SECS: u64 = 900;
+use types::currency::DEFAULT_INVOICE_EXPIRATION_SECS;
 
 /// Convert an amount to crypto smallest units using the exchange rate.
 ///
