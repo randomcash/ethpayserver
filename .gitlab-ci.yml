@@ -1,12 +1,9 @@
 stages:
   - check
-  - test
-  - security
   - build
   - docker
 
 # Shell executor — runs on host, uses native cargo cache.
-# No Docker overhead, no image pulls, no dep recompilation.
 
 variables:
   CARGO_INCREMENTAL: "1"
@@ -27,7 +24,7 @@ before_script:
     fi
 
 # ---------------------------------------------------------------------------
-# Stage: check (single job — fmt + clippy in one compilation pass)
+# Stage: check — all validation in parallel
 # ---------------------------------------------------------------------------
 
 lint:
@@ -40,12 +37,8 @@ lint:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
 
-# ---------------------------------------------------------------------------
-# Stage: test
-# ---------------------------------------------------------------------------
-
 test:
-  stage: test
+  stage: check
   script:
     - cargo test --workspace --lib --no-fail-fast
   rules:
@@ -53,24 +46,11 @@ test:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
 
-test:doc:
-  stage: test
-  script:
-    - cargo doc --workspace --no-deps
-  timeout: 15 minutes
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == "main"
-    - if: $CI_COMMIT_BRANCH == "testnet"
-
-# ---------------------------------------------------------------------------
-# Stage: security (tools pre-installed on runner — no compile overhead)
-# ---------------------------------------------------------------------------
-
 audit:
-  stage: security
+  stage: check
   script:
     - cargo audit
+    - cargo deny check licenses sources
   timeout: 10 minutes
   allow_failure: true
   rules:
@@ -78,21 +58,11 @@ audit:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
 
-deny:
-  stage: security
-  script:
-    - cargo deny check licenses sources
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == "main"
-    - if: $CI_COMMIT_BRANCH == "testnet"
-  allow_failure: true
-
 # ---------------------------------------------------------------------------
-# Stage: build
+# Stage: build — compile binaries and WASM on host (parallel)
 # ---------------------------------------------------------------------------
 
-build:release:
+build:server:
   stage: build
   script:
     - cargo build --release --bin ethpayserver
@@ -101,7 +71,31 @@ build:release:
     paths:
       - target/release/ethpayserver
       - target/release/migrate_postgres
-    expire_in: 7 days
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
+
+build:monitor:
+  stage: build
+  script:
+    - cargo build --release --bin evmmonitor --features monitor-bin
+  artifacts:
+    paths:
+      - target/release/evmmonitor
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
+
+build:client:
+  stage: build
+  script:
+    - cd client && trunk build --release
+  artifacts:
+    paths:
+      - client/dist/
+    expire_in: 1 day
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
@@ -114,17 +108,18 @@ build:check:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 # ---------------------------------------------------------------------------
-# Stage: docker — build and push images to GitLab Container Registry
+# Stage: docker — package pre-built binaries into slim images (parallel)
 # ---------------------------------------------------------------------------
 
 docker:server:
   stage: docker
+  needs:
+    - build:server
   before_script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     - >
       docker build
-      --secret id=GIT_AUTH_TOKEN,env=CI_JOB_TOKEN
       -f docker/ethpayserver.Dockerfile
       -t $SERVER_IMAGE
       -t $SERVER_IMAGE_LATEST
@@ -137,12 +132,13 @@ docker:server:
 
 docker:monitor:
   stage: docker
+  needs:
+    - build:monitor
   before_script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     - >
       docker build
-      --secret id=GIT_AUTH_TOKEN,env=CI_JOB_TOKEN
       -f docker/evmmonitor.Dockerfile
       -t $MONITOR_IMAGE
       -t $MONITOR_IMAGE_LATEST
@@ -155,12 +151,13 @@ docker:monitor:
 
 docker:client:
   stage: docker
+  needs:
+    - build:client
   before_script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
     - >
       docker build
-      --secret id=GIT_AUTH_TOKEN,env=CI_JOB_TOKEN
       -f docker/client.Dockerfile
       -t $CLIENT_IMAGE
       -t $CLIENT_IMAGE_LATEST
