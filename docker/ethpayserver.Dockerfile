@@ -4,10 +4,8 @@
 #   target/release/ethpayserver
 #   target/release/migrate_postgres
 
-FROM debian:bookworm-slim
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -q ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+FROM archlinux:base
+RUN pacman -Sy --noconfirm ca-certificates && pacman -Scc --noconfirm
 RUN useradd -r -s /bin/false ethpayserver
 COPY target/release/ethpayserver /usr/local/bin/
 COPY target/release/migrate_postgres /usr/local/bin/

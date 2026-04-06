@@ -2,7 +2,6 @@ stages:
   - check
   - build
   - docker
-  - notify
 
 # Shell executor — runs on host, uses native cargo cache.
 
@@ -186,20 +185,3 @@ docker:client:
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
-
-# ---------------------------------------------------------------------------
-# Stage: notify — trigger downstream deploy (if configured)
-# ---------------------------------------------------------------------------
-
-notify:deploy:
-  stage: notify
-  before_script: []
-  script:
-    - >
-      curl -s -X POST
-      -F "token=$DEPLOY_TRIGGER_TOKEN"
-      -F "ref=main"
-      "$DEPLOY_TRIGGER_URL"
-  rules:
-    - if: $CI_COMMIT_BRANCH == "testnet" && $DEPLOY_TRIGGER_URL
-    - if: $CI_COMMIT_BRANCH == "main" && $DEPLOY_TRIGGER_URL
