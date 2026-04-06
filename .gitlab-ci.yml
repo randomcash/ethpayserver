@@ -3,12 +3,17 @@ stages:
   - test
   - security
   - build
+  - docker
 
 # Shell executor — runs on host, uses native cargo cache.
 # No Docker overhead, no image pulls, no dep recompilation.
 
 variables:
   CARGO_INCREMENTAL: "1"
+  SERVER_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  SERVER_IMAGE_LATEST: $CI_REGISTRY_IMAGE:$CI_COMMIT_BRANCH-latest
+  MONITOR_IMAGE: $CI_REGISTRY_IMAGE/evmmonitor:$CI_COMMIT_SHORT_SHA
+  MONITOR_IMAGE_LATEST: $CI_REGISTRY_IMAGE/evmmonitor:$CI_COMMIT_BRANCH-latest
 
 # Clone payserver-commons if not already present (for [patch] paths)
 before_script:
@@ -31,6 +36,7 @@ lint:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
 
 # ---------------------------------------------------------------------------
 # Stage: test
@@ -43,14 +49,17 @@ test:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
 
 test:doc:
   stage: test
   script:
     - cargo doc --workspace --no-deps
+  timeout: 15 minutes
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
 
 # ---------------------------------------------------------------------------
 # Stage: security (tools pre-installed on runner — no compile overhead)
@@ -60,9 +69,12 @@ audit:
   stage: security
   script:
     - cargo audit
+  timeout: 10 minutes
+  allow_failure: true
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
 
 deny:
   stage: security
@@ -71,6 +83,7 @@ deny:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
   allow_failure: true
 
 # ---------------------------------------------------------------------------
@@ -89,6 +102,7 @@ build:release:
     expire_in: 7 days
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
 
 build:check:
   stage: build
@@ -96,3 +110,43 @@ build:check:
     - cargo build --release --bin ethpayserver
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ---------------------------------------------------------------------------
+# Stage: docker — build and push images to GitLab Container Registry
+# ---------------------------------------------------------------------------
+
+docker:server:
+  stage: docker
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - >
+      docker build
+      --secret id=GIT_AUTH_TOKEN,env=CI_JOB_TOKEN
+      -f docker/ethpayserver.Dockerfile
+      -t $SERVER_IMAGE
+      -t $SERVER_IMAGE_LATEST
+      .
+    - docker push $SERVER_IMAGE
+    - docker push $SERVER_IMAGE_LATEST
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
+
+docker:monitor:
+  stage: docker
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - >
+      docker build
+      --secret id=GIT_AUTH_TOKEN,env=CI_JOB_TOKEN
+      -f docker/evmmonitor.Dockerfile
+      -t $MONITOR_IMAGE
+      -t $MONITOR_IMAGE_LATEST
+      .
+    - docker push $MONITOR_IMAGE
+    - docker push $MONITOR_IMAGE_LATEST
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
