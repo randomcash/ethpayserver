@@ -2,8 +2,8 @@
 target/
 build/
 
-# Frontend client (built separately with trunk)
-client/
+# Frontend client build artifacts (source needed for client.Dockerfile)
+client/dist/
 
 # IDE and editor
 .idea/
@@ -16,10 +16,9 @@ client/
 .git/
 .gitignore
 
-# Docker
-docker/
+# Docker (keep config files, exclude Dockerfiles)
+docker/*.Dockerfile
 .dockerignore
-Dockerfile*
 
 # Documentation and memos
 memos/
