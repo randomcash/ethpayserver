@@ -1,5 +1,8 @@
-# Build artifacts
-target/
+# Build artifacts (keep release binaries for CI docker builds)
+target/debug/
+target/doc/
+target/.rustc_info.json
+target/.cargo-lock
 build/
 
 # Frontend client build artifacts (source needed for client.Dockerfile)
