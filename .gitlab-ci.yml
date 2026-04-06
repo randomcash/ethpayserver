@@ -14,6 +14,8 @@ variables:
   SERVER_IMAGE_LATEST: $CI_REGISTRY_IMAGE:$CI_COMMIT_BRANCH-latest
   MONITOR_IMAGE: $CI_REGISTRY_IMAGE/evmmonitor:$CI_COMMIT_SHORT_SHA
   MONITOR_IMAGE_LATEST: $CI_REGISTRY_IMAGE/evmmonitor:$CI_COMMIT_BRANCH-latest
+  CLIENT_IMAGE: $CI_REGISTRY_IMAGE/client:$CI_COMMIT_SHORT_SHA
+  CLIENT_IMAGE_LATEST: $CI_REGISTRY_IMAGE/client:$CI_COMMIT_BRANCH-latest
 
 # Clone payserver-commons if not already present (for [patch] paths)
 before_script:
@@ -147,6 +149,24 @@ docker:monitor:
       .
     - docker push $MONITOR_IMAGE
     - docker push $MONITOR_IMAGE_LATEST
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
+
+docker:client:
+  stage: docker
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - >
+      docker build
+      --secret id=GIT_AUTH_TOKEN,env=CI_JOB_TOKEN
+      -f docker/client.Dockerfile
+      -t $CLIENT_IMAGE
+      -t $CLIENT_IMAGE_LATEST
+      .
+    - docker push $CLIENT_IMAGE
+    - docker push $CLIENT_IMAGE_LATEST
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
