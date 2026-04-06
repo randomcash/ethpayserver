@@ -45,11 +45,14 @@ test:
     - cargo test --workspace --lib --no-fail-fast
     # Integration tests against ephemeral Postgres
     - |
-      PGPORT=15432
-      PGCONTAINER="ci_postgres_$$"
-      docker run -d --name $PGCONTAINER -p $PGPORT:5432 \
+      PGCONTAINER="ci_postgres_${CI_JOB_ID}"
+      docker rm -f $PGCONTAINER 2>/dev/null || true
+      docker run -d --name $PGCONTAINER -p 0:5432 \
         -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ethpayserver_test \
         postgres:16-alpine
+      PGPORT=$(docker port $PGCONTAINER 5432 | head -1 | cut -d: -f2)
+      cleanup() { docker rm -f $PGCONTAINER 2>/dev/null; }
+      trap cleanup EXIT
       for i in $(seq 1 30); do
         docker exec $PGCONTAINER pg_isready -U test && break || sleep 1
       done
@@ -57,7 +60,6 @@ test:
         cargo run --release --bin migrate_postgres
       DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_test" \
         cargo test -p data-service -- --ignored --no-fail-fast
-      docker rm -f $PGCONTAINER
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
