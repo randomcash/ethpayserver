@@ -326,13 +326,18 @@ mod tests {
             .expect("client connect failed");
 
         // First message must be the Connected acknowledgement
-        let msg = ws.next().await.unwrap().unwrap();
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for Connected")
+            .unwrap()
+            .unwrap();
         let update: StatusUpdate = serde_json::from_str(msg.to_text().unwrap()).unwrap();
         assert!(matches!(update, StatusUpdate::Connected));
     }
 
     #[tokio::test]
     async fn test_handle_socket_forwards_broadcast() {
+        let timeout = std::time::Duration::from_secs(5);
         let (addr, broadcast) = spawn_test_ws_server().await;
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
@@ -340,7 +345,11 @@ mod tests {
             .expect("client connect failed");
 
         // Consume the Connected message
-        let _ = ws.next().await.unwrap().unwrap();
+        tokio::time::timeout(timeout, ws.next())
+            .await
+            .expect("timed out waiting for Connected")
+            .unwrap()
+            .unwrap();
 
         // Broadcast a status update
         broadcast.send(StatusUpdate::InvoiceStatus {
@@ -348,7 +357,11 @@ mod tests {
             status: "paid".to_string(),
         });
 
-        let msg = ws.next().await.unwrap().unwrap();
+        let msg = tokio::time::timeout(timeout, ws.next())
+            .await
+            .expect("timed out waiting for broadcast")
+            .unwrap()
+            .unwrap();
         let update: StatusUpdate = serde_json::from_str(msg.to_text().unwrap()).unwrap();
         assert!(
             matches!(update, StatusUpdate::InvoiceStatus { ref invoice_id, ref status }
@@ -365,7 +378,11 @@ mod tests {
             .expect("client connect failed");
 
         // Consume Connected
-        let _ = ws.next().await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for Connected")
+            .unwrap()
+            .unwrap();
 
         // Client sends close frame
         ws.close(None).await.unwrap();
