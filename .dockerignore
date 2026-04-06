@@ -5,8 +5,12 @@ target/.rustc_info.json
 target/.cargo-lock
 build/
 
-# Frontend client build artifacts (source needed for client.Dockerfile)
-client/dist/
+# Frontend client source (keep dist/ for CI docker builds)
+client/src/
+client/Cargo.toml
+client/Trunk.toml
+client/index.html
+client/styles.css
 
 # IDE and editor
 .idea/
