@@ -276,6 +276,9 @@ mod tests {
             amount: None,
         };
         let json = serde_json::to_value(&payment_no_amt).unwrap();
-        assert_eq!(json["amount"], serde_json::Value::Null);
+        // Use .get().unwrap().is_null() instead of json["amount"] == Null
+        // so this assertion catches a future skip_serializing_if annotation
+        // that would omit the key entirely.
+        assert!(json.get("amount").unwrap().is_null());
     }
 }
