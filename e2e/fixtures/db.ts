@@ -1,7 +1,7 @@
 import { Client } from 'pg';
 
 const DATABASE_URL =
-  process.env.E2E_DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/ethpayserver';
+  process.env.E2E_DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/ethpayserver_e2e';
 
 const TABLES_TO_TRUNCATE = [
   'api_keys',
@@ -12,9 +12,10 @@ const TABLES_TO_TRUNCATE = [
   'invoices',
   'store_payment_methods',
   'store_webhooks',
-  'store_wallets',
   'user_stores',
+  'store_roles',
   'stores',
+  'discoverable_authentication_challenges',
   'wallet_challenges',
   'passkey_authentication_challenges',
   'passkey_registration_challenges',

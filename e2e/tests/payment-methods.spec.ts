@@ -111,7 +111,7 @@ test.describe('Payment Methods', () => {
       await confirmBtn.click();
     }
 
-    // After deletion the section should revert to empty or have one fewer entry
-    await page.waitForTimeout(500);
+    // After deletion the payment method entry should be removed
+    await expect(page.locator('button', { hasText: /delete|remove/i }).first()).not.toBeVisible({ timeout: 5_000 });
   });
 });
