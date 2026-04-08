@@ -1,6 +1,7 @@
 stages:
   - check
   - build
+  - e2e
   - docker
   - notify
 
@@ -125,6 +126,68 @@ build:check:
     - cargo build --release --bin ethpayserver
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ---------------------------------------------------------------------------
+# Stage: e2e — Playwright regression tests against live backend + frontend
+# ---------------------------------------------------------------------------
+
+e2e:
+  stage: e2e
+  needs:
+    - build:server
+    - build:client
+  variables:
+    E2E_DATABASE_URL: "postgres://test:test@127.0.0.1:5432/ethpayserver_e2e"
+    E2E_API_URL: "http://127.0.0.1:3000"
+    E2E_BASE_URL: "http://127.0.0.1:8080"
+    DATABASE_URL: "postgres://test:test@127.0.0.1:5432/ethpayserver_e2e"
+    REDIS_URL: "redis://127.0.0.1:6379"
+  script:
+    # Start Postgres
+    - |
+      PGCONTAINER="ci_e2e_postgres_${CI_JOB_ID}"
+      docker rm -f $PGCONTAINER 2>/dev/null || true
+      docker run -d --name $PGCONTAINER -p 5432:5432 \
+        -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ethpayserver_e2e \
+        postgres:16-alpine
+      cleanup_pg() { docker rm -f $PGCONTAINER 2>/dev/null; }
+      trap cleanup_pg EXIT
+    # Start Redis
+    - |
+      REDISCONTAINER="ci_e2e_redis_${CI_JOB_ID}"
+      docker rm -f $REDISCONTAINER 2>/dev/null || true
+      docker run -d --name $REDISCONTAINER -p 6379:6379 redis:7-alpine
+      cleanup_all() { docker rm -f $PGCONTAINER $REDISCONTAINER 2>/dev/null; }
+      trap cleanup_all EXIT
+    # Wait for Postgres
+    - |
+      for i in $(seq 1 30); do
+        docker exec $PGCONTAINER pg_isready -U test && break || sleep 1
+      done
+    # Run migrations
+    - ./target/release/migrate_postgres
+    # Start backend in background
+    - ./target/release/ethpayserver &
+    - |
+      for i in $(seq 1 30); do
+        curl -sf ${E2E_API_URL}/health/live && break || sleep 1
+      done
+    # Serve frontend from pre-built client dist
+    - npx -y serve -s client/dist -l 8080 &
+    - sleep 2
+    # Install Playwright and run tests
+    - cd e2e && npm ci && npx playwright install --with-deps chromium
+    - npx playwright test
+  artifacts:
+    when: always
+    paths:
+      - e2e/playwright-report/
+      - e2e/test-results/
+    expire_in: 7 days
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
+  allow_failure: true
 
 # ---------------------------------------------------------------------------
 # Stage: docker — package pre-built binaries into slim images (parallel)
