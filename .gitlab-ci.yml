@@ -71,6 +71,7 @@ audit:
   script:
     - git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
     - git config --global url."https://github.com/".insteadOf "git@github.com:"
+    - rm -rf ${CARGO_HOME:-$HOME/.cargo}/advisory-db
     - cargo audit
     - cargo deny check licenses sources
   timeout: 10 minutes
