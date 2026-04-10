@@ -79,6 +79,10 @@ services:
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
       WEBAUTHN_RP_ORIGIN: ${WEBAUTHN_RP_ORIGIN:-http://localhost:8080}
       WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-PayServer}
+      # CAPTCHA (optional — registration works without it)
+      CAPTCHA_PROVIDER: ${CAPTCHA_PROVIDER:-}
+      CAPTCHA_SECRET_KEY: ${CAPTCHA_SECRET_KEY:-}
+      CAPTCHA_SITE_KEY: ${CAPTCHA_SITE_KEY:-}
     ports:
       - "${SERVER_PORT:-3000}:3000"
     depends_on:

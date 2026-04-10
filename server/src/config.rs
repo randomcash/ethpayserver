@@ -25,6 +25,11 @@
 //! - `WEBHOOK_REQUEST_TIMEOUT_SECS` - HTTP request timeout (default: 30)
 //! - `WEBHOOK_POLL_INTERVAL_SECS` - Queue poll interval (default: 5)
 //!
+//! ## CAPTCHA (optional)
+//! - `CAPTCHA_PROVIDER` - Provider name: `turnstile` or `cloudflare` (unset = disabled)
+//! - `CAPTCHA_SECRET_KEY` - Provider secret key (required when CAPTCHA_PROVIDER is set)
+//! - `CAPTCHA_SITE_KEY` - Provider site key (required when CAPTCHA_PROVIDER is set)
+//!
 //! ## Watch Retry Service
 //! - `WATCH_RETRY_INTERVAL_SECS` - Retry interval in seconds (default: 30)
 //! - `WATCH_RETRY_ENABLED` - Enable/disable retry service (default: true)
