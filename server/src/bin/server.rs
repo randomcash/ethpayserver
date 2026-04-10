@@ -95,10 +95,12 @@ async fn main() -> Result<()> {
     // Configure CAPTCHA provider (optional)
     let captcha_provider = match std::env::var("CAPTCHA_PROVIDER").ok().as_deref() {
         Some("turnstile" | "cloudflare") => {
-            let secret = std::env::var("CAPTCHA_SECRET_KEY")
-                .map_err(|_| anyhow::anyhow!("CAPTCHA_SECRET_KEY required when CAPTCHA_PROVIDER is set"))?;
-            let site_key = std::env::var("CAPTCHA_SITE_KEY")
-                .map_err(|_| anyhow::anyhow!("CAPTCHA_SITE_KEY required when CAPTCHA_PROVIDER is set"))?;
+            let secret = std::env::var("CAPTCHA_SECRET_KEY").map_err(|_| {
+                anyhow::anyhow!("CAPTCHA_SECRET_KEY required when CAPTCHA_PROVIDER is set")
+            })?;
+            let site_key = std::env::var("CAPTCHA_SITE_KEY").map_err(|_| {
+                anyhow::anyhow!("CAPTCHA_SITE_KEY required when CAPTCHA_PROVIDER is set")
+            })?;
             tracing::info!(provider = "turnstile", "CAPTCHA enabled");
             Some(Arc::new(CloudflareTurnstile::new(secret, site_key))
                 as Arc<dyn auth::captcha::CaptchaProvider>)
