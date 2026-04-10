@@ -179,6 +179,33 @@ impl EvmApiClient {
         self.get("/api/auth/me").await
     }
 
+    /// Log out the current session (server-side invalidation).
+    pub async fn logout(&self) -> Result<(), ApiError> {
+        let request = self
+            .build_request("POST", "/api/auth/logout")
+            .build()
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if response.status() == 401 {
+            return Err(ApiError::Unauthorized);
+        }
+
+        if !response.ok() {
+            let message = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http {
+                status: response.status(),
+                message,
+            });
+        }
+
+        Ok(())
+    }
+
     // =========================================================================
     // Dashboard
     // =========================================================================
