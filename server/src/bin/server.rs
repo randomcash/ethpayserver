@@ -13,7 +13,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use auth::{AuthConfig, AuthService};
+use auth::{AuthConfig, AuthService, captcha::CloudflareTurnstile};
 use data_service::PgDataService;
 use evm::monitor::bridge::{COMMANDS_CHANNEL, EVENTS_CHANNEL, RedisBridge};
 use rates::RateProviderConfig;
@@ -91,6 +91,26 @@ async fn main() -> Result<()> {
         Arc::clone(&data_service),
         auth_config,
     ));
+
+    // Configure CAPTCHA provider (optional)
+    let captcha_provider = match std::env::var("CAPTCHA_PROVIDER").ok().as_deref() {
+        Some("turnstile" | "cloudflare") => {
+            let secret = std::env::var("CAPTCHA_SECRET_KEY")
+                .expect("CAPTCHA_SECRET_KEY required when CAPTCHA_PROVIDER is set");
+            let site_key = std::env::var("CAPTCHA_SITE_KEY")
+                .expect("CAPTCHA_SITE_KEY required when CAPTCHA_PROVIDER is set");
+            tracing::info!(provider = "turnstile", "CAPTCHA enabled");
+            Some(Arc::new(CloudflareTurnstile::new(secret, site_key))
+                as Arc<dyn auth::captcha::CaptchaProvider>)
+        }
+        Some(other) => {
+            panic!("Unknown CAPTCHA_PROVIDER: {other}. Supported: turnstile, cloudflare");
+        }
+        None => {
+            tracing::info!("CAPTCHA disabled (no CAPTCHA_PROVIDER set)");
+            None
+        }
+    };
 
     // Connect to Redis (REQUIRED for event processing)
     let redis_url = config
@@ -185,6 +205,7 @@ async fn main() -> Result<()> {
         rate_provider,
     );
     state.ws_broadcast = Some(ws_broadcast);
+    state.captcha_provider = captcha_provider;
 
     // Build router with middleware
     let app = api::router(state, config.enable_swagger)
