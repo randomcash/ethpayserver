@@ -69,7 +69,10 @@ test:
 audit:
   stage: check
   script:
-    - cargo audit
+    - git config --global --unset-all url."ssh://git@github.com/".insteadOf || true
+    - rm -rf ${CARGO_HOME:-$HOME/.cargo}/advisory-db
+    - git clone --depth 1 https://github.com/RustSec/advisory-db.git ${CARGO_HOME:-$HOME/.cargo}/advisory-db
+    - cargo audit --no-fetch
     - cargo deny check licenses sources
   timeout: 10 minutes
   allow_failure: true
@@ -137,26 +140,25 @@ e2e:
     - build:server
     - build:client
   variables:
-    E2E_DATABASE_URL: "postgres://test:test@127.0.0.1:5432/ethpayserver_e2e"
     E2E_API_URL: "http://127.0.0.1:3000"
     E2E_BASE_URL: "http://127.0.0.1:8080"
-    DATABASE_URL: "postgres://test:test@127.0.0.1:5432/ethpayserver_e2e"
-    REDIS_URL: "redis://127.0.0.1:6379"
   script:
     # Start Postgres
     - |
       PGCONTAINER="ci_e2e_postgres_${CI_JOB_ID}"
       docker rm -f $PGCONTAINER 2>/dev/null || true
-      docker run -d --name $PGCONTAINER -p 5432:5432 \
+      docker run -d --name $PGCONTAINER -p 0:5432 \
         -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ethpayserver_e2e \
         postgres:16-alpine
+      PGPORT=$(docker port $PGCONTAINER 5432 | head -1 | cut -d: -f2)
       cleanup_pg() { docker rm -f $PGCONTAINER 2>/dev/null; }
       trap cleanup_pg EXIT
     # Start Redis
     - |
       REDISCONTAINER="ci_e2e_redis_${CI_JOB_ID}"
       docker rm -f $REDISCONTAINER 2>/dev/null || true
-      docker run -d --name $REDISCONTAINER -p 6379:6379 redis:7-alpine
+      docker run -d --name $REDISCONTAINER -p 0:6379 redis:7-alpine
+      REDISPORT=$(docker port $REDISCONTAINER 6379 | head -1 | cut -d: -f2)
       cleanup_all() { docker rm -f $PGCONTAINER $REDISCONTAINER 2>/dev/null; }
       trap cleanup_all EXIT
     # Wait for Postgres
@@ -164,9 +166,10 @@ e2e:
       for i in $(seq 1 30); do
         docker exec $PGCONTAINER pg_isready -U test && break || sleep 1
       done
-    # Run migrations
+    # Run migrations and start backend with dynamic ports
+    - export DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_e2e"
+    - export REDIS_URL="redis://127.0.0.1:$REDISPORT"
     - ./target/release/migrate_postgres
-    # Start backend in background
     - ./target/release/ethpayserver &
     - |
       for i in $(seq 1 30); do
@@ -207,6 +210,7 @@ docker:server:
       -t $SERVER_IMAGE_LATEST
       .
     - docker push $SERVER_IMAGE
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - docker push $SERVER_IMAGE_LATEST
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
@@ -226,6 +230,7 @@ docker:monitor:
       -t $MONITOR_IMAGE_LATEST
       .
     - docker push $MONITOR_IMAGE
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - docker push $MONITOR_IMAGE_LATEST
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
@@ -245,6 +250,7 @@ docker:client:
       -t $CLIENT_IMAGE_LATEST
       .
     - docker push $CLIENT_IMAGE
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - docker push $CLIENT_IMAGE_LATEST
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
