@@ -432,8 +432,23 @@ fn MainHeader<F>(on_menu_click: F) -> impl IntoView
 where
     F: Fn(web_sys::MouseEvent) + 'static,
 {
+    let auth = use_auth();
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
     let create_invoice =
         use_context::<CreateInvoiceSignal>().expect("CreateInvoiceSignal must be provided");
+
+    let (menu_open, set_menu_open) = signal(false);
+
+    let toggle_menu = move |_: web_sys::MouseEvent| set_menu_open.update(|v| *v = !*v);
+
+    let on_logout = move |_: web_sys::MouseEvent| {
+        let api = api.get();
+        set_menu_open.set(false);
+        leptos::task::spawn_local(async move {
+            let _ = api.logout().await;
+            auth.logout();
+        });
+    };
 
     view! {
         <header class="main-header">
@@ -455,6 +470,22 @@ where
                     <button class="btn btn-primary btn-sm" on:click=move |_| create_invoice.open()>
                         <span>"Create Invoice"</span>
                     </button>
+                    <div class="user-menu">
+                        <button class="btn btn-ghost btn-sm user-menu-trigger" on:click=toggle_menu>
+                            <IconUser />
+                        </button>
+                        <div class=move || if menu_open.get() { "user-menu-dropdown open" } else { "user-menu-dropdown" }>
+                            <a href="/evm/settings" class="user-menu-item" on:click=move |_| set_menu_open.set(false)>
+                                <IconSettings />
+                                <span>"Settings"</span>
+                            </a>
+                            <div class="user-menu-divider"></div>
+                            <button class="user-menu-item user-menu-logout" on:click=on_logout>
+                                <IconLogout />
+                                <span>"Log out"</span>
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </header>
@@ -620,6 +651,27 @@ fn IconCheck() -> impl IntoView {
     view! {
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+    }
+}
+
+#[component]
+fn IconUser() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle>
+        </svg>
+    }
+}
+
+#[component]
+fn IconLogout() -> impl IntoView {
+    view! {
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
         </svg>
     }
 }
