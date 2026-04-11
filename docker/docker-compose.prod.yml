@@ -9,6 +9,9 @@
 #   - EVMMONITOR_CHAINS (chain IDs to monitor)
 #   - EVMMONITOR_CHAIN_{ID}_RPC_HTTP (for each chain)
 #   - EVMMONITOR_CHAIN_{ID}_RPC_WS (for each chain)
+#   - WEBAUTHN_RP_ID (domain for passkey auth, e.g. random.cash)
+#   - WEBAUTHN_RP_ORIGIN (full origin URL, e.g. https://random.cash)
+#   - WEBAUTHN_RP_NAME (display name for passkey prompts)
 
 services:
   postgres:
@@ -73,6 +76,9 @@ services:
       PORT: 3000
       RUST_LOG: ${RUST_LOG:-info}
       ENABLE_SWAGGER: "false"
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      WEBAUTHN_RP_ORIGIN: ${WEBAUTHN_RP_ORIGIN:-http://localhost:8080}
+      WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-PayServer}
     ports:
       - "${SERVER_PORT:-3000}:3000"
     depends_on:
