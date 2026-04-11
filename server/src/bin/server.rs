@@ -51,16 +51,41 @@ async fn main() -> Result<()> {
         wallet_challenge_duration: chrono::Duration::minutes(10),
         ..AuthConfig::default()
     };
+
     // WebAuthn config from environment
-    if let Ok(rp_id) = std::env::var("WEBAUTHN_RP_ID") {
-        auth_config.rp_id = rp_id;
-    }
+    let rp_id_explicit = std::env::var("WEBAUTHN_RP_ID").ok();
     if let Ok(rp_origin) = std::env::var("WEBAUTHN_RP_ORIGIN") {
         auth_config.rp_origin = rp_origin;
     }
     if let Ok(rp_name) = std::env::var("WEBAUTHN_RP_NAME") {
         auth_config.rp_name = rp_name;
     }
+
+    // Set rp_id: use explicit env var, or auto-derive from rp_origin's host.
+    // This prevents the common misconfiguration where WEBAUTHN_RP_ORIGIN is set
+    // to the deployment URL but WEBAUTHN_RP_ID is left as the "localhost" default,
+    // causing "rp.id cannot be used with the current origin" errors in the browser.
+    if let Some(rp_id) = rp_id_explicit {
+        auth_config.rp_id = rp_id;
+    } else if let Ok(url) = url::Url::parse(&auth_config.rp_origin) {
+        if let Some(host) = url.host_str() {
+            auth_config.rp_id = host.to_string();
+        }
+    }
+
+    // Validate WebAuthn config at startup to fail fast on misconfiguration
+    let rp_origin_url = url::Url::parse(&auth_config.rp_origin)
+        .expect("WEBAUTHN_RP_ORIGIN must be a valid URL (e.g. https://testnet.random.cash)");
+    if let Some(host) = rp_origin_url.host_str() {
+        if !host.ends_with(&auth_config.rp_id) {
+            tracing::error!(
+                rp_id = %auth_config.rp_id,
+                origin_host = %host,
+                "WEBAUTHN_RP_ID must be a registrable domain suffix of WEBAUTHN_RP_ORIGIN host — passkey auth will fail"
+            );
+        }
+    }
+
     tracing::info!(rp_id = %auth_config.rp_id, rp_origin = %auth_config.rp_origin, "WebAuthn configured");
     let auth_service = Arc::new(AuthService::with_config(
         Arc::clone(&data_service),
