@@ -69,8 +69,7 @@ test:
 audit:
   stage: check
   script:
-    - git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-    - git config --global url."https://github.com/".insteadOf "git@github.com:"
+    - git config --global --unset-all url."ssh://git@github.com/".insteadOf || true
     - rm -rf ${CARGO_HOME:-$HOME/.cargo}/advisory-db
     - git clone --depth 1 https://github.com/RustSec/advisory-db.git ${CARGO_HOME:-$HOME/.cargo}/advisory-db
     - cargo audit --no-fetch
