@@ -62,26 +62,17 @@ async fn main() -> Result<()> {
     }
 
     // Set rp_id: use explicit env var, or auto-derive from rp_origin's host.
-    // This prevents the common misconfiguration where WEBAUTHN_RP_ORIGIN is set
-    // to the deployment URL but WEBAUTHN_RP_ID is left as the "localhost" default,
-    // causing "rp.id cannot be used with the current origin" errors in the browser.
     if let Some(rp_id) = rp_id_explicit {
         auth_config.rp_id = rp_id;
-    } else if let Ok(url) = url::Url::parse(&auth_config.rp_origin)
-        && let Some(host) = url.host_str()
-    {
-        auth_config.rp_id = host.to_string();
+    } else if let Some(host) = server::config::derive_rp_id_from_origin(&auth_config.rp_origin) {
+        auth_config.rp_id = host;
     }
 
     // Validate WebAuthn config at startup to fail fast on misconfiguration
-    let rp_origin_url = url::Url::parse(&auth_config.rp_origin)
-        .expect("WEBAUTHN_RP_ORIGIN must be a valid URL (e.g. https://testnet.random.cash)");
-    if let Some(host) = rp_origin_url.host_str()
-        && !host.ends_with(&auth_config.rp_id)
-    {
+    if !server::config::validate_rp_id(&auth_config.rp_id, &auth_config.rp_origin) {
         tracing::error!(
             rp_id = %auth_config.rp_id,
-            origin_host = %host,
+            rp_origin = %auth_config.rp_origin,
             "WEBAUTHN_RP_ID must be a registrable domain suffix of WEBAUTHN_RP_ORIGIN host — passkey auth will fail"
         );
     }
@@ -93,20 +84,11 @@ async fn main() -> Result<()> {
     ));
 
     // Configure CAPTCHA provider (optional)
-    let captcha_provider = match std::env::var("CAPTCHA_PROVIDER").ok().as_deref() {
-        Some("turnstile" | "cloudflare") => {
-            let secret = std::env::var("CAPTCHA_SECRET_KEY").map_err(|_| {
-                anyhow::anyhow!("CAPTCHA_SECRET_KEY required when CAPTCHA_PROVIDER is set")
-            })?;
-            let site_key = std::env::var("CAPTCHA_SITE_KEY").map_err(|_| {
-                anyhow::anyhow!("CAPTCHA_SITE_KEY required when CAPTCHA_PROVIDER is set")
-            })?;
+    let captcha_provider = match server::config::parse_captcha_env()? {
+        Some((_provider, secret, site_key)) => {
             tracing::info!(provider = "turnstile", "CAPTCHA enabled");
             Some(Arc::new(CloudflareTurnstile::new(secret, site_key))
                 as Arc<dyn auth::captcha::CaptchaProvider>)
-        }
-        Some(other) => {
-            anyhow::bail!("Unknown CAPTCHA_PROVIDER: {other}. Supported: turnstile, cloudflare");
         }
         None => {
             tracing::info!("CAPTCHA disabled (no CAPTCHA_PROVIDER set)");

@@ -9,6 +9,7 @@ use leptos_router::{
 };
 use ui_kit::hooks::use_storage::{get_local, set_local};
 use ui_kit::{AuthGuard, AuthProvider, LoginPage, RegisterPage, use_auth};
+use wasm_bindgen::JsCast;
 
 use crate::api::{EvmApiClient, Store};
 use crate::components::{CreateInvoiceModal, CreateInvoiceSignal};
@@ -438,8 +439,31 @@ where
         use_context::<CreateInvoiceSignal>().expect("CreateInvoiceSignal must be provided");
 
     let (menu_open, set_menu_open) = signal(false);
+    let menu_ref = leptos::prelude::NodeRef::<leptos::html::Div>::new();
 
     let toggle_menu = move |_: web_sys::MouseEvent| set_menu_open.update(|v| *v = !*v);
+
+    // Close menu on click outside
+    leptos::prelude::Effect::new(move |_| {
+        if menu_open.get() {
+            let closure =
+                wasm_bindgen::closure::Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
+                    if let Some(el) = menu_ref.get()
+                        && let Some(target) =
+                            e.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok())
+                        && !el.contains(Some(&target))
+                    {
+                        set_menu_open.set(false);
+                    }
+                })
+                    as Box<dyn FnMut(web_sys::MouseEvent)>);
+
+            let window = web_sys::window().unwrap();
+            let _ =
+                window.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref());
+            closure.forget();
+        }
+    });
 
     let on_logout = move |_: web_sys::MouseEvent| {
         let api = api.get();
@@ -470,7 +494,7 @@ where
                     <button class="btn btn-primary btn-sm" on:click=move |_| create_invoice.open()>
                         <span>"Create Invoice"</span>
                     </button>
-                    <div class="user-menu">
+                    <div class="user-menu" node_ref=menu_ref>
                         <button class="btn btn-ghost btn-sm user-menu-trigger" on:click=toggle_menu>
                             <IconUser />
                         </button>
