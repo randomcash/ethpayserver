@@ -188,8 +188,8 @@ mod tests {
     #[test]
     fn derive_rp_id_https() {
         assert_eq!(
-            derive_rp_id_from_origin("https://testnet.random.cash"),
-            Some("testnet.random.cash".to_string())
+            derive_rp_id_from_origin("https://app.example.com"),
+            Some("app.example.com".to_string())
         );
     }
 
@@ -225,17 +225,17 @@ mod tests {
 
     #[test]
     fn validate_rp_id_exact_match() {
-        assert!(validate_rp_id("random.cash", "https://random.cash"));
+        assert!(validate_rp_id("example.com", "https://example.com"));
     }
 
     #[test]
     fn validate_rp_id_subdomain() {
-        assert!(validate_rp_id("random.cash", "https://testnet.random.cash"));
+        assert!(validate_rp_id("example.com", "https://app.example.com"));
     }
 
     #[test]
     fn validate_rp_id_mismatch() {
-        assert!(!validate_rp_id("localhost", "https://testnet.random.cash"));
+        assert!(!validate_rp_id("localhost", "https://app.example.com"));
     }
 
     #[test]
