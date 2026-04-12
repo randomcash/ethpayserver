@@ -25,6 +25,11 @@
 //! - `WEBHOOK_REQUEST_TIMEOUT_SECS` - HTTP request timeout (default: 30)
 //! - `WEBHOOK_POLL_INTERVAL_SECS` - Queue poll interval (default: 5)
 //!
+//! ## CAPTCHA (optional)
+//! - `CAPTCHA_PROVIDER` - Provider name: `turnstile` or `cloudflare` (unset = disabled)
+//! - `CAPTCHA_SECRET_KEY` - Provider secret key (required when CAPTCHA_PROVIDER is set)
+//! - `CAPTCHA_SITE_KEY` - Provider site key (required when CAPTCHA_PROVIDER is set)
+//!
 //! ## Watch Retry Service
 //! - `WATCH_RETRY_INTERVAL_SECS` - Retry interval in seconds (default: 30)
 //! - `WATCH_RETRY_ENABLED` - Enable/disable retry service (default: true)
@@ -133,5 +138,198 @@ impl Config {
     /// Get the server bind address.
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+}
+
+/// Derive the WebAuthn RP ID from the origin URL's host.
+/// Returns `None` if the URL can't be parsed or has no host.
+pub fn derive_rp_id_from_origin(origin: &str) -> Option<String> {
+    url::Url::parse(origin)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+}
+
+/// Validate that the WebAuthn RP ID is a registrable domain suffix of the origin host.
+pub fn validate_rp_id(rp_id: &str, rp_origin: &str) -> bool {
+    url::Url::parse(rp_origin)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .is_some_and(|host| host.ends_with(rp_id))
+}
+
+/// Parse the CAPTCHA provider from environment variables.
+/// Returns `Ok(None)` if CAPTCHA is disabled (no CAPTCHA_PROVIDER set).
+pub fn parse_captcha_env() -> anyhow::Result<Option<(String, String, String)>> {
+    match env::var("CAPTCHA_PROVIDER").ok().as_deref() {
+        Some(provider @ ("turnstile" | "cloudflare")) => {
+            let secret = env::var("CAPTCHA_SECRET_KEY").map_err(|_| {
+                anyhow::anyhow!("CAPTCHA_SECRET_KEY required when CAPTCHA_PROVIDER is set")
+            })?;
+            let site_key = env::var("CAPTCHA_SITE_KEY").map_err(|_| {
+                anyhow::anyhow!("CAPTCHA_SITE_KEY required when CAPTCHA_PROVIDER is set")
+            })?;
+            Ok(Some((provider.to_string(), secret, site_key)))
+        }
+        Some(other) => {
+            anyhow::bail!("Unknown CAPTCHA_PROVIDER: {other}. Supported: turnstile, cloudflare")
+        }
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // WebAuthn RP ID derivation
+    // ========================================================================
+
+    #[test]
+    fn derive_rp_id_https() {
+        assert_eq!(
+            derive_rp_id_from_origin("https://app.example.com"),
+            Some("app.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_rp_id_with_port() {
+        assert_eq!(
+            derive_rp_id_from_origin("http://localhost:8080"),
+            Some("localhost".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_rp_id_ip() {
+        assert_eq!(
+            derive_rp_id_from_origin("http://192.168.1.1:3000"),
+            Some("192.168.1.1".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_rp_id_invalid_url() {
+        assert_eq!(derive_rp_id_from_origin("not-a-url"), None);
+    }
+
+    #[test]
+    fn derive_rp_id_empty() {
+        assert_eq!(derive_rp_id_from_origin(""), None);
+    }
+
+    // ========================================================================
+    // WebAuthn RP ID validation
+    // ========================================================================
+
+    #[test]
+    fn validate_rp_id_exact_match() {
+        assert!(validate_rp_id("example.com", "https://example.com"));
+    }
+
+    #[test]
+    fn validate_rp_id_subdomain() {
+        assert!(validate_rp_id("example.com", "https://app.example.com"));
+    }
+
+    #[test]
+    fn validate_rp_id_mismatch() {
+        assert!(!validate_rp_id("localhost", "https://app.example.com"));
+    }
+
+    #[test]
+    fn validate_rp_id_localhost() {
+        assert!(validate_rp_id("localhost", "http://localhost:8080"));
+    }
+
+    // ========================================================================
+    // CAPTCHA config parsing
+    // ========================================================================
+
+    // SAFETY: these tests manipulate env vars which is unsafe in Rust 2024.
+    // They must run serially (cargo test runs them in separate threads by default,
+    // but env vars are process-global). Using --test-threads=1 for safety.
+
+    #[test]
+    fn captcha_disabled_when_no_env() {
+        unsafe { env::remove_var("CAPTCHA_PROVIDER") };
+        assert!(parse_captcha_env().unwrap().is_none());
+    }
+
+    #[test]
+    fn captcha_turnstile_requires_keys() {
+        unsafe {
+            env::set_var("CAPTCHA_PROVIDER", "turnstile");
+            env::remove_var("CAPTCHA_SECRET_KEY");
+            env::remove_var("CAPTCHA_SITE_KEY");
+        }
+
+        let result = parse_captcha_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("CAPTCHA_SECRET_KEY")
+        );
+
+        unsafe { env::remove_var("CAPTCHA_PROVIDER") };
+    }
+
+    #[test]
+    fn captcha_turnstile_with_keys() {
+        unsafe {
+            env::set_var("CAPTCHA_PROVIDER", "turnstile");
+            env::set_var("CAPTCHA_SECRET_KEY", "secret123");
+            env::set_var("CAPTCHA_SITE_KEY", "site123");
+        }
+
+        let result = parse_captcha_env().unwrap();
+        assert!(result.is_some());
+        let (provider, secret, site_key) = result.unwrap();
+        assert_eq!(provider, "turnstile");
+        assert_eq!(secret, "secret123");
+        assert_eq!(site_key, "site123");
+
+        unsafe {
+            env::remove_var("CAPTCHA_PROVIDER");
+            env::remove_var("CAPTCHA_SECRET_KEY");
+            env::remove_var("CAPTCHA_SITE_KEY");
+        }
+    }
+
+    #[test]
+    fn captcha_cloudflare_alias() {
+        unsafe {
+            env::set_var("CAPTCHA_PROVIDER", "cloudflare");
+            env::set_var("CAPTCHA_SECRET_KEY", "s");
+            env::set_var("CAPTCHA_SITE_KEY", "k");
+        }
+
+        let result = parse_captcha_env().unwrap();
+        assert_eq!(result.unwrap().0, "cloudflare");
+
+        unsafe {
+            env::remove_var("CAPTCHA_PROVIDER");
+            env::remove_var("CAPTCHA_SECRET_KEY");
+            env::remove_var("CAPTCHA_SITE_KEY");
+        }
+    }
+
+    #[test]
+    fn captcha_unknown_provider() {
+        unsafe { env::set_var("CAPTCHA_PROVIDER", "recaptcha") };
+
+        let result = parse_captcha_env();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown CAPTCHA_PROVIDER")
+        );
+
+        unsafe { env::remove_var("CAPTCHA_PROVIDER") };
     }
 }

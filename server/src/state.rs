@@ -69,6 +69,9 @@ pub struct AppState<D, A, E> {
 
     /// WebSocket broadcast channel for real-time status updates.
     pub ws_broadcast: Option<Arc<WsBroadcast>>,
+
+    /// Optional CAPTCHA provider for registration endpoints.
+    pub captcha_provider: Option<Arc<dyn auth::captcha::CaptchaProvider>>,
 }
 
 // Manual Clone impl since we only need Arc::clone
@@ -80,6 +83,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             evm_monitor: self.evm_monitor.clone(),
             rate_provider: Arc::clone(&self.rate_provider),
             ws_broadcast: self.ws_broadcast.clone(),
+            captcha_provider: self.captcha_provider.clone(),
         }
     }
 }
@@ -98,6 +102,7 @@ impl<D, A, E> AppState<D, A, E> {
             evm_monitor,
             rate_provider,
             ws_broadcast: None,
+            captcha_provider: None,
         }
     }
 }

@@ -218,8 +218,11 @@ where
         .route("/api-keys", post(users::create_api_key::<A>))
         .route("/api-keys/{id}", delete(users::revoke_api_key::<A>))
         .with_state(state.clone());
-    // Auth API from auth crate
-    let auth_state = auth::api::AuthState::new(state.auth_service.clone());
+    // Auth API from auth crate (with optional CAPTCHA provider)
+    let auth_state = match state.captcha_provider.clone() {
+        Some(captcha) => auth::api::AuthState::with_captcha(state.auth_service.clone(), captcha),
+        None => auth::api::AuthState::new(state.auth_service.clone()),
+    };
     let auth_routes = auth::api::router(auth_state);
 
     // EVM API has its own state

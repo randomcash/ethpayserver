@@ -16,7 +16,7 @@ path = "src/bin/migrate_postgres.rs"
 
 [dependencies]
 # Internal crates
-auth = { git = "https://gitlab.com/random.cash/payserver-commons.git", features = ["metrics"] }
+auth = { git = "https://gitlab.com/random.cash/payserver-commons.git", features = ["metrics", "captcha"] }
 crypto = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
 data-service = { path = "../data-service" }
 evm = { path = "../evm", features = ["api", "redis"] }
