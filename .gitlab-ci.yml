@@ -43,7 +43,7 @@ test:
   stage: check
   script:
     # Unit tests
-    - cargo test --workspace --lib --no-fail-fast
+    - cargo test --workspace --lib --no-fail-fast -- --test-threads=1
     # Integration tests against ephemeral Postgres
     - |
       PGCONTAINER="ci_postgres_${CI_JOB_ID}"
