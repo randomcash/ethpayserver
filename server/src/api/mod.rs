@@ -2,6 +2,8 @@
 //!
 //! This module combines all API endpoints from different crates into a single router.
 
+use std::sync::Arc;
+
 use axum::{Router, routing::get};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -14,6 +16,7 @@ pub mod dashboard;
 pub mod extractors;
 pub mod health;
 pub mod invoices;
+pub mod rate_limit;
 pub mod stores;
 pub mod users;
 pub mod ws;
@@ -128,7 +131,11 @@ pub struct ApiDoc;
 /// - `/evm` - EVM operations (tokens, networks)
 /// - `/auth` - Authentication
 /// - `/stores` - Store management
-pub fn router<A>(state: PgAppState<A>, enable_swagger: bool) -> Router
+pub fn router<A>(
+    state: PgAppState<A>,
+    enable_swagger: bool,
+    rate_limiters: Option<Arc<rate_limit::RateLimitState>>,
+) -> Router
 where
     A: AuthenticationService + 'static,
 {
@@ -240,6 +247,14 @@ where
         .nest("/users", user_routes)
         .nest("/auth", auth_routes)
         .nest("/evm", evm_routes);
+
+    // Apply rate limiting middleware if configured
+    if let Some(limiters) = rate_limiters {
+        app = app.layer(axum::middleware::from_fn_with_state(
+            limiters,
+            rate_limit::middleware,
+        ));
+    }
 
     // Add Swagger UI if enabled
     if enable_swagger {
