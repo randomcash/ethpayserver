@@ -405,6 +405,15 @@ impl<
         // Record metrics
         metrics::record_payment_confirmed(event.chain_id, &payment.asset_symbol);
 
+        // Record confirmation duration (detected_at → confirmed_at)
+        if let Ok(duration) = (event.confirmed_at - payment.detected_at).to_std() {
+            metrics::record_payment_confirmation_duration(
+                event.chain_id,
+                &payment.asset_symbol,
+                duration,
+            );
+        }
+
         // Check if invoice is fully paid
         let invoice = InvoiceReader::get(&*self.data_service, &invoice_id)
             .await?
