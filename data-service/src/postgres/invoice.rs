@@ -172,8 +172,9 @@ impl InvoiceReader for PgDataService {
                 r#"
                 SELECT id
                 FROM invoices
-                WHERE status = 'pending'
+                WHERE status IN ('pending', 'processing', 'partially_paid')
                   AND expires_at < NOW()
+                ORDER BY expires_at ASC
                 "#,
             )
             .fetch(&self.pool)
@@ -265,7 +266,8 @@ impl InvoiceWriter for PgDataService {
             r#"
             UPDATE invoices
             SET status = 'expired'::invoice_status
-            WHERE id = $1 AND status = 'pending'
+            WHERE id = $1
+              AND status IN ('pending', 'processing', 'partially_paid')
             "#,
         )
         .bind(id.as_str())
