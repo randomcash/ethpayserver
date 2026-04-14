@@ -947,8 +947,8 @@ where
     let limit = query.limit.unwrap_or(20).min(100);
     let offset = query.offset.unwrap_or(0);
 
-    let deriver = XpubDeriver::from_xpub(&wallet.xpub)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let deriver =
+        XpubDeriver::from_xpub(&wallet.xpub).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut addresses = Vec::with_capacity(limit as usize);
     for i in offset..offset + limit {

@@ -200,7 +200,10 @@ where
         .route("/", get(stores::list_wallets::<A>))
         .route("/{wallet_id}", get(stores::get_wallet_by_id::<A>))
         .route("/{wallet_id}/xpub", get(stores::export_wallet_xpub::<A>))
-        .route("/{wallet_id}/addresses", get(stores::list_wallet_addresses::<A>))
+        .route(
+            "/{wallet_id}/addresses",
+            get(stores::list_wallet_addresses::<A>),
+        )
         .with_state(state.clone());
 
     // Payment endpoints (store-scoped)
