@@ -9,6 +9,7 @@ stages:
 
 variables:
   CARGO_INCREMENTAL: "1"
+  CARGO_BUILD_JOBS: "2"
   SERVER_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
   SERVER_IMAGE_LATEST: $CI_REGISTRY_IMAGE:$CI_COMMIT_BRANCH-latest
   MONITOR_IMAGE: $CI_REGISTRY_IMAGE/evmmonitor:$CI_COMMIT_SHORT_SHA
@@ -31,6 +32,7 @@ before_script:
 
 lint:
   stage: check
+  resource_group: rust-compile
   script:
     - cargo fmt -p server -p data-service -p evm -p ethpayserver-client -- --check
     - cargo clippy -p server -p data-service -p evm -p ethpayserver-client --all-targets -- -D warnings
@@ -41,11 +43,16 @@ lint:
 
 test:
   stage: check
+  resource_group: rust-compile
   script:
     # Unit tests
     - cargo test --workspace --lib --no-fail-fast -- --test-threads=1
-    # Integration tests against ephemeral Postgres
+    # Integration tests against ephemeral Postgres (requires Docker socket)
     - |
+      if ! docker info >/dev/null 2>&1; then
+        echo "WARNING: Docker not available, skipping integration tests"
+        exit 0
+      fi
       PGCONTAINER="ci_postgres_${CI_JOB_ID}"
       docker rm -f $PGCONTAINER 2>/dev/null || true
       docker run -d --name $PGCONTAINER -p 0:5432 \
@@ -87,6 +94,7 @@ audit:
 
 build:server:
   stage: build
+  resource_group: rust-compile
   script:
     - cargo build --release --bin ethpayserver
     - cargo build --release --bin migrate_postgres
@@ -101,6 +109,7 @@ build:server:
 
 build:monitor:
   stage: build
+  resource_group: rust-compile
   script:
     - cargo build --release --bin evmmonitor --features monitor-bin
   artifacts:
@@ -125,6 +134,7 @@ build:client:
 
 build:check:
   stage: build
+  resource_group: rust-compile
   script:
     - cargo build --release --bin ethpayserver
   rules:
