@@ -138,7 +138,7 @@ impl BlockSource for MockBlockSource {
                         let matches = filter.topics.iter().enumerate().all(|(i, topic_filter)| {
                             match topic_filter {
                                 Some(expected) => {
-                                    log.topics().get(i).map_or(false, |t| t == expected)
+                                    log.topics().get(i) == Some(expected)
                                 }
                                 None => true,
                             }
