@@ -16,8 +16,9 @@ use wasm_bindgen::JsCast;
 use crate::api::{EvmApiClient, Store};
 use crate::components::{CreateInvoiceModal, CreateInvoiceSignal};
 use crate::pages::{
-    DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage, PaymentsPage,
-    SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage, WalletsPage,
+    CheckoutPage, DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage,
+    PaymentDetailPage, PaymentsPage, SettingsPage, StoreDetailPage, StoresPage,
+    WalletDetailPage, WalletsPage,
 };
 use crate::services::{ConnectionState, WebSocketService};
 
@@ -71,9 +72,10 @@ pub fn App() -> impl IntoView {
         <AuthProvider>
             <Router>
                 <Routes fallback=|| view! { <NotFoundPage /> }>
-                    // Public auth routes (no layout)
+                    // Public routes (no layout)
                     <Route path=path!("/login") view=|| view! { <LoginPage /> } />
                     <Route path=path!("/register") view=|| view! { <RegisterPage /> } />
+                    <Route path=path!("/checkout/:id") view=|| view! { <CheckoutPage /> } />
 
                     // Protected routes with layout
                     <Route path=path!("/") view=DashboardProtected />

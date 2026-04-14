@@ -345,6 +345,23 @@ pub struct UpdateWebhookRequest {
     pub enabled: bool,
 }
 
+/// Public checkout response.
+///
+/// Mirrors `CheckoutResponse` from the server checkout API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckoutResponse {
+    pub id: String,
+    pub currency: String,
+    pub status: String,
+    pub amount: String,
+    pub amount_received: String,
+    pub expires_at: String,
+    pub is_expired: bool,
+    pub is_paid: bool,
+    pub payment_options: Vec<PaymentOption>,
+    pub payments: Vec<Payment>,
+}
+
 /// Paginated response wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginatedResponse<T> {

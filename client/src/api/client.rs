@@ -5,10 +5,11 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload, CreateInvoiceRequest,
-    CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice, InvoiceListResponse,
-    InvoiceStatusResponse, Payment, PaymentListResponse, Store, StorePaymentMethod, StoreWebhook,
-    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, UserInfo, Wallet,
+    ApiKeyListResponse, CheckoutResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
+    CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
+    InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, Store,
+    StorePaymentMethod, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
+    UpdateWebhookRequest, UserInfo, Wallet,
 };
 
 /// API client errors.
@@ -252,6 +253,11 @@ impl EvmApiClient {
     /// Get an invoice by ID.
     pub async fn get_invoice(&self, id: &str) -> Result<Invoice, ApiError> {
         self.get(&format!("/api/invoices/{}", id)).await
+    }
+
+    /// Get public checkout data for an invoice (no auth required).
+    pub async fn get_checkout(&self, invoice_id: &str) -> Result<CheckoutResponse, ApiError> {
+        self.get(&format!("/checkout/{}", invoice_id)).await
     }
 
     /// Create a new invoice.

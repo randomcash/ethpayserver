@@ -12,6 +12,7 @@ use auth::AuthenticationService;
 
 use crate::state::PgAppState;
 
+pub mod checkout;
 pub mod dashboard;
 pub mod extractors;
 pub mod health;
@@ -262,9 +263,16 @@ where
     // EVM API has its own state
     let evm_routes = evm::api::router(state.to_evm_state());
 
+    // Public checkout endpoints (no auth required)
+    let checkout_routes = Router::new()
+        .route("/{invoice_id}", get(checkout::get_checkout::<A>))
+        .route("/ws", get(checkout::checkout_ws_handler::<A>))
+        .with_state(state.clone());
+
     // Combine all routes
     let mut app = Router::new()
         .merge(health_routes)
+        .nest("/checkout", checkout_routes)
         .nest("/stores", store_routes)
         .nest("/wallets", wallet_routes)
         .nest("/invoices", invoice_routes)
