@@ -229,11 +229,7 @@ pub fn record_store_created() {
 // ============================================================================
 
 /// Record the duration from payment detected to confirmed.
-pub fn record_payment_confirmation_duration(
-    chain_id: u64,
-    asset_symbol: &str,
-    duration: Duration,
-) {
+pub fn record_payment_confirmation_duration(chain_id: u64, asset_symbol: &str, duration: Duration) {
     histogram!(
         "ethpayserver_payment_confirmation_duration_seconds",
         "chain_id" => chain_id.to_string(),
@@ -260,5 +256,6 @@ pub fn record_http_request(method: &str, path: &str, status: u16, duration: Dura
         ("status", status.to_string()),
     ];
     counter!("ethpayserver_http_requests_total", &labels).increment(1);
-    histogram!("ethpayserver_http_request_duration_seconds", &labels).record(duration.as_secs_f64());
+    histogram!("ethpayserver_http_request_duration_seconds", &labels)
+        .record(duration.as_secs_f64());
 }
