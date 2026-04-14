@@ -274,9 +274,7 @@ async fn test_underpayment_two_transactions() {
     let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
 
     // First partial payment
-    test_source
-        .set_balance(payment_address, half_amount)
-        .await;
+    test_source.set_balance(payment_address, half_amount).await;
     test_source
         .add_native_transfer(
             100,
@@ -299,9 +297,7 @@ async fn test_underpayment_two_transactions() {
 
     // Second partial payment (completes the full amount)
     let full_amount = half_amount * U256::from(2);
-    test_source
-        .set_balance(payment_address, full_amount)
-        .await;
+    test_source.set_balance(payment_address, full_amount).await;
     test_source
         .add_native_transfer(
             101,

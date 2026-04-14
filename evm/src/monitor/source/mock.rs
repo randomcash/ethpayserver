@@ -12,11 +12,11 @@ use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::Block;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, broadcast};
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 /// Shared inner state for the mock source.
 struct Inner {
@@ -100,9 +100,7 @@ impl MockBlockSource {
 
     /// Set the current block number without pushing a notification.
     pub fn set_block_number(&self, number: u64) {
-        self.inner
-            .current_block
-            .store(number, Ordering::SeqCst);
+        self.inner.current_block.store(number, Ordering::SeqCst);
     }
 }
 
@@ -198,11 +196,7 @@ pub fn make_block(number: u64) -> BlockNotification {
 }
 
 /// Create a synthetic block notification with specific hashes.
-pub fn make_block_with_parent(
-    number: u64,
-    hash: B256,
-    parent_hash: B256,
-) -> BlockNotification {
+pub fn make_block_with_parent(number: u64, hash: B256, parent_hash: B256) -> BlockNotification {
     BlockNotification {
         number,
         hash,
@@ -242,10 +236,9 @@ pub fn make_erc20_transfer_log(
     use alloy::primitives::LogData;
 
     // topic0 = keccak256("Transfer(address,address,uint256)")
-    let transfer_topic: B256 =
-        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-            .parse()
-            .expect("valid transfer topic");
+    let transfer_topic: B256 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        .parse()
+        .expect("valid transfer topic");
 
     // Pad address (20 bytes) to 32 bytes, left-aligned with zeros
     let mut from_bytes = [0u8; 32];
@@ -349,11 +342,10 @@ mod tests {
         let block = make_block(42);
         source.push_block(block);
 
-        let received =
-            tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
-                .await
-                .unwrap()
-                .unwrap()
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
                 .unwrap();
 
         assert_eq!(received.number, 42);

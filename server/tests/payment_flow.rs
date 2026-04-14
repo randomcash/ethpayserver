@@ -18,12 +18,12 @@ use evm::monitor::bridge::MemoryBridge;
 use evm::monitor::events::{MonitorEvent, PaymentConfirmed, PaymentDetected};
 use evm::monitor::{ChainHealth, EventBridge};
 use evm::{Address, B256, U256};
-use server::services::evm_monitor::{EVMMonitor, EVMMonitorError};
 use server::EventConsumer;
+use server::services::evm_monitor::{EVMMonitor, EVMMonitorError};
 use types::{
-    InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, Network,
-    PaymentMethodId, PaymentOptionData, PaymentOptionId, PaymentReader, PaymentWriter,
-    StoreId, WatchedAddressWriter,
+    InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, Network, PaymentMethodId,
+    PaymentOptionData, PaymentOptionId, PaymentReader, PaymentWriter, StoreId,
+    WatchedAddressWriter,
 };
 
 // ============================================================================
@@ -152,7 +152,7 @@ async fn setup_test_env() -> (
         &invoice.id,
         &payment_address_str,
         "50000000000000000", // 0.05 ETH in wei
-        "2000.00",          // ETH/USD rate
+        "2000.00",           // ETH/USD rate
     );
     data_service::PaymentOptionWriter::create(&*ds, &payment_option)
         .await
