@@ -33,11 +33,7 @@ fn normalize_path(path: &str) -> String {
                 return segment.to_string();
             }
             // Replace UUIDs (8-4-4-4-12 or bare 32+ hex chars)
-            if segment.len() >= 32
-                && segment
-                    .chars()
-                    .all(|c| c.is_ascii_hexdigit() || c == '-')
-            {
+            if segment.len() >= 32 && segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
                 return ":id".to_string();
             }
             // Replace pure numeric segments

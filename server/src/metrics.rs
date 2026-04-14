@@ -117,10 +117,7 @@ fn describe_histograms() {
         "ethpayserver_http_request_duration_seconds",
         "API request latency"
     );
-    describe_counter!(
-        "ethpayserver_http_requests_total",
-        "Total HTTP requests"
-    );
+    describe_counter!("ethpayserver_http_requests_total", "Total HTTP requests");
 }
 
 // ============================================================================
