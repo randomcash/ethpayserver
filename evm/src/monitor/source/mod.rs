@@ -7,6 +7,9 @@ pub mod rpc;
 // pub mod alchemy;
 // pub mod infura;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod mock;
+
 use crate::error::EvmResult;
 use alloy::primitives::{Address, B256, BlockNumber, U256};
 use alloy::rpc::types::{Block, Log};

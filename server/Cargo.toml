@@ -81,3 +81,4 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "migrate"] }
 tokio = { version = "1.42", features = ["test-util"] }
 tokio-tungstenite = "0.28"
 data-service = { path = "../data-service", features = ["test-utils"] }
+evm = { path = "../evm", features = ["api", "redis", "test-utils"] }
