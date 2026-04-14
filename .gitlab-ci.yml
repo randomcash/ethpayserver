@@ -47,8 +47,12 @@ test:
   script:
     # Unit tests
     - cargo test --workspace --lib --no-fail-fast -- --test-threads=1
-    # Integration tests against ephemeral Postgres
+    # Integration tests against ephemeral Postgres (requires Docker socket)
     - |
+      if ! docker info >/dev/null 2>&1; then
+        echo "WARNING: Docker not available, skipping integration tests"
+        exit 0
+      fi
       PGCONTAINER="ci_postgres_${CI_JOB_ID}"
       docker rm -f $PGCONTAINER 2>/dev/null || true
       docker run -d --name $PGCONTAINER -p 0:5432 \
