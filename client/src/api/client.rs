@@ -226,12 +226,16 @@ impl EvmApiClient {
         &self,
         store_id: &str,
         status: Option<&str>,
+        currency: Option<&str>,
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<InvoiceListResponse, ApiError> {
         let mut query = format!("/api/invoices?store_id={}", store_id);
         if let Some(s) = status {
             query.push_str(&format!("&status={}", s));
+        }
+        if let Some(c) = currency {
+            query.push_str(&format!("&currency={}", c));
         }
         if let Some(l) = limit {
             query.push_str(&format!("&limit={}", l));
