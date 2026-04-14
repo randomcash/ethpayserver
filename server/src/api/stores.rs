@@ -5,11 +5,11 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use auth::{
@@ -20,7 +20,7 @@ use data_service::{
     StorePaymentMethod, StorePaymentMethodReader, StorePaymentMethodWriter, StoreWalletReader,
     StoreWalletWriter,
 };
-use evm::validate_xpub;
+use evm::{XpubDeriver, validate_xpub};
 use types::{StoreWebhookReader, StoreWebhookWriter};
 
 use super::extractors::AuthenticatedUser;
@@ -680,6 +680,56 @@ pub struct WalletResponse {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Wallet xpub export response (full, unmasked).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WalletXpubResponse {
+    /// Wallet ID.
+    pub id: Uuid,
+    /// Store ID.
+    pub store_id: Uuid,
+    /// Full extended public key (unmasked).
+    pub xpub: String,
+    /// Current derivation index.
+    pub derivation_index: i32,
+    /// Wallet name.
+    pub name: Option<String>,
+    /// Creation timestamp.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A derived wallet address with its index and derivation path.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DerivedAddressEntry {
+    /// Ethereum address (checksummed hex).
+    pub address: String,
+    /// BIP-44 derivation index.
+    pub index: u32,
+    /// Full BIP-44 derivation path.
+    pub derivation_path: String,
+    /// Whether this index has been assigned to a payment option.
+    pub used: bool,
+}
+
+/// Response for listing derived wallet addresses.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WalletAddressesResponse {
+    /// Wallet ID.
+    pub wallet_id: Uuid,
+    /// Current derivation index (number of addresses assigned so far).
+    pub derivation_index: i32,
+    /// Derived addresses.
+    pub addresses: Vec<DerivedAddressEntry>,
+}
+
+/// Query parameters for listing wallet addresses.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct WalletAddressesQuery {
+    /// Number of addresses to derive (default 20, max 100).
+    pub limit: Option<u32>,
+    /// Starting index (default 0).
+    pub offset: Option<u32>,
+}
+
 /// Mask an xpub for display (show first 8 and last 8 chars).
 fn mask_xpub(xpub: &str) -> String {
     if xpub.len() <= 20 {
@@ -789,6 +839,138 @@ where
         created_at: wallet.created_at,
     }))
 }
+
+/// Export the full (unmasked) xpub for a wallet.
+///
+/// Requires `canviewstoresettings` permission on the wallet's store.
+#[utoipa::path(
+    get,
+    path = "/wallets/{wallet_id}/xpub",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("wallet_id" = Uuid, Path, description = "Wallet ID")
+    ),
+    responses(
+        (status = 200, description = "Full xpub export", body = WalletXpubResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not a member of this wallet's store"),
+        (status = 404, description = "Wallet not found"),
+    )
+)]
+pub async fn export_wallet_xpub<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(wallet_id): Path<Uuid>,
+) -> Result<Json<WalletXpubResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let wallet = StoreWalletReader::get_wallet_by_id(&*state.data_service, wallet_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(wallet.store_id),
+            "ethpay.store.canviewstoresettings",
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !has_permission {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(Json(WalletXpubResponse {
+        id: wallet.id,
+        store_id: wallet.store_id,
+        xpub: wallet.xpub,
+        derivation_index: wallet.derivation_index,
+        name: wallet.name,
+        created_at: wallet.created_at,
+    }))
+}
+
+/// List derived addresses for a wallet.
+///
+/// Derives addresses from the wallet's xpub at the requested index range.
+/// Addresses below the current `derivation_index` are marked as used.
+#[utoipa::path(
+    get,
+    path = "/wallets/{wallet_id}/addresses",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("wallet_id" = Uuid, Path, description = "Wallet ID"),
+        WalletAddressesQuery,
+    ),
+    responses(
+        (status = 200, description = "Derived addresses", body = WalletAddressesResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Not a member of this wallet's store"),
+        (status = 404, description = "Wallet not found"),
+        (status = 500, description = "Address derivation failed"),
+    )
+)]
+pub async fn list_wallet_addresses<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(wallet_id): Path<Uuid>,
+    Query(query): Query<WalletAddressesQuery>,
+) -> Result<Json<WalletAddressesResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let wallet = StoreWalletReader::get_wallet_by_id(&*state.data_service, wallet_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let has_permission = state
+        .data_service
+        .user_has_store_permission(
+            user.id,
+            StoreId(wallet.store_id),
+            "ethpay.store.canviewstoresettings",
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !has_permission {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let limit = query.limit.unwrap_or(20).min(100);
+    let offset = query.offset.unwrap_or(0);
+
+    let deriver = XpubDeriver::from_xpub(&wallet.xpub)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut addresses = Vec::with_capacity(limit as usize);
+    for i in offset..offset + limit {
+        let address = deriver
+            .derive_address(i)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        addresses.push(DerivedAddressEntry {
+            address: address.to_string(),
+            index: i,
+            derivation_path: format!("m/44'/60'/0'/0/{}", i),
+            used: (i as i32) < wallet.derivation_index,
+        });
+    }
+
+    Ok(Json(WalletAddressesResponse {
+        wallet_id: wallet.id,
+        derivation_index: wallet.derivation_index,
+        addresses,
+    }))
+}
+
 /// Get wallet configuration for a store.
 #[utoipa::path(
     get,
@@ -1870,5 +2052,129 @@ mod tests {
 
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["store_id"].as_str().unwrap(), store_id.to_string());
+    }
+
+    // =========================================================================
+    // export_wallet_xpub response
+    // =========================================================================
+
+    #[test]
+    fn test_xpub_export_response_contains_full_xpub() {
+        let xpub = "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz";
+        let response = WalletXpubResponse {
+            id: Uuid::new_v4(),
+            store_id: Uuid::new_v4(),
+            xpub: xpub.to_string(),
+            derivation_index: 5,
+            name: Some("Main Wallet".to_string()),
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["xpub"], xpub);
+        assert!(!json["xpub"].as_str().unwrap().contains("..."));
+        assert_eq!(json["derivation_index"], 5);
+        assert_eq!(json["name"], "Main Wallet");
+    }
+
+    #[test]
+    fn test_xpub_export_response_without_name() {
+        let response = WalletXpubResponse {
+            id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            xpub: "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5".to_string(),
+            derivation_index: 0,
+            name: None,
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["name"].is_null());
+        assert!(json["xpub"].as_str().unwrap().starts_with("xpub"));
+    }
+
+    // =========================================================================
+    // list_wallet_addresses response
+    // =========================================================================
+
+    #[test]
+    fn test_derived_address_entry_serialization() {
+        let entry = DerivedAddressEntry {
+            address: "0x1234567890abcdef1234567890abcdef12345678".to_string(),
+            index: 0,
+            derivation_path: "m/44'/60'/0'/0/0".to_string(),
+            used: true,
+        };
+
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["index"], 0);
+        assert_eq!(json["derivation_path"], "m/44'/60'/0'/0/0");
+        assert_eq!(json["used"], true);
+        assert!(json["address"].as_str().unwrap().starts_with("0x"));
+    }
+
+    #[test]
+    fn test_wallet_addresses_response_marks_used_correctly() {
+        let response = WalletAddressesResponse {
+            wallet_id: Uuid::new_v4(),
+            derivation_index: 3,
+            addresses: vec![
+                DerivedAddressEntry {
+                    address: "0xaaa0".to_string(),
+                    index: 0,
+                    derivation_path: "m/44'/60'/0'/0/0".to_string(),
+                    used: true,
+                },
+                DerivedAddressEntry {
+                    address: "0xaaa1".to_string(),
+                    index: 1,
+                    derivation_path: "m/44'/60'/0'/0/1".to_string(),
+                    used: true,
+                },
+                DerivedAddressEntry {
+                    address: "0xaaa2".to_string(),
+                    index: 2,
+                    derivation_path: "m/44'/60'/0'/0/2".to_string(),
+                    used: true,
+                },
+                DerivedAddressEntry {
+                    address: "0xaaa3".to_string(),
+                    index: 3,
+                    derivation_path: "m/44'/60'/0'/0/3".to_string(),
+                    used: false,
+                },
+                DerivedAddressEntry {
+                    address: "0xaaa4".to_string(),
+                    index: 4,
+                    derivation_path: "m/44'/60'/0'/0/4".to_string(),
+                    used: false,
+                },
+            ],
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["derivation_index"], 3);
+        let addrs = json["addresses"].as_array().unwrap();
+        assert_eq!(addrs.len(), 5);
+        // First 3 (index < derivation_index=3) should be used
+        assert_eq!(addrs[0]["used"], true);
+        assert_eq!(addrs[1]["used"], true);
+        assert_eq!(addrs[2]["used"], true);
+        // Index 3 and 4 should be unused
+        assert_eq!(addrs[3]["used"], false);
+        assert_eq!(addrs[4]["used"], false);
+    }
+
+    #[test]
+    fn test_wallet_addresses_response_empty() {
+        let response = WalletAddressesResponse {
+            wallet_id: Uuid::new_v4(),
+            derivation_index: 0,
+            addresses: vec![],
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["addresses"].as_array().unwrap().is_empty());
+        assert_eq!(json["derivation_index"], 0);
     }
 }
