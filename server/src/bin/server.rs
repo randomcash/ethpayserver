@@ -19,9 +19,10 @@ use evm::monitor::bridge::{COMMANDS_CHANNEL, EVENTS_CHANNEL, RedisBridge};
 use rates::RateProviderConfig;
 use server::{
     AppState, CleanupConfig, EventConsumer, InvoiceCleanupService, RedisEVMMonitor,
-    WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService, api, config::Config,
-    metrics,
+    WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService, api,
     api::rate_limit::{RateLimitConfig, RateLimitState},
+    config::Config,
+    metrics,
 };
 
 #[tokio::main]

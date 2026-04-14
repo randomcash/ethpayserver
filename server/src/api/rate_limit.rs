@@ -155,7 +155,6 @@ fn client_ip(req: &Request, fallback: IpAddr) -> IpAddr {
 /// and returns 429 with Retry-After header when the limit is exceeded.
 pub async fn middleware(
     State(limiters): State<Arc<RateLimitState>>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -169,7 +168,9 @@ pub async fn middleware(
         Tier::WebSocket => &limiters.ws,
     };
 
-    let fallback_addr = connect_info
+    let fallback_addr = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
         .unwrap_or(IpAddr::from([127, 0, 0, 1]));
     let ip = client_ip(&req, fallback_addr);
@@ -245,10 +246,7 @@ mod tests {
         assert!(matches!(classify("/invoices", &Method::GET), Tier::Read));
         assert!(matches!(classify("/stores", &Method::GET), Tier::Read));
         assert!(matches!(classify("/invoices", &Method::POST), Tier::Write));
-        assert!(matches!(
-            classify("/stores/abc", &Method::PUT),
-            Tier::Write
-        ));
+        assert!(matches!(classify("/stores/abc", &Method::PUT), Tier::Write));
         assert!(matches!(
             classify("/stores/abc", &Method::DELETE),
             Tier::Write
