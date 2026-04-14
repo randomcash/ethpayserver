@@ -137,9 +137,7 @@ impl BlockSource for MockBlockSource {
                     if !filter.topics.is_empty() {
                         let matches = filter.topics.iter().enumerate().all(|(i, topic_filter)| {
                             match topic_filter {
-                                Some(expected) => {
-                                    log.topics().get(i) == Some(expected)
-                                }
+                                Some(expected) => log.topics().get(i) == Some(expected),
                                 None => true,
                             }
                         });
