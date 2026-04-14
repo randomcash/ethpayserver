@@ -54,6 +54,8 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::delete_store_wallet,
         stores::list_wallets,
         stores::get_wallet_by_id,
+        stores::export_wallet_xpub,
+        stores::list_wallet_addresses,
         stores::get_store_webhook,
         stores::configure_store_webhook,
         stores::delete_store_webhook,
@@ -92,6 +94,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::MemberResponse,
         stores::ConfigureWalletRequest,
         stores::WalletResponse,
+        stores::WalletXpubResponse,
+        stores::DerivedAddressEntry,
+        stores::WalletAddressesResponse,
         stores::ConfigureWebhookRequest,
         stores::WebhookResponse,
         stores::CreatePaymentMethodRequest,
@@ -201,6 +206,11 @@ where
     let wallet_routes = Router::new()
         .route("/", get(stores::list_wallets::<A>))
         .route("/{wallet_id}", get(stores::get_wallet_by_id::<A>))
+        .route("/{wallet_id}/xpub", get(stores::export_wallet_xpub::<A>))
+        .route(
+            "/{wallet_id}/addresses",
+            get(stores::list_wallet_addresses::<A>),
+        )
         .with_state(state.clone());
 
     // Payment endpoints (store-scoped)
