@@ -291,7 +291,10 @@ mod tests {
         let addr = Address::random();
 
         source.set_balance(addr, U256::from(42)).await;
-        assert_eq!(handle.get_balance(addr, None).await.unwrap(), U256::from(42));
+        assert_eq!(
+            handle.get_balance(addr, None).await.unwrap(),
+            U256::from(42)
+        );
     }
 
     #[tokio::test]
@@ -346,7 +349,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
-                .unwrap();
+            .unwrap();
 
         assert_eq!(received.number, 42);
         assert_eq!(source.get_block_number().await.unwrap(), 42);
