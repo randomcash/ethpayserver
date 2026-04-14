@@ -130,21 +130,18 @@ fn classify(path: &str, method: &Method) -> Tier {
 
 /// Extract client IP from proxy headers, falling back to peer address.
 fn client_ip(req: &Request, fallback: IpAddr) -> IpAddr {
-    if let Some(xff) = req.headers().get("x-forwarded-for") {
-        if let Ok(s) = xff.to_str() {
-            if let Some(first) = s.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
-                    return ip;
-                }
-            }
-        }
+    if let Some(xff) = req.headers().get("x-forwarded-for")
+        && let Ok(s) = xff.to_str()
+        && let Some(first) = s.split(',').next()
+        && let Ok(ip) = first.trim().parse::<IpAddr>()
+    {
+        return ip;
     }
-    if let Some(xri) = req.headers().get("x-real-ip") {
-        if let Ok(s) = xri.to_str() {
-            if let Ok(ip) = s.trim().parse::<IpAddr>() {
-                return ip;
-            }
-        }
+    if let Some(xri) = req.headers().get("x-real-ip")
+        && let Ok(s) = xri.to_str()
+        && let Ok(ip) = s.trim().parse::<IpAddr>()
+    {
+        return ip;
     }
     fallback
 }
