@@ -138,11 +138,10 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         self.check_expired().await
     }
 
-    /// Check and expire all pending invoices that have passed their expiration time.
+    /// Check and expire all invoices that have passed their expiration time.
     ///
     /// Uses streaming to minimize memory usage.
-    /// Only expires invoices with status='pending' (no payments detected).
-    /// Invoices with processing or partially_paid status are left unchanged.
+    /// Expires invoices in pending, processing, or partially_paid states.
     pub async fn check_expired(&self) -> Result<u64, CleanupError> {
         tracing::debug!("Checking expired invoices");
 

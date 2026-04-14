@@ -1115,7 +1115,7 @@ where
         payment_count: payments.len(),
         confirmed_count,
         is_paid: invoice.status == InvoiceStatus::Paid,
-        is_expired: invoice.expires_at < now,
+        is_expired: invoice.status == InvoiceStatus::Expired || invoice.expires_at < now,
         payment_options: options.into_iter().map(Into::into).collect(),
         payments: payments.into_iter().map(|p| p.into()).collect(),
     }))
