@@ -30,6 +30,7 @@ alloy = { version = "1.0", features = [
     "rpc-types",
     "signers",
     "signer-local",
+    "rand",
 ] }
 
 # HD wallet derivation
