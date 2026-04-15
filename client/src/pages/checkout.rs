@@ -8,22 +8,8 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
 use crate::api::{ApiError, CheckoutResponse, EvmApiClient, PaymentOption};
+use crate::pages::invoices::chain_name;
 use crate::services::websocket::{StatusUpdate, WebSocketService};
-
-/// Map chain ID to human-readable name.
-fn chain_name(chain_id: u64) -> &'static str {
-    match chain_id {
-        1 => "Ethereum",
-        137 => "Polygon",
-        42161 => "Arbitrum",
-        10 => "Optimism",
-        8453 => "Base",
-        56 => "BSC",
-        43114 => "Avalanche",
-        11155111 => "Sepolia",
-        _ => "Unknown",
-    }
-}
 
 /// Format a human-readable amount from smallest units.
 ///
@@ -80,7 +66,7 @@ pub fn CheckoutPage() -> impl IntoView {
     });
 
     // WebSocket for real-time updates
-    let ws = WebSocketService::new();
+    let ws = std::rc::Rc::new(WebSocketService::new());
     let ws_connected = ws.connected();
     let ws_update = ws.last_update();
 
@@ -99,9 +85,18 @@ pub fn CheckoutPage() -> impl IntoView {
         let host = web_sys::window()
             .and_then(|w| w.location().host().ok())
             .unwrap_or_default();
-        let ws_url = format!("{}://{}/checkout/ws?invoice_id={}", protocol, host, id_for_ws);
+        let ws_url = format!(
+            "{}://{}/checkout/ws?invoice_id={}",
+            protocol, host, id_for_ws
+        );
         let _ = ws.connect(&ws_url);
     }
+
+    // Clean up WebSocket on unmount
+    let ws_cleanup = ws.clone();
+    on_cleanup(move || {
+        ws_cleanup.disconnect();
+    });
 
     // Refresh data when a relevant WS update arrives
     Effect::new(move || {
@@ -163,7 +158,6 @@ fn render_checkout(
     set_copied: WriteSignal<bool>,
 ) -> AnyView {
     let status = data.status.clone();
-    let is_terminal = data.is_paid || data.is_expired || status == "cancelled" || status == "refunded";
 
     // Terminal states
     if data.is_paid {
@@ -285,7 +279,13 @@ fn render_checkout(
                                     <div class="checkout-qr-box">
                                         // QR code rendered via CSS background or JS in production.
                                         // For now, show the address prominently.
-                                        <span class="checkout-qr-addr-short">{&addr[..6]}"..."{&addr[addr.len()-4..]}</span>
+                                        <span class="checkout-qr-addr-short">{
+                                            if addr.len() >= 10 {
+                                                format!("{}...{}", &addr[..6], &addr[addr.len()-4..])
+                                            } else {
+                                                addr.clone()
+                                            }
+                                        }</span>
                                     </div>
                                 </div>
                             </div>
@@ -344,32 +344,34 @@ fn CountdownTimer(expires_at: String) -> impl IntoView {
 
     // Parse expiration and tick every second
     let expires = expires_at.clone();
+    let handle = StoredValue::new(None::<gloo_timers::callback::Interval>);
     Effect::new(move |_| {
         let expires = expires.clone();
-        // Use an interval to update the countdown
-        let handle = gloo_timers::callback::Interval::new(1000, move || {
-            // Parse ISO 8601 datetime
-            if let Ok(exp) = js_sys::Date::parse(&expires) {
-                let now = js_sys::Date::now();
-                let diff_ms = exp - now;
-                if diff_ms <= 0.0 {
-                    set_remaining.set("Expired".to_string());
+        let interval = gloo_timers::callback::Interval::new(1000, move || {
+            let exp = js_sys::Date::parse(&expires);
+            let now = js_sys::Date::now();
+            let diff_ms = exp - now;
+            if diff_ms <= 0.0 {
+                set_remaining.set("Expired".to_string());
+            } else {
+                let secs = (diff_ms / 1000.0) as u64;
+                let mins = secs / 60;
+                let s = secs % 60;
+                if mins > 60 {
+                    let hrs = mins / 60;
+                    let m = mins % 60;
+                    set_remaining.set(format!("{}h {}m {}s", hrs, m, s));
                 } else {
-                    let secs = (diff_ms / 1000.0) as u64;
-                    let mins = secs / 60;
-                    let s = secs % 60;
-                    if mins > 60 {
-                        let hrs = mins / 60;
-                        let m = mins % 60;
-                        set_remaining.set(format!("{}h {}m {}s", hrs, m, s));
-                    } else {
-                        set_remaining.set(format!("{}m {}s", mins, s));
-                    }
+                    set_remaining.set(format!("{}m {}s", mins, s));
                 }
             }
         });
-        // Keep the handle alive for the component's lifetime
-        std::mem::forget(handle);
+        handle.set_value(Some(interval));
+    });
+
+    // Drop interval on unmount
+    on_cleanup(move || {
+        handle.set_value(None);
     });
 
     view! {

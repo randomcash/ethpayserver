@@ -12,7 +12,7 @@ use crate::components::{CreateInvoiceSignal, PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
 
 /// Helper to get chain name from chain ID.
-fn chain_name(chain_id: u64) -> &'static str {
+pub(crate) fn chain_name(chain_id: u64) -> &'static str {
     match chain_id {
         1 => "Ethereum",
         137 => "Polygon",

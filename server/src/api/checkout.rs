@@ -15,7 +15,7 @@ use utoipa::ToSchema;
 
 use auth::AuthenticationService;
 use data_service::{PaymentOptionReader, PaymentReader};
-use types::{InvoiceId, InvoiceReader, InvoiceStatus, traits::InvoiceData};
+use types::{InvoiceId, InvoiceReader, InvoiceStatus};
 
 use super::invoices::{PaymentOptionResponse, PaymentResponse};
 use super::ws::StatusUpdate;
@@ -143,12 +143,8 @@ async fn handle_checkout_socket(
         while let Ok(update) = rx.recv().await {
             // Filter: only forward events for this invoice
             let matches = match &update {
-                StatusUpdate::InvoiceStatus {
-                    invoice_id: ref id, ..
-                } => id == &inv_id,
-                StatusUpdate::PaymentUpdate {
-                    invoice_id: ref id, ..
-                } => id == &inv_id,
+                StatusUpdate::InvoiceStatus { invoice_id, .. } => invoice_id == &inv_id,
+                StatusUpdate::PaymentUpdate { invoice_id, .. } => invoice_id == &inv_id,
                 StatusUpdate::Ping => true,
                 StatusUpdate::Connected => false,
             };
