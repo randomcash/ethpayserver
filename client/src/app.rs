@@ -1,5 +1,7 @@
 //! Root application component with Stripe-inspired layout.
 
+use std::rc::Rc;
+
 use leptos::children::{Children, ChildrenFn};
 use leptos::prelude::*;
 use leptos_router::{
@@ -17,6 +19,7 @@ use crate::pages::{
     DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage, PaymentsPage,
     SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage, WalletsPage,
 };
+use crate::services::{ConnectionState, WebSocketService};
 
 /// localStorage key for persisted selected store ID.
 const SELECTED_STORE_KEY: &str = "eps_selected_store";
@@ -204,6 +207,55 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
         refetch,
     };
     provide_context(store_ctx);
+
+    // WebSocket service — single connection shared by all child pages.
+    let ws = WebSocketService::new();
+    let ws_connection_state = ws.connection_state();
+    let ws_last_update = ws.last_update();
+
+    // Connect WebSocket when auth token is available, disconnect on logout.
+    let ws_for_effect = Rc::new(ws);
+    provide_context(ws_connection_state);
+    provide_context(ws_last_update);
+
+    {
+        let ws = ws_for_effect.clone();
+        Effect::new(move || {
+            let token = auth.token.get();
+            match token {
+                Some(ref t) => {
+                    let protocol =
+                        if web_sys::window()
+                            .and_then(|w| w.location().protocol().ok())
+                            .as_deref()
+                            == Some("https:")
+                        {
+                            "wss"
+                        } else {
+                            "ws"
+                        };
+                    let host = web_sys::window()
+                        .and_then(|w| w.location().host().ok())
+                        .unwrap_or_default();
+                    let url = format!("{}://{}/ws?token={}", protocol, host, t);
+                    if let Err(e) = ws.connect(&url) {
+                        web_sys::console::error_1(
+                            &format!("WebSocket connect error: {}", e).into(),
+                        );
+                    }
+                }
+                None => {
+                    ws.disconnect();
+                }
+            }
+        });
+    }
+
+    // Disconnect on drop (component unmount).
+    let ws_for_cleanup = ws_for_effect.clone();
+    on_cleanup(move || {
+        ws_for_cleanup.disconnect();
+    });
 
     // Create invoice modal signal — shared between header button and invoices page.
     let (show_create_invoice, set_show_create_invoice) = signal(false);
@@ -437,6 +489,8 @@ where
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
     let create_invoice =
         use_context::<CreateInvoiceSignal>().expect("CreateInvoiceSignal must be provided");
+    let ws_state =
+        use_context::<ReadSignal<ConnectionState>>().expect("ConnectionState must be provided");
 
     let (menu_open, set_menu_open) = signal(false);
     let menu_ref = leptos::prelude::NodeRef::<leptos::html::Div>::new();
@@ -488,6 +542,7 @@ where
                 </div>
 
                 <div class="main-header-actions">
+                    <ConnectionIndicator state=ws_state />
                     <button class="btn btn-ghost btn-sm">
                         <IconBell />
                     </button>
@@ -513,6 +568,35 @@ where
                 </div>
             </div>
         </header>
+    }
+}
+
+/// WebSocket connection status indicator.
+#[component]
+fn ConnectionIndicator(state: ReadSignal<ConnectionState>) -> impl IntoView {
+    let class = move || match state.get() {
+        ConnectionState::Connected => "ws-indicator ws-indicator-connected",
+        ConnectionState::Reconnecting => "ws-indicator ws-indicator-reconnecting",
+        ConnectionState::Disconnected => "ws-indicator ws-indicator-disconnected",
+    };
+
+    let title = move || match state.get() {
+        ConnectionState::Connected => "Live",
+        ConnectionState::Reconnecting => "Reconnecting...",
+        ConnectionState::Disconnected => "Disconnected",
+    };
+
+    let label = move || match state.get() {
+        ConnectionState::Connected => "Live",
+        ConnectionState::Reconnecting => "Reconnecting",
+        ConnectionState::Disconnected => "Offline",
+    };
+
+    view! {
+        <div class=class title=title>
+            <span class="ws-indicator-dot"></span>
+            <span class="ws-indicator-label">{label}</span>
+        </div>
     }
 }
 
