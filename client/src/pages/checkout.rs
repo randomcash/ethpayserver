@@ -7,6 +7,8 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
+use send_wrapper::SendWrapper;
+
 use crate::api::{ApiError, CheckoutResponse, EvmApiClient, PaymentOption};
 use crate::pages::invoices::chain_name;
 use crate::services::websocket::{StatusUpdate, WebSocketService};
@@ -93,7 +95,7 @@ pub fn CheckoutPage() -> impl IntoView {
     }
 
     // Clean up WebSocket on unmount
-    let ws_cleanup = ws.clone();
+    let ws_cleanup = SendWrapper::new(ws.clone());
     on_cleanup(move || {
         ws_cleanup.disconnect();
     });
@@ -343,7 +345,9 @@ fn CountdownTimer(expires_at: String) -> impl IntoView {
 
     // Parse expiration and tick every second
     let expires = expires_at.clone();
-    let handle = StoredValue::new(None::<gloo_timers::callback::Interval>);
+    let interval_handle: std::rc::Rc<std::cell::RefCell<Option<gloo_timers::callback::Interval>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let handle_for_effect = interval_handle.clone();
     Effect::new(move |_| {
         let expires = expires.clone();
         let interval = gloo_timers::callback::Interval::new(1000, move || {
@@ -365,12 +369,13 @@ fn CountdownTimer(expires_at: String) -> impl IntoView {
                 }
             }
         });
-        handle.set_value(Some(interval));
+        *handle_for_effect.borrow_mut() = Some(interval);
     });
 
     // Drop interval on unmount
+    let handle_for_cleanup = SendWrapper::new(interval_handle);
     on_cleanup(move || {
-        handle.set_value(None);
+        handle_for_cleanup.borrow_mut().take();
     });
 
     view! {
