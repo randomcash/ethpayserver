@@ -591,6 +591,27 @@ where
                         return Err(StatusCode::SERVICE_UNAVAILABLE);
                     }
 
+                    // Staleness guard: reject rates older than 5 minutes
+                    if exchange_rate.is_stale(chrono::Duration::seconds(300)) {
+                        tracing::error!(
+                            from = %req.currency,
+                            to = %payment_method.asset_symbol,
+                            timestamp = %exchange_rate.timestamp,
+                            "Exchange rate too stale (>5min), rejecting"
+                        );
+                        return Err(StatusCode::SERVICE_UNAVAILABLE);
+                    }
+
+                    // Warn for rates older than 60 seconds
+                    if exchange_rate.is_stale(chrono::Duration::seconds(60)) {
+                        tracing::warn!(
+                            from = %req.currency,
+                            to = %payment_method.asset_symbol,
+                            timestamp = %exchange_rate.timestamp,
+                            "Exchange rate is >60s old, may be slightly outdated"
+                        );
+                    }
+
                     // Convert invoice currency to crypto smallest units
                     let amount = convert_to_crypto_smallest_unit(
                         &req.amount,

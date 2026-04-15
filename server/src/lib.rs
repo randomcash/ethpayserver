@@ -50,6 +50,7 @@ pub use state::{AppDataService, AppDataServiceReader, AppState};
 
 // Re-export rates crate types for convenience
 pub use rates::{
-    ExchangeRate, FIAT_CURRENCIES, KrakenRateProvider, RateError, RateProvider, RateProviderConfig,
-    is_crypto_currency, is_fiat_currency,
+    CachedRateProvider, CoinGeckoRateProvider, ExchangeRate, FIAT_CURRENCIES, FallbackRateProvider,
+    KrakenRateProvider, RateError, RateProvider, RateProviderConfig, is_crypto_currency,
+    is_fiat_currency,
 };
