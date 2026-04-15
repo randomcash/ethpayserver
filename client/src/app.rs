@@ -16,9 +16,8 @@ use wasm_bindgen::JsCast;
 use crate::api::{EvmApiClient, Store};
 use crate::components::{CreateInvoiceModal, CreateInvoiceSignal};
 use crate::pages::{
-    CheckoutPage, DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage,
-    PaymentDetailPage, PaymentsPage, SettingsPage, StoreDetailPage, StoresPage,
-    WalletDetailPage, WalletsPage,
+    CheckoutPage, DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage,
+    PaymentsPage, SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage, WalletsPage,
 };
 use crate::services::{ConnectionState, WebSocketService};
 
