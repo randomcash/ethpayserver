@@ -1156,6 +1156,341 @@ where
 }
 
 // =============================================================================
+// Webhook Deliveries
+// =============================================================================
+
+/// Webhook delivery record in the response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WebhookDeliveryResponse {
+    pub id: Uuid,
+    pub store_id: Uuid,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub http_status: Option<i16>,
+    pub response_body: Option<String>,
+    pub latency_ms: i32,
+    pub success: bool,
+    pub error_message: Option<String>,
+    pub attempt_number: i32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<types::WebhookDelivery> for WebhookDeliveryResponse {
+    fn from(d: types::WebhookDelivery) -> Self {
+        Self {
+            id: d.id,
+            store_id: d.store_id,
+            event_type: d.event_type,
+            payload: d.payload,
+            http_status: d.http_status,
+            response_body: d.response_body,
+            latency_ms: d.latency_ms,
+            success: d.success,
+            error_message: d.error_message,
+            attempt_number: d.attempt_number,
+            created_at: d.created_at,
+        }
+    }
+}
+
+/// Paginated list of webhook deliveries.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WebhookDeliveryListResponse {
+    pub total: i64,
+    pub deliveries: Vec<WebhookDeliveryResponse>,
+}
+
+/// Query parameters for listing webhook deliveries.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ListDeliveriesQuery {
+    pub event_type: Option<String>,
+    pub success: Option<bool>,
+    #[serde(default = "default_delivery_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_delivery_limit() -> i64 {
+    20
+}
+
+/// Response from testing a webhook.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TestWebhookResponse {
+    pub success: bool,
+    pub http_status: Option<i16>,
+    pub latency_ms: i32,
+    pub error_message: Option<String>,
+    pub delivery_id: Uuid,
+}
+
+/// Send a test webhook to the store's configured URL.
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/webhook/test",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID")
+    ),
+    responses(
+        (status = 200, description = "Test result", body = TestWebhookResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Webhook not configured"),
+    )
+)]
+pub async fn test_store_webhook<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(store_id): Path<Uuid>,
+) -> Result<Json<TestWebhookResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    require_store_settings_permission(&state, &user, store_id).await?;
+
+    let webhook = StoreWebhookReader::get_webhook(&*state.data_service, store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Build synthetic test payload
+    let test_payload = serde_json::json!({
+        "event_id": Uuid::new_v4(),
+        "event_type": "test",
+        "timestamp": chrono::Utc::now(),
+        "store_id": store_id,
+        "message": "This is a test webhook delivery from ETHPayServer."
+    });
+
+    let payload_json =
+        serde_json::to_string(&test_payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Sign with HMAC-SHA256
+    let signature =
+        crate::services::webhook::sign_webhook_payload(&payload_json, &webhook.webhook_secret);
+
+    // Deliver synchronously with timing
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let start = std::time::Instant::now();
+    let result = client
+        .post(&webhook.webhook_url)
+        .header("Content-Type", "application/json")
+        .header("X-Webhook-Signature", &signature)
+        .header("X-Webhook-Event", "test")
+        .header("X-Webhook-Id", Uuid::new_v4().to_string())
+        .body(payload_json)
+        .send()
+        .await;
+    let latency_ms = start.elapsed().as_millis() as i32;
+
+    let (success, http_status, error_message, response_body) = match result {
+        Ok(resp) => {
+            let status = resp.status().as_u16() as i16;
+            let body = resp.text().await.unwrap_or_default();
+            let truncated = if body.len() > 1024 {
+                format!("{}...", &body[..1024])
+            } else {
+                body
+            };
+            let ok = (200..300).contains(&(status as u16));
+            let err = if ok {
+                None
+            } else {
+                Some(format!("HTTP {status}"))
+            };
+            (ok, Some(status), err, Some(truncated))
+        }
+        Err(e) => (false, None, Some(e.to_string()), None),
+    };
+
+    // Record the delivery
+    let delivery = types::WebhookDeliveryWriter::create_delivery(
+        &*state.data_service,
+        store_id,
+        "test",
+        test_payload,
+        http_status,
+        response_body.as_deref(),
+        latency_ms,
+        success,
+        error_message.as_deref(),
+        1,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(TestWebhookResponse {
+        success,
+        http_status,
+        latency_ms,
+        error_message,
+        delivery_id: delivery.id,
+    }))
+}
+
+/// List webhook deliveries for a store.
+#[utoipa::path(
+    get,
+    path = "/stores/{store_id}/webhook/deliveries",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID"),
+        ("event_type" = Option<String>, Query, description = "Filter by event type"),
+        ("success" = Option<bool>, Query, description = "Filter by success status"),
+        ("limit" = Option<i64>, Query, description = "Max results (default 20, max 100)"),
+        ("offset" = Option<i64>, Query, description = "Offset for pagination"),
+    ),
+    responses(
+        (status = 200, description = "List of deliveries", body = WebhookDeliveryListResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+    )
+)]
+pub async fn list_webhook_deliveries<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(store_id): Path<Uuid>,
+    axum::extract::Query(query): axum::extract::Query<ListDeliveriesQuery>,
+) -> Result<Json<WebhookDeliveryListResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    require_store_settings_permission(&state, &user, store_id).await?;
+
+    let limit = query.limit.min(100).max(1);
+    let offset = query.offset.max(0);
+
+    let (total, deliveries) = types::WebhookDeliveryReader::list_deliveries(
+        &*state.data_service,
+        store_id,
+        query.event_type.as_deref(),
+        query.success,
+        limit,
+        offset,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(WebhookDeliveryListResponse {
+        total,
+        deliveries: deliveries.into_iter().map(|d| d.into()).collect(),
+    }))
+}
+
+/// Retry a failed webhook delivery.
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/webhook/deliveries/{delivery_id}/retry",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID"),
+        ("delivery_id" = Uuid, Path, description = "Delivery ID to retry"),
+    ),
+    responses(
+        (status = 200, description = "Retry result", body = WebhookDeliveryResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Delivery or webhook not found"),
+    )
+)]
+pub async fn retry_webhook_delivery<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path((store_id, delivery_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<WebhookDeliveryResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    require_store_settings_permission(&state, &user, store_id).await?;
+
+    // Get original delivery
+    let original = types::WebhookDeliveryReader::get_delivery(&*state.data_service, delivery_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if original.store_id != store_id {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Get current webhook config
+    let webhook = StoreWebhookReader::get_webhook(&*state.data_service, store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Re-deliver original payload to current webhook URL
+    let payload_json =
+        serde_json::to_string(&original.payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let signature =
+        crate::services::webhook::sign_webhook_payload(&payload_json, &webhook.webhook_secret);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let start = std::time::Instant::now();
+    let result = client
+        .post(&webhook.webhook_url)
+        .header("Content-Type", "application/json")
+        .header("X-Webhook-Signature", &signature)
+        .header("X-Webhook-Event", &original.event_type)
+        .header("X-Webhook-Id", Uuid::new_v4().to_string())
+        .body(payload_json)
+        .send()
+        .await;
+    let latency_ms = start.elapsed().as_millis() as i32;
+
+    let (success, http_status, error_message, response_body) = match result {
+        Ok(resp) => {
+            let status = resp.status().as_u16() as i16;
+            let body = resp.text().await.unwrap_or_default();
+            let truncated = if body.len() > 1024 {
+                format!("{}...", &body[..1024])
+            } else {
+                body
+            };
+            let ok = (200..300).contains(&(status as u16));
+            let err = if ok {
+                None
+            } else {
+                Some(format!("HTTP {status}"))
+            };
+            (ok, Some(status), err, Some(truncated))
+        }
+        Err(e) => (false, None, Some(e.to_string()), None),
+    };
+
+    let delivery = types::WebhookDeliveryWriter::create_delivery(
+        &*state.data_service,
+        store_id,
+        &original.event_type,
+        original.payload,
+        http_status,
+        response_body.as_deref(),
+        latency_ms,
+        success,
+        error_message.as_deref(),
+        original.attempt_number + 1,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(delivery.into()))
+}
+
+// =============================================================================
 // Payment Methods
 // =============================================================================
 
@@ -1870,5 +2205,113 @@ mod tests {
 
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["store_id"].as_str().unwrap(), store_id.to_string());
+    }
+
+    // =========================================================================
+    // WebhookDeliveryResponse conversion
+    // =========================================================================
+
+    #[test]
+    fn test_webhook_delivery_response_from_delivery() {
+        let delivery = types::WebhookDelivery {
+            id: Uuid::nil(),
+            store_id: Uuid::nil(),
+            event_type: "test".to_string(),
+            payload: serde_json::json!({"event_type": "test"}),
+            http_status: Some(200),
+            response_body: Some("OK".to_string()),
+            latency_ms: 42,
+            success: true,
+            error_message: None,
+            attempt_number: 1,
+            created_at: Utc::now(),
+        };
+
+        let response: WebhookDeliveryResponse = delivery.into();
+        assert_eq!(response.event_type, "test");
+        assert_eq!(response.http_status, Some(200));
+        assert_eq!(response.latency_ms, 42);
+        assert!(response.success);
+        assert!(response.error_message.is_none());
+    }
+
+    #[test]
+    fn test_webhook_delivery_response_failed() {
+        let delivery = types::WebhookDelivery {
+            id: Uuid::new_v4(),
+            store_id: Uuid::new_v4(),
+            event_type: "payment_confirmed".to_string(),
+            payload: serde_json::json!({}),
+            http_status: Some(500),
+            response_body: Some("Internal Server Error".to_string()),
+            latency_ms: 1500,
+            success: false,
+            error_message: Some("HTTP 500".to_string()),
+            attempt_number: 3,
+            created_at: Utc::now(),
+        };
+
+        let response: WebhookDeliveryResponse = delivery.into();
+        assert!(!response.success);
+        assert_eq!(response.error_message, Some("HTTP 500".to_string()));
+        assert_eq!(response.attempt_number, 3);
+    }
+
+    #[test]
+    fn test_webhook_delivery_response_network_error() {
+        let delivery = types::WebhookDelivery {
+            id: Uuid::new_v4(),
+            store_id: Uuid::new_v4(),
+            event_type: "payment_detected".to_string(),
+            payload: serde_json::json!({"event_type": "payment_detected"}),
+            http_status: None,
+            response_body: None,
+            latency_ms: 30000,
+            success: false,
+            error_message: Some("connection timeout".to_string()),
+            attempt_number: 1,
+            created_at: Utc::now(),
+        };
+
+        let response: WebhookDeliveryResponse = delivery.into();
+        assert!(response.http_status.is_none());
+        assert!(!response.success);
+        assert_eq!(
+            response.error_message,
+            Some("connection timeout".to_string())
+        );
+    }
+
+    #[test]
+    fn test_delivery_list_serialization() {
+        let list = WebhookDeliveryListResponse {
+            total: 42,
+            deliveries: vec![],
+        };
+
+        let json = serde_json::to_value(&list).unwrap();
+        assert_eq!(json["total"], 42);
+        assert!(json["deliveries"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_test_webhook_response_serialization() {
+        let response = TestWebhookResponse {
+            success: true,
+            http_status: Some(200),
+            latency_ms: 150,
+            error_message: None,
+            delivery_id: Uuid::nil(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["success"].as_bool().unwrap());
+        assert_eq!(json["latency_ms"], 150);
+        assert!(json["error_message"].is_null());
+    }
+
+    #[test]
+    fn test_default_delivery_limit() {
+        assert_eq!(default_delivery_limit(), 20);
     }
 }

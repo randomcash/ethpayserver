@@ -94,6 +94,11 @@ pub use types::{
     WatchedAddressReader,
     WatchedAddressRepository,
     WatchedAddressWriter,
+    // Webhook Delivery
+    WebhookDelivery,
+    WebhookDeliveryReader,
+    WebhookDeliveryRepository,
+    WebhookDeliveryWriter,
 };
 
 /// Convert sqlx::Error to RepositoryError.

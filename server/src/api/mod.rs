@@ -54,6 +54,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::get_store_webhook,
         stores::configure_store_webhook,
         stores::delete_store_webhook,
+        stores::test_store_webhook,
+        stores::list_webhook_deliveries,
+        stores::retry_webhook_delivery,
         // Payment Methods
         stores::list_payment_methods,
         stores::create_payment_method,
@@ -94,6 +97,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::CreatePaymentMethodRequest,
         stores::UpdatePaymentMethodRequest,
         stores::PaymentMethodResponse,
+        stores::WebhookDeliveryResponse,
+        stores::WebhookDeliveryListResponse,
+        stores::TestWebhookResponse,
         invoices::CreateInvoiceRequest,
         invoices::InvoiceResponse,
         invoices::InvoiceListResponse,
@@ -166,6 +172,9 @@ where
         .route("/{store_id}/webhook", get(stores::get_store_webhook::<A>))
         .route("/{store_id}/webhook", put(stores::configure_store_webhook::<A>))
         .route("/{store_id}/webhook", delete(stores::delete_store_webhook::<A>))
+        .route("/{store_id}/webhook/test", post(stores::test_store_webhook::<A>))
+        .route("/{store_id}/webhook/deliveries", get(stores::list_webhook_deliveries::<A>))
+        .route("/{store_id}/webhook/deliveries/{delivery_id}/retry", post(stores::retry_webhook_delivery::<A>))
         // Payment methods
         .route("/{store_id}/payment-methods", get(stores::list_payment_methods::<A>))
         .route("/{store_id}/payment-methods", post(stores::create_payment_method::<A>))

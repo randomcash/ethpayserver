@@ -345,6 +345,39 @@ pub struct UpdateWebhookRequest {
     pub enabled: bool,
 }
 
+/// Webhook delivery record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookDelivery {
+    pub id: String,
+    pub store_id: String,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub http_status: Option<i16>,
+    pub response_body: Option<String>,
+    pub latency_ms: i32,
+    pub success: bool,
+    pub error_message: Option<String>,
+    pub attempt_number: i32,
+    pub created_at: String,
+}
+
+/// List of webhook deliveries with total count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookDeliveryList {
+    pub total: i64,
+    pub deliveries: Vec<WebhookDelivery>,
+}
+
+/// Response from webhook test endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestWebhookResponse {
+    pub success: bool,
+    pub http_status: Option<i16>,
+    pub latency_ms: i32,
+    pub error_message: Option<String>,
+    pub delivery_id: String,
+}
+
 /// Paginated response wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginatedResponse<T> {

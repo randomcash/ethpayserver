@@ -1120,7 +1120,28 @@ fn WebhooksTab(store_id: String) -> impl IntoView {
                                     });
                                 }
                             };
-                            view! { <WebhookConfig webhook=wh on_edit=on_edit on_regenerate=on_regenerate on_delete=on_delete /> }.into_any()
+                            let store_id_test = store_id.clone();
+            let on_test = move |_| {
+                let api = api.get();
+                let sid = store_id_test.clone();
+                leptos::task::spawn_local(async move {
+                    match api.test_store_webhook(&sid).await {
+                        Ok(result) => {
+                            let msg = if result.success {
+                                format!("Test succeeded: HTTP {} in {}ms", result.http_status.unwrap_or(0), result.latency_ms)
+                            } else {
+                                format!("Test failed: {}", result.error_message.unwrap_or_else(|| "unknown error".to_string()))
+                            };
+                            web_sys::window().and_then(|w| w.alert_with_message(&msg).ok());
+                            set_refresh_counter.update(|c| *c += 1);
+                        }
+                        Err(e) => {
+                            web_sys::window().and_then(|w| w.alert_with_message(&format!("Error: {e}")).ok());
+                        }
+                    }
+                });
+            };
+            view! { <WebhookConfig webhook=wh on_edit=on_edit on_regenerate=on_regenerate on_delete=on_delete on_test=on_test /> }.into_any()
                         }
                         Ok(None) => {
                             let on_configure = move |_| {
@@ -1171,6 +1192,122 @@ fn WebhooksTab(store_id: String) -> impl IntoView {
                     </div>
                 </div>
             </div>
+
+            <WebhookDeliveryLog store_id=store_id.clone() refresh=refresh_counter />
+        </div>
+    }
+}
+
+/// Webhook delivery log component.
+#[component]
+fn WebhookDeliveryLog(store_id: String, refresh: ReadSignal<u32>) -> impl IntoView {
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let store_id_fetch = store_id.clone();
+
+    let deliveries_resource = LocalResource::new(move || {
+        let api = api.get();
+        let sid = store_id_fetch.clone();
+        refresh.get();
+        async move {
+            api.list_webhook_deliveries(&sid, None, None, Some(20), None)
+                .await
+        }
+    });
+
+    view! {
+        <div class="detail-card" style="margin-top: 1rem;">
+            <div class="detail-card-header">
+                <h3>"Delivery Log"</h3>
+            </div>
+            <div class="detail-card-body">
+                <Suspense fallback=move || view! {
+                    <p style="color: var(--text-muted); padding: 1rem 0;">"Loading deliveries..."</p>
+                }>
+                    {move || {
+                        let store_id = store_id.clone();
+                        deliveries_resource.get().map(move |result| match &*result {
+                            Ok(list) if list.deliveries.is_empty() => {
+                                view! {
+                                    <p style="color: var(--text-muted); padding: 1rem 0; text-align: center;">
+                                        "No deliveries yet. Configure a webhook and click Test to see delivery logs here."
+                                    </p>
+                                }.into_any()
+                            }
+                            Ok(list) => {
+                                let deliveries = list.deliveries.clone();
+                                view! {
+                                    <div style="overflow-x: auto;">
+                                        <table class="data-table" style="width: 100%; font-size: var(--text-sm);">
+                                            <thead>
+                                                <tr>
+                                                    <th>"Time"</th>
+                                                    <th>"Event"</th>
+                                                    <th>"Status"</th>
+                                                    <th>"HTTP"</th>
+                                                    <th>"Latency"</th>
+                                                    <th>"Actions"</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {deliveries.into_iter().map(|d| {
+                                                    let badge_class = if d.success { "badge badge-success" } else { "badge badge-error" };
+                                                    let badge_text = if d.success { "OK" } else { "Failed" };
+                                                    let http_text = d.http_status.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string());
+                                                    let latency_text = format!("{}ms", d.latency_ms);
+                                                    let time_text = d.created_at.chars().take(19).collect::<String>().replace('T', " ");
+                                                    let delivery_id = d.id.clone();
+                                                    let store_id_retry = store_id.clone();
+                                                    let can_retry = !d.success;
+                                                    let on_retry = move |_| {
+                                                        let api = api.get();
+                                                        let sid = store_id_retry.clone();
+                                                        let did = delivery_id.clone();
+                                                        leptos::task::spawn_local(async move {
+                                                            match api.retry_webhook_delivery(&sid, &did).await {
+                                                                Ok(result) => {
+                                                                    let msg = if result.success {
+                                                                        "Retry succeeded".to_string()
+                                                                    } else {
+                                                                        format!("Retry failed: {}", result.error_message.unwrap_or_default())
+                                                                    };
+                                                                    web_sys::window().and_then(|w| w.alert_with_message(&msg).ok());
+                                                                }
+                                                                Err(e) => {
+                                                                    web_sys::window().and_then(|w| w.alert_with_message(&format!("Error: {e}")).ok());
+                                                                }
+                                                            }
+                                                        });
+                                                    };
+                                                    view! {
+                                                        <tr>
+                                                            <td style="white-space: nowrap;">{time_text}</td>
+                                                            <td><code>{d.event_type}</code></td>
+                                                            <td><span class=badge_class>{badge_text}</span></td>
+                                                            <td>{http_text}</td>
+                                                            <td>{latency_text}</td>
+                                                            <td>
+                                                                {can_retry.then(|| view! {
+                                                                    <button class="btn btn-ghost btn-xs" on:click=on_retry>"Retry"</button>
+                                                                })}
+                                                            </td>
+                                                        </tr>
+                                                    }
+                                                }).collect::<Vec<_>>()}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <p style="color: var(--text-muted); font-size: var(--text-xs); margin-top: 0.5rem;">
+                                        {format!("Showing {} of {} deliveries", list.deliveries.len(), list.total)}
+                                    </p>
+                                }.into_any()
+                            }
+                            Err(e) => view! {
+                                <p style="color: var(--color-error);">"Failed to load deliveries: "{e.to_string()}</p>
+                            }.into_any(),
+                        })
+                    }}
+                </Suspense>
+            </div>
         </div>
     }
 }
@@ -1182,6 +1319,7 @@ fn WebhookConfig(
     on_edit: impl Fn(leptos::ev::MouseEvent) + 'static,
     on_regenerate: impl Fn(leptos::ev::MouseEvent) + 'static,
     on_delete: impl Fn(leptos::ev::MouseEvent) + 'static,
+    on_test: impl Fn(leptos::ev::MouseEvent) + 'static,
 ) -> impl IntoView {
     let status_class = if webhook.enabled {
         "badge badge-success"
@@ -1215,6 +1353,7 @@ fn WebhookConfig(
 
                 <div class="form-actions" style="display: flex; gap: 0.5rem; margin-top: 1rem;">
                     <button class="btn btn-secondary btn-sm" on:click=on_edit>"Edit endpoint"</button>
+                    <button class="btn btn-primary btn-sm" on:click=on_test>"Test"</button>
                     <button class="btn btn-secondary btn-sm" on:click=on_regenerate>"Regenerate secret"</button>
                     <button class="btn btn-ghost btn-sm" style="color: var(--color-error);" on:click=on_delete>"Delete"</button>
                 </div>

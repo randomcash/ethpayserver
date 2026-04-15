@@ -12,6 +12,7 @@ mod store_wallet;
 mod store_webhook;
 mod token;
 mod watched_address;
+mod webhook_delivery;
 
 pub use watched_address::PendingWatch;
 
