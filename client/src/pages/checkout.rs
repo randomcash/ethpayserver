@@ -102,13 +102,11 @@ pub fn CheckoutPage() -> impl IntoView {
 
     // Refresh data when a relevant WS update arrives
     Effect::new(move || {
-        if let Some(update) = ws_update.get() {
-            match update {
-                StatusUpdate::InvoiceStatus { .. } | StatusUpdate::PaymentUpdate { .. } => {
-                    set_refresh.update(|n| *n += 1);
-                }
-                _ => {}
-            }
+        if let Some(
+            StatusUpdate::InvoiceStatus { .. } | StatusUpdate::PaymentUpdate { .. },
+        ) = ws_update.get()
+        {
+            set_refresh.update(|n| *n += 1);
         }
     });
 
