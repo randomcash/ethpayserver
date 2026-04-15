@@ -235,16 +235,10 @@ impl EvmApiClient {
             js_sys::encode_uri_component(store_id)
         );
         if let Some(s) = status {
-            query.push_str(&format!(
-                "&status={}",
-                js_sys::encode_uri_component(s)
-            ));
+            query.push_str(&format!("&status={}", js_sys::encode_uri_component(s)));
         }
         if let Some(c) = currency {
-            query.push_str(&format!(
-                "&currency={}",
-                js_sys::encode_uri_component(c)
-            ));
+            query.push_str(&format!("&currency={}", js_sys::encode_uri_component(c)));
         }
         if let Some(l) = limit {
             query.push_str(&format!("&limit={}", l));
@@ -302,10 +296,7 @@ impl EvmApiClient {
             js_sys::encode_uri_component(store_id)
         );
         if let Some(s) = status {
-            query.push_str(&format!(
-                "&status={}",
-                js_sys::encode_uri_component(s)
-            ));
+            query.push_str(&format!("&status={}", js_sys::encode_uri_component(s)));
         }
         if let Some(l) = limit {
             query.push_str(&format!("&limit={}", l));
