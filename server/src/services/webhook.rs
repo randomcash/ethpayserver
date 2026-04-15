@@ -351,9 +351,11 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             return Ok(false);
         }
 
-        // Attempt delivery
+        // Attempt delivery with timing
         job.attempts += 1;
+        let delivery_start = std::time::Instant::now();
         let result = self.deliver_webhook(&job).await;
+        let delivery_duration = delivery_start.elapsed();
 
         match result {
             Ok(()) => {
@@ -364,6 +366,11 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     "Webhook delivered successfully"
                 );
                 metrics::record_webhook_delivered(&job.payload.event_type.to_string());
+                metrics::record_webhook_delivery_duration(
+                    &job.payload.event_type.to_string(),
+                    true,
+                    delivery_duration,
+                );
                 self.record_delivery_event(&job, true, None).await;
             }
             Err(e) => {
@@ -373,6 +380,11 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     attempts = job.attempts,
                     error = %e,
                     "Webhook delivery failed"
+                );
+                metrics::record_webhook_delivery_duration(
+                    &job.payload.event_type.to_string(),
+                    false,
+                    delivery_duration,
                 );
 
                 if job.is_exhausted() {

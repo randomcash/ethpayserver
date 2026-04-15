@@ -15,6 +15,7 @@ use crate::state::PgAppState;
 pub mod dashboard;
 pub mod extractors;
 pub mod health;
+pub mod http_metrics;
 pub mod invoices;
 pub mod rate_limit;
 pub mod stores;
@@ -301,6 +302,9 @@ where
 
         app = app.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", openapi));
     }
+
+    // HTTP request metrics (innermost layer = runs closest to handlers)
+    app = app.layer(axum::middleware::from_fn(http_metrics::middleware));
 
     app
 }

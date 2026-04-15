@@ -3,9 +3,10 @@
 //! Provides application-level metrics for monitoring invoice processing,
 //! payment detection, webhook delivery, and service health.
 
-use metrics::{counter, describe_counter, describe_gauge, gauge};
+use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 /// Global metrics handle for rendering.
 static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -25,6 +26,7 @@ pub fn init_metrics() -> Result<(), metrics_exporter_prometheus::BuildError> {
     // Describe all metrics
     describe_counters();
     describe_gauges();
+    describe_histograms();
 
     Ok(())
 }
@@ -79,24 +81,6 @@ fn describe_counters() {
         "Total number of webhook delivery failures"
     );
 
-    // User activity metrics
-    describe_counter!(
-        "ethpayserver_user_registrations_total",
-        "Total number of user registrations"
-    );
-    describe_counter!(
-        "ethpayserver_user_logins_total",
-        "Total number of user logins"
-    );
-    describe_counter!(
-        "ethpayserver_user_logouts_total",
-        "Total number of user logouts"
-    );
-    describe_counter!(
-        "ethpayserver_user_login_failures_total",
-        "Total number of failed login attempts"
-    );
-
     // Store metrics
     describe_counter!(
         "ethpayserver_stores_created_total",
@@ -124,6 +108,22 @@ fn describe_gauges() {
         "Total number of registered users"
     );
     describe_gauge!("ethpayserver_stores", "Total number of stores");
+}
+
+fn describe_histograms() {
+    describe_histogram!(
+        "ethpayserver_payment_confirmation_duration_seconds",
+        "Time from payment detected to confirmed"
+    );
+    describe_histogram!(
+        "ethpayserver_webhook_delivery_duration_seconds",
+        "HTTP round-trip time per webhook delivery attempt"
+    );
+    describe_histogram!(
+        "ethpayserver_http_request_duration_seconds",
+        "API request latency"
+    );
+    describe_counter!("ethpayserver_http_requests_total", "Total HTTP requests");
 }
 
 // ============================================================================
@@ -222,30 +222,6 @@ pub fn set_stores(count: u64) {
     gauge!("ethpayserver_stores").set(count as f64);
 }
 
-// ============================================================================
-// User activity metrics
-// ============================================================================
-
-/// Record a user registration.
-pub fn record_user_registration() {
-    counter!("ethpayserver_user_registrations_total").increment(1);
-}
-
-/// Record a user login.
-pub fn record_user_login() {
-    counter!("ethpayserver_user_logins_total").increment(1);
-}
-
-/// Record a user logout.
-pub fn record_user_logout() {
-    counter!("ethpayserver_user_logouts_total").increment(1);
-}
-
-/// Record a failed login attempt.
-pub fn record_login_failure() {
-    counter!("ethpayserver_user_login_failures_total").increment(1);
-}
-
 /// Record a store creation.
 pub fn record_store_created() {
     counter!("ethpayserver_stores_created_total").increment(1);
@@ -258,4 +234,40 @@ pub fn record_rate_limited(tier: &str) {
         "tier" => tier.to_string()
     )
     .increment(1);
+}
+
+// ============================================================================
+// Histogram recording functions
+// ============================================================================
+
+/// Record the duration from payment detected to confirmed.
+pub fn record_payment_confirmation_duration(chain_id: u64, asset_symbol: &str, duration: Duration) {
+    histogram!(
+        "ethpayserver_payment_confirmation_duration_seconds",
+        "chain_id" => chain_id.to_string(),
+        "asset_symbol" => asset_symbol.to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Record a webhook delivery round-trip duration.
+pub fn record_webhook_delivery_duration(event_type: &str, success: bool, duration: Duration) {
+    histogram!(
+        "ethpayserver_webhook_delivery_duration_seconds",
+        "event_type" => event_type.to_string(),
+        "status" => if success { "ok" } else { "error" }.to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// Record an HTTP request.
+pub fn record_http_request(method: &str, path: &str, status: u16, duration: Duration) {
+    let labels = [
+        ("method", method.to_string()),
+        ("path", path.to_string()),
+        ("status", status.to_string()),
+    ];
+    counter!("ethpayserver_http_requests_total", &labels).increment(1);
+    histogram!("ethpayserver_http_request_duration_seconds", &labels)
+        .record(duration.as_secs_f64());
 }
