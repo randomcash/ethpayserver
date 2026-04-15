@@ -165,7 +165,7 @@ fn render_checkout(
             <div class="checkout-status checkout-paid">
                 <div class="checkout-status-icon">"&#10003;"</div>
                 <h2>"Payment Complete"</h2>
-                <p class="checkout-amount">{&data.amount}" "{&data.currency}</p>
+                <p class="checkout-amount">{data.amount.clone()}" "{data.currency.clone()}</p>
                 <p class="checkout-status-detail">"Thank you for your payment."</p>
             </div>
         }
@@ -177,7 +177,7 @@ fn render_checkout(
             <div class="checkout-status checkout-expired">
                 <div class="checkout-status-icon">"&#10007;"</div>
                 <h2>"Invoice Expired"</h2>
-                <p class="checkout-amount">{&data.amount}" "{&data.currency}</p>
+                <p class="checkout-amount">{data.amount.clone()}" "{data.currency.clone()}</p>
                 <p class="checkout-status-detail">"This invoice is no longer accepting payments."</p>
             </div>
         }
@@ -189,7 +189,7 @@ fn render_checkout(
             <div class="checkout-status checkout-expired">
                 <div class="checkout-status-icon">"&#10007;"</div>
                 <h2>"Invoice Cancelled"</h2>
-                <p class="checkout-amount">{&data.amount}" "{&data.currency}</p>
+                <p class="checkout-amount">{data.amount.clone()}" "{data.currency.clone()}</p>
             </div>
         }
         .into_any();
@@ -229,7 +229,7 @@ fn render_checkout(
         <div class="checkout-body">
             // Amount and status
             <div class="checkout-amount-section">
-                <p class="checkout-amount">{&amount}" "{&currency}</p>
+                <p class="checkout-amount">{amount.clone()}" "{currency.clone()}</p>
                 <p class="checkout-status-label">{status_label}</p>
                 <CountdownTimer expires_at=expires_at />
             </div>
@@ -293,7 +293,7 @@ fn render_checkout(
                             // Amount in crypto
                             <div class="checkout-detail-row">
                                 <span class="checkout-detail-label">"Amount"</span>
-                                <span class="checkout-detail-value">{&display_amount}" "{&asset}</span>
+                                <span class="checkout-detail-value">{display_amount.clone()}" "{asset.clone()}</span>
                             </div>
 
                             // Network
@@ -306,21 +306,20 @@ fn render_checkout(
                             <div class="checkout-address-row">
                                 <span class="checkout-detail-label">"Address"</span>
                                 <div class="checkout-address-value">
-                                    <code class="checkout-address">{&addr}</code>
+                                    <code class="checkout-address">{addr.clone()}</code>
                                     <button
                                         class="checkout-copy-btn"
                                         on:click=move |_| {
                                             if let Some(window) = web_sys::window() {
-                                                if let Some(clipboard) = window.navigator().clipboard() {
-                                                    let addr = addr_for_copy.clone();
-                                                    let _ = clipboard.write_text(&addr);
-                                                    set_copied.set(true);
-                                                    // Reset after 2 seconds
-                                                    leptos::task::spawn_local(async move {
-                                                        gloo_timers::future::TimeoutFuture::new(2000).await;
-                                                        set_copied.set(false);
-                                                    });
-                                                }
+                                                let clipboard = window.navigator().clipboard();
+                                                let addr = addr_for_copy.clone();
+                                                let _ = clipboard.write_text(&addr);
+                                                set_copied.set(true);
+                                                // Reset after 2 seconds
+                                                leptos::task::spawn_local(async move {
+                                                    gloo_timers::future::TimeoutFuture::new(2000).await;
+                                                    set_copied.set(false);
+                                                });
                                             }
                                         }
                                     >
