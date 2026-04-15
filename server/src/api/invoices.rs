@@ -1369,7 +1369,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             q.store_id.unwrap(),
-            "00000000-0000-0000-0000-000000000001".parse::<Uuid>().unwrap()
+            "00000000-0000-0000-0000-000000000001"
+                .parse::<Uuid>()
+                .unwrap()
         );
         assert_eq!(q.status.unwrap(), "paid");
         assert_eq!(q.currency.unwrap(), "USD");
