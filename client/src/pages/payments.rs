@@ -19,6 +19,11 @@ fn chain_name(chain_id: u64) -> &'static str {
         8453 => "Base",
         56 => "BSC",
         43114 => "Avalanche",
+        324 => "zkSync",
+        59144 => "Linea",
+        534352 => "Scroll",
+        250 => "Fantom",
+        100 => "Gnosis",
         11155111 => "Sepolia",
         _ => "Unknown",
     }

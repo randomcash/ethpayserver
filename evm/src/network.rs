@@ -29,6 +29,10 @@ pub enum EvmNetwork {
     Linea,
     /// Scroll
     Scroll,
+    /// Fantom Opera
+    Fantom,
+    /// Gnosis (formerly xDai)
+    Gnosis,
 }
 
 impl EvmNetwork {
@@ -45,6 +49,8 @@ impl EvmNetwork {
             EvmNetwork::ZkSync => "zkSync",
             EvmNetwork::Linea => "Linea",
             EvmNetwork::Scroll => "Scroll",
+            EvmNetwork::Fantom => "Fantom",
+            EvmNetwork::Gnosis => "Gnosis",
         }
     }
 
@@ -61,6 +67,8 @@ impl EvmNetwork {
             EvmNetwork::ZkSync => "ETH",
             EvmNetwork::Linea => "ETH",
             EvmNetwork::Scroll => "ETH",
+            EvmNetwork::Fantom => "FTM",
+            EvmNetwork::Gnosis => "xDAI",
         }
     }
 
@@ -77,6 +85,8 @@ impl EvmNetwork {
             EvmNetwork::ZkSync => 324,
             EvmNetwork::Linea => 59144,
             EvmNetwork::Scroll => 534352,
+            EvmNetwork::Fantom => 250,
+            EvmNetwork::Gnosis => 100,
         }
     }
 
@@ -93,6 +103,8 @@ impl EvmNetwork {
             324 => Some(EvmNetwork::ZkSync),
             59144 => Some(EvmNetwork::Linea),
             534352 => Some(EvmNetwork::Scroll),
+            250 => Some(EvmNetwork::Fantom),
+            100 => Some(EvmNetwork::Gnosis),
             _ => None,
         }
     }
@@ -110,6 +122,8 @@ impl EvmNetwork {
             Self::ZkSync => "zksync",
             Self::Linea => "linea",
             Self::Scroll => "scroll",
+            Self::Fantom => "fantom",
+            Self::Gnosis => "gnosis",
         }
     }
 }
@@ -135,6 +149,8 @@ impl std::str::FromStr for EvmNetwork {
             "zksync" | "zk_sync" => Ok(Self::ZkSync),
             "linea" => Ok(Self::Linea),
             "scroll" => Ok(Self::Scroll),
+            "fantom" | "ftm" => Ok(Self::Fantom),
+            "gnosis" | "xdai" => Ok(Self::Gnosis),
             _ => Err(format!("unknown network: {}", s)),
         }
     }
@@ -294,6 +310,30 @@ pub const SCROLL: ChainConfig = ChainConfig {
     explorer_url: "https://scrollscan.com/tx/{tx}",
 };
 
+/// Fantom Opera configuration.
+pub const FANTOM: ChainConfig = ChainConfig {
+    network: Some(EvmNetwork::Fantom),
+    chain_id: 250,
+    name: "Fantom Opera",
+    native_symbol: "FTM",
+    native_decimals: 18,
+    block_time_secs: 1,
+    confirmations_required: 12,
+    explorer_url: "https://ftmscan.com/tx/{tx}",
+};
+
+/// Gnosis Chain configuration.
+pub const GNOSIS: ChainConfig = ChainConfig {
+    network: Some(EvmNetwork::Gnosis),
+    chain_id: 100,
+    name: "Gnosis Chain",
+    native_symbol: "xDAI",
+    native_decimals: 18,
+    block_time_secs: 5,
+    confirmations_required: 20,
+    explorer_url: "https://gnosisscan.io/tx/{tx}",
+};
+
 /// All supported chains.
 pub const ALL_CHAINS: &[ChainConfig] = &[
     ETHEREUM,
@@ -306,6 +346,8 @@ pub const ALL_CHAINS: &[ChainConfig] = &[
     ZKSYNC,
     LINEA,
     SCROLL,
+    FANTOM,
+    GNOSIS,
 ];
 
 /// Get chain configuration by network.
@@ -350,6 +392,8 @@ pub fn network_to_chain_id(network: types::Network) -> Option<u64> {
         Network::ZkSync => Some(324),
         Network::Linea => Some(59144),
         Network::Scroll => Some(534352),
+        Network::Fantom => Some(250),
+        Network::Gnosis => Some(100),
         _ => None,
     }
 }
@@ -371,6 +415,8 @@ pub fn chain_id_to_network(chain_id: u64) -> Option<types::Network> {
         324 => Some(Network::ZkSync),
         59144 => Some(Network::Linea),
         534352 => Some(Network::Scroll),
+        250 => Some(Network::Fantom),
+        100 => Some(Network::Gnosis),
         _ => None,
     }
 }

@@ -19,6 +19,8 @@ pub fn try_network_to_db(network: Network) -> Result<&'static str, RepositoryErr
         Network::ZkSync => Ok("zksync"),
         Network::Linea => Ok("linea"),
         Network::Scroll => Ok("scroll"),
+        Network::Fantom => Ok("fantom"),
+        Network::Gnosis => Ok("gnosis"),
         _ => Err(RepositoryError::InvalidData(format!(
             "Unsupported network for ethpayserver: {:?}",
             network
@@ -42,6 +44,8 @@ pub fn try_db_to_network(s: &str) -> Result<Network, RepositoryError> {
         "zksync" => Ok(Network::ZkSync),
         "linea" => Ok(Network::Linea),
         "scroll" => Ok(Network::Scroll),
+        "fantom" => Ok(Network::Fantom),
+        "gnosis" => Ok(Network::Gnosis),
         _ => Err(RepositoryError::InvalidData(format!(
             "Unknown network in database: {}",
             s

@@ -802,6 +802,8 @@ mod tests {
             Polygon => "POL",
             Avalanche => "AVAX",
             BinanceSmartChain => "BNB",
+            Fantom => "FTM",
+            Gnosis => "xDAI",
             // Non-EVM networks - shouldn't reach here
             _ => "UNKNOWN",
         }
@@ -902,6 +904,8 @@ mod tests {
         assert_eq!(network_native_symbol(Network::Arbitrum), "ETH");
         assert_eq!(network_native_symbol(Network::Optimism), "ETH");
         assert_eq!(network_native_symbol(Network::Base), "ETH");
+        assert_eq!(network_native_symbol(Network::Fantom), "FTM");
+        assert_eq!(network_native_symbol(Network::Gnosis), "xDAI");
         // Non-EVM networks
         assert_eq!(network_native_symbol(Network::BitcoinMainnet), "UNKNOWN");
     }

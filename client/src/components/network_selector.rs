@@ -16,6 +16,8 @@ const AVAILABLE_NETWORKS: &[(Network, u64)] = &[
     (Network::ZkSync, 324),
     (Network::Linea, 59144),
     (Network::Scroll, 534352),
+    (Network::Fantom, 250),
+    (Network::Gnosis, 100),
 ];
 
 /// Network selector component.

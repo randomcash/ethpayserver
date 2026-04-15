@@ -5,7 +5,7 @@
 //!
 //! # Features
 //!
-//! - **Chain configurations** - Pre-defined settings for 10+ EVM networks
+//! - **Chain configurations** - Pre-defined settings for 12 EVM networks
 //! - **HD wallet derivation** - BIP-32/44 address generation for payment invoices
 //! - **RPC provider** - Alloy-based provider for blockchain interaction
 //! - **ERC20 support** - Token registry and balance checking
