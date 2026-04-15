@@ -86,6 +86,12 @@ fn describe_counters() {
         "ethpayserver_stores_created_total",
         "Total number of stores created"
     );
+
+    // Rate limiting metrics
+    describe_counter!(
+        "ethpayserver_rate_limited_total",
+        "Total number of requests rejected by rate limiting"
+    );
 }
 
 fn describe_gauges() {
@@ -219,6 +225,15 @@ pub fn set_stores(count: u64) {
 /// Record a store creation.
 pub fn record_store_created() {
     counter!("ethpayserver_stores_created_total").increment(1);
+}
+
+/// Record a rate-limited request.
+pub fn record_rate_limited(tier: &str) {
+    counter!(
+        "ethpayserver_rate_limited_total",
+        "tier" => tier.to_string()
+    )
+    .increment(1);
 }
 
 // ============================================================================

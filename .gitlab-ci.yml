@@ -76,6 +76,7 @@ test:
 audit:
   stage: check
   script:
+    - cargo install cargo-audit cargo-deny --locked
     - git config --global --unset-all url."ssh://git@github.com/".insteadOf || true
     - rm -rf ${CARGO_HOME:-$HOME/.cargo}/advisory-db
     - git clone --depth 1 https://github.com/RustSec/advisory-db.git ${CARGO_HOME:-$HOME/.cargo}/advisory-db

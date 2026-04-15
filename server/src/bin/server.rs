@@ -19,7 +19,9 @@ use evm::monitor::bridge::{COMMANDS_CHANNEL, EVENTS_CHANNEL, RedisBridge};
 use rates::RateProviderConfig;
 use server::{
     AppState, CleanupConfig, EventConsumer, InvoiceCleanupService, RedisEVMMonitor,
-    WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService, api, config::Config,
+    WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService, api,
+    api::rate_limit::{RateLimitConfig, RateLimitState},
+    config::Config,
     metrics,
 };
 
@@ -191,8 +193,13 @@ async fn main() -> Result<()> {
     state.ws_broadcast = Some(ws_broadcast);
     state.captcha_provider = captcha_provider;
 
+    // Create rate limiters
+    let rate_limit_config = RateLimitConfig::from_env();
+    tracing::info!(?rate_limit_config, "Rate limiting configured");
+    let rate_limiters = Arc::new(RateLimitState::from_config(&rate_limit_config));
+
     // Build router with middleware
-    let app = api::router(state, config.enable_swagger)
+    let app = api::router(state, config.enable_swagger, Some(rate_limiters))
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()

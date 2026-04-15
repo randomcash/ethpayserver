@@ -2,6 +2,8 @@
 //!
 //! This module combines all API endpoints from different crates into a single router.
 
+use std::sync::Arc;
+
 use axum::{Router, routing::get};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -15,6 +17,7 @@ pub mod extractors;
 pub mod health;
 pub mod http_metrics;
 pub mod invoices;
+pub mod rate_limit;
 pub mod stores;
 pub mod users;
 pub mod ws;
@@ -52,6 +55,8 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::delete_store_wallet,
         stores::list_wallets,
         stores::get_wallet_by_id,
+        stores::export_wallet_xpub,
+        stores::list_wallet_addresses,
         stores::get_store_webhook,
         stores::configure_store_webhook,
         stores::delete_store_webhook,
@@ -90,6 +95,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::MemberResponse,
         stores::ConfigureWalletRequest,
         stores::WalletResponse,
+        stores::WalletXpubResponse,
+        stores::DerivedAddressEntry,
+        stores::WalletAddressesResponse,
         stores::ConfigureWebhookRequest,
         stores::WebhookResponse,
         stores::CreatePaymentMethodRequest,
@@ -129,7 +137,11 @@ pub struct ApiDoc;
 /// - `/evm` - EVM operations (tokens, networks)
 /// - `/auth` - Authentication
 /// - `/stores` - Store management
-pub fn router<A>(state: PgAppState<A>, enable_swagger: bool) -> Router
+pub fn router<A>(
+    state: PgAppState<A>,
+    enable_swagger: bool,
+    rate_limiters: Option<Arc<rate_limit::RateLimitState>>,
+) -> Router
 where
     A: AuthenticationService + 'static,
 {
@@ -195,6 +207,11 @@ where
     let wallet_routes = Router::new()
         .route("/", get(stores::list_wallets::<A>))
         .route("/{wallet_id}", get(stores::get_wallet_by_id::<A>))
+        .route("/{wallet_id}/xpub", get(stores::export_wallet_xpub::<A>))
+        .route(
+            "/{wallet_id}/addresses",
+            get(stores::list_wallet_addresses::<A>),
+        )
         .with_state(state.clone());
 
     // Payment endpoints (store-scoped)
@@ -241,6 +258,14 @@ where
         .nest("/users", user_routes)
         .nest("/auth", auth_routes)
         .nest("/evm", evm_routes);
+
+    // Apply rate limiting middleware if configured
+    if let Some(limiters) = rate_limiters {
+        app = app.layer(axum::middleware::from_fn_with_state(
+            limiters,
+            rate_limit::middleware,
+        ));
+    }
 
     // Add Swagger UI if enabled
     if enable_swagger {
