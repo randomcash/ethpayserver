@@ -252,7 +252,7 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
     }
 
     // Disconnect on drop (component unmount).
-    let ws_for_cleanup = ws_for_effect.clone();
+    let ws_for_cleanup = send_wrapper::SendWrapper::new(ws_for_effect.clone());
     on_cleanup(move || {
         ws_for_cleanup.disconnect();
     });
