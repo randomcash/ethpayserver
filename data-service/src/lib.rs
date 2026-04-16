@@ -39,6 +39,7 @@ pub use test_utils::InMemoryDataService;
 pub use types::{
     // Watched Address (for PostgreSQL persistence)
     CleanupAddressInfo,
+    CreateDeliveryParams,
     // Combined traits
     DataService,
     DataServiceReader,
@@ -94,8 +95,6 @@ pub use types::{
     WatchedAddressReader,
     WatchedAddressRepository,
     WatchedAddressWriter,
-    // Webhook Delivery
-    CreateDeliveryParams,
     WebhookDelivery,
     WebhookDeliveryReader,
     WebhookDeliveryRepository,
