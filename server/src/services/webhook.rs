@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use data_service::{PaymentEventWriter, WebhookDeliveryWriter};
+use data_service::{CreateDeliveryParams, PaymentEventWriter, WebhookDeliveryWriter};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -466,15 +466,17 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
 
         if let Err(e) = WebhookDeliveryWriter::create_delivery(
             &*self.data_service,
-            job.payload.store_id,
-            &job.payload.event_type.to_string(),
-            payload_value,
-            Some(status as i16),
-            Some(&truncated_body),
-            latency_ms,
-            success,
-            error_msg.as_deref(),
-            job.attempts as i32,
+            CreateDeliveryParams {
+                store_id: job.payload.store_id,
+                event_type: job.payload.event_type.to_string(),
+                payload: payload_value,
+                http_status: Some(status as i16),
+                response_body: Some(truncated_body.clone()),
+                latency_ms,
+                success,
+                error_message: error_msg,
+                attempt_number: job.attempts as i32,
+            },
         )
         .await
         {

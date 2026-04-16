@@ -1313,15 +1313,17 @@ where
     // Record the delivery
     let delivery = types::WebhookDeliveryWriter::create_delivery(
         &*state.data_service,
-        store_id,
-        "test",
-        test_payload,
-        http_status,
-        response_body.as_deref(),
-        latency_ms,
-        success,
-        error_message.as_deref(),
-        1,
+        types::CreateDeliveryParams {
+            store_id,
+            event_type: "test".to_string(),
+            payload: test_payload,
+            http_status,
+            response_body: response_body.clone(),
+            latency_ms,
+            success,
+            error_message: error_message.clone(),
+            attempt_number: 1,
+        },
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1474,15 +1476,17 @@ where
 
     let delivery = types::WebhookDeliveryWriter::create_delivery(
         &*state.data_service,
-        store_id,
-        &original.event_type,
-        original.payload,
-        http_status,
-        response_body.as_deref(),
-        latency_ms,
-        success,
-        error_message.as_deref(),
-        original.attempt_number + 1,
+        types::CreateDeliveryParams {
+            store_id,
+            event_type: original.event_type.clone(),
+            payload: original.payload,
+            http_status,
+            response_body: response_body.clone(),
+            latency_ms,
+            success,
+            error_message: error_message.clone(),
+            attempt_number: original.attempt_number + 1,
+        },
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

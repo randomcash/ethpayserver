@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use super::PgDataService;
 use crate::{
-    RepositoryResult, WebhookDelivery, WebhookDeliveryReader, WebhookDeliveryWriter,
-    sqlx_to_repo_error,
+    CreateDeliveryParams, RepositoryResult, WebhookDelivery, WebhookDeliveryReader,
+    WebhookDeliveryWriter, sqlx_to_repo_error,
 };
 
 fn row_to_delivery(row: &sqlx::postgres::PgRow) -> WebhookDelivery {
@@ -105,15 +105,7 @@ impl WebhookDeliveryReader for PgDataService {
 impl WebhookDeliveryWriter for PgDataService {
     async fn create_delivery(
         &self,
-        store_id: Uuid,
-        event_type: &str,
-        payload: serde_json::Value,
-        http_status: Option<i16>,
-        response_body: Option<&str>,
-        latency_ms: i32,
-        success: bool,
-        error_message: Option<&str>,
-        attempt_number: i32,
+        params: CreateDeliveryParams,
     ) -> RepositoryResult<WebhookDelivery> {
         let row = sqlx::query(
             r#"
@@ -124,15 +116,15 @@ impl WebhookDeliveryWriter for PgDataService {
             RETURNING *
             "#,
         )
-        .bind(store_id)
-        .bind(event_type)
-        .bind(payload)
-        .bind(http_status)
-        .bind(response_body)
-        .bind(latency_ms)
-        .bind(success)
-        .bind(error_message)
-        .bind(attempt_number)
+        .bind(params.store_id)
+        .bind(&params.event_type)
+        .bind(&params.payload)
+        .bind(params.http_status)
+        .bind(&params.response_body)
+        .bind(params.latency_ms)
+        .bind(params.success)
+        .bind(&params.error_message)
+        .bind(params.attempt_number)
         .fetch_one(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;

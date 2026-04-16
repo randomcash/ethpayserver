@@ -95,6 +95,7 @@ pub use types::{
     WatchedAddressRepository,
     WatchedAddressWriter,
     // Webhook Delivery
+    CreateDeliveryParams,
     WebhookDelivery,
     WebhookDeliveryReader,
     WebhookDeliveryRepository,
