@@ -75,6 +75,18 @@ pub use types::{
     StorePaymentMethodReader,
     StorePaymentMethodRepository,
     StorePaymentMethodWriter,
+    // Payout
+    PayoutData,
+    PayoutReader,
+    PayoutRepository,
+    PayoutStatus,
+    PayoutWriter,
+    // Refund
+    RefundData,
+    RefundReader,
+    RefundRepository,
+    RefundStatus,
+    RefundWriter,
     // Store Wallet (deprecated)
     StoreWallet,
     StoreWalletReader,

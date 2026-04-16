@@ -92,6 +92,34 @@ fn describe_counters() {
         "ethpayserver_rate_limited_total",
         "Total number of requests rejected by rate limiting"
     );
+
+    // Refund metrics
+    describe_counter!(
+        "ethpayserver_refunds_initiated_total",
+        "Total number of refunds initiated"
+    );
+    describe_counter!(
+        "ethpayserver_refunds_confirmed_total",
+        "Total number of refunds confirmed"
+    );
+    describe_counter!(
+        "ethpayserver_refunds_failed_total",
+        "Total number of refunds that failed"
+    );
+
+    // Payout metrics
+    describe_counter!(
+        "ethpayserver_payouts_initiated_total",
+        "Total number of payouts initiated"
+    );
+    describe_counter!(
+        "ethpayserver_payouts_confirmed_total",
+        "Total number of payouts confirmed"
+    );
+    describe_counter!(
+        "ethpayserver_payouts_failed_total",
+        "Total number of payouts that failed"
+    );
 }
 
 fn describe_gauges() {

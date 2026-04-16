@@ -17,7 +17,9 @@ pub mod extractors;
 pub mod health;
 pub mod http_metrics;
 pub mod invoices;
+pub mod payouts;
 pub mod rate_limit;
+pub mod refunds;
 pub mod stores;
 pub mod users;
 pub mod ws;
@@ -185,6 +187,10 @@ where
         .route("/{store_id}/payment-methods/{method_id}", get(stores::get_payment_method::<A>))
         .route("/{store_id}/payment-methods/{method_id}", put(stores::update_payment_method::<A>))
         .route("/{store_id}/payment-methods/{method_id}", delete(stores::delete_payment_method::<A>))
+        // Payouts
+        .route("/{store_id}/payouts", get(payouts::list_payouts::<A>))
+        .route("/{store_id}/payouts", post(payouts::create_payout::<A>))
+        .route("/{store_id}/payouts/{payout_id}", get(payouts::get_payout::<A>))
         .with_state(state.clone());
 
     // Invoice endpoints
@@ -201,6 +207,8 @@ where
             get(invoices::get_invoice_status::<A>),
         )
         .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
+        .route("/{invoice_id}/refund", post(refunds::create_refund::<A>))
+        .route("/{invoice_id}/refunds", get(refunds::list_refunds::<A>))
         .with_state(state.clone());
 
     // Wallet endpoints (cross-store)

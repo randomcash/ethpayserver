@@ -33,6 +33,18 @@ pub enum WebhookEventType {
     /// Late payment received (expired → late_paid)
     /// Requires merchant review before fulfillment.
     LatePaid,
+    /// Refund transaction initiated.
+    RefundInitiated,
+    /// Refund transaction confirmed on-chain.
+    RefundConfirmed,
+    /// Refund transaction failed.
+    RefundFailed,
+    /// Payout/sweep transaction initiated.
+    PayoutInitiated,
+    /// Payout transaction confirmed on-chain.
+    PayoutConfirmed,
+    /// Payout transaction failed.
+    PayoutFailed,
 }
 
 impl std::fmt::Display for WebhookEventType {
@@ -43,6 +55,12 @@ impl std::fmt::Display for WebhookEventType {
             Self::InvoiceExpired => write!(f, "invoice_expired"),
             Self::InvoiceCancelled => write!(f, "invoice_cancelled"),
             Self::LatePaid => write!(f, "late_paid"),
+            Self::RefundInitiated => write!(f, "refund_initiated"),
+            Self::RefundConfirmed => write!(f, "refund_confirmed"),
+            Self::RefundFailed => write!(f, "refund_failed"),
+            Self::PayoutInitiated => write!(f, "payout_initiated"),
+            Self::PayoutConfirmed => write!(f, "payout_confirmed"),
+            Self::PayoutFailed => write!(f, "payout_failed"),
         }
     }
 }
@@ -574,6 +592,30 @@ mod tests {
             "invoice_cancelled"
         );
         assert_eq!(WebhookEventType::LatePaid.to_string(), "late_paid");
+        assert_eq!(
+            WebhookEventType::RefundInitiated.to_string(),
+            "refund_initiated"
+        );
+        assert_eq!(
+            WebhookEventType::RefundConfirmed.to_string(),
+            "refund_confirmed"
+        );
+        assert_eq!(
+            WebhookEventType::RefundFailed.to_string(),
+            "refund_failed"
+        );
+        assert_eq!(
+            WebhookEventType::PayoutInitiated.to_string(),
+            "payout_initiated"
+        );
+        assert_eq!(
+            WebhookEventType::PayoutConfirmed.to_string(),
+            "payout_confirmed"
+        );
+        assert_eq!(
+            WebhookEventType::PayoutFailed.to_string(),
+            "payout_failed"
+        );
     }
 
     #[test]
