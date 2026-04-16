@@ -128,7 +128,6 @@ audit:
       ln -sfn /cargo-advisory-db ${CARGO_HOME:-$HOME/.cargo}/advisory-db
     - cargo audit --no-fetch
     - cargo deny check licenses sources
-  timeout: 10 minutes
   allow_failure: true
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
