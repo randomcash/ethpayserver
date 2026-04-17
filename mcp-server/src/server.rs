@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use rmcp::{schemars, tool, tool_router};
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::{schemars, tool, tool_router};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use uuid::Uuid;
@@ -14,13 +14,13 @@ use data_service::PgDataService;
 use evm::XpubDeriver;
 use evm::monitor::bridge::{COMMANDS_CHANNEL, EVENTS_CHANNEL, EventBridge, RedisBridge};
 use rates::{RateProvider, is_fiat_currency};
+use types::currency::DEFAULT_INVOICE_EXPIRATION_SECS;
 use types::{
     InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentMethodId,
     PaymentOptionData, PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentReader,
     StoreId, StorePaymentMethodReader, StorePaymentMethodWriter, WatchedAddressWriter,
     traits::InvoiceData,
 };
-use types::currency::DEFAULT_INVOICE_EXPIRATION_SECS;
 
 /// EVM monitor type (reuse the same Redis-backed monitor from the server crate).
 pub type EvmMonitor = evm::monitor::bridge::RedisBridge;
@@ -43,7 +43,9 @@ pub struct CreateInvoiceArgs {
     pub store_id: String,
     #[schemars(description = "Invoice currency (e.g. \"USD\", \"EUR\", \"ETH\")")]
     pub currency: String,
-    #[schemars(description = "Amount in the currency's standard unit (e.g. \"100.00\" for USD, \"0.1\" for ETH)")]
+    #[schemars(
+        description = "Amount in the currency's standard unit (e.g. \"100.00\" for USD, \"0.1\" for ETH)"
+    )]
     pub amount: String,
     #[schemars(description = "Expiration in seconds from now (default: 900)")]
     pub expiration_seconds: Option<u64>,
@@ -61,7 +63,9 @@ pub struct GetInvoiceArgs {
 pub struct ListInvoicesArgs {
     #[schemars(description = "Store ID (UUID) to list invoices for")]
     pub store_id: String,
-    #[schemars(description = "Filter by status: pending, processing, partially_paid, paid, expired, cancelled, refunded, late_paid")]
+    #[schemars(
+        description = "Filter by status: pending, processing, partially_paid, paid, expired, cancelled, refunded, late_paid"
+    )]
     pub status: Option<String>,
     #[schemars(description = "Filter by currency (e.g. \"USD\")")]
     pub currency: Option<String>,
@@ -79,7 +83,9 @@ pub struct GetInvoicePaymentsArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CancelInvoiceArgs {
-    #[schemars(description = "Invoice ID to cancel (must be pending, processing, or partially_paid)")]
+    #[schemars(
+        description = "Invoice ID to cancel (must be pending, processing, or partially_paid)"
+    )]
     pub invoice_id: String,
 }
 
@@ -145,76 +151,76 @@ impl EthpayMcpServer {
 impl EthpayMcpServer {
     /// Create a new invoice for a store. Returns the invoice with payment options
     /// (addresses, amounts, rates) that can be presented to the payer.
-    #[tool(description = "Create a new invoice for a store. Returns invoice ID, status, and payment options with addresses and amounts.")]
-    async fn create_invoice(
-        &self,
-        Parameters(args): Parameters<CreateInvoiceArgs>,
-    ) -> String {
+    #[tool(
+        description = "Create a new invoice for a store. Returns invoice ID, status, and payment options with addresses and amounts."
+    )]
+    async fn create_invoice(&self, Parameters(args): Parameters<CreateInvoiceArgs>) -> String {
         match self.do_create_invoice(args).await {
             Ok(json) => json,
-            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\""))
+            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
         }
     }
 
     /// Get full details of an invoice including its payment options.
-    #[tool(description = "Get an invoice by ID. Returns full invoice data including status, amount, payment options, and expiration.")]
-    async fn get_invoice(
-        &self,
-        Parameters(args): Parameters<GetInvoiceArgs>,
-    ) -> String {
+    #[tool(
+        description = "Get an invoice by ID. Returns full invoice data including status, amount, payment options, and expiration."
+    )]
+    async fn get_invoice(&self, Parameters(args): Parameters<GetInvoiceArgs>) -> String {
         match self.do_get_invoice(args).await {
             Ok(json) => json,
-            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\""))
+            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
         }
     }
 
     /// List invoices for a store with optional filters.
-    #[tool(description = "List invoices for a store. Supports filtering by status, currency, and pagination.")]
-    async fn list_invoices(
-        &self,
-        Parameters(args): Parameters<ListInvoicesArgs>,
-    ) -> String {
+    #[tool(
+        description = "List invoices for a store. Supports filtering by status, currency, and pagination."
+    )]
+    async fn list_invoices(&self, Parameters(args): Parameters<ListInvoicesArgs>) -> String {
         match self.do_list_invoices(args).await {
             Ok(json) => json,
-            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\""))
+            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
         }
     }
 
     /// Get all payments received for an invoice.
-    #[tool(description = "Get payments for an invoice. Returns all payments with chain, asset, amount, tx_hash, and confirmation status.")]
+    #[tool(
+        description = "Get payments for an invoice. Returns all payments with chain, asset, amount, tx_hash, and confirmation status."
+    )]
     async fn get_invoice_payments(
         &self,
         Parameters(args): Parameters<GetInvoicePaymentsArgs>,
     ) -> String {
         match self.do_get_invoice_payments(args).await {
             Ok(json) => json,
-            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\""))
+            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
         }
     }
 
     /// Cancel a pending invoice. Only works for invoices in pending, processing,
     /// or partially_paid status.
-    #[tool(description = "Cancel an invoice. Only works if status is pending, processing, or partially_paid.")]
-    async fn cancel_invoice(
-        &self,
-        Parameters(args): Parameters<CancelInvoiceArgs>,
-    ) -> String {
+    #[tool(
+        description = "Cancel an invoice. Only works if status is pending, processing, or partially_paid."
+    )]
+    async fn cancel_invoice(&self, Parameters(args): Parameters<CancelInvoiceArgs>) -> String {
         match self.do_cancel_invoice(args).await {
             Ok(json) => json,
-            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\""))
+            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
         }
     }
 
     /// Get a simplified payment status for an invoice — useful for polling
     /// whether a payment has been received and confirmed.
-    #[tool(description = "Get simplified payment status for an invoice: pending/partial/settled/expired/cancelled, with amount_due vs amount_received.")]
+    #[tool(
+        description = "Get simplified payment status for an invoice: pending/partial/settled/expired/cancelled, with amount_due vs amount_received."
+    )]
     async fn get_payment_status(
         &self,
         Parameters(args): Parameters<GetPaymentStatusArgs>,
     ) -> String {
         match self.do_get_payment_status(args).await {
             Ok(json) => json,
-            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\""))
+            Err(e) => format!("{{\"error\": \"{}\"}}", e.replace('"', "\\\"")),
         }
     }
 }
@@ -228,12 +234,10 @@ impl EthpayMcpServer {
         self.authorize_store(store_id)?;
 
         // Get enabled payment methods for the store
-        let payment_methods = StorePaymentMethodReader::get_enabled_payment_methods(
-            &*self.data_service,
-            store_uuid,
-        )
-        .await
-        .map_err(|e| format!("Failed to get payment methods: {e}"))?;
+        let payment_methods =
+            StorePaymentMethodReader::get_enabled_payment_methods(&*self.data_service, store_uuid)
+                .await
+                .map_err(|e| format!("Failed to get payment methods: {e}"))?;
 
         if payment_methods.is_empty() {
             return Err("Store has no enabled payment methods".into());
@@ -260,7 +264,11 @@ impl EthpayMcpServer {
                 validated_methods.push((idx, amount, None, None));
             } else {
                 // Cross-currency �� need exchange rate
-                match self.rate_provider.get_rate(&args.currency, &pm.asset_symbol).await {
+                match self
+                    .rate_provider
+                    .get_rate(&args.currency, &pm.asset_symbol)
+                    .await
+                {
                     Ok(rate) => {
                         if rate.rate <= Decimal::ZERO {
                             return Err(format!(
@@ -268,9 +276,8 @@ impl EthpayMcpServer {
                                 args.currency, pm.asset_symbol
                             ));
                         }
-                        let amount = convert_to_crypto_smallest_unit(
-                            &args.amount, rate.rate, pm.decimals,
-                        )?;
+                        let amount =
+                            convert_to_crypto_smallest_unit(&args.amount, rate.rate, pm.decimals)?;
                         validated_methods.push((
                             idx,
                             amount,
@@ -288,7 +295,9 @@ impl EthpayMcpServer {
             return Err("No payment methods with supported rate pairs for this currency".into());
         }
 
-        let expiration_secs = args.expiration_seconds.unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
+        let expiration_secs = args
+            .expiration_seconds
+            .unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
         let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
         let invoice = InvoiceData {
@@ -318,8 +327,8 @@ impl EthpayMcpServer {
                 .await
                 .map_err(|e| format!("Failed to get derivation index: {e}"))?;
 
-            let deriver = XpubDeriver::from_xpub(&pm.xpub)
-                .map_err(|e| format!("Invalid xpub: {e}"))?;
+            let deriver =
+                XpubDeriver::from_xpub(&pm.xpub).map_err(|e| format!("Invalid xpub: {e}"))?;
             let address = deriver
                 .derive_address(index as u32)
                 .map_err(|e| format!("Address derivation failed: {e}"))?;
@@ -548,7 +557,8 @@ impl EthpayMcpServer {
             "id": id.0,
             "status": "cancelled",
             "previous_status": invoice.status.to_string(),
-        }).to_string())
+        })
+        .to_string())
     }
 
     async fn do_get_payment_status(&self, args: GetPaymentStatusArgs) -> Result<String, String> {

@@ -214,7 +214,7 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
     provide_context(create_invoice_signal);
 
     view! {
-        <AuthGuard redirect_to="/login".to_string()>
+        <AuthGuard>
             <div class="app-layout">
                 // Mobile overlay
                 <div

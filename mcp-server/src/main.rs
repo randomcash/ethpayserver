@@ -40,9 +40,7 @@ async fn main() -> Result<()> {
 
     // MCP servers MUST log to stderr (stdout is the JSON-RPC transport)
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
@@ -71,25 +69,21 @@ async fn main() -> Result<()> {
 
     // Optional: EVM monitor via Redis (for watching addresses on invoice creation)
     let evm_monitor = match std::env::var("REDIS_URL") {
-        Ok(redis_url) => {
-            match server::create_evm_monitor(&redis_url).await {
-                Ok(monitor) => {
-                    tracing::info!("EVM monitor connected via Redis");
-                    Some(Arc::new(monitor))
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "EVM monitor unavailable: {e} \
-                         — invoices created without address watching"
-                    );
-                    None
-                }
+        Ok(redis_url) => match server::create_evm_monitor(&redis_url).await {
+            Ok(monitor) => {
+                tracing::info!("EVM monitor connected via Redis");
+                Some(Arc::new(monitor))
             }
-        }
+            Err(e) => {
+                tracing::warn!(
+                    "EVM monitor unavailable: {e} \
+                         — invoices created without address watching"
+                );
+                None
+            }
+        },
         Err(_) => {
-            tracing::info!(
-                "REDIS_URL not set — invoices will be created without address watching"
-            );
+            tracing::info!("REDIS_URL not set — invoices will be created without address watching");
             None
         }
     };
