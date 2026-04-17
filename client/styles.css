@@ -2186,8 +2186,8 @@ a:hover {
     justify-content: center;
 }
 
-/* Pagination */
-.invoices-pagination {
+/* Pagination (shared component) */
+.pagination {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -2204,9 +2204,66 @@ a:hover {
     font-weight: 600;
 }
 
-.pagination-controls {
+.pagination-nav {
     display: flex;
-    gap: var(--space-2);
+    align-items: center;
+    gap: var(--space-1);
+}
+
+.pagination-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    height: 32px;
+    padding: 0 var(--space-2);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--border-radius-md);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.pagination-btn:hover:not(:disabled) {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+.pagination-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.pagination-btn-page {
+    color: var(--text-primary);
+}
+
+.pagination-btn-active {
+    background: var(--color-primary);
+    color: white;
+    border-color: var(--color-primary);
+    cursor: default;
+}
+
+.pagination-btn-active:hover:not(:disabled) {
+    background: var(--color-primary);
+    color: white;
+    border-color: var(--color-primary);
+}
+
+.pagination-ellipsis {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    height: 32px;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    user-select: none;
 }
 
 /* Invoice Detail Page */
@@ -2774,14 +2831,15 @@ a:hover {
         min-width: unset;
     }
 
-    .invoices-pagination {
+    .pagination {
         flex-direction: column;
         gap: var(--space-3);
         align-items: center;
     }
 
-    .pagination-info {
-        font-size: var(--text-sm);
+    .pagination-nav {
+        flex-wrap: wrap;
+        justify-content: center;
     }
 
     .invoices-cards {
@@ -3089,13 +3147,6 @@ a:hover {
     color: var(--text-muted);
 }
 
-/* Pagination */
-.payments-pagination {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding-top: var(--space-4);
-}
 
 /* Payments Cards (Mobile) */
 .payments-cards {
@@ -3255,16 +3306,6 @@ a:hover {
     .payments-search {
         width: 100%;
         min-width: unset;
-    }
-
-    .payments-pagination {
-        flex-direction: column;
-        gap: var(--space-3);
-        align-items: center;
-    }
-
-    .pagination-info {
-        font-size: var(--text-sm);
     }
 
     .payments-cards {
