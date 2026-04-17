@@ -110,8 +110,7 @@ pub fn PaymentsPage() -> impl IntoView {
     // WebSocket-driven payment patches and new-payment detection.
     // Stores payment_id -> new status for in-place patching.
     // If a PaymentUpdate arrives for an unknown payment_id, triggers a refetch.
-    let (ws_patches, set_ws_patches) =
-        signal(std::collections::HashMap::<String, String>::new());
+    let (ws_patches, set_ws_patches) = signal(std::collections::HashMap::<String, String>::new());
     let ws_update = use_context::<ReadSignal<Option<StatusUpdate>>>();
     let known_payment_ids: StoredValue<std::collections::HashSet<String>> =
         StoredValue::new(std::collections::HashSet::new());

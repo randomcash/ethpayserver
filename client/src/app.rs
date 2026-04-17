@@ -224,16 +224,15 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
             let token = auth.token.get();
             match token {
                 Some(ref t) => {
-                    let protocol =
-                        if web_sys::window()
-                            .and_then(|w| w.location().protocol().ok())
-                            .as_deref()
-                            == Some("https:")
-                        {
-                            "wss"
-                        } else {
-                            "ws"
-                        };
+                    let protocol = if web_sys::window()
+                        .and_then(|w| w.location().protocol().ok())
+                        .as_deref()
+                        == Some("https:")
+                    {
+                        "wss"
+                    } else {
+                        "ws"
+                    };
                     let host = web_sys::window()
                         .and_then(|w| w.location().host().ok())
                         .unwrap_or_default();
