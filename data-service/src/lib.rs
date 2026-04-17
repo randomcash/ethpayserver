@@ -66,7 +66,19 @@ pub use types::{
     PaymentReader,
     PaymentRepository,
     PaymentWriter,
+    // Payout
+    PayoutData,
+    PayoutReader,
+    PayoutRepository,
+    PayoutStatus,
+    PayoutWriter,
     PendingWatchInfo,
+    // Refund
+    RefundData,
+    RefundReader,
+    RefundRepository,
+    RefundStatus,
+    RefundWriter,
     // Errors
     RepositoryError,
     RepositoryResult,
@@ -75,18 +87,6 @@ pub use types::{
     StorePaymentMethodReader,
     StorePaymentMethodRepository,
     StorePaymentMethodWriter,
-    // Payout
-    PayoutData,
-    PayoutReader,
-    PayoutRepository,
-    PayoutStatus,
-    PayoutWriter,
-    // Refund
-    RefundData,
-    RefundReader,
-    RefundRepository,
-    RefundStatus,
-    RefundWriter,
     // Store Wallet (deprecated)
     StoreWallet,
     StoreWalletReader,

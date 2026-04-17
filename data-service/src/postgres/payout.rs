@@ -25,7 +25,9 @@ fn try_row_to_payout(row: &sqlx::postgres::PgRow) -> RepositoryResult<PayoutData
         destination_address: row
             .try_get("destination_address")
             .map_err(sqlx_to_repo_error)?,
-        chain_id: row.try_get::<i64, _>("chain_id").map_err(sqlx_to_repo_error)? as u64,
+        chain_id: row
+            .try_get::<i64, _>("chain_id")
+            .map_err(sqlx_to_repo_error)? as u64,
         asset_type: row.try_get("asset_type").map_err(sqlx_to_repo_error)?,
         asset_symbol: row.try_get("asset_symbol").map_err(sqlx_to_repo_error)?,
         token_address: row.try_get("token_address").map_err(sqlx_to_repo_error)?,
@@ -79,7 +81,10 @@ impl PayoutReader for PgDataService {
         .await
         .map_err(sqlx_to_repo_error)?;
 
-        let payouts: Vec<PayoutData> = rows.iter().map(try_row_to_payout).collect::<Result<_, _>>()?;
+        let payouts: Vec<PayoutData> = rows
+            .iter()
+            .map(try_row_to_payout)
+            .collect::<Result<_, _>>()?;
         Ok((count.0, payouts))
     }
 

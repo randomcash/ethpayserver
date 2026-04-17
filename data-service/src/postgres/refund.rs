@@ -23,7 +23,9 @@ fn try_row_to_refund(row: &sqlx::postgres::PgRow) -> RepositoryResult<RefundData
         payment_id: row.try_get("payment_id").map_err(sqlx_to_repo_error)?,
         store_id: StoreId(row.try_get("store_id").map_err(sqlx_to_repo_error)?),
         to_address: row.try_get("to_address").map_err(sqlx_to_repo_error)?,
-        chain_id: row.try_get::<i64, _>("chain_id").map_err(sqlx_to_repo_error)? as u64,
+        chain_id: row
+            .try_get::<i64, _>("chain_id")
+            .map_err(sqlx_to_repo_error)? as u64,
         asset_type: row.try_get("asset_type").map_err(sqlx_to_repo_error)?,
         asset_symbol: row.try_get("asset_symbol").map_err(sqlx_to_repo_error)?,
         token_address: row.try_get("token_address").map_err(sqlx_to_repo_error)?,
@@ -92,7 +94,10 @@ impl RefundReader for PgDataService {
         .await
         .map_err(sqlx_to_repo_error)?;
 
-        let refunds: Vec<RefundData> = rows.iter().map(try_row_to_refund).collect::<Result<_, _>>()?;
+        let refunds: Vec<RefundData> = rows
+            .iter()
+            .map(try_row_to_refund)
+            .collect::<Result<_, _>>()?;
         Ok((count.0, refunds))
     }
 
@@ -163,13 +168,11 @@ impl RefundWriter for PgDataService {
     }
 
     async fn confirm_refund(&self, id: Uuid) -> RepositoryResult<()> {
-        sqlx::query(
-            "UPDATE refunds SET status = 'confirmed', confirmed_at = NOW() WHERE id = $1",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
+        sqlx::query("UPDATE refunds SET status = 'confirmed', confirmed_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
 
         Ok(())
     }

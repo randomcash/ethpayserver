@@ -14,8 +14,9 @@ use wasm_bindgen::JsCast;
 use crate::api::{EvmApiClient, Store};
 use crate::components::{CreateInvoiceModal, CreateInvoiceSignal};
 use crate::pages::{
-    DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, PaymentDetailPage, PaymentsPage,
-    SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage, WalletsPage,
+    DashboardPage, InvoiceDetailPage, InvoicesPage, NotFoundPage, OnboardingPage,
+    PaymentDetailPage, PaymentsPage, SettingsPage, StoreDetailPage, StoresPage, WalletDetailPage,
+    WalletsPage,
 };
 
 /// localStorage key for persisted selected store ID.
@@ -81,6 +82,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/evm/payments/:id") view=PaymentDetailProtected />
                     <Route path=path!("/evm/stores") view=StoresProtected />
                     <Route path=path!("/evm/stores/:id") view=StoreDetailProtected />
+                    <Route path=path!("/evm/onboarding") view=OnboardingProtected />
                     <Route path=path!("/evm/wallets") view=WalletsProtected />
                     <Route path=path!("/evm/wallets/:id") view=WalletDetailProtected />
                     <Route path=path!("/evm/settings") view=SettingsProtected />
@@ -134,6 +136,11 @@ fn WalletsProtected() -> impl IntoView {
 #[component]
 fn WalletDetailProtected() -> impl IntoView {
     view! { <ProtectedLayout><WalletDetailPage /></ProtectedLayout> }
+}
+
+#[component]
+fn OnboardingProtected() -> impl IntoView {
+    view! { <ProtectedLayout><OnboardingPage /></ProtectedLayout> }
 }
 
 #[component]
