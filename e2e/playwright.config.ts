@@ -9,7 +9,9 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   workers: 1,
-  reporter: process.env.CI ? [['html', { open: 'never' }]] : 'list',
+  reporter: process.env.CI
+    ? [['html', { open: 'never' }], ['./perf-reporter.ts']]
+    : [['list'], ['./perf-reporter.ts']],
   timeout: 30_000,
   use: {
     baseURL: BASE_URL,

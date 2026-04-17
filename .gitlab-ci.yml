@@ -194,6 +194,7 @@ e2e:
     paths:
       - e2e/playwright-report/
       - e2e/test-results/
+      - e2e/perf-results.json
     expire_in: 7 days
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
