@@ -5,6 +5,7 @@
 
 use super::{BlockNotification, BlockSource, BlockStream, LogFilter, NativeTransfer, SourceStatus};
 use crate::error::{EvmError, EvmResult};
+use crate::metrics as rpc_metrics;
 use alloy::consensus::Transaction as TransactionTrait;
 use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, U256};
@@ -332,10 +333,14 @@ impl BlockSource for RpcBlockSource {
             alloy_filter = alloy_filter.to_block(to);
         }
 
-        self.http_provider
-            .get_logs(&alloy_filter)
-            .await
-            .map_err(|e| EvmError::Rpc(format!("get_logs failed: {}", e)))
+        let chain_id = self.config.chain_id;
+        rpc_metrics::timed_rpc(chain_id, "get_logs", async {
+            self.http_provider
+                .get_logs(&alloy_filter)
+                .await
+                .map_err(|e| EvmError::Rpc(format!("get_logs failed: {}", e)))
+        })
+        .await
     }
 
     async fn get_balance(&self, address: Address, block: Option<u64>) -> EvmResult<U256> {
@@ -343,25 +348,37 @@ impl BlockSource for RpcBlockSource {
             .map(BlockNumberOrTag::Number)
             .unwrap_or(BlockNumberOrTag::Latest);
 
-        self.http_provider
-            .get_balance(address)
-            .block_id(block_id.into())
-            .await
-            .map_err(|e| EvmError::Rpc(format!("get_balance failed: {}", e)))
+        let chain_id = self.config.chain_id;
+        rpc_metrics::timed_rpc(chain_id, "get_balance", async {
+            self.http_provider
+                .get_balance(address)
+                .block_id(block_id.into())
+                .await
+                .map_err(|e| EvmError::Rpc(format!("get_balance failed: {}", e)))
+        })
+        .await
     }
 
     async fn get_block_number(&self) -> EvmResult<u64> {
-        self.http_provider
-            .get_block_number()
-            .await
-            .map_err(|e| EvmError::Rpc(format!("get_block_number failed: {}", e)))
+        let chain_id = self.config.chain_id;
+        rpc_metrics::timed_rpc(chain_id, "get_block_number", async {
+            self.http_provider
+                .get_block_number()
+                .await
+                .map_err(|e| EvmError::Rpc(format!("get_block_number failed: {}", e)))
+        })
+        .await
     }
 
     async fn get_block(&self, number: u64) -> EvmResult<Option<Block>> {
-        self.http_provider
-            .get_block_by_number(BlockNumberOrTag::Number(number))
-            .await
-            .map_err(|e| EvmError::Rpc(format!("get_block failed: {}", e)))
+        let chain_id = self.config.chain_id;
+        rpc_metrics::timed_rpc(chain_id, "get_block", async {
+            self.http_provider
+                .get_block_by_number(BlockNumberOrTag::Number(number))
+                .await
+                .map_err(|e| EvmError::Rpc(format!("get_block failed: {}", e)))
+        })
+        .await
     }
 
     async fn find_native_transfers_to(
@@ -376,13 +393,16 @@ impl BlockSource for RpcBlockSource {
         // Build a set for O(1) lookup
         let watched: HashSet<Address> = addresses.iter().copied().collect();
 
-        // Fetch block with full transactions
-        let block = self
-            .http_provider
-            .get_block_by_number(BlockNumberOrTag::Number(block_number))
-            .kind(BlockTransactionsKind::Full)
-            .await
-            .map_err(|e| EvmError::Rpc(format!("get_block_with_txs failed: {}", e)))?;
+        // Fetch block with full transactions (instrumented)
+        let chain_id = self.config.chain_id;
+        let block = rpc_metrics::timed_rpc(chain_id, "get_block_with_txs", async {
+            self.http_provider
+                .get_block_by_number(BlockNumberOrTag::Number(block_number))
+                .kind(BlockTransactionsKind::Full)
+                .await
+                .map_err(|e| EvmError::Rpc(format!("get_block_with_txs failed: {}", e)))
+        })
+        .await?;
 
         let Some(block) = block else {
             return Ok(Vec::new());

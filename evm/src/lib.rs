@@ -32,6 +32,7 @@
 pub mod api;
 
 pub mod error;
+pub mod metrics;
 pub mod monitor;
 pub mod network;
 pub mod provider;
