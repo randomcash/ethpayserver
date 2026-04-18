@@ -52,13 +52,10 @@ fn DashboardMetrics() -> impl IntoView {
     let (ws_version, set_ws_version) = signal(0u32);
     if let Some(ws_update) = ws_update {
         Effect::new(move || {
-            if let Some(ref update) = ws_update.get() {
-                match update {
-                    StatusUpdate::InvoiceStatus { .. } | StatusUpdate::PaymentUpdate { .. } => {
-                        set_ws_version.update(|n| *n = n.wrapping_add(1));
-                    }
-                    _ => {}
-                }
+            if let Some(StatusUpdate::InvoiceStatus { .. } | StatusUpdate::PaymentUpdate { .. }) =
+                ws_update.get()
+            {
+                set_ws_version.update(|n| *n = n.wrapping_add(1));
             }
         });
     }

@@ -212,12 +212,12 @@ pub fn InvoicesPage() -> impl IntoView {
                         let patches = ws_patches.get();
                         if !patches.is_empty() {
                             for invoice in &mut invoices {
-                                if let Some(new_status) = patches.get(&invoice.id) {
-                                    if let Ok(parsed) = serde_json::from_value(
+                                if let Some(new_status) = patches.get(&invoice.id)
+                                    && let Ok(parsed) = serde_json::from_value(
                                         serde_json::Value::String(new_status.clone()),
-                                    ) {
-                                        invoice.status = parsed;
-                                    }
+                                    )
+                                {
+                                    invoice.status = parsed;
                                 }
                             }
                         }

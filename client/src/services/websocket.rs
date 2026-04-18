@@ -113,10 +113,10 @@ impl WebSocketService {
             *self.intentional_disconnect.borrow_mut() = true;
             let _ = ws.close();
         }
-        if let Some(handle) = self.reconnect_handle.borrow_mut().take() {
-            if let Some(window) = web_sys::window() {
-                window.clear_timeout_with_handle(handle);
-            }
+        if let Some(handle) = self.reconnect_handle.borrow_mut().take()
+            && let Some(window) = web_sys::window()
+        {
+            window.clear_timeout_with_handle(handle);
         }
 
         *self.intentional_disconnect.borrow_mut() = false;
@@ -251,10 +251,10 @@ impl WebSocketService {
         *self.intentional_disconnect.borrow_mut() = true;
 
         // Cancel any pending reconnect timer
-        if let Some(handle) = self.reconnect_handle.borrow_mut().take() {
-            if let Some(window) = web_sys::window() {
-                window.clear_timeout_with_handle(handle);
-            }
+        if let Some(handle) = self.reconnect_handle.borrow_mut().take()
+            && let Some(window) = web_sys::window()
+        {
+            window.clear_timeout_with_handle(handle);
         }
 
         if let Some(ws) = self.ws.borrow_mut().take() {
