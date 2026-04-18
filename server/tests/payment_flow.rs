@@ -22,7 +22,7 @@ use server::EventConsumer;
 use server::services::evm_monitor::{EVMMonitor, EVMMonitorError};
 use types::{
     InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, Network, PaymentMethodId,
-    PaymentOptionData, PaymentOptionId, PaymentReader, PaymentWriter, StoreId,
+    PaymentOptionData, PaymentOptionId, PaymentReader, StoreId,
     WatchedAddressWriter,
 };
 
@@ -249,7 +249,7 @@ async fn test_payment_detected_creates_record() {
 
 #[tokio::test]
 async fn test_payment_confirmed_marks_invoice_paid() {
-    let (ds, bridge, invoice, po, payment_address) = setup_test_env().await;
+    let (ds, bridge, invoice, _po, payment_address) = setup_test_env().await;
     let consumer_handle = spawn_consumer(bridge.clone(), ds.clone());
     tokio::time::sleep(Duration::from_millis(50)).await;
 
