@@ -81,6 +81,12 @@ fn describe_counters() {
         "Total number of webhook delivery failures"
     );
 
+    // Webhook delivery tracking
+    describe_counter!(
+        "ethpayserver_webhook_deliveries_total",
+        "Total webhook deliveries by status (delivered, retrying, permanent_failed)"
+    );
+
     // Store metrics
     describe_counter!(
         "ethpayserver_stores_created_total",
@@ -146,6 +152,10 @@ fn describe_histograms() {
     describe_histogram!(
         "ethpayserver_webhook_delivery_duration_seconds",
         "HTTP round-trip time per webhook delivery attempt"
+    );
+    describe_histogram!(
+        "ethpayserver_webhook_retry_attempts",
+        "Webhook delivery attempt number on failure"
     );
     describe_histogram!(
         "ethpayserver_http_request_duration_seconds",
@@ -224,6 +234,20 @@ pub fn record_webhook_failed(event_type: &str) {
         "event_type" => event_type.to_string()
     )
     .increment(1);
+}
+
+/// Record a webhook delivery outcome by status (delivered, retrying, permanent_failed).
+pub fn record_webhook_delivery_status(status: &str) {
+    counter!(
+        "ethpayserver_webhook_deliveries_total",
+        "status" => status.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a webhook retry attempt number as a histogram observation.
+pub fn record_webhook_retry_attempt(attempt: u32) {
+    histogram!("ethpayserver_webhook_retry_attempts").record(f64::from(attempt));
 }
 
 /// Update the webhook queue depth gauge.
