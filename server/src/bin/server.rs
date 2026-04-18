@@ -203,15 +203,32 @@ async fn main() -> Result<()> {
     tracing::info!(?rate_limit_config, "Rate limiting configured");
     let rate_limiters = Arc::new(RateLimitState::from_config(&rate_limit_config));
 
+    // Create idempotency state (shares the existing Redis connection)
+    let idempotency = match api::idempotency::IdempotencyState::from_env(redis_url).await {
+        Ok(idem) => {
+            tracing::info!(ttl_secs = idem.ttl_secs, "Idempotency middleware enabled");
+            Some(Arc::new(idem))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to create idempotency state, disabled");
+            None
+        }
+    };
+
     // Build router with middleware
-    let app = api::router(state, config.enable_swagger, Some(rate_limiters))
-        .layer(TraceLayer::new_for_http())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        );
+    let app = api::router(
+        state,
+        config.enable_swagger,
+        Some(rate_limiters),
+        idempotency,
+    )
+    .layer(TraceLayer::new_for_http())
+    .layer(
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    );
 
     // Start server
     let bind_addr = config.bind_address();
