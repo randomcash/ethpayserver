@@ -3,16 +3,17 @@
 //! POST /invoices/{invoice_id}/refund — Initiate a refund for a paid invoice.
 //! GET  /invoices/{invoice_id}/refunds — List refunds for an invoice.
 
-use axum::{Json, extract::{Path, State}};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use chrono::Utc;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use auth::SessionService;
-use data_service::{
-    InvoiceReader, PaymentReader, RefundReader, RefundWriter, StoreWalletReader,
-};
+use data_service::{InvoiceReader, PaymentReader, RefundReader, RefundWriter, StoreWalletReader};
 use types::{InvoiceId, InvoiceStatus, RefundData, RefundStatus};
 
 use super::extractors::AuthenticatedUser;

@@ -600,10 +600,7 @@ mod tests {
             WebhookEventType::RefundConfirmed.to_string(),
             "refund_confirmed"
         );
-        assert_eq!(
-            WebhookEventType::RefundFailed.to_string(),
-            "refund_failed"
-        );
+        assert_eq!(WebhookEventType::RefundFailed.to_string(), "refund_failed");
         assert_eq!(
             WebhookEventType::PayoutInitiated.to_string(),
             "payout_initiated"
@@ -612,10 +609,7 @@ mod tests {
             WebhookEventType::PayoutConfirmed.to_string(),
             "payout_confirmed"
         );
-        assert_eq!(
-            WebhookEventType::PayoutFailed.to_string(),
-            "payout_failed"
-        );
+        assert_eq!(WebhookEventType::PayoutFailed.to_string(), "payout_failed");
     }
 
     #[test]

@@ -4,7 +4,10 @@
 //! GET  /stores/{store_id}/payouts — List payouts for a store.
 //! GET  /stores/{store_id}/payouts/{payout_id} — Get payout details.
 
-use axum::{Json, extract::{Path, State}};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use chrono::Utc;
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -191,9 +194,10 @@ where
 {
     let store_id = StoreId(store_id);
 
-    let (total, payouts) = PayoutReader::get_payouts_for_store(&*state.data_service, store_id, 50, 0)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (total, payouts) =
+        PayoutReader::get_payouts_for_store(&*state.data_service, store_id, 50, 0)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(PayoutListResponse {
         total,
