@@ -44,7 +44,7 @@ impl ApiKeyRepository for PostgresApiKeyRepository {
 
     async fn get_api_key(&self, id: ApiKeyId) -> Result<Option<ApiKey>> {
         let row = sqlx::query_as::<_, ApiKeyRow>(
-            "SELECT id, user_id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at FROM api_keys WHERE id = $1",
+            "SELECT id, user_id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, rate_limit_rpm FROM api_keys WHERE id = $1",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
@@ -56,7 +56,7 @@ impl ApiKeyRepository for PostgresApiKeyRepository {
 
     async fn get_api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>> {
         let row = sqlx::query_as::<_, ApiKeyRow>(
-            "SELECT id, user_id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at FROM api_keys WHERE key_hash = $1",
+            "SELECT id, user_id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, rate_limit_rpm FROM api_keys WHERE key_hash = $1",
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -68,7 +68,7 @@ impl ApiKeyRepository for PostgresApiKeyRepository {
 
     async fn list_user_api_keys(&self, user_id: UserId) -> Result<Vec<ApiKey>> {
         let rows = sqlx::query_as::<_, ApiKeyRow>(
-            "SELECT id, user_id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC",
+            "SELECT id, user_id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, rate_limit_rpm FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC",
         )
         .bind(user_id.0)
         .fetch_all(&self.pool)
@@ -144,6 +144,7 @@ struct ApiKeyRow {
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
     expires_at: Option<DateTime<Utc>>,
+    rate_limit_rpm: Option<i32>,
 }
 
 impl ApiKeyRow {
@@ -160,5 +161,68 @@ impl ApiKeyRow {
             last_used_at: self.last_used_at,
             expires_at: self.expires_at,
         }
+    }
+}
+
+/// Lightweight row for rate-limit lookups by key hash.
+#[derive(Debug, sqlx::FromRow)]
+pub struct ApiKeyRateLimitInfo {
+    pub id: Uuid,
+    pub rate_limit_rpm: Option<i32>,
+}
+
+impl PostgresApiKeyRepository {
+    /// Look up an active API key's ID and rate limit by its hash.
+    pub async fn get_rate_limit_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<Option<ApiKeyRateLimitInfo>> {
+        let row = sqlx::query_as::<_, ApiKeyRateLimitInfo>(
+            "SELECT id, rate_limit_rpm FROM api_keys WHERE key_hash = $1 AND is_active = true",
+        )
+        .bind(key_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AuthError::Repository(e.to_string()))?;
+
+        Ok(row)
+    }
+
+    /// Update the per-key rate limit.
+    pub async fn update_rate_limit(&self, id: ApiKeyId, rpm: Option<i32>) -> Result<()> {
+        let result = sqlx::query("UPDATE api_keys SET rate_limit_rpm = $1 WHERE id = $2")
+            .bind(rpm)
+            .bind(id.0)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AuthError::Repository(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(AuthError::ApiKeyNotFound("Key not found".to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// List all API keys for a user, including rate_limit_rpm.
+    pub async fn list_user_api_keys_with_rate_limit(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<(ApiKey, Option<i32>)>> {
+        let rows = sqlx::query_as::<_, ApiKeyRow>(
+            "SELECT id, user_id, name, key_hash, key_prefix, is_active, created_at, last_used_at, expires_at, rate_limit_rpm FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(user_id.0)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AuthError::Repository(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let rpm = r.rate_limit_rpm;
+                (r.into_api_key(), rpm)
+            })
+            .collect())
     }
 }

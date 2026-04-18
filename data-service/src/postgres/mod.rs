@@ -15,6 +15,7 @@ mod store_webhook;
 mod token;
 mod watched_address;
 
+pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository};
 pub use watched_address::PendingWatch;
 
 #[cfg(test)]
@@ -65,5 +66,36 @@ impl PgDataService {
             .fetch_one(&self.pool)
             .await?;
         Ok(result.0)
+    }
+
+    /// Look up an active API key's ID and rate limit by its hash.
+    pub async fn get_api_key_rate_limit_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> ::auth::error::Result<Option<ApiKeyRateLimitInfo>> {
+        PostgresApiKeyRepository::new(self.pool.clone())
+            .get_rate_limit_by_hash(key_hash)
+            .await
+    }
+
+    /// Update the per-key rate limit for an API key.
+    pub async fn update_api_key_rate_limit(
+        &self,
+        id: ::auth::ApiKeyId,
+        rpm: Option<i32>,
+    ) -> ::auth::error::Result<()> {
+        PostgresApiKeyRepository::new(self.pool.clone())
+            .update_rate_limit(id, rpm)
+            .await
+    }
+
+    /// List all API keys for a user, including rate_limit_rpm.
+    pub async fn list_user_api_keys_with_rate_limit(
+        &self,
+        user_id: ::auth::UserId,
+    ) -> ::auth::error::Result<Vec<(::auth::ApiKey, Option<i32>)>> {
+        PostgresApiKeyRepository::new(self.pool.clone())
+            .list_user_api_keys_with_rate_limit(user_id)
+            .await
     }
 }

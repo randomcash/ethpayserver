@@ -2,6 +2,8 @@
 
 mod api_key;
 mod api_key_impl;
+
+pub use api_key::{ApiKeyRateLimitInfo, PostgresApiKeyRepository};
 mod challenge;
 mod device;
 mod passkey;

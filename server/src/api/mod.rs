@@ -12,6 +12,7 @@ use auth::AuthenticationService;
 
 use crate::state::PgAppState;
 
+pub mod api_key_rate_limit;
 pub mod checkout;
 pub mod dashboard;
 pub mod extractors;
@@ -87,6 +88,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::list_api_keys,
         users::create_api_key,
         users::revoke_api_key,
+        users::update_api_key,
     ),
     components(schemas(
         health::HealthResponse,
@@ -125,6 +127,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::ApiKeyInfoResponse,
         users::CreateApiKeyPayload,
         users::CreateApiKeyResponsePayload,
+        users::UpdateApiKeyPayload,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -153,6 +156,7 @@ pub fn router<A>(
     enable_swagger: bool,
     rate_limiters: Option<Arc<rate_limit::RateLimitState>>,
     idempotency: Option<Arc<idempotency::IdempotencyState>>,
+    api_key_rate_limiter: Option<Arc<api_key_rate_limit::ApiKeyRateLimitState>>,
 ) -> Router
 where
     A: AuthenticationService + 'static,
@@ -261,6 +265,10 @@ where
         .route("/api-keys", get(users::list_api_keys::<A>))
         .route("/api-keys", post(users::create_api_key::<A>))
         .route("/api-keys/{id}", delete(users::revoke_api_key::<A>))
+        .route(
+            "/api-keys/{id}",
+            axum::routing::patch(users::update_api_key::<A>),
+        )
         .with_state(state.clone());
     // Auth API from auth crate (with optional CAPTCHA provider)
     let auth_state = match state.captcha_provider.clone() {
@@ -292,7 +300,15 @@ where
         .nest("/auth", auth_routes)
         .nest("/evm", evm_routes);
 
-    // Apply rate limiting middleware if configured
+    // Apply per-API-key rate limiting (runs after IP-tier, both must pass)
+    if let Some(api_key_limiter) = api_key_rate_limiter {
+        app = app.layer(axum::middleware::from_fn_with_state(
+            api_key_limiter,
+            api_key_rate_limit::middleware,
+        ));
+    }
+
+    // Apply IP-tier rate limiting middleware if configured
     if let Some(limiters) = rate_limiters {
         app = app.layer(axum::middleware::from_fn_with_state(
             limiters,
