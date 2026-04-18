@@ -90,6 +90,36 @@ impl EvmApiClient {
         self.handle_response(response).await
     }
 
+    /// Make a GET request returning raw text (for CSV downloads).
+    async fn get_text(&self, path: &str) -> Result<String, ApiError> {
+        let request = self
+            .build_request("GET", path)
+            .build()
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if response.status() == 401 {
+            return Err(ApiError::Unauthorized);
+        }
+
+        if !response.ok() {
+            let message = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http {
+                status: response.status(),
+                message,
+            });
+        }
+
+        response
+            .text()
+            .await
+            .map_err(|e| ApiError::Parse(e.to_string()))
+    }
+
     /// Make a POST request.
     async fn post<T: DeserializeOwned, B: Serialize>(
         &self,
@@ -294,6 +324,19 @@ impl EvmApiClient {
             .await
     }
 
+    /// Export invoices as CSV text.
+    pub async fn export_invoices_csv(
+        &self,
+        store_id: &str,
+        status: Option<&str>,
+    ) -> Result<String, ApiError> {
+        let mut query = format!("/api/invoices/export.csv?store_id={}", store_id);
+        if let Some(s) = status {
+            query.push_str(&format!("&status={}", s));
+        }
+        self.get_text(&query).await
+    }
+
     // =========================================================================
     // Payments (store-scoped)
     // =========================================================================
@@ -322,6 +365,19 @@ impl EvmApiClient {
             query.push_str(&format!("&offset={}", o));
         }
         self.get(&query).await
+    }
+
+    /// Export payments as CSV text.
+    pub async fn export_payments_csv(
+        &self,
+        store_id: &str,
+        status: Option<&str>,
+    ) -> Result<String, ApiError> {
+        let mut query = format!("/api/payments/export.csv?store_id={}", store_id);
+        if let Some(s) = status {
+            query.push_str(&format!("&status={}", s));
+        }
+        self.get_text(&query).await
     }
 
     /// Get a single payment by ID.
