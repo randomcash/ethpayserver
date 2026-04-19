@@ -22,8 +22,7 @@ use server::EventConsumer;
 use server::services::evm_monitor::{EVMMonitor, EVMMonitorError};
 use types::{
     InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, Network, PaymentMethodId,
-    PaymentOptionData, PaymentOptionId, PaymentReader, StoreId,
-    WatchedAddressWriter,
+    PaymentOptionData, PaymentOptionId, PaymentReader, StoreId, WatchedAddressWriter,
 };
 
 // ============================================================================
