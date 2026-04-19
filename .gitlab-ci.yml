@@ -23,13 +23,18 @@ variables:
   CLIENT_IMAGE: $CI_REGISTRY_IMAGE/client:$CI_COMMIT_SHORT_SHA
   CLIENT_IMAGE_LATEST: $CI_REGISTRY_IMAGE/client:$CI_COMMIT_BRANCH-latest
 
-# Clone payserver-commons if not already present (for [patch] paths)
+# Clone payserver-commons, trying MR source branch first, falling back to main.
+# Always fresh-clone to avoid stale branch state from prior CI jobs.
 before_script:
   - |
-    if [ ! -d "../payserver-commons" ]; then
-      git clone --depth 1 https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/random.cash/payserver-commons.git ../payserver-commons
+    COMMONS_URL="https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/random.cash/payserver-commons.git"
+    BRANCH="${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-${CI_COMMIT_BRANCH:-main}}"
+    rm -rf ../payserver-commons || true
+    if git clone --depth 1 -b "$BRANCH" "$COMMONS_URL" ../payserver-commons 2>/dev/null; then
+      echo "Cloned payserver-commons branch: $BRANCH"
     else
-      cd ../payserver-commons && git pull --ff-only && cd -
+      echo "Branch $BRANCH not found in payserver-commons, using main"
+      git clone --depth 1 "$COMMONS_URL" ../payserver-commons
     fi
   - sccache --start-server 2>/dev/null || true
 
