@@ -26,7 +26,10 @@ fn page_numbers(current: i64, total_pages: i64) -> Vec<Option<i64>> {
 
     // Window around current page (at least 2 inner pages at boundaries)
     let start = (current - 1).max(2);
-    let end = (current + 1).min(total_pages - 1).max(start + 1).min(total_pages - 1);
+    let end = (current + 1)
+        .min(total_pages - 1)
+        .max(start + 1)
+        .min(total_pages - 1);
     for p in start..=end {
         pages.push(Some(p));
     }
