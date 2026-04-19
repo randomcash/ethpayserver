@@ -425,12 +425,8 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     );
                     metrics::record_webhook_failed(&job.payload.event_type.to_string());
                     metrics::record_webhook_delivery_status("permanent_failed");
-                    self.record_delivery_event(
-                        &job,
-                        "webhook_permanent_failed",
-                        Some(error_msg),
-                    )
-                    .await;
+                    self.record_delivery_event(&job, "webhook_permanent_failed", Some(error_msg))
+                        .await;
                 } else {
                     // Schedule retry.
                     metrics::record_webhook_delivery_status("retrying");
@@ -441,8 +437,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     // `retry_delay()` returns a bounded std Duration, so the chrono
                     // conversion cannot fail in practice.
                     #[allow(clippy::unwrap_used, reason = "retry_delay is bounded")]
-                    let next = Utc::now()
-                        + chrono::Duration::from_std(job.retry_delay()).unwrap();
+                    let next = Utc::now() + chrono::Duration::from_std(job.retry_delay()).unwrap();
                     job.scheduled_at = next;
 
                     let job_json = serde_json::to_string(&job)
@@ -738,7 +733,10 @@ mod tests {
 
         for i in 0..7 {
             job.attempts = i;
-            assert!(!job.is_exhausted(), "should not be exhausted at attempt {i}");
+            assert!(
+                !job.is_exhausted(),
+                "should not be exhausted at attempt {i}"
+            );
         }
         job.attempts = 7;
         assert!(job.is_exhausted(), "should be exhausted at attempt 7");
