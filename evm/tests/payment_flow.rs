@@ -354,11 +354,8 @@ async fn test_no_watched_addresses_no_events() {
 
     // Should not receive any payment events
     let result = tokio::time::timeout(Duration::from_millis(500), event_rx.recv()).await;
-    match result {
-        Ok(Ok(MonitorEvent::PaymentDetected(_))) => {
-            panic!("should not detect payment with no watches")
-        }
-        _ => {} // timeout or non-payment event is fine
+    if let Ok(Ok(MonitorEvent::PaymentDetected(_))) = result {
+        panic!("should not detect payment with no watches")
     }
 
     monitor.stop().await.unwrap();
