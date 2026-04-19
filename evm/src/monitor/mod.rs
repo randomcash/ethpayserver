@@ -86,3 +86,9 @@ pub use events::{
     WatchAddressCommand,
 };
 pub use handlers::{EventHandler, EventHandlerFn, LoggingHandler};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub use source::mock::{
+    self as mock_source, MockBlockSource, make_block, make_block_with_parent,
+    make_erc20_transfer_log, make_native_transfer,
+};

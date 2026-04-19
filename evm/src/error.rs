@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 /// Errors that can occur in EVM operations.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum EvmError {
     /// RPC provider error.
     #[error("RPC error: {0}")]
