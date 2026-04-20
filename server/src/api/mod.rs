@@ -157,7 +157,7 @@ pub fn router<A>(
 where
     A: AuthenticationService + 'static,
 {
-    use axum::routing::{delete, post, put};
+    use axum::routing::{delete, patch, post, put};
 
     // Health endpoints with AppState
     let health_routes = Router::new()
@@ -189,6 +189,8 @@ where
         .route("/{store_id}/wallet", get(stores::get_store_wallet::<A>))
         .route("/{store_id}/wallet", put(stores::configure_store_wallet::<A>))
         .route("/{store_id}/wallet", delete(stores::delete_store_wallet::<A>))
+        .route("/{store_id}/settings", get(stores::get_store_settings::<A>))
+        .route("/{store_id}/settings", patch(stores::update_store_settings::<A>))
         .route("/{store_id}/webhook", get(stores::get_store_webhook::<A>))
         .route("/{store_id}/webhook", put(stores::configure_store_webhook::<A>))
         .route("/{store_id}/webhook", delete(stores::delete_store_webhook::<A>))

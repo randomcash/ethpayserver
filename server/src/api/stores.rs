@@ -17,10 +17,10 @@ use auth::{
     repository::{StoreRepository, StoreRoleRepository, UserStoreRepository},
 };
 use data_service::{
-    StorePaymentMethod, StorePaymentMethodReader, StorePaymentMethodWriter, StoreWalletReader,
-    StoreWalletWriter,
+    self, StorePaymentMethod, StorePaymentMethodReader, StorePaymentMethodWriter,
+    StoreWalletReader, StoreWalletWriter,
 };
-use evm::{XpubDeriver, validate_xpub};
+use evm::{self, XpubDeriver, validate_xpub};
 use types::{StoreWebhookReader, StoreWebhookWriter};
 
 use super::extractors::AuthenticatedUser;
@@ -1639,6 +1639,233 @@ where
     Ok(StatusCode::NO_CONTENT)
 }
 
+// =============================================================================
+// Store Settings
+// =============================================================================
+
+/// Store settings response.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct StoreSettingsResponse {
+    pub store_id: Uuid,
+    pub default_chain_id: Option<i64>,
+    pub default_display_currency: Option<String>,
+    pub logo_url: Option<String>,
+    pub accent_color: Option<String>,
+    pub notification_prefs: serde_json::Value,
+    pub updated_at: String,
+}
+
+/// Request to update store settings (PATCH — all fields optional).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateStoreSettingsRequest {
+    pub default_chain_id: Option<i64>,
+    pub default_display_currency: Option<String>,
+    pub logo_url: Option<String>,
+    pub accent_color: Option<String>,
+    pub notification_prefs: Option<serde_json::Value>,
+}
+
+/// Known webhook event types for notification_prefs validation.
+const VALID_NOTIFICATION_EVENTS: &[&str] = &[
+    "payment_detected",
+    "payment_confirmed",
+    "invoice_expired",
+    "invoice_cancelled",
+    "late_paid",
+];
+
+/// Get store settings.
+#[utoipa::path(
+    get,
+    path = "/stores/{store_id}/settings",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID")
+    ),
+    responses(
+        (status = 200, description = "Store settings", body = StoreSettingsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Store not found"),
+    )
+)]
+pub async fn get_store_settings<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(store_id): Path<Uuid>,
+) -> Result<Json<StoreSettingsResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    require_store_settings_permission(&state, &user, store_id).await?;
+
+    // Verify store exists
+    let _ = state
+        .data_service
+        .get_store(StoreId(store_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let settings =
+        data_service::StoreSettingsReader::get_store_settings(&*state.data_service, store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match settings {
+        Some(s) => Ok(Json(StoreSettingsResponse {
+            store_id: s.store_id,
+            default_chain_id: s.default_chain_id,
+            default_display_currency: s.default_display_currency,
+            logo_url: s.logo_url,
+            accent_color: s.accent_color,
+            notification_prefs: s.notification_prefs,
+            updated_at: s.updated_at.to_rfc3339(),
+        })),
+        None => Ok(Json(StoreSettingsResponse {
+            store_id,
+            default_chain_id: None,
+            default_display_currency: None,
+            logo_url: None,
+            accent_color: None,
+            notification_prefs: serde_json::json!({}),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        })),
+    }
+}
+
+/// Update store settings (partial update).
+#[utoipa::path(
+    patch,
+    path = "/stores/{store_id}/settings",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID")
+    ),
+    request_body = UpdateStoreSettingsRequest,
+    responses(
+        (status = 200, description = "Settings updated", body = StoreSettingsResponse),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Store not found"),
+    )
+)]
+pub async fn update_store_settings<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(store_id): Path<Uuid>,
+    Json(req): Json<UpdateStoreSettingsRequest>,
+) -> Result<Json<StoreSettingsResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    require_store_settings_permission(&state, &user, store_id).await?;
+
+    // Verify store exists
+    let _ = state
+        .data_service
+        .get_store(StoreId(store_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Validate default_chain_id
+    if let Some(chain_id) = req.default_chain_id
+        && evm::get_any_chain_config(chain_id as u64).is_none()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate default_display_currency (ISO 4217 3-letter code)
+    if let Some(ref currency) = req.default_display_currency
+        && (currency.len() != 3 || !currency.chars().all(|c| c.is_ascii_uppercase()))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate logo_url (must be https://)
+    if let Some(ref url) = req.logo_url
+        && !url.starts_with("https://")
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate accent_color (must be #RRGGBB)
+    if let Some(ref color) = req.accent_color
+        && (color.len() != 7
+            || !color.starts_with('#')
+            || !color[1..].chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate notification_prefs keys
+    if let Some(ref prefs) = req.notification_prefs {
+        if let Some(obj) = prefs.as_object() {
+            for key in obj.keys() {
+                if !VALID_NOTIFICATION_EVENTS.contains(&key.as_str()) {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+            }
+        } else {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    // Merge with existing settings for partial update
+    let existing =
+        data_service::StoreSettingsReader::get_store_settings(&*state.data_service, store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let empty_prefs = serde_json::json!({});
+    let (chain_id, display_currency, logo, color, prefs) = match existing {
+        Some(ref e) => (
+            req.default_chain_id.or(e.default_chain_id),
+            req.default_display_currency
+                .as_deref()
+                .or(e.default_display_currency.as_deref()),
+            req.logo_url.as_deref().or(e.logo_url.as_deref()),
+            req.accent_color.as_deref().or(e.accent_color.as_deref()),
+            req.notification_prefs
+                .as_ref()
+                .unwrap_or(&e.notification_prefs),
+        ),
+        None => (
+            req.default_chain_id,
+            req.default_display_currency.as_deref(),
+            req.logo_url.as_deref(),
+            req.accent_color.as_deref(),
+            req.notification_prefs.as_ref().unwrap_or(&empty_prefs),
+        ),
+    };
+
+    let settings = data_service::StoreSettingsWriter::upsert_store_settings(
+        &*state.data_service,
+        store_id,
+        chain_id,
+        display_currency,
+        logo,
+        color,
+        prefs,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(StoreSettingsResponse {
+        store_id: settings.store_id,
+        default_chain_id: settings.default_chain_id,
+        default_display_currency: settings.default_display_currency,
+        logo_url: settings.logo_url,
+        accent_color: settings.accent_color,
+        notification_prefs: settings.notification_prefs,
+        updated_at: settings.updated_at.to_rfc3339(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2177,5 +2404,83 @@ mod tests {
         let json = serde_json::to_value(&response).unwrap();
         assert!(json["addresses"].as_array().unwrap().is_empty());
         assert_eq!(json["derivation_index"], 0);
+    }
+
+    // =========================================================================
+    // Store Settings validation tests
+    // =========================================================================
+
+    #[test]
+    fn test_store_settings_response_serialization() {
+        let response = StoreSettingsResponse {
+            store_id: Uuid::nil(),
+            default_chain_id: Some(137),
+            default_display_currency: Some("USD".to_string()),
+            logo_url: Some("https://example.com/logo.png".to_string()),
+            accent_color: Some("#FF5500".to_string()),
+            notification_prefs: serde_json::json!({"payment_confirmed": {"webhook": true}}),
+            updated_at: "2026-04-20T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["default_chain_id"], 137);
+        assert_eq!(json["default_display_currency"], "USD");
+        assert_eq!(json["logo_url"], "https://example.com/logo.png");
+        assert_eq!(json["accent_color"], "#FF5500");
+    }
+
+    #[test]
+    fn test_store_settings_response_defaults() {
+        let response = StoreSettingsResponse {
+            store_id: Uuid::nil(),
+            default_chain_id: None,
+            default_display_currency: None,
+            logo_url: None,
+            accent_color: None,
+            notification_prefs: serde_json::json!({}),
+            updated_at: "2026-04-20T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["default_chain_id"].is_null());
+        assert!(json["logo_url"].is_null());
+    }
+
+    #[test]
+    fn test_valid_notification_events_list() {
+        assert_eq!(VALID_NOTIFICATION_EVENTS.len(), 5);
+        assert!(VALID_NOTIFICATION_EVENTS.contains(&"payment_detected"));
+        assert!(VALID_NOTIFICATION_EVENTS.contains(&"payment_confirmed"));
+        assert!(VALID_NOTIFICATION_EVENTS.contains(&"invoice_expired"));
+        assert!(VALID_NOTIFICATION_EVENTS.contains(&"invoice_cancelled"));
+        assert!(VALID_NOTIFICATION_EVENTS.contains(&"late_paid"));
+    }
+
+    #[test]
+    fn test_update_settings_request_deserialization() {
+        let json = serde_json::json!({
+            "default_chain_id": 1,
+            "default_display_currency": "EUR",
+            "logo_url": "https://example.com/logo.png",
+            "accent_color": "#00FF00",
+            "notification_prefs": {"payment_detected": {"webhook": false}}
+        });
+        let req: UpdateStoreSettingsRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.default_chain_id, Some(1));
+        assert_eq!(req.default_display_currency.as_deref(), Some("EUR"));
+        assert_eq!(
+            req.logo_url.as_deref(),
+            Some("https://example.com/logo.png")
+        );
+        assert_eq!(req.accent_color.as_deref(), Some("#00FF00"));
+    }
+
+    #[test]
+    fn test_update_settings_request_partial() {
+        let json = serde_json::json!({"accent_color": "#AABBCC"});
+        let req: UpdateStoreSettingsRequest = serde_json::from_value(json).unwrap();
+        assert!(req.default_chain_id.is_none());
+        assert!(req.default_display_currency.is_none());
+        assert!(req.logo_url.is_none());
+        assert_eq!(req.accent_color.as_deref(), Some("#AABBCC"));
+        assert!(req.notification_prefs.is_none());
     }
 }

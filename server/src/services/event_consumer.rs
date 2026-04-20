@@ -14,7 +14,7 @@ use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
 use types::{
     AssetType, InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentData,
-    PaymentReader, PaymentWriter, TokenReader, WatchedAddressReader,
+    PaymentReader, PaymentWriter, StoreSettingsReader, TokenReader, WatchedAddressReader,
 };
 use uuid::Uuid;
 
@@ -37,6 +37,7 @@ pub trait EventConsumerDataService:
     + TokenReader
     + WatchedAddressReader
     + StoreWebhookReader
+    + StoreSettingsReader
     + CleanupDataService
     + Send
     + Sync
@@ -52,6 +53,7 @@ impl<T> EventConsumerDataService for T where
         + TokenReader
         + WatchedAddressReader
         + StoreWebhookReader
+        + StoreSettingsReader
         + CleanupDataService
         + Send
         + Sync
@@ -574,6 +576,23 @@ impl<
         let Some(webhook_service) = &self.webhook_service else {
             return;
         };
+
+        // Check notification preferences — skip if webhook disabled for this event
+        if let Ok(Some(settings)) =
+            StoreSettingsReader::get_store_settings(&*self.data_service, invoice.store_id.0).await
+        {
+            let event_key = event_type.to_string();
+            if let Some(event_prefs) = settings.notification_prefs.get(&event_key)
+                && event_prefs.get("webhook") == Some(&serde_json::Value::Bool(false))
+            {
+                tracing::trace!(
+                    store_id = %invoice.store_id.0,
+                    event = %event_key,
+                    "Webhook suppressed by notification_prefs"
+                );
+                return;
+            }
+        }
 
         // Look up webhook config for the store
         let webhook_config =

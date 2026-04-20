@@ -10,6 +10,7 @@ mod payment_option;
 mod payout;
 mod refund;
 mod store_payment_method;
+mod store_settings;
 mod store_wallet;
 mod store_webhook;
 mod token;

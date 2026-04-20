@@ -9,7 +9,8 @@ use wasm_bindgen::JsCast;
 
 use crate::api::{
     CreatePaymentMethodRequest, CreateStoreRequest, EvmApiClient, Store, StorePaymentMethod,
-    StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest,
+    StoreSettings, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
+    UpdateStoreSettingsRequest, UpdateWebhookRequest,
 };
 use crate::app::StoreContext;
 
@@ -313,6 +314,7 @@ pub fn StoreDetailPage() -> impl IntoView {
         ("general", "General"),
         ("payment_methods", "Payment Methods"),
         ("webhooks", "Webhooks"),
+        ("settings", "Settings"),
     ];
 
     view! {
@@ -379,6 +381,7 @@ pub fn StoreDetailPage() -> impl IntoView {
                                     "general" => view! { <GeneralTab store=store_for_tabs.clone() /> }.into_any(),
                                     "payment_methods" => view! { <PaymentMethodsTab store_id=store_for_tabs.id.clone() /> }.into_any(),
                                     "webhooks" => view! { <WebhooksTab store_id=store_for_tabs.id.clone() /> }.into_any(),
+                                    "settings" => view! { <SettingsTab store_id=store_for_tabs.id.clone() /> }.into_any(),
                                     _ => view! { <GeneralTab store=store_for_tabs.clone() /> }.into_any(),
                                 }}
                             </div>
@@ -1221,6 +1224,285 @@ fn WebhookEmpty(on_configure: impl Fn(leptos::ev::MouseEvent) + 'static) -> impl
 }
 
 // ============================================
+// ============================================
+// Settings Tab
+// ============================================
+
+/// Store settings tab: defaults, branding, notifications.
+#[component]
+fn SettingsTab(store_id: String) -> impl IntoView {
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let store_id_for_load = store_id.clone();
+    let store_id_for_save = store_id.clone();
+
+    let (refresh, set_refresh) = signal(0u32);
+    let settings_resource = LocalResource::new(move || {
+        let api = api.get();
+        let id = store_id_for_load.clone();
+        refresh.get();
+        async move { api.get_store_settings(&id).await }
+    });
+
+    // Form state
+    let (chain_id, set_chain_id) = signal(String::new());
+    let (display_currency, set_display_currency) = signal(String::new());
+    let (logo_url, set_logo_url) = signal(String::new());
+    let (accent_color, set_accent_color) = signal(String::new());
+    let (saving, set_saving) = signal(false);
+    let (error_msg, set_error_msg) = signal(Option::<String>::None);
+    let (success_msg, set_success_msg) = signal(false);
+
+    // Notification prefs state (one bool per event)
+    let (wh_payment_detected, set_wh_payment_detected) = signal(true);
+    let (wh_payment_confirmed, set_wh_payment_confirmed) = signal(true);
+    let (wh_invoice_expired, set_wh_invoice_expired) = signal(true);
+    let (wh_invoice_cancelled, set_wh_invoice_cancelled) = signal(true);
+    let (wh_late_paid, set_wh_late_paid) = signal(true);
+
+    // Populate form when settings load
+    let populate = move |s: &StoreSettings| {
+        set_chain_id.set(
+            s.default_chain_id
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
+        );
+        set_display_currency.set(s.default_display_currency.clone().unwrap_or_default());
+        set_logo_url.set(s.logo_url.clone().unwrap_or_default());
+        set_accent_color.set(s.accent_color.clone().unwrap_or_default());
+        // Parse notification prefs
+        let prefs = &s.notification_prefs;
+        let get_wh = |key: &str| -> bool {
+            prefs
+                .get(key)
+                .and_then(|v| v.get("webhook"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+        };
+        set_wh_payment_detected.set(get_wh("payment_detected"));
+        set_wh_payment_confirmed.set(get_wh("payment_confirmed"));
+        set_wh_invoice_expired.set(get_wh("invoice_expired"));
+        set_wh_invoice_cancelled.set(get_wh("invoice_cancelled"));
+        set_wh_late_paid.set(get_wh("late_paid"));
+    };
+
+    let on_save = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        set_saving.set(true);
+        set_error_msg.set(None);
+        set_success_msg.set(false);
+
+        let api = api.get();
+        let id = store_id_for_save.clone();
+
+        let chain = chain_id.get();
+        let currency = display_currency.get();
+        let logo = logo_url.get();
+        let color = accent_color.get();
+
+        // Build notification prefs JSON
+        let prefs = serde_json::json!({
+            "payment_detected": {"webhook": wh_payment_detected.get()},
+            "payment_confirmed": {"webhook": wh_payment_confirmed.get()},
+            "invoice_expired": {"webhook": wh_invoice_expired.get()},
+            "invoice_cancelled": {"webhook": wh_invoice_cancelled.get()},
+            "late_paid": {"webhook": wh_late_paid.get()},
+        });
+
+        let req = UpdateStoreSettingsRequest {
+            default_chain_id: if chain.is_empty() {
+                None
+            } else {
+                chain.parse().ok()
+            },
+            default_display_currency: if currency.is_empty() {
+                None
+            } else {
+                Some(currency)
+            },
+            logo_url: if logo.is_empty() { None } else { Some(logo) },
+            accent_color: if color.is_empty() { None } else { Some(color) },
+            notification_prefs: Some(prefs),
+        };
+
+        leptos::task::spawn_local(async move {
+            match api.update_store_settings(&id, &req).await {
+                Ok(_) => {
+                    set_success_msg.set(true);
+                    set_refresh.update(|n| *n += 1);
+                }
+                Err(e) => set_error_msg.set(Some(format!("{}", e))),
+            }
+            set_saving.set(false);
+        });
+    };
+
+    view! {
+        <div class="settings-tab">
+            <Suspense fallback=move || view! { <p style="color: var(--text-muted);">"Loading settings..."</p> }>
+                {move || settings_resource.get().map(|result| match &*result {
+                    Ok(settings) => {
+                        populate(settings);
+                        view! { <div></div> }.into_any()
+                    }
+                    Err(_) => view! { <div></div> }.into_any(),
+                })}
+            </Suspense>
+
+            <form on:submit=on_save>
+                // General section
+                <div class="settings-section">
+                    <h3 class="settings-section-title">"General"</h3>
+                    <div class="form-group">
+                        <label for="chain_id">"Default Chain"</label>
+                        <select id="chain_id"
+                            prop:value=move || chain_id.get()
+                            on:change=move |ev| set_chain_id.set(event_target_value(&ev))
+                        >
+                            <option value="">"No default"</option>
+                            <option value="1">"Ethereum"</option>
+                            <option value="137">"Polygon"</option>
+                            <option value="42161">"Arbitrum"</option>
+                            <option value="10">"Optimism"</option>
+                            <option value="8453">"Base"</option>
+                            <option value="56">"BSC"</option>
+                            <option value="43114">"Avalanche"</option>
+                            <option value="100">"Gnosis"</option>
+                            <option value="250">"Fantom"</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="display_currency">"Default Display Currency"</label>
+                        <select id="display_currency"
+                            prop:value=move || display_currency.get()
+                            on:change=move |ev| set_display_currency.set(event_target_value(&ev))
+                        >
+                            <option value="">"No default"</option>
+                            <option value="USD">"USD"</option>
+                            <option value="EUR">"EUR"</option>
+                            <option value="GBP">"GBP"</option>
+                            <option value="BRL">"BRL"</option>
+                            <option value="JPY">"JPY"</option>
+                        </select>
+                    </div>
+                </div>
+
+                // Branding section
+                <div class="settings-section">
+                    <h3 class="settings-section-title">"Branding"</h3>
+                    <div class="form-group">
+                        <label for="logo_url">"Logo URL"</label>
+                        <input type="url" id="logo_url" placeholder="https://example.com/logo.png"
+                            prop:value=move || logo_url.get()
+                            on:input=move |ev| set_logo_url.set(event_target_value(&ev))
+                        />
+                        <small class="form-hint">"Must be HTTPS. Displayed on checkout page."</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="accent_color">"Accent Color"</label>
+                        <div class="color-input-row">
+                            <input type="color"
+                                prop:value=move || {
+                                    let c = accent_color.get();
+                                    if c.is_empty() { "#6366f1".to_string() } else { c }
+                                }
+                                on:input=move |ev| set_accent_color.set(event_target_value(&ev))
+                            />
+                            <input type="text" id="accent_color" placeholder="#6366f1" maxlength="7"
+                                prop:value=move || accent_color.get()
+                                on:input=move |ev| set_accent_color.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <small class="form-hint">"Hex color for checkout button and header accent."</small>
+                    </div>
+                    {move || {
+                        let logo = logo_url.get();
+                        let color = accent_color.get();
+                        let color_val = if color.is_empty() { "#6366f1".to_string() } else { color };
+                        if !logo.is_empty() || !accent_color.get().is_empty() {
+                            view! {
+                                <div class="branding-preview" style=format!("border-top: 3px solid {};", color_val)>
+                                    {(!logo.is_empty()).then(|| view! {
+                                        <img src=logo alt="Logo preview" style="max-height: 40px; margin-bottom: 0.5rem;" />
+                                    })}
+                                    <span style="font-size: 0.875rem; color: var(--text-muted);">"Checkout header preview"</span>
+                                </div>
+                            }.into_any()
+                        } else {
+                            view! { <div></div> }.into_any()
+                        }
+                    }}
+                </div>
+
+                // Notifications section
+                <div class="settings-section">
+                    <h3 class="settings-section-title">"Notifications"</h3>
+                    <p class="settings-section-desc">"Control which events trigger webhook delivery."</p>
+                    <div class="notification-matrix">
+                        <div class="notification-row">
+                            <label>"Payment Detected"</label>
+                            <input type="checkbox"
+                                prop:checked=move || wh_payment_detected.get()
+                                on:change=move |ev| set_wh_payment_detected.set(event_target_checked(&ev))
+                            />
+                        </div>
+                        <div class="notification-row">
+                            <label>"Payment Confirmed"</label>
+                            <input type="checkbox"
+                                prop:checked=move || wh_payment_confirmed.get()
+                                on:change=move |ev| set_wh_payment_confirmed.set(event_target_checked(&ev))
+                            />
+                        </div>
+                        <div class="notification-row">
+                            <label>"Invoice Expired"</label>
+                            <input type="checkbox"
+                                prop:checked=move || wh_invoice_expired.get()
+                                on:change=move |ev| set_wh_invoice_expired.set(event_target_checked(&ev))
+                            />
+                        </div>
+                        <div class="notification-row">
+                            <label>"Invoice Cancelled"</label>
+                            <input type="checkbox"
+                                prop:checked=move || wh_invoice_cancelled.get()
+                                on:change=move |ev| set_wh_invoice_cancelled.set(event_target_checked(&ev))
+                            />
+                        </div>
+                        <div class="notification-row">
+                            <label>"Late Payment"</label>
+                            <input type="checkbox"
+                                prop:checked=move || wh_late_paid.get()
+                                on:change=move |ev| set_wh_late_paid.set(event_target_checked(&ev))
+                            />
+                        </div>
+                    </div>
+                </div>
+
+                // Error / success messages
+                {move || error_msg.get().map(|msg| view! {
+                    <div class="alert alert-error">{msg}</div>
+                })}
+                {move || success_msg.get().then(|| view! {
+                    <div class="alert alert-success">"Settings saved."</div>
+                })}
+
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary" disabled=move || saving.get()>
+                        {move || if saving.get() { "Saving..." } else { "Save Settings" }}
+                    </button>
+                </div>
+            </form>
+        </div>
+    }
+}
+
+/// Helper to get checked state from a checkbox event.
+fn event_target_checked(ev: &leptos::ev::Event) -> bool {
+    use wasm_bindgen::JsCast;
+    ev.target()
+        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .map(|input| input.checked())
+        .unwrap_or(false)
+}
+
 // Icons
 // ============================================
 
