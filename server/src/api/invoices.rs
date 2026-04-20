@@ -32,6 +32,24 @@ use crate::state::PgAppState;
 use rates::{RateError, is_fiat_currency};
 use types::currency::DEFAULT_INVOICE_EXPIRATION_SECS;
 
+/// Maximum age (seconds) before an exchange rate is rejected outright.
+/// Override with `RATE_STALE_REJECT_SECS` env var. Default: 300 (5 minutes).
+fn rate_stale_reject_secs() -> i64 {
+    std::env::var("RATE_STALE_REJECT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300)
+}
+
+/// Age (seconds) at which an exchange rate triggers a staleness warning.
+/// Override with `RATE_STALE_WARN_SECS` env var. Default: 60.
+fn rate_stale_warn_secs() -> i64 {
+    std::env::var("RATE_STALE_WARN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60)
+}
+
 /// Convert an amount to crypto smallest units using the exchange rate.
 ///
 /// # Arguments
@@ -589,6 +607,31 @@ where
                             "Received non-positive exchange rate"
                         );
                         return Err(StatusCode::SERVICE_UNAVAILABLE);
+                    }
+
+                    // Staleness guard: reject rates older than threshold
+                    let reject_secs = rate_stale_reject_secs();
+                    if exchange_rate.is_stale(chrono::Duration::seconds(reject_secs)) {
+                        tracing::error!(
+                            from = %req.currency,
+                            to = %payment_method.asset_symbol,
+                            timestamp = %exchange_rate.timestamp,
+                            max_age_secs = reject_secs,
+                            "Exchange rate too stale, rejecting"
+                        );
+                        return Err(StatusCode::SERVICE_UNAVAILABLE);
+                    }
+
+                    // Warn for rates older than warning threshold
+                    let warn_secs = rate_stale_warn_secs();
+                    if exchange_rate.is_stale(chrono::Duration::seconds(warn_secs)) {
+                        tracing::warn!(
+                            from = %req.currency,
+                            to = %payment_method.asset_symbol,
+                            timestamp = %exchange_rate.timestamp,
+                            warn_age_secs = warn_secs,
+                            "Exchange rate may be slightly outdated"
+                        );
                     }
 
                     // Convert invoice currency to crypto smallest units
