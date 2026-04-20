@@ -1,5 +1,5 @@
 [workspace]
-members = ["server", "data-service", "evm", "client"]
+members = ["server", "data-service", "evm", "client", "mcp-server"]
 resolver = "3"
 
 [workspace.package]
