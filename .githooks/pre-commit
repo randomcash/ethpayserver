@@ -1,0 +1,30 @@
+#!/bin/bash
+# Pre-commit hook: runs the same fmt + clippy checks as .gitlab-ci.yml lint stage.
+# Skipped when no Rust sources are staged.
+#
+# Install (run once per clone): git config core.hooksPath .githooks
+# Bypass (one-off): git commit --no-verify
+
+set -e
+
+CRATES="-p server -p data-service -p evm -p ethpayserver-client"
+
+if ! git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$'; then
+    exit 0
+fi
+
+echo "=== pre-commit: cargo fmt --check ==="
+cargo fmt $CRATES -- --check || {
+    echo
+    echo "Format check failed. Run: cargo fmt $CRATES"
+    exit 1
+}
+
+echo "=== pre-commit: cargo clippy ==="
+cargo clippy $CRATES --all-targets -- -D warnings || {
+    echo
+    echo "Clippy failed. Fix the warnings above."
+    exit 1
+}
+
+echo "pre-commit: passed."
