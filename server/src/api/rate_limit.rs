@@ -201,6 +201,7 @@ fn parse_env_u32(key: &str, default: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

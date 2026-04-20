@@ -185,6 +185,7 @@ pub fn parse_captcha_env() -> anyhow::Result<Option<(String, String, String)>> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     // ========================================================================

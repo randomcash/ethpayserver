@@ -97,11 +97,11 @@ where
         Err(_) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
     }
 
-    // Get broadcast receiver
-    let ws_broadcast = state
-        .ws_broadcast
-        .as_ref()
-        .expect("WsBroadcast must be configured");
+    // Get broadcast receiver. In deployments without WS configured, return 503
+    // rather than panicking the handler task.
+    let Some(ws_broadcast) = state.ws_broadcast.as_ref() else {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let rx = ws_broadcast.subscribe();
 
     ws.on_upgrade(move |socket| handle_socket(socket, rx))
@@ -111,7 +111,11 @@ where
 async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<StatusUpdate>) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Send connected acknowledgement
+    // Send connected acknowledgement. Serialising a unit-variant is infallible.
+    #[allow(
+        clippy::unwrap_used,
+        reason = "serde_json of unit variant is infallible"
+    )]
     let connected = serde_json::to_string(&StatusUpdate::Connected).unwrap();
     if sender.send(Message::Text(connected.into())).await.is_err() {
         return;
@@ -148,6 +152,7 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<StatusUpda
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use axum::routing;
     use futures::StreamExt;

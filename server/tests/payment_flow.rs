@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! End-to-end integration tests for the payment detection pipeline.
 //!
 //! Verifies the full flow: invoice creation → payment detection → event processing

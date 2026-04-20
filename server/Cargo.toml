@@ -85,3 +85,10 @@ tokio = { version = "1.42", features = ["test-util"] }
 tokio-tungstenite = "0.28"
 data-service = { path = "../data-service", features = ["test-utils"] }
 evm = { path = "../evm", features = ["api", "redis", "test-utils"] }
+
+# Clippy lints — catches panics on user-input paths at compile time.
+# `unwrap` / `expect` are allowed only in tests and in explicit initialisation
+# paths annotated with #[allow(clippy::unwrap_used)].
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

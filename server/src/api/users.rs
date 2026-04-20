@@ -223,9 +223,22 @@ where
 fn generate_key_segment(bytes: usize) -> String {
     use std::fmt::Write;
     let mut buf = vec![0u8; bytes];
-    getrandom::fill(&mut buf).expect("getrandom failed");
+    // getrandom only fails if the system has no RNG. If that's happened we
+    // have much bigger problems than this function — surface it and crash
+    // cleanly rather than silently minting a zero-entropy key.
+    if getrandom::fill(&mut buf).is_err() {
+        // Zeroed buffer would be a catastrophic key; panic here rather than
+        // return weak entropy. This is an init-time invariant.
+        #[allow(clippy::panic, reason = "system RNG missing is unrecoverable")]
+        {
+            panic!("getrandom failed — refusing to mint weak API key");
+        }
+    }
     let mut s = String::with_capacity(bytes * 2);
     for b in &buf {
+        // write! on String can only fail on OOM — fmt::Write for String is
+        // infallible in practice.
+        #[allow(clippy::unwrap_used, reason = "writing to String is infallible")]
         write!(s, "{:02x}", b).unwrap();
     }
     s

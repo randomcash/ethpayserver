@@ -415,9 +415,11 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     self.record_delivery_event(&job, false, Some(e.to_string()))
                         .await;
                 } else {
-                    // Schedule retry
-                    job.scheduled_at =
-                        Utc::now() + chrono::Duration::from_std(job.retry_delay()).unwrap();
+                    // Schedule retry. `retry_delay()` returns a bounded Duration
+                    // (seconds, not years) so the chrono conversion cannot fail.
+                    #[allow(clippy::unwrap_used, reason = "retry_delay is bounded")]
+                    let next = Utc::now() + chrono::Duration::from_std(job.retry_delay()).unwrap();
+                    job.scheduled_at = next;
 
                     let job_json = serde_json::to_string(&job)
                         .map_err(|e| WebhookError::Serialization(e.to_string()))?;
@@ -491,6 +493,11 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
 
         type HmacSha256 = Hmac<Sha256>;
 
+        // HMAC accepts any key length — this constructor is infallible in practice.
+        #[allow(
+            clippy::expect_used,
+            reason = "HmacSha256::new_from_slice is infallible for any key length"
+        )]
         let mut mac =
             HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
         mac.update(payload.as_bytes());
@@ -561,6 +568,10 @@ pub fn sign_webhook_payload(payload: &str, secret: &str) -> String {
 
     type HmacSha256 = Hmac<Sha256>;
 
+    #[allow(
+        clippy::expect_used,
+        reason = "HmacSha256::new_from_slice is infallible for any key length"
+    )]
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
@@ -571,6 +582,7 @@ pub fn sign_webhook_payload(payload: &str, secret: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

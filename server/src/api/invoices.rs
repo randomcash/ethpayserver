@@ -1247,6 +1247,7 @@ fn _generate_payment_uri(address: &str, amount: &str, _asset_symbol: &str) -> St
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]
