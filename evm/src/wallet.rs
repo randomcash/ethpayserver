@@ -131,6 +131,31 @@ impl HdWallet {
         Ok(addresses)
     }
 
+    /// Derive the private key at the given BIP-44 index.
+    ///
+    /// Uses path: m/44'/60'/0'/0/{index}
+    ///
+    /// # Security
+    ///
+    /// The returned key bytes must be handled securely and zeroized after use.
+    /// Never log or persist private keys.
+    pub fn derive_private_key(&self, index: u32) -> EvmResult<[u8; 32]> {
+        let path = format!("m/44'/60'/0'/0/{}", index);
+        let derivation_path = DerivationPath::from_str(&path)
+            .map_err(|e| EvmError::InvalidDerivationPath(e.to_string()))?;
+
+        let derived_key = self
+            .master_key
+            .derive_path(&derivation_path)
+            .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
+
+        let signing_key: &k256::ecdsa::SigningKey = derived_key.as_ref();
+        let key_bytes = signing_key.to_bytes();
+        let mut result = [0u8; 32];
+        result.copy_from_slice(&key_bytes);
+        Ok(result)
+    }
+
     /// Get the extended public key for account 0.
     ///
     /// This can be used to derive addresses without the private key.
@@ -376,6 +401,23 @@ mod tests {
                 deriver.derive_address(i).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn test_derive_private_key() {
+        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
+        let key = wallet.derive_private_key(0).unwrap();
+
+        // Should be 32 bytes
+        assert_eq!(key.len(), 32);
+
+        // Should be deterministic
+        let key2 = wallet.derive_private_key(0).unwrap();
+        assert_eq!(key, key2);
+
+        // Different indexes should produce different keys
+        let key3 = wallet.derive_private_key(1).unwrap();
+        assert_ne!(key, key3);
     }
 
     #[test]

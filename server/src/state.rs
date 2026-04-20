@@ -5,9 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use auth::StoreRoleRepository;
 use data_service::{
-    InvoiceReader, InvoiceWriter, PaymentReader, PaymentWriter, StoreWalletReader,
-    StoreWalletWriter, StoreWebhookReader, TokenReader, TokenWriter, WatchedAddressReader,
-    WatchedAddressWriter,
+    InvoiceReader, InvoiceWriter, PaymentReader, PaymentWriter, PayoutReader, PayoutWriter,
+    RefundReader, RefundWriter, StoreWalletReader, StoreWalletWriter, StoreWebhookReader,
+    TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
 };
 use evm::api::EvmDataService;
 use rates::RateProvider;
@@ -26,6 +26,8 @@ pub trait AppDataServiceReader:
     + StoreWalletReader
     + StoreWebhookReader
     + StoreRoleRepository
+    + RefundReader
+    + PayoutReader
     + Send
     + Sync
 {
@@ -44,6 +46,8 @@ pub trait AppDataService:
     + TokenWriter
     + WatchedAddressWriter
     + StoreWalletWriter
+    + RefundWriter
+    + PayoutWriter
     + EvmDataService
 {
 }

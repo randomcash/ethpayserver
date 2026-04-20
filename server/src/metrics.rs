@@ -92,6 +92,34 @@ fn describe_counters() {
         "ethpayserver_rate_limited_total",
         "Total number of requests rejected by rate limiting"
     );
+
+    // Refund metrics
+    describe_counter!(
+        "ethpayserver_refunds_initiated_total",
+        "Total number of refunds initiated"
+    );
+    describe_counter!(
+        "ethpayserver_refunds_confirmed_total",
+        "Total number of refunds confirmed"
+    );
+    describe_counter!(
+        "ethpayserver_refunds_failed_total",
+        "Total number of refunds that failed"
+    );
+
+    // Payout metrics
+    describe_counter!(
+        "ethpayserver_payouts_initiated_total",
+        "Total number of payouts initiated"
+    );
+    describe_counter!(
+        "ethpayserver_payouts_confirmed_total",
+        "Total number of payouts confirmed"
+    );
+    describe_counter!(
+        "ethpayserver_payouts_failed_total",
+        "Total number of payouts that failed"
+    );
 }
 
 fn describe_gauges() {
@@ -225,6 +253,26 @@ pub fn set_stores(count: u64) {
 /// Record a store creation.
 pub fn record_store_created() {
     counter!("ethpayserver_stores_created_total").increment(1);
+}
+
+/// Record a payout initiation.
+pub fn record_payout_initiated(chain_id: u64, asset_symbol: &str) {
+    counter!(
+        "ethpayserver_payouts_initiated_total",
+        "chain_id" => chain_id.to_string(),
+        "asset_symbol" => asset_symbol.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a refund initiation.
+pub fn record_refund_initiated(chain_id: u64, asset_symbol: &str) {
+    counter!(
+        "ethpayserver_refunds_initiated_total",
+        "chain_id" => chain_id.to_string(),
+        "asset_symbol" => asset_symbol.to_string()
+    )
+    .increment(1);
 }
 
 /// Record a rate-limited request.

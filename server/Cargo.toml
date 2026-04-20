@@ -60,6 +60,9 @@ metrics-exporter-prometheus = "0.16"
 # Rate limiting
 governor = "0.10"
 
+# Ethereum primitives
+alloy-primitives = "1"
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }

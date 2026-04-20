@@ -69,6 +69,18 @@ pub enum EvmError {
     #[error("monitor error: {0}")]
     Monitor(String),
 
+    /// Transaction signing error.
+    #[error("signing error: {0}")]
+    Signing(String),
+
+    /// Transaction error.
+    #[error("transaction error: {0}")]
+    Transaction(String),
+
+    /// Insufficient balance for transaction.
+    #[error("insufficient balance: {0}")]
+    InsufficientBalance(String),
+
     /// Generic internal error.
     #[error("internal error: {0}")]
     Internal(String),

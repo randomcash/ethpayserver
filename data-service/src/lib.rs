@@ -66,7 +66,19 @@ pub use types::{
     PaymentReader,
     PaymentRepository,
     PaymentWriter,
+    // Payout
+    PayoutData,
+    PayoutReader,
+    PayoutRepository,
+    PayoutStatus,
+    PayoutWriter,
     PendingWatchInfo,
+    // Refund
+    RefundData,
+    RefundReader,
+    RefundRepository,
+    RefundStatus,
+    RefundWriter,
     // Errors
     RepositoryError,
     RepositoryResult,

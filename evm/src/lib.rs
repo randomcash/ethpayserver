@@ -37,6 +37,7 @@ pub mod network;
 pub mod provider;
 pub mod testnet;
 pub mod tokens;
+pub mod transaction;
 pub mod wallet;
 
 // Re-export commonly used items
