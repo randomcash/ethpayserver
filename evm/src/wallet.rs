@@ -149,9 +149,10 @@ impl HdWallet {
             .derive_path(&derivation_path)
             .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
 
-        let key_bytes = derived_key.to_bytes();
+        let signing_key: &k256::ecdsa::SigningKey = derived_key.as_ref();
+        let key_bytes = signing_key.to_bytes();
         let mut result = [0u8; 32];
-        result.copy_from_slice(&key_bytes[..32]);
+        result.copy_from_slice(&key_bytes);
         Ok(result)
     }
 

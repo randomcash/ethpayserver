@@ -85,7 +85,7 @@ pub async fn send_native_transfer(
         .with_to(to)
         .with_value(amount)
         .with_nonce(nonce)
-        .with_gas_limit(NATIVE_TRANSFER_GAS as u128)
+        .with_gas_limit(NATIVE_TRANSFER_GAS)
         .with_gas_price(gas_price)
         .with_chain_id(chain_id);
 
@@ -139,7 +139,7 @@ pub async fn send_erc20_transfer(
 
     let estimated_gas = provider
         .inner()
-        .estimate_gas(&estimate_tx)
+        .estimate_gas(estimate_tx)
         .await
         .map_err(|e| EvmError::Rpc(format!("gas estimation failed: {}", e)))?;
 
@@ -163,9 +163,12 @@ pub async fn send_erc20_transfer(
     }
 
     // Check token balance
-    let token_balance =
-        crate::tokens::get_token_balance(provider.inner(), &token_address.to_string(), from)
-            .await?;
+    let token_contract = IERC20::new(token_address, provider.inner().clone());
+    let token_balance = token_contract
+        .balanceOf(from)
+        .call()
+        .await
+        .map_err(|e| EvmError::Contract(e.to_string()))?;
     if token_balance < amount {
         return Err(EvmError::InsufficientBalance(format!(
             "need {} token units, have {}",
@@ -182,7 +185,7 @@ pub async fn send_erc20_transfer(
         .with_to(token_address)
         .with_input(calldata)
         .with_nonce(nonce)
-        .with_gas_limit(gas_limit as u128)
+        .with_gas_limit(gas_limit)
         .with_gas_price(gas_price)
         .with_chain_id(chain_id);
 
