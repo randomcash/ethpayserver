@@ -1,23 +1,24 @@
 stages:
-  - lint
-  - check
+  - verify
   - build
   - e2e
+  - audit
   - docker
   - notify
 
 default:
   timeout: 3 hours
 
-# Shell executor — runs on host, uses native cargo cache.
+# Docker executor. The runner image
+# (registry.gitlab.com/random.cash/ci-base:rust-1.94) ships rustfmt, clippy,
+# cargo-nextest, cargo-audit, cargo-deny, mold, sccache, and trunk. See
+# openclaw-config/picoclaw/ci-base/ for the Dockerfile that builds it.
 
 variables:
-  CARGO_BUILD_JOBS: "2"
-  # sccache — compile cache persisted via runner volume mount
+  CARGO_BUILD_JOBS: "4"
   RUSTC_WRAPPER: "/usr/local/bin/sccache"
   SCCACHE_DIR: "/sccache"
   SCCACHE_CACHE_SIZE: "20G"
-  # mold linker — ~10× faster than default ld for Rust binaries
   RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
   SERVER_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
   SERVER_IMAGE_LATEST: $CI_REGISTRY_IMAGE:$CI_COMMIT_BRANCH-latest
@@ -26,10 +27,9 @@ variables:
   CLIENT_IMAGE: $CI_REGISTRY_IMAGE/client:$CI_COMMIT_SHORT_SHA
   CLIENT_IMAGE_LATEST: $CI_REGISTRY_IMAGE/client:$CI_COMMIT_BRANCH-latest
 
-# Ensure rustfmt + clippy are available (not shipped with rust:*-bookworm)
-# and clone payserver-commons, trying the MR source branch first.
+# Clone payserver-commons next to this repo, trying the MR source branch first.
+# sccache is started here so every job can reuse the running daemon.
 before_script:
-  - rustup component add rustfmt clippy
   - |
     COMMONS_URL="https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/random.cash/payserver-commons.git"
     BRANCH="${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-${CI_COMMIT_BRANCH:-main}}"
@@ -43,112 +43,59 @@ before_script:
   - sccache --start-server 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# Stage: lint — fast checks that gate everything else (fmt + clippy)
+# verify — one Rust pass that fmt-checks, clippies, tests, and cargo-checks
+# the release binaries. Runs on every MR. A single job keeps CARGO_TARGET_DIR
+# hot so each subsequent cargo invocation reuses rmeta from the one before it.
 # ---------------------------------------------------------------------------
 
-lint:
-  stage: lint
+verify:
+  stage: verify
   resource_group: rust-compile
   script:
     - cargo fmt -p server -p data-service -p evm -p ethpayserver-client -- --check
     - cargo clippy -p server -p data-service -p evm -p ethpayserver-client --all-targets -- -D warnings
-    - sccache --show-stats || true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == "main"
-    - if: $CI_COMMIT_BRANCH == "testnet"
-
-# ---------------------------------------------------------------------------
-# Stage: check — test + audit (need: lint, skip on docs-only MRs)
-# ---------------------------------------------------------------------------
-
-test:
-  stage: check
-  needs: ["lint"]
-  resource_group: rust-compile
-  script:
-    # Unit tests
-    - cargo nextest run --workspace --lib --no-fail-fast -j 1
-    # Integration tests against ephemeral Postgres (requires Docker socket)
+    - cargo nextest run --workspace --lib --no-fail-fast
+    # Integration tests against ephemeral Postgres (requires Docker socket).
     - |
       if ! docker info >/dev/null 2>&1; then
         echo "WARNING: Docker not available, skipping integration tests"
-        exit 0
+      else
+        PGCONTAINER="ci_postgres_${CI_JOB_ID}"
+        docker rm -f $PGCONTAINER 2>/dev/null || true
+        docker run -d --name $PGCONTAINER -p 0:5432 \
+          -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ethpayserver_test \
+          postgres:16-alpine
+        PGPORT=$(docker port $PGCONTAINER 5432 | head -1 | cut -d: -f2)
+        cleanup() { docker rm -f $PGCONTAINER 2>/dev/null; }
+        trap cleanup EXIT
+        for i in $(seq 1 30); do
+          docker exec $PGCONTAINER pg_isready -U test && break || sleep 1
+        done
+        DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_test" \
+          cargo run --release --bin migrate_postgres
+        DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_test" \
+          cargo nextest run -p data-service --no-fail-fast --run-ignored only \
+          || echo "WARNING: integration tests failed (known FK fixture issues, non-blocking)"
       fi
-      PGCONTAINER="ci_postgres_${CI_JOB_ID}"
-      docker rm -f $PGCONTAINER 2>/dev/null || true
-      docker run -d --name $PGCONTAINER -p 0:5432 \
-        -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ethpayserver_test \
-        postgres:16-alpine
-      PGPORT=$(docker port $PGCONTAINER 5432 | head -1 | cut -d: -f2)
-      cleanup() { docker rm -f $PGCONTAINER 2>/dev/null; }
-      trap cleanup EXIT
-      for i in $(seq 1 30); do
-        docker exec $PGCONTAINER pg_isready -U test && break || sleep 1
-      done
-      DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_test" \
-        cargo run --release --bin migrate_postgres
-      DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_test" \
-        cargo nextest run -p data-service --no-fail-fast --run-ignored only -j 1 || echo "WARNING: integration tests failed (known FK fixture issues, non-blocking)"
+    # Make sure the release binaries cargo-check cleanly. Artifacts are produced
+    # by the dedicated build:* jobs on testnet/main branches.
+    - cargo check --release --bin ethpayserver
+    - cargo check --release --bin evmmonitor --features monitor-bin
+    - cargo check --release --bin migrate_postgres
     - sccache --show-stats || true
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes:
-        - "**/*.rs"
-        - "**/*.sql"
-        - "**/Cargo.toml"
-        - "**/Cargo.lock"
-        - .gitlab-ci.yml
-    - if: $CI_COMMIT_BRANCH == "main"
-    - if: $CI_COMMIT_BRANCH == "testnet"
-
-audit:
-  stage: check
-  needs: ["lint"]
-  script:
-    # Re-use binaries from previous runs when the volume cache preserves them;
-    # otherwise install. sccache accelerates the compile path when a cold
-    # install is required.
-    - |
-      if ! command -v cargo-audit >/dev/null 2>&1; then
-        cargo install cargo-audit --locked
-      fi
-      if ! command -v cargo-deny >/dev/null 2>&1; then
-        cargo install cargo-deny --locked
-      fi
-    # Use persistent advisory-db mount from the runner volume
-    - |
-      git config --global --unset-all url."ssh://git@github.com/".insteadOf || true
-      if [ -d /cargo-advisory-db/.git ]; then
-        echo "Refreshing cached advisory-db"
-        git -C /cargo-advisory-db fetch --quiet --depth 1 origin master 2>/dev/null || true
-        git -C /cargo-advisory-db reset --hard origin/master 2>/dev/null || true
-      else
-        echo "Cloning advisory-db to cache"
-        git clone --depth 1 https://github.com/RustSec/advisory-db.git /cargo-advisory-db
-      fi
-      mkdir -p ${CARGO_HOME:-$HOME/.cargo}
-      ln -sfn /cargo-advisory-db ${CARGO_HOME:-$HOME/.cargo}/advisory-db
-    - cargo audit --no-fetch
-    - cargo deny check licenses sources
-  allow_failure: true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes:
-        - "**/Cargo.toml"
-        - "**/Cargo.lock"
-        - "deny.toml"
-        - .gitlab-ci.yml
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
 
 # ---------------------------------------------------------------------------
-# Stage: build — compile binaries and WASM on host (parallel)
+# build:* — produce release binary artifacts on integration branches only.
+# Skipped on MRs; verify already cargo-check'd the same entry points.
 # ---------------------------------------------------------------------------
 
 build:server:
   stage: build
-  needs: ["lint"]
+  needs: ["verify"]
   resource_group: rust-compile
   script:
     - cargo build --release --bin ethpayserver
@@ -166,7 +113,7 @@ build:server:
 
 build:monitor:
   stage: build
-  needs: ["lint"]
+  needs: ["verify"]
   resource_group: rust-compile
   script:
     - cargo build --release --bin evmmonitor --features monitor-bin
@@ -181,7 +128,8 @@ build:monitor:
 
 build:client:
   stage: build
-  needs: ["lint"]
+  needs: ["verify"]
+  resource_group: rust-compile
   script:
     - cd client && trunk build --release
   artifacts:
@@ -192,24 +140,8 @@ build:client:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
 
-build:check:
-  stage: build
-  needs: ["lint"]
-  resource_group: rust-compile
-  script:
-    - cargo build --release --bin ethpayserver
-    - sccache --show-stats || true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes:
-        - "**/*.rs"
-        - "**/*.sql"
-        - "**/Cargo.toml"
-        - "**/Cargo.lock"
-        - .gitlab-ci.yml
-
 # ---------------------------------------------------------------------------
-# Stage: e2e — Playwright regression tests against live backend + frontend
+# e2e — Playwright regression against live backend + frontend.
 # ---------------------------------------------------------------------------
 
 e2e:
@@ -221,7 +153,6 @@ e2e:
     E2E_API_URL: "http://127.0.0.1:3000"
     E2E_BASE_URL: "http://127.0.0.1:8080"
   script:
-    # Start Postgres
     - |
       PGCONTAINER="ci_e2e_postgres_${CI_JOB_ID}"
       docker rm -f $PGCONTAINER 2>/dev/null || true
@@ -231,7 +162,6 @@ e2e:
       PGPORT=$(docker port $PGCONTAINER 5432 | head -1 | cut -d: -f2)
       cleanup_pg() { docker rm -f $PGCONTAINER 2>/dev/null; }
       trap cleanup_pg EXIT
-    # Start Redis
     - |
       REDISCONTAINER="ci_e2e_redis_${CI_JOB_ID}"
       docker rm -f $REDISCONTAINER 2>/dev/null || true
@@ -239,12 +169,10 @@ e2e:
       REDISPORT=$(docker port $REDISCONTAINER 6379 | head -1 | cut -d: -f2)
       cleanup_all() { docker rm -f $PGCONTAINER $REDISCONTAINER 2>/dev/null; }
       trap cleanup_all EXIT
-    # Wait for Postgres
     - |
       for i in $(seq 1 30); do
         docker exec $PGCONTAINER pg_isready -U test && break || sleep 1
       done
-    # Run migrations and start backend with dynamic ports
     - export DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_e2e"
     - export REDIS_URL="redis://127.0.0.1:$REDISPORT"
     - ./target/release/migrate_postgres
@@ -253,10 +181,8 @@ e2e:
       for i in $(seq 1 30); do
         curl -sf ${E2E_API_URL}/health/live && break || sleep 1
       done
-    # Serve frontend from pre-built client dist
     - npx -y serve -s client/dist -l 8080 &
     - sleep 2
-    # Install Playwright and run tests
     - cd e2e && npm ci && npx playwright install --with-deps chromium
     - npx playwright test
   artifacts:
@@ -271,7 +197,46 @@ e2e:
   allow_failure: true
 
 # ---------------------------------------------------------------------------
-# Stage: docker — package pre-built binaries into slim images (parallel)
+# audit — cargo-audit + cargo-deny. Only runs on testnet/main since it's
+# advisory-level, never a merge blocker. Binaries ship with the runner image;
+# the advisory DB is refreshed from a persistent volume mount.
+# ---------------------------------------------------------------------------
+
+audit:
+  stage: audit
+  # Runs in parallel with the build stage — no Rust compilation happens here.
+  needs: []
+  script:
+    # Pre-baked in the ci-base runner image. Fall back to install-if-missing
+    # so this works against the stock rust:*-bookworm image too.
+    - |
+      if ! command -v cargo-audit >/dev/null 2>&1; then
+        cargo install cargo-audit --locked --quiet
+      fi
+      if ! command -v cargo-deny >/dev/null 2>&1; then
+        cargo install cargo-deny --locked --quiet
+      fi
+    - |
+      git config --global --unset-all url."ssh://git@github.com/".insteadOf || true
+      if [ -d /cargo-advisory-db/.git ]; then
+        echo "Refreshing cached advisory-db"
+        git -C /cargo-advisory-db fetch --quiet --depth 1 origin master 2>/dev/null || true
+        git -C /cargo-advisory-db reset --hard origin/master 2>/dev/null || true
+      else
+        echo "Cloning advisory-db to cache"
+        git clone --depth 1 https://github.com/RustSec/advisory-db.git /cargo-advisory-db
+      fi
+      mkdir -p ${CARGO_HOME:-$HOME/.cargo}
+      ln -sfn /cargo-advisory-db ${CARGO_HOME:-$HOME/.cargo}/advisory-db
+    - cargo audit --no-fetch
+    - cargo deny check licenses sources
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "testnet"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ---------------------------------------------------------------------------
+# docker — package pre-built binaries into slim images.
 # ---------------------------------------------------------------------------
 
 docker:server:
@@ -335,7 +300,7 @@ docker:client:
     - if: $CI_COMMIT_BRANCH == "testnet"
 
 # ---------------------------------------------------------------------------
-# Stage: notify — trigger downstream deploy (if configured)
+# notify — trigger downstream deploy (if configured)
 # ---------------------------------------------------------------------------
 
 notify:deploy:
