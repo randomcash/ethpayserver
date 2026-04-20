@@ -10,7 +10,7 @@ default:
   timeout: 3 hours
 
 # Docker executor. The runner image
-# (registry.gitlab.com/random.cash/ci-base:rust-1.94) ships rustfmt, clippy,
+# (registry.gitlab.com/random.cash/payserver-commons/ci-base:rust-1.94) ships rustfmt, clippy,
 # cargo-nextest, cargo-audit, cargo-deny, mold, sccache, and trunk. See
 # openclaw-config/picoclaw/ci-base/ for the Dockerfile that builds it.
 
