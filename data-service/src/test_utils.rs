@@ -831,15 +831,15 @@ impl WebhookDeliveryReader for InMemoryDataService {
                 if d.store_id != store_id {
                     return false;
                 }
-                if let Some(et) = event_type {
-                    if d.event_type != et {
-                        return false;
-                    }
+                if let Some(et) = event_type
+                    && d.event_type != et
+                {
+                    return false;
                 }
-                if let Some(s) = success {
-                    if d.success != s {
-                        return false;
-                    }
+                if let Some(s) = success
+                    && d.success != s
+                {
+                    return false;
                 }
                 true
             })
