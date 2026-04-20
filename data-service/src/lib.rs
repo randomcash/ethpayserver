@@ -21,7 +21,7 @@
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
-pub use postgres::{PendingWatch, PgDataService};
+pub use postgres::{ApiKeyAuthInfo, ApiKeyFullInfo, PendingWatch, PgDataService};
 
 #[cfg(feature = "redis")]
 pub mod redis;

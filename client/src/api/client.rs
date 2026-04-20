@@ -7,8 +7,10 @@ use thiserror::Error;
 use super::{
     ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload, CreateInvoiceRequest,
     CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice, InvoiceListResponse,
-    InvoiceStatusResponse, Payment, PaymentListResponse, Store, StorePaymentMethod, StoreWebhook,
-    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, UserInfo, Wallet,
+    InvoiceStatusResponse, Payment, PaymentListResponse, RotateApiKeyResponse, Store,
+    StorePaymentMethod, StoreWebhook, TestWebhookResponse, UpdatePaymentMethodRequest,
+    UpdateStoreRequest, UpdateWebhookRequest, UserInfo, Wallet, WebhookDelivery,
+    WebhookDeliveryList,
 };
 
 /// API client errors.
@@ -484,6 +486,12 @@ impl EvmApiClient {
     /// Revoke an API key.
     pub async fn revoke_api_key(&self, id: &str) -> Result<(), ApiError> {
         self.delete(&format!("/api/users/api-keys/{}", id)).await
+    }
+
+    /// Rotate an API key — deprecates the old one, returns a new plaintext key.
+    pub async fn rotate_api_key(&self, id: &str) -> Result<RotateApiKeyResponse, ApiError> {
+        self.post_empty(&format!("/api/users/api-keys/{}/rotate", id))
+            .await
     }
 }
 

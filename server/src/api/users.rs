@@ -1,6 +1,6 @@
 //! User API endpoints — API key management.
 //!
-//! All endpoints require authentication via session token.
+//! All endpoints require authentication via session token or API key.
 
 use axum::{
     Json,
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, SessionService};
+use auth::{ApiKey, ApiKeyId, ApiKeyRepository, SessionService};
 
 use super::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
@@ -23,7 +23,7 @@ pub struct ApiKeyListResponse {
     pub keys: Vec<ApiKeyInfoResponse>,
 }
 
-/// API key info for list/get responses.
+/// API key info for list/get responses (includes deprecation status).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ApiKeyInfoResponse {
     pub id: Uuid,
@@ -33,20 +33,9 @@ pub struct ApiKeyInfoResponse {
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
-}
-
-impl From<ApiKeyInfo> for ApiKeyInfoResponse {
-    fn from(info: ApiKeyInfo) -> Self {
-        Self {
-            id: info.id.0,
-            name: info.name,
-            key_prefix: info.key_prefix,
-            is_active: info.is_active,
-            created_at: info.created_at,
-            last_used_at: info.last_used_at,
-            expires_at: info.expires_at,
-        }
-    }
+    /// When this key was deprecated (rotated). Null for active keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated_at: Option<DateTime<Utc>>,
 }
 
 /// Request to create a new API key.
@@ -91,13 +80,22 @@ where
 {
     let keys = state
         .data_service
-        .list_user_api_keys(user.id)
+        .list_user_api_keys_full(user.id.0)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let keys = keys
-        .iter()
-        .map(|k| ApiKeyInfoResponse::from(ApiKeyInfo::from(k)))
+        .into_iter()
+        .map(|k| ApiKeyInfoResponse {
+            id: k.id,
+            name: k.name,
+            key_prefix: k.key_prefix,
+            is_active: k.is_active,
+            created_at: k.created_at,
+            last_used_at: k.last_used_at,
+            expires_at: k.expires_at,
+            deprecated_at: k.deprecated_at,
+        })
         .collect();
 
     Ok(Json(ApiKeyListResponse { keys }))
@@ -237,4 +235,97 @@ fn hash_api_key(raw_key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(raw_key.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Response after rotating an API key (includes the new plaintext key).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RotateApiKeyResponsePayload {
+    /// ID of the new (replacement) key.
+    pub key_id: Uuid,
+    /// The plaintext API key. Store this securely — it cannot be retrieved again.
+    pub raw_key: String,
+}
+
+/// Rotate an API key: generates a new key, deprecates the old one.
+///
+/// The old key remains valid for a grace window (default 48 h, controlled by
+/// `API_KEY_DEPRECATION_GRACE_SECS`). After the grace window it stops
+/// authenticating.
+#[utoipa::path(
+    post,
+    path = "/users/api-keys/{id}/rotate",
+    tag = "users",
+    security(("bearer_auth" = [])),
+    params(
+        ("id" = Uuid, Path, description = "API key ID to rotate"),
+    ),
+    responses(
+        (status = 200, description = "Key rotated", body = RotateApiKeyResponsePayload),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "API key not found"),
+    )
+)]
+pub async fn rotate_api_key<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RotateApiKeyResponsePayload>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    // Verify the key belongs to this user and is active
+    let key = state
+        .data_service
+        .get_api_key(ApiKeyId(id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if key.user_id != user.id {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if !key.is_active {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Generate a new API key with the same generation logic
+    let raw_key = format!(
+        "ak_{}_{}",
+        generate_key_segment(4),
+        generate_key_segment(32)
+    );
+    let key_prefix = format!("{}****{}", &raw_key[..8], &raw_key[raw_key.len() - 4..]);
+    let key_hash = hash_api_key(&raw_key);
+
+    let now = Utc::now();
+    let new_key = ApiKey {
+        id: ApiKeyId::new(),
+        user_id: user.id,
+        name: format!("{} (rotated)", key.name),
+        key_hash,
+        key_prefix,
+        is_active: true,
+        created_at: now,
+        last_used_at: None,
+        expires_at: key.expires_at,
+    };
+
+    // Create the new key
+    state
+        .data_service
+        .create_api_key(&new_key)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Deprecate the old key
+    state
+        .data_service
+        .set_api_key_deprecated(id, now)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(RotateApiKeyResponsePayload {
+        key_id: new_key.id.0,
+        raw_key,
+    }))
 }

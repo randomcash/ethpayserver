@@ -1367,7 +1367,7 @@ where
 {
     require_store_settings_permission(&state, &user, store_id).await?;
 
-    let limit = query.limit.min(100).max(1);
+    let limit = query.limit.clamp(1, 100);
     let offset = query.offset.max(0);
 
     let (total, deliveries) = types::WebhookDeliveryReader::list_deliveries(

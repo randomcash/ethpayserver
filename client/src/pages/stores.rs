@@ -8,8 +8,9 @@ use leptos_router::hooks::{use_navigate, use_params_map};
 use wasm_bindgen::JsCast;
 
 use crate::api::{
-    CreatePaymentMethodRequest, CreateStoreRequest, EvmApiClient, Store, StorePaymentMethod,
-    StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest,
+    ApiError, CreatePaymentMethodRequest, CreateStoreRequest, EvmApiClient, Store,
+    StorePaymentMethod, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
+    UpdateWebhookRequest, WebhookDeliveryList,
 };
 use crate::app::StoreContext;
 
@@ -987,6 +988,7 @@ fn WebhooksTab(store_id: String) -> impl IntoView {
         });
     };
 
+    let store_id_delivery = store_id.clone();
     view! {
         <div class="store-tab-webhooks">
             <div class="section-header">
@@ -1193,7 +1195,7 @@ fn WebhooksTab(store_id: String) -> impl IntoView {
                 </div>
             </div>
 
-            <WebhookDeliveryLog store_id=store_id.clone() refresh=refresh_counter />
+            <WebhookDeliveryLog store_id=store_id_delivery.clone() refresh=refresh_counter />
         </div>
     }
 }
@@ -1204,15 +1206,16 @@ fn WebhookDeliveryLog(store_id: String, refresh: ReadSignal<u32>) -> impl IntoVi
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
     let store_id_fetch = store_id.clone();
 
-    let deliveries_resource = LocalResource::new(move || {
-        let api = api.get();
-        let sid = store_id_fetch.clone();
-        refresh.get();
-        async move {
-            api.list_webhook_deliveries(&sid, None, None, Some(20), None)
-                .await
-        }
-    });
+    let deliveries_resource: LocalResource<Result<WebhookDeliveryList, ApiError>> =
+        LocalResource::new(move || {
+            let api = api.get();
+            let sid = store_id_fetch.clone();
+            refresh.get();
+            async move {
+                api.list_webhook_deliveries(&sid, None, None, Some(20), None)
+                    .await
+            }
+        });
 
     view! {
         <div class="detail-card" style="margin-top: 1rem;">
@@ -1252,7 +1255,7 @@ fn WebhookDeliveryLog(store_id: String, refresh: ReadSignal<u32>) -> impl IntoVi
                                                 {deliveries.into_iter().map(|d| {
                                                     let badge_class = if d.success { "badge badge-success" } else { "badge badge-error" };
                                                     let badge_text = if d.success { "OK" } else { "Failed" };
-                                                    let http_text = d.http_status.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string());
+                                                    let http_text = d.http_status.map(|s: i16| s.to_string()).unwrap_or_else(|| "-".to_string());
                                                     let latency_text = format!("{}ms", d.latency_ms);
                                                     let time_text = d.created_at.chars().take(19).collect::<String>().replace('T', " ");
                                                     let delivery_id = d.id.clone();
