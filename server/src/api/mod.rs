@@ -89,6 +89,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::create_api_key,
         users::revoke_api_key,
         users::update_api_key,
+        users::rotate_api_key,
     ),
     components(schemas(
         health::HealthResponse,
@@ -128,6 +129,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::CreateApiKeyPayload,
         users::CreateApiKeyResponsePayload,
         users::UpdateApiKeyPayload,
+        users::RotateApiKeyResponsePayload,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -276,6 +278,10 @@ where
         .route(
             "/api-keys/{id}",
             axum::routing::patch(users::update_api_key::<A>),
+        )
+        .route(
+            "/api-keys/{id}/rotate",
+            axum::routing::post(users::rotate_api_key::<A>),
         )
         .with_state(state.clone());
     // Auth API from auth crate (with optional CAPTCHA provider)

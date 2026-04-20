@@ -427,6 +427,19 @@ pub struct ApiKeyInfo {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub expires_at: Option<String>,
+    pub deprecated_at: Option<String>,
+}
+
+/// Response after rotating an API key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotateApiKeyResponse {
+    pub id: String,
+    pub name: String,
+    pub key_prefix: String,
+    pub created_at: String,
+    /// The new plaintext API key.
+    pub key: String,
+    pub old_key_deprecated_at: String,
 }
 
 /// Response for listing API keys.

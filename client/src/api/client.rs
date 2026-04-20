@@ -7,8 +7,8 @@ use thiserror::Error;
 use super::{
     ApiKeyListResponse, CheckoutResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
-    InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, Store,
-    StorePaymentMethod, StoreSettings, StoreWebhook, TxHashLookupResponse,
+    InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, RotateApiKeyResponse,
+    Store, StorePaymentMethod, StoreSettings, StoreWebhook, TxHashLookupResponse,
     UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateStoreSettingsRequest,
     UpdateWebhookRequest, UserInfo, Wallet,
 };
@@ -203,6 +203,21 @@ impl EvmApiClient {
         }
 
         Ok(())
+    }
+
+    /// Make a POST request without a body, returning parsed JSON.
+    async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        let request = self
+            .build_request("POST", path)
+            .build()
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        self.handle_response(response).await
     }
 
     /// Handle response and parse JSON.
@@ -581,6 +596,12 @@ impl EvmApiClient {
     /// Revoke an API key.
     pub async fn revoke_api_key(&self, id: &str) -> Result<(), ApiError> {
         self.delete(&format!("/api/users/api-keys/{}", id)).await
+    }
+
+    /// Rotate an API key (deprecates old, creates new).
+    pub async fn rotate_api_key(&self, id: &str) -> Result<RotateApiKeyResponse, ApiError> {
+        self.post_empty(&format!("/api/users/api-keys/{}/rotate", id))
+            .await
     }
 }
 

@@ -1,8 +1,10 @@
 //! PostgreSQL implementation of the repository traits.
 
+use chrono::{DateTime, Utc};
 use metrics::histogram;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPool, Postgres};
+use uuid::Uuid;
 
 mod auth;
 mod conversions;
@@ -112,5 +114,91 @@ impl PgDataService {
         PostgresApiKeyRepository::new(self.pool.clone())
             .list_user_api_keys_with_rate_limit(user_id)
             .await
+    }
+}
+
+// === API Key Rotation / Deprecation ===
+
+/// Auth info returned when validating an API key.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ApiKeyAuthInfo {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub is_active: bool,
+    pub deprecated_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Full API key info for listing.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ApiKeyFullInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub key_prefix: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub deprecated_at: Option<DateTime<Utc>>,
+    /// Per-key rate limit in requests per minute. Null = server default.
+    pub rate_limit_rpm: Option<i32>,
+}
+
+impl PgDataService {
+    /// Look up an API key by its SHA-256 hash for authentication.
+    pub async fn get_api_key_auth_info(
+        &self,
+        key_hash: &str,
+    ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
+        sqlx::query_as::<_, ApiKeyAuthInfo>(
+            "SELECT id, user_id, is_active, deprecated_at, expires_at FROM api_keys WHERE key_hash = $1",
+        )
+        .bind(key_hash)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    /// List all API keys for a user (with deprecation info and per-key rate limit).
+    pub async fn list_user_api_keys_full(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<ApiKeyFullInfo>, sqlx::Error> {
+        sqlx::query_as::<_, ApiKeyFullInfo>(
+            "SELECT id, name, key_prefix, is_active, created_at, last_used_at, \
+                    expires_at, deprecated_at, rate_limit_rpm \
+             FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Mark an API key as deprecated (starts the grace window).
+    pub async fn set_api_key_deprecated(
+        &self,
+        id: Uuid,
+        deprecated_at: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE api_keys SET deprecated_at = $1 WHERE id = $2")
+            .bind(deprecated_at)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
+impl PgDataService {
+    /// Look up an API key's auth info by its primary key ID (for rotation checks).
+    pub async fn get_api_key_auth_info_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
+        sqlx::query_as::<_, ApiKeyAuthInfo>(
+            "SELECT id, user_id, is_active, deprecated_at, expires_at FROM api_keys WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
     }
 }
