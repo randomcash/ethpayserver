@@ -8,6 +8,10 @@ stages:
 
 default:
   timeout: 3 hours
+  # Custom runner image. Rustfmt, clippy, wasm32 target, mold, sccache,
+  # cargo-nextest, cargo-audit, cargo-deny, and trunk are all baked in.
+  # See openclaw-config/picoclaw/ci-base/Dockerfile.
+  image: registry.gitlab.com/random.cash/payserver-commons/ci-base:rust-1.94
 
 # Docker executor. The runner image
 # (registry.gitlab.com/random.cash/payserver-commons/ci-base:rust-1.94) ships rustfmt, clippy,
@@ -207,15 +211,6 @@ audit:
   # Runs in parallel with the build stage — no Rust compilation happens here.
   needs: []
   script:
-    # Pre-baked in the ci-base runner image. Fall back to install-if-missing
-    # so this works against the stock rust:*-bookworm image too.
-    - |
-      if ! command -v cargo-audit >/dev/null 2>&1; then
-        cargo install cargo-audit --locked --quiet
-      fi
-      if ! command -v cargo-deny >/dev/null 2>&1; then
-        cargo install cargo-deny --locked --quiet
-      fi
     - |
       git config --global --unset-all url."ssh://git@github.com/".insteadOf || true
       if [ -d /cargo-advisory-db/.git ]; then
