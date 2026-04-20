@@ -72,7 +72,7 @@ where
 
     let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
         .await
-        .unwrap_or_default();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let now = chrono::Utc::now();
 
@@ -115,10 +115,9 @@ where
         _ => return StatusCode::NOT_FOUND.into_response(),
     }
 
-    let ws_broadcast = state
-        .ws_broadcast
-        .as_ref()
-        .expect("WsBroadcast must be configured");
+    let Some(ws_broadcast) = state.ws_broadcast.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let rx = ws_broadcast.subscribe();
 
     ws.on_upgrade(move |socket| handle_checkout_socket(socket, rx, query.invoice_id))

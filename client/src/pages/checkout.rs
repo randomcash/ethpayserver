@@ -43,8 +43,8 @@ pub fn CheckoutPage() -> impl IntoView {
     let params = use_params_map();
     let invoice_id = move || params.get().get("id").unwrap_or_default();
 
-    // Create unauthenticated API client
-    let api = EvmApiClient::new("");
+    // Create unauthenticated API client (same-origin, no auth header).
+    let api = EvmApiClient::unauthenticated();
 
     // Selected payment option index
     let (selected_idx, set_selected_idx) = signal(0usize);
@@ -124,10 +124,10 @@ pub fn CheckoutPage() -> impl IntoView {
                     </div>
                 }>
                     {move || checkout_resource.get().map(|result| match &*result {
-                        Err(e) => view! {
+                        Err(_) => view! {
                             <div class="checkout-error">
-                                <h2>"Invoice not found"</h2>
-                                <p>{e.to_string()}</p>
+                                <h2>"Invoice unavailable"</h2>
+                                <p>"This invoice could not be loaded. Check the link and try again."</p>
                             </div>
                         }.into_any(),
                         Ok(data) => {

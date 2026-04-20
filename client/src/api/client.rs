@@ -41,6 +41,13 @@ impl EvmApiClient {
         }
     }
 
+    /// Create a client for public endpoints (no auth header sent).
+    ///
+    /// Uses a same-origin relative base URL. Call `with_token` to authenticate later.
+    pub fn unauthenticated() -> Self {
+        Self::new("")
+    }
+
     /// Set the authorization token.
     pub fn with_token(mut self, token: Option<String>) -> Self {
         self.token = token;
