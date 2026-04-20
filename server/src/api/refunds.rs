@@ -6,14 +6,14 @@
 use axum::{
     Json,
     extract::{Path, State},
+    http::StatusCode,
 };
 use chrono::Utc;
-use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use auth::SessionService;
-use data_service::{InvoiceReader, PaymentReader, RefundReader, RefundWriter, StoreWalletReader};
+use data_service::{InvoiceReader, PaymentReader, RefundReader, RefundWriter};
 use types::{InvoiceId, InvoiceStatus, RefundData, RefundStatus};
 
 use super::extractors::AuthenticatedUser;

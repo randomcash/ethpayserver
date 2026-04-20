@@ -255,6 +255,26 @@ pub fn record_store_created() {
     counter!("ethpayserver_stores_created_total").increment(1);
 }
 
+/// Record a payout initiation.
+pub fn record_payout_initiated(chain_id: u64, asset_symbol: &str) {
+    counter!(
+        "ethpayserver_payouts_initiated_total",
+        "chain_id" => chain_id.to_string(),
+        "asset_symbol" => asset_symbol.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a refund initiation.
+pub fn record_refund_initiated(chain_id: u64, asset_symbol: &str) {
+    counter!(
+        "ethpayserver_refunds_initiated_total",
+        "chain_id" => chain_id.to_string(),
+        "asset_symbol" => asset_symbol.to_string()
+    )
+    .increment(1);
+}
+
 /// Record a rate-limited request.
 pub fn record_rate_limited(tier: &str) {
     counter!(

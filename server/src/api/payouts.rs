@@ -7,14 +7,15 @@
 use axum::{
     Json,
     extract::{Path, State},
+    http::StatusCode,
 };
 use chrono::Utc;
-use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use alloy_primitives::U256;
 use auth::SessionService;
-use data_service::{PaymentReader, PayoutReader, PayoutWriter, StoreWalletReader};
+use data_service::{PaymentReader, PayoutReader, PayoutWriter};
 use types::{PayoutData, PayoutStatus, StoreId};
 
 use super::extractors::AuthenticatedUser;
@@ -117,7 +118,7 @@ where
     };
 
     // Calculate total amount from confirmed payments for the specified invoices
-    let mut total_amount = alloy::primitives::U256::ZERO;
+    let mut total_amount = U256::ZERO;
     for invoice_id_str in &body.invoice_ids {
         let invoice_id = types::InvoiceId::from_string(invoice_id_str.clone());
         let payments = PaymentReader::get_valid_for_invoice(&*state.data_service, &invoice_id)
@@ -129,10 +130,9 @@ where
                 && !payment.reorged
                 && payment.chain_id == body.chain_id
                 && payment.asset_symbol == body.asset_symbol
+                && let Ok(amt) = payment.amount.parse::<U256>()
             {
-                if let Ok(amt) = payment.amount.parse::<alloy::primitives::U256>() {
-                    total_amount += amt;
-                }
+                total_amount += amt;
             }
         }
     }
@@ -201,7 +201,7 @@ where
 
     Ok(Json(PayoutListResponse {
         total,
-        payouts: payouts.into_iter().map(Into::into).collect(),
+        payouts: payouts.into_iter().map(Into::into).collect::<Vec<_>>(),
     }))
 }
 
