@@ -201,7 +201,12 @@ fn parse_env_u32(key: &str, default: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity
+    )]
     use super::*;
 
     #[test]

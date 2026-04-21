@@ -92,3 +92,9 @@ evm = { path = "../evm", features = ["api", "redis", "test-utils"] }
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+# Function-size / complexity — thresholds defined in the workspace clippy.toml
+# (80 lines, cognitive complexity 25). Long functions or state machines must
+# carry #[allow(clippy::too_many_lines, reason = "<why>")] if they can't be
+# split cleanly.
+too_many_lines = "deny"
+cognitive_complexity = "deny"

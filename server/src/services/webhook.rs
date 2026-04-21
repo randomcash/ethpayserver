@@ -582,7 +582,12 @@ pub fn sign_webhook_payload(payload: &str, secret: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity
+    )]
     use super::*;
 
     #[test]

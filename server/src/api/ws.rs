@@ -152,7 +152,12 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<StatusUpda
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity
+    )]
     use super::*;
     use axum::routing;
     use futures::StreamExt;

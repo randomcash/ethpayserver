@@ -1,2 +1,7 @@
 too-many-arguments-threshold = 8
 type-complexity-threshold = 300
+# Function-length guard. Long functions aren't forbidden — they're prompts.
+# Use #[allow(clippy::too_many_lines, reason = "<why>")] on state machines or
+# large match statements where splitting hurts clarity more than it helps.
+too-many-lines-threshold = 80
+cognitive-complexity-threshold = 25

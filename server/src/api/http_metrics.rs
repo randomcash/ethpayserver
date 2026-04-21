@@ -48,7 +48,12 @@ fn normalize_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity
+    )]
     use super::*;
 
     #[test]
