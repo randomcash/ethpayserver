@@ -59,12 +59,14 @@ pub fn InvoicesPage() -> impl IntoView {
 
     // Filter state
     let (active_filter, set_active_filter) = signal("all".to_string());
+    let (currency_filter, set_currency_filter) = signal("all".to_string());
     let (search_query, set_search_query) = signal(String::new());
     let (current_offset, set_current_offset) = signal(0i64);
 
-    // Reset offset when filter or store changes
+    // Reset offset when any filter or store changes
     let _reset_offset_on_filter = Effect::new(move || {
         let _ = active_filter.get();
+        let _ = currency_filter.get();
         let _ = store_ctx.selected_store_id.get();
         set_current_offset.set(0);
     });
@@ -109,8 +111,12 @@ pub fn InvoicesPage() -> impl IntoView {
         was_showing.set_value(showing);
     });
 
-    // Convert active filter to API status param
+    // Convert filters to API params
     let status_param = Signal::derive(move || match active_filter.get().as_str() {
+        "all" => None,
+        other => Some(other.to_string()),
+    });
+    let currency_param = Signal::derive(move || match currency_filter.get().as_str() {
         "all" => None,
         other => Some(other.to_string()),
     });
@@ -119,6 +125,7 @@ pub fn InvoicesPage() -> impl IntoView {
         let api = api.get();
         let store_id = store_ctx.selected_store_id.get();
         let status = status_param.get();
+        let currency = currency_param.get();
         let offset = current_offset.get();
         let _ = refresh.get();
 
@@ -126,18 +133,16 @@ pub fn InvoicesPage() -> impl IntoView {
             let Some(sid) = store_id else {
                 return Err(ApiError::Network("Please select a store first".to_string()));
             };
-            api.list_invoices(&sid, status.as_deref(), Some(PAGE_SIZE), Some(offset))
-                .await
+            api.list_invoices(
+                &sid,
+                status.as_deref(),
+                currency.as_deref(),
+                Some(PAGE_SIZE),
+                Some(offset),
+            )
+            .await
         }
     });
-
-    let filters = vec![
-        ("all", "All"),
-        ("pending", "Pending"),
-        ("processing", "Processing"),
-        ("paid", "Paid"),
-        ("expired", "Expired"),
-    ];
 
     view! {
         <div class="invoices-page">
@@ -162,18 +167,37 @@ pub fn InvoicesPage() -> impl IntoView {
             // Filters and Search
             <div class="invoices-toolbar">
                 <div class="invoices-filters">
-                    {filters.into_iter().map(|(key, label)| {
-                        let key_owned = key.to_string();
-                        let key_for_click = key.to_string();
-                        view! {
-                            <button
-                                class=move || if active_filter.get() == key_owned { "filter-tab active" } else { "filter-tab" }
-                                on:click=move |_| set_active_filter.set(key_for_click.clone())
-                            >
-                                {label}
-                            </button>
-                        }
-                    }).collect_view()}
+                    <select
+                        class="filter-select"
+                        on:change=move |ev| set_active_filter.set(event_target_value(&ev))
+                        prop:value=move || active_filter.get()
+                    >
+                        <option value="all">"All statuses"</option>
+                        <option value="pending">"Pending"</option>
+                        <option value="processing">"Processing"</option>
+                        <option value="partially_paid">"Partially Paid"</option>
+                        <option value="paid">"Paid"</option>
+                        <option value="expired">"Expired"</option>
+                        <option value="cancelled">"Cancelled"</option>
+                        <option value="refunded">"Refunded"</option>
+                        <option value="late_paid">"Late Paid"</option>
+                    </select>
+
+                    <select
+                        class="filter-select"
+                        on:change=move |ev| set_currency_filter.set(event_target_value(&ev))
+                        prop:value=move || currency_filter.get()
+                    >
+                        <option value="all">"All currencies"</option>
+                        <option value="USD">"USD"</option>
+                        <option value="EUR">"EUR"</option>
+                        <option value="GBP">"GBP"</option>
+                        <option value="BTC">"BTC"</option>
+                        <option value="ETH">"ETH"</option>
+                        <option value="USDT">"USDT"</option>
+                        <option value="USDC">"USDC"</option>
+                        <option value="DAI">"DAI"</option>
+                    </select>
                 </div>
 
                 <div class="invoices-search">
