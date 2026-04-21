@@ -507,6 +507,7 @@ where
         (status = 403, description = "Insufficient permissions"),
     )
 )]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // validation + payment-option setup is one logical flow
 pub async fn create_invoice<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,

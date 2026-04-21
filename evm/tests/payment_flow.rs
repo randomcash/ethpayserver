@@ -37,6 +37,7 @@ fn test_monitor_config(required_confirmations: u64) -> ChainMonitorConfig {
 // ============================================================================
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // end-to-end payment flow test with multi-step setup + assertions
 async fn test_native_payment_detection_and_confirmation() {
     let source = MockBlockSource::new(TEST_CHAIN_ID);
     let test_source = source.clone(); // shared handle for injection

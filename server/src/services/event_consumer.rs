@@ -95,6 +95,7 @@ impl<
     /// Run the event consumer as a background task.
     ///
     /// This should be spawned with `tokio::spawn(consumer.run())`.
+    #[allow(clippy::cognitive_complexity)] // event-loop with stream + error handling
     pub async fn run(self) {
         tracing::info!("Starting event consumer");
 
@@ -116,6 +117,7 @@ impl<
     }
 
     /// Handle a single monitor event.
+    #[allow(clippy::cognitive_complexity)] // match on event variants with per-variant logging
     async fn handle_event(&self, event: MonitorEvent) -> Result<(), EventConsumerError> {
         match event {
             MonitorEvent::PaymentDetected(payment) => self.handle_payment_detected(payment).await,
@@ -170,6 +172,7 @@ impl<
     /// Creates a payment record in the database. The DB trigger automatically:
     /// - Updates invoice.amount_received
     /// - Transitions invoice status: pending → processing
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // payment state machine — single logical transaction
     async fn handle_payment_detected(
         &self,
         event: PaymentDetected,
@@ -370,6 +373,7 @@ impl<
     ///
     /// Updates payment confirmation status and transitions invoice to `paid`
     /// if amount_received >= amount.
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // confirmation state machine — reads/updates/transitions in one flow
     async fn handle_payment_confirmed(
         &self,
         event: PaymentConfirmed,
@@ -560,6 +564,7 @@ impl<
     /// Queue a webhook notification for an invoice status change.
     ///
     /// This is a non-blocking operation - errors are logged but don't stop event processing.
+    #[allow(clippy::cognitive_complexity)] // webhook payload assembly with optional fields
     async fn queue_webhook(
         &self,
         event_type: WebhookEventType,
@@ -648,6 +653,7 @@ impl<
     /// Marks affected payments as reorged and reverts invoice status:
     /// - If other valid payments exist → `processing`
     /// - If no valid payments → `pending`
+    #[allow(clippy::cognitive_complexity)] // reorg recovery with multi-payment rollback logic
     async fn handle_reorg_detected(&self, event: ReorgDetected) -> Result<(), EventConsumerError> {
         // Try to get network from chain_id (None for testnets)
         let network = chain_id_to_network(event.chain_id);
@@ -1237,6 +1243,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // multi-step reorg test with setup + multiple assertions
     async fn test_handle_reorg_with_remaining_valid_payments() {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());

@@ -28,6 +28,10 @@ async-trait = "0.1"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
 tracing = "0.1"
 
+[lints.clippy]
+too_many_lines = { level = "deny", priority = -1 }
+cognitive_complexity = "deny"
+
 [dev-dependencies]
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
 crypto = { git = "https://gitlab.com/random.cash/payserver-commons.git" }

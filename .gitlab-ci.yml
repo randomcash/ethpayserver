@@ -80,12 +80,26 @@ verify:
           cargo nextest run -p data-service --no-fail-fast --run-ignored only \
           || echo "WARNING: integration tests failed (known FK fixture issues, non-blocking)"
       fi
+    # Coverage gating (RCS-110) — install cargo-llvm-cov if not in ci-base image.
+    # TODO: bake into ci-base image (RCS-111) and remove the install-if-missing.
+    - rustup component add llvm-tools 2>/dev/null || true
+    - command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+    - RUSTC_WRAPPER="" cargo llvm-cov nextest --workspace --lib --no-fail-fast --fail-under-lines 70 --cobertura --output-path cobertura.xml
     # Make sure the release binaries cargo-check cleanly. Artifacts are produced
     # by the dedicated build:* jobs on testnet/main branches.
     - cargo check --release --bin ethpayserver
     - cargo check --release --bin evmmonitor --features monitor-bin
     - cargo check --release --bin migrate_postgres
     - sccache --show-stats || true
+  artifacts:
+    when: always
+    paths:
+      - cobertura.xml
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: cobertura.xml
+  coverage: '/TOTAL\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+\.\d+)%/'
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
