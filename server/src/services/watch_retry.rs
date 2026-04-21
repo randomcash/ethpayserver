@@ -79,6 +79,10 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
     /// Run the retry service as a background task.
     ///
     /// This should be spawned as a tokio task.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "daemon loop: enabled-check + ticker; branches share cancellation state"
+    )]
     pub async fn run(self) {
         if !self.config.enabled {
             tracing::info!("Watch retry service disabled");
@@ -102,6 +106,11 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
     }
 
     /// Retry all pending watched addresses.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cognitive_complexity,
+        reason = "per-address retry loop with parse + amount/token decoding + watch call + mark_notified; shared mutable state prevents a clean helper split"
+    )]
     async fn retry_pending_watches(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let pending = WatchedAddressReader::get_pending(&*self.data_service).await?;
 
