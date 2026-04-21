@@ -54,7 +54,6 @@ before_script:
 
 verify:
   stage: verify
-  resource_group: rust-compile
   script:
     - cargo fmt -p server -p data-service -p evm -p ethpayserver-client -- --check
     - cargo clippy -p server -p data-service -p evm -p ethpayserver-client --all-targets -- -D warnings
@@ -100,7 +99,6 @@ verify:
 build:server:
   stage: build
   needs: ["verify"]
-  resource_group: rust-compile
   script:
     - cargo build --release --bin ethpayserver
     - cargo build --release --bin migrate_postgres
@@ -118,7 +116,6 @@ build:server:
 build:monitor:
   stage: build
   needs: ["verify"]
-  resource_group: rust-compile
   script:
     - cargo build --release --bin evmmonitor --features monitor-bin
     - sccache --show-stats || true
@@ -133,7 +130,6 @@ build:monitor:
 build:client:
   stage: build
   needs: ["verify"]
-  resource_group: rust-compile
   script:
     - cd client && trunk build --release
   artifacts:
