@@ -56,6 +56,7 @@ use evm::monitor::{
 };
 use evm::network::get_any_chain_config;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
@@ -159,10 +160,13 @@ async fn main() -> anyhow::Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();
 
+    // Initialize Sentry (no-op when SENTRY_DSN is unset)
+    let _sentry_guard = init_sentry();
+
     // Parse CLI args
     let args = Args::parse();
 
-    // Initialize logging
+    // Initialize logging (includes Sentry layer when DSN is configured)
     init_logging(&args.log_format, &args.log_level)?;
 
     info!("starting evmmonitor");
@@ -566,6 +570,17 @@ async fn publish_health_loop(
     }
 }
 
+fn init_sentry() -> sentry::ClientInitGuard {
+    sentry::init(sentry::ClientOptions {
+        dsn: std::env::var("SENTRY_DSN")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        release: option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from),
+        environment: std::env::var("SENTRY_ENVIRONMENT").ok().map(Cow::from),
+        ..Default::default()
+    })
+}
+
 fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
     let filter = EnvFilter::try_new(level)?;
 
@@ -573,12 +588,14 @@ fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
         "json" => {
             tracing_subscriber::registry()
                 .with(filter)
+                .with(sentry_tracing::layer())
                 .with(tracing_subscriber::fmt::layer().json())
                 .init();
         }
         _ => {
             tracing_subscriber::registry()
                 .with(filter)
+                .with(sentry_tracing::layer())
                 .with(tracing_subscriber::fmt::layer())
                 .init();
         }

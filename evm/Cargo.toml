@@ -16,7 +16,7 @@ default = []
 api = ["axum", "utoipa", "types", "data-service", "auth"]
 redis = ["dep:redis"]
 test-utils = []
-monitor-bin = ["redis", "types", "data-service", "data-service/redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "tokio/full"]
+monitor-bin = ["redis", "types", "data-service", "data-service/redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "dep:sentry", "dep:sentry-tracing", "tokio/full"]
 
 [dependencies]
 # Ethereum/EVM - alloy ecosystem
@@ -70,6 +70,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optio
 dotenvy = { version = "0.15", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 anyhow = { version = "1.0", optional = true }
+sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls"], optional = true }
+sentry-tracing = { version = "0.47", optional = true }
 
 # API (optional)
 axum = { version = "0.8", optional = true }
