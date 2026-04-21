@@ -128,13 +128,12 @@ pub async fn middleware(
             state
                 .limiters
                 .insert(info.id, (effective_rpm, make_direct_limiter(effective_rpm)));
-            // Freshly-inserted entry — if it's gone now, another request
-            // already rebuilt it with the same rpm; in that case just
-            // allow this request and let the next one hit the limiter.
-            let Some(entry) = state.limiters.get(&info.id) else {
-                return next.run(req).await;
-            };
-            entry.value().1.check()
+            // Re-fetch; None is unreachable after insert, but skip
+            // rate-limiting rather than panicking if it somehow occurs.
+            match state.limiters.get(&info.id) {
+                Some(entry) => entry.value().1.check(),
+                None => Ok(()),
+            }
         } else {
             limiter.check()
         }
