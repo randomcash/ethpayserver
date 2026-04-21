@@ -5,6 +5,7 @@ stages:
   - audit
   - docker
   - notify
+  - mutation
 
 default:
   timeout: 3 hours
@@ -308,3 +309,55 @@ notify:deploy:
   rules:
     - if: $CI_COMMIT_BRANCH == "testnet"
     - if: $CI_COMMIT_BRANCH == "main"
+
+# ---------------------------------------------------------------------------
+# mutation — weekly cargo-mutants safety net on money-path code (RCS-111).
+# Runs ONLY on scheduled pipelines (configure: Sunday 03:00 UTC, ref: testnet).
+# Each file gets its own parallel job. Surviving mutants are filed as Linear
+# issues tagged "test-gap". Does NOT fail the pipeline — informational only.
+# ---------------------------------------------------------------------------
+
+.mutation:
+  stage: mutation
+  needs: []
+  timeout: 6 hours
+  before_script:
+    - |
+      COMMONS_URL="https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.com/random.cash/payserver-commons.git"
+      BRANCH="${CI_COMMIT_BRANCH:-testnet}"
+      rm -rf ../payserver-commons || true
+      if git clone --depth 1 -b "$BRANCH" "$COMMONS_URL" ../payserver-commons 2>/dev/null; then
+        echo "Cloned payserver-commons branch: $BRANCH"
+      else
+        git clone --depth 1 "$COMMONS_URL" ../payserver-commons
+      fi
+    - sccache --start-server 2>/dev/null || true
+    - cargo install cargo-mutants --locked
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - mutants.out/
+    expire_in: 14 days
+
+mutation:test:
+  extends: .mutation
+  parallel:
+    matrix:
+      - MUTANT_FILE:
+          - server/src/api/invoices.rs
+          - server/src/api/payouts.rs
+          - server/src/api/refunds.rs
+          - server/src/services/event_consumer.rs
+          - server/src/services/webhook.rs
+          - evm/src/wallet.rs
+          - evm/src/monitor/chain.rs
+          - evm/src/monitor/coordinator.rs
+          - evm/src/monitor/events.rs
+          - evm/src/monitor/handlers.rs
+  script:
+    - cargo mutants --file "$MUTANT_FILE" -- --workspace --lib --no-fail-fast || true
+    - bash scripts/report-surviving-mutants.sh mutants.out
+    - sccache --show-stats || true
