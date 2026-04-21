@@ -182,6 +182,7 @@ pub async fn middleware(
     if !lock_acquired {
         // Another request with the same key is in-flight
         return (
+            #[allow(clippy::expect_used)] // 425 is always a valid status code
             StatusCode::from_u16(425).expect("425 is a valid status code"),
             axum::Json(serde_json::json!({"error": "idempotency_in_progress"})),
         )
@@ -306,6 +307,7 @@ fn build_replay_response(cached: &CachedResponse) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
