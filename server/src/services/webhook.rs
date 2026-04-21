@@ -155,6 +155,10 @@ pub struct WebhookJob {
 }
 
 impl WebhookJob {
+    /// Stripe-like retry delays: 1m, 5m, 30m, 2h, 12h, 24h.
+    /// Index by (attempts - 1), clamped to last entry.
+    const RETRY_DELAYS_SECS: [u64; 6] = [60, 300, 1800, 7200, 43200, 86400];
+
     /// Create a new webhook job.
     pub fn new(webhook_url: String, webhook_secret: String, payload: WebhookPayload) -> Self {
         let now = Utc::now();
@@ -164,21 +168,24 @@ impl WebhookJob {
             webhook_secret,
             payload,
             attempts: 0,
-            max_attempts: 3,
+            max_attempts: 7,
             created_at: now,
             scheduled_at: now,
         }
     }
 
-    /// Calculate delay for next retry using exponential backoff.
+    /// Calculate delay for next retry using a Stripe-like backoff schedule.
     ///
-    /// Attempt 1: 10 seconds
-    /// Attempt 2: 30 seconds
-    /// Attempt 3: 90 seconds (then give up)
+    /// Attempt 1: 1 minute
+    /// Attempt 2: 5 minutes
+    /// Attempt 3: 30 minutes
+    /// Attempt 4: 2 hours
+    /// Attempt 5: 12 hours
+    /// Attempt 6: 24 hours
+    /// Total retry window: ~38.6 hours
     pub fn retry_delay(&self) -> Duration {
-        let base_delay = 10u64; // seconds
-        let multiplier = 3u64.pow(self.attempts);
-        Duration::from_secs(base_delay * multiplier)
+        let idx = self.attempts.saturating_sub(1) as usize;
+        Duration::from_secs(Self::RETRY_DELAYS_SECS[idx.min(Self::RETRY_DELAYS_SECS.len() - 1)])
     }
 
     /// Check if job has exceeded max attempts.
@@ -390,9 +397,13 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     true,
                     delivery_duration,
                 );
-                self.record_delivery_event(&job, true, None).await;
+                metrics::record_webhook_delivery_status("delivered");
+                self.record_delivery_event(&job, "webhook_delivered", None)
+                    .await;
             }
             Err(e) => {
+                let error_msg = truncate_error(&e.to_string(), 500);
+
                 tracing::warn!(
                     job_id = %job.id,
                     invoice_id = %job.payload.invoice_id,
@@ -410,14 +421,22 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     tracing::error!(
                         job_id = %job.id,
                         invoice_id = %job.payload.invoice_id,
-                        "Webhook delivery exhausted, giving up"
+                        "Webhook delivery permanently failed after {} attempts",
+                        job.attempts,
                     );
                     metrics::record_webhook_failed(&job.payload.event_type.to_string());
-                    self.record_delivery_event(&job, false, Some(e.to_string()))
+                    metrics::record_webhook_delivery_status("permanent_failed");
+                    self.record_delivery_event(&job, "webhook_permanent_failed", Some(error_msg))
                         .await;
                 } else {
-                    // Schedule retry. `retry_delay()` returns a bounded Duration
-                    // (seconds, not years) so the chrono conversion cannot fail.
+                    // Schedule retry.
+                    metrics::record_webhook_delivery_status("retrying");
+                    metrics::record_webhook_retry_attempt(job.attempts);
+                    self.record_delivery_event(&job, "webhook_retrying", Some(error_msg))
+                        .await;
+
+                    // `retry_delay()` returns a bounded std Duration, so the chrono
+                    // conversion cannot fail in practice.
                     #[allow(clippy::unwrap_used, reason = "retry_delay is bounded")]
                     let next = Utc::now() + chrono::Duration::from_std(job.retry_delay()).unwrap();
                     job.scheduled_at = next;
@@ -509,19 +528,18 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     }
 
     /// Record webhook delivery event in payment_events table.
-    async fn record_delivery_event(&self, job: &WebhookJob, success: bool, error: Option<String>) {
-        let event_type = if success {
-            "webhook_delivered"
-        } else {
-            "webhook_failed"
-        };
-
+    async fn record_delivery_event(
+        &self,
+        job: &WebhookJob,
+        event_type: &str,
+        error: Option<String>,
+    ) {
         let event_data = serde_json::json!({
             "webhook_id": job.id,
-            "event_type": job.payload.event_type.to_string(),
+            "webhook_event_type": job.payload.event_type.to_string(),
             "attempts": job.attempts,
-            "success": success,
-            "error": error,
+            "max_attempts": job.max_attempts,
+            "last_error": error,
         });
 
         let invoice_id = types::InvoiceId::from_string(job.payload.invoice_id.clone());
@@ -541,6 +559,15 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                 "Failed to record webhook delivery event"
             );
         }
+    }
+}
+
+/// Truncate an error message to a maximum length, appending "..." if truncated.
+fn truncate_error(error: &str, max_len: usize) -> String {
+    if error.len() <= max_len {
+        error.to_string()
+    } else {
+        format!("{}...", &error[..max_len.saturating_sub(3)])
     }
 }
 
@@ -585,6 +612,23 @@ pub fn sign_webhook_payload(payload: &str, secret: &str) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    fn test_payload() -> WebhookPayload {
+        WebhookPayload {
+            event_id: Uuid::new_v4(),
+            event_type: WebhookEventType::PaymentDetected,
+            timestamp: Utc::now(),
+            invoice_id: "test-invoice".to_string(),
+            store_id: Uuid::new_v4(),
+            status: "processing".to_string(),
+            amount: "1000".to_string(),
+            amount_received: "1000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            chain_id: 1,
+            network: Some("ethereum".to_string()),
+            payment: None,
+        }
+    }
 
     #[test]
     fn test_webhook_event_type_display() {
@@ -635,98 +679,75 @@ mod tests {
 
     #[test]
     fn test_webhook_job_new() {
-        let payload = WebhookPayload {
-            event_id: Uuid::new_v4(),
-            event_type: WebhookEventType::PaymentDetected,
-            timestamp: Utc::now(),
-            invoice_id: "test-invoice".to_string(),
-            store_id: Uuid::new_v4(),
-            status: "processing".to_string(),
-            amount: "1000".to_string(),
-            amount_received: "1000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            chain_id: 1,
-            network: Some("ethereum".to_string()),
-            payment: None,
-        };
-
         let job = WebhookJob::new(
             "https://example.com/webhook".to_string(),
             "secret123".to_string(),
-            payload,
+            test_payload(),
         );
 
         assert_eq!(job.attempts, 0);
-        assert_eq!(job.max_attempts, 3);
+        assert_eq!(job.max_attempts, 7);
         assert_eq!(job.webhook_url, "https://example.com/webhook");
         assert!(!job.is_exhausted());
     }
 
     #[test]
     fn test_webhook_job_retry_delay() {
-        let payload = WebhookPayload {
-            event_id: Uuid::new_v4(),
-            event_type: WebhookEventType::PaymentDetected,
-            timestamp: Utc::now(),
-            invoice_id: "test-invoice".to_string(),
-            store_id: Uuid::new_v4(),
-            status: "processing".to_string(),
-            amount: "1000".to_string(),
-            amount_received: "1000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            chain_id: 1,
-            network: Some("ethereum".to_string()),
-            payment: None,
-        };
-
         let mut job = WebhookJob::new(
             "https://example.com/webhook".to_string(),
             "secret123".to_string(),
-            payload,
+            test_payload(),
         );
 
-        // Attempt 0: 10 * 3^0 = 10 seconds
-        assert_eq!(job.retry_delay(), Duration::from_secs(10));
-
+        // Attempt 1: 60s (1 minute)
         job.attempts = 1;
-        // Attempt 1: 10 * 3^1 = 30 seconds
-        assert_eq!(job.retry_delay(), Duration::from_secs(30));
+        assert_eq!(job.retry_delay(), Duration::from_secs(60));
 
+        // Attempt 2: 300s (5 minutes)
         job.attempts = 2;
-        // Attempt 2: 10 * 3^2 = 90 seconds
-        assert_eq!(job.retry_delay(), Duration::from_secs(90));
+        assert_eq!(job.retry_delay(), Duration::from_secs(300));
+
+        // Attempt 3: 1800s (30 minutes)
+        job.attempts = 3;
+        assert_eq!(job.retry_delay(), Duration::from_secs(1800));
+
+        // Attempt 4: 7200s (2 hours)
+        job.attempts = 4;
+        assert_eq!(job.retry_delay(), Duration::from_secs(7200));
+
+        // Attempt 5: 43200s (12 hours)
+        job.attempts = 5;
+        assert_eq!(job.retry_delay(), Duration::from_secs(43200));
+
+        // Attempt 6: 86400s (24 hours)
+        job.attempts = 6;
+        assert_eq!(job.retry_delay(), Duration::from_secs(86400));
     }
 
     #[test]
     fn test_webhook_job_is_exhausted() {
-        let payload = WebhookPayload {
-            event_id: Uuid::new_v4(),
-            event_type: WebhookEventType::PaymentDetected,
-            timestamp: Utc::now(),
-            invoice_id: "test-invoice".to_string(),
-            store_id: Uuid::new_v4(),
-            status: "processing".to_string(),
-            amount: "1000".to_string(),
-            amount_received: "1000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            chain_id: 1,
-            network: Some("ethereum".to_string()),
-            payment: None,
-        };
-
         let mut job = WebhookJob::new(
             "https://example.com/webhook".to_string(),
             "secret123".to_string(),
-            payload,
+            test_payload(),
         );
 
-        assert!(!job.is_exhausted()); // 0 attempts
-        job.attempts = 1;
-        assert!(!job.is_exhausted()); // 1 attempt
-        job.attempts = 2;
-        assert!(!job.is_exhausted()); // 2 attempts
-        job.attempts = 3;
-        assert!(job.is_exhausted()); // 3 attempts = max
+        for i in 0..7 {
+            job.attempts = i;
+            assert!(
+                !job.is_exhausted(),
+                "should not be exhausted at attempt {i}"
+            );
+        }
+        job.attempts = 7;
+        assert!(job.is_exhausted(), "should be exhausted at attempt 7");
+    }
+
+    #[test]
+    fn test_webhook_permanent_failure_after_7_attempts() {
+        let total_retry_secs: u64 = WebhookJob::RETRY_DELAYS_SECS.iter().sum();
+        // 60 + 300 + 1800 + 7200 + 43200 + 86400 = 138960 seconds (~38.6 hours)
+        assert_eq!(total_retry_secs, 138_960);
     }
 
     #[test]
@@ -817,5 +838,21 @@ mod tests {
         let deserialized: WebhookJob = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.webhook_url, job.webhook_url);
         assert_eq!(deserialized.payload.invoice_id, job.payload.invoice_id);
+    }
+
+    #[test]
+    fn test_truncate_error() {
+        let short = "short error";
+        assert_eq!(truncate_error(short, 500), short);
+
+        let exact = "a".repeat(500);
+        assert_eq!(truncate_error(&exact, 500), exact);
+
+        let long = "b".repeat(600);
+        let truncated = truncate_error(&long, 500);
+        assert_eq!(truncated.len(), 500);
+        assert!(truncated.ends_with("..."));
+
+        assert_eq!(truncate_error("", 500), "");
     }
 }
