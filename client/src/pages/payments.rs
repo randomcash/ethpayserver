@@ -8,6 +8,7 @@ use leptos_router::hooks::use_params_map;
 
 use crate::api::{ApiError, EvmApiClient, Payment};
 use crate::app::StoreContext;
+use crate::components::{PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
 
 /// Helper to get chain name from chain ID.
@@ -87,9 +88,6 @@ fn truncate_hash(hash: &str, prefix: usize, suffix: usize) -> String {
         hash.to_string()
     }
 }
-
-/// Number of payments per page.
-const PAGE_SIZE: i64 = 20;
 
 /// Payments list page.
 #[component]
@@ -292,10 +290,6 @@ pub fn PaymentsPage() -> impl IntoView {
                             }.into_any()
                         } else {
                             let offset = current_offset.get();
-                            let showing_start = offset + 1;
-                            let showing_end = offset + filtered.len() as i64;
-                            let has_prev = offset > 0;
-                            let has_next = offset + PAGE_SIZE < total;
 
                             view! {
                                 // Payment Table (Desktop)
@@ -328,23 +322,13 @@ pub fn PaymentsPage() -> impl IntoView {
                                 </div>
 
                                 // Pagination
-                                <div class="payments-pagination">
-                                    <div class="pagination-info">
-                                        "Showing "<strong>{showing_start}"-"{showing_end}</strong>" of "<strong>{total}</strong>" payments"
-                                    </div>
-                                    <div class="pagination-controls">
-                                        <button
-                                            class="btn btn-ghost btn-sm"
-                                            disabled=move || !has_prev
-                                            on:click=move |_| set_current_offset.update(|o| *o = (*o - PAGE_SIZE).max(0))
-                                        >"Previous"</button>
-                                        <button
-                                            class="btn btn-ghost btn-sm"
-                                            disabled=move || !has_next
-                                            on:click=move |_| set_current_offset.update(|o| *o += PAGE_SIZE)
-                                        >"Next"</button>
-                                    </div>
-                                </div>
+                                <Pagination
+                                    total=total
+                                    page_size=PAGE_SIZE
+                                    current_offset=offset
+                                    on_page_change=move |new_offset| set_current_offset.set(new_offset)
+                                    item_label="payments"
+                                />
                             }.into_any()
                         }
                     }
