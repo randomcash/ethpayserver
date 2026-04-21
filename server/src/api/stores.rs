@@ -1753,6 +1753,7 @@ where
         (status = 404, description = "Store not found"),
     )
 )]
+#[allow(clippy::too_many_lines)] // PATCH handler validates + persists many optional fields
 pub async fn update_store_settings<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,

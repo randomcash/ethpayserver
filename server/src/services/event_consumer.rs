@@ -566,7 +566,7 @@ impl<
     /// Queue a webhook notification for an invoice status change.
     ///
     /// This is a non-blocking operation - errors are logged but don't stop event processing.
-    #[allow(clippy::cognitive_complexity)] // webhook payload assembly with optional fields
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)] // webhook payload assembly with optional fields
     async fn queue_webhook(
         &self,
         event_type: WebhookEventType,
