@@ -1711,8 +1711,7 @@ mod tests {
         assert_eq!(result.unwrap_err(), "Amount must be positive");
     }
 
-    }
-
+    // =========================================================================
     // ListInvoicesQuery deserialization
     // =========================================================================
 
@@ -1852,7 +1851,8 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["total"], 0);
         assert!(json["invoices"].as_array().unwrap().is_empty());
-=======
+    }
+
     // CSV writer tests
 
     #[test]
