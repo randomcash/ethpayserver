@@ -89,7 +89,9 @@ pub fn CheckoutPage() -> impl IntoView {
             .unwrap_or_default();
         let ws_url = format!(
             "{}://{}/checkout/ws?invoice_id={}",
-            protocol, host, id_for_ws
+            protocol,
+            host,
+            js_sys::encode_uri_component(&id_for_ws)
         );
         let _ = ws.connect(&ws_url);
     }

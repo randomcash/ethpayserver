@@ -210,4 +210,37 @@ mod tests {
         let query: CheckoutWsQuery = serde_json::from_value(json).unwrap();
         assert_eq!(query.invoice_id, "inv_abc");
     }
+
+    /// Ensures `GET /checkout/ws` routes to the WebSocket handler, not to
+    /// `get_checkout` with `invoice_id = "ws"`. Axum prioritises static path
+    /// segments over dynamic params, but this test guards against a future
+    /// routing regression or a rebase that flips the order.
+    #[tokio::test]
+    async fn test_ws_route_wins_over_invoice_id_param() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // Build a minimal router mirroring the production mount.
+        let app: Router = Router::new()
+            .route(
+                "/{invoice_id}",
+                axum::routing::get(
+                    |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                        format!("invoice={id}")
+                    },
+                ),
+            )
+            .route("/ws", axum::routing::get(|| async { "websocket" }));
+
+        // A plain GET /ws (no upgrade headers) must hit the "websocket" handler,
+        // not the `{invoice_id}` handler with id="ws".
+        let resp = app
+            .oneshot(Request::builder().uri("/ws").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"websocket");
+    }
 }
