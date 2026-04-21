@@ -142,6 +142,10 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
     ///
     /// Uses streaming to minimize memory usage.
     /// Expires invoices in pending, processing, or partially_paid states.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "streaming cursor with per-row retry + metric emission + WS broadcast + webhook queueing; shared mutable counter prevents clean split"
+    )]
     pub async fn check_expired(&self) -> Result<u64, CleanupError> {
         tracing::debug!("Checking expired invoices");
 
@@ -201,6 +205,10 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
     /// Queue a webhook notification for an expired invoice.
     ///
     /// This is a non-blocking operation - errors are logged but don't stop expiration processing.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "webhook payload assembly with early-outs for missing store/webhook/URL and optional metadata plumbing"
+    )]
     async fn queue_expiration_webhook(&self, invoice_id: &types::InvoiceId) {
         let Some(webhook_service) = &self.webhook_service else {
             return;
@@ -433,6 +441,10 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
     /// 2. Cleans up watched addresses for completed invoices
     ///
     /// Should be spawned with `tokio::spawn(service.run())`.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "daemon loop with tokio::select over cleanup ticker + shutdown signal"
+    )]
     pub async fn run(self: Arc<Self>) {
         tracing::info!(
             interval_secs = self.config.fallback_interval_secs,
