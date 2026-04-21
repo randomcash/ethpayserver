@@ -39,6 +39,7 @@ impl InvoiceReader for PgDataService {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // sequential dynamic-SQL builder with per-field binds
     async fn query(
         &self,
         params: &InvoiceQueryParams,

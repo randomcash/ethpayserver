@@ -208,6 +208,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     }
 
     /// Start the monitor.
+    #[allow(clippy::cognitive_complexity)] // tokio::select! event loop with multiple branches
     pub async fn start(self: Arc<Self>) -> EvmResult<()> {
         let chain_id = self.chain_id();
         info!(
@@ -283,6 +284,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     }
 
     /// Process a new block.
+    #[allow(clippy::cognitive_complexity)] // reorg check + watched-address scan is one logical unit
     async fn process_block(&self, block: &BlockNotification) -> EvmResult<()> {
         let chain_id = self.chain_id();
         debug!(chain_id, block = block.number, "processing block");

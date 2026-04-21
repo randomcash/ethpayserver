@@ -268,6 +268,7 @@ impl WatchedAddressReader for PgDataService {
 
 #[async_trait]
 impl WatchedAddressWriter for PgDataService {
+    #[allow(clippy::too_many_lines)] // ERC20 vs native-asset branches each need their own SQL + tx
     async fn upsert(
         &self,
         address: &str,

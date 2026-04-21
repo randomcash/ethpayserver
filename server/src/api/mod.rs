@@ -145,6 +145,7 @@ pub struct ApiDoc;
 /// - `/evm` - EVM operations (tokens, networks)
 /// - `/auth` - Authentication
 /// - `/stores` - Store management
+#[allow(clippy::too_many_lines)] // route registration table — splitting hides the full API surface
 pub fn router<A>(
     state: PgAppState<A>,
     enable_swagger: bool,

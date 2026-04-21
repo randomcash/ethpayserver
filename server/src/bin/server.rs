@@ -26,6 +26,7 @@ use server::{
 };
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // server bootstrap — config, DB, services, routes in sequence
 async fn main() -> Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();

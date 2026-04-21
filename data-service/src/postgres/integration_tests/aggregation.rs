@@ -24,6 +24,7 @@ use super::{
 /// - Verify: amount_received = $100
 #[tokio::test]
 #[ignore]
+#[allow(clippy::too_many_lines)] // integration test with multi-step setup + assertions
 async fn integration_multi_currency_payment_aggregation() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 

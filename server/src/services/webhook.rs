@@ -334,6 +334,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// Process the next job from the queue.
     ///
     /// Returns Ok(true) if a job was processed, Ok(false) if queue was empty.
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // Redis dequeue + HTTP delivery + retry logic
     async fn process_next_job(&self) -> Result<bool, WebhookError> {
         let mut conn = self
             .redis_client

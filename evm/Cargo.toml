@@ -78,5 +78,9 @@ types = { git = "https://gitlab.com/random.cash/payserver-commons.git", optional
 data-service = { path = "../data-service", optional = true }
 auth = { git = "https://gitlab.com/random.cash/payserver-commons.git", optional = true }
 
+[lints.clippy]
+too_many_lines = { level = "deny", priority = -1 }
+cognitive_complexity = "deny"
+
 [dev-dependencies]
 tokio = { version = "1.42", features = ["full", "test-util"] }
