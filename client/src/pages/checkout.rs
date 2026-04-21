@@ -226,6 +226,8 @@ fn render_checkout(
     let status_label = match status.as_str() {
         "processing" => "Payment detected, awaiting confirmation...",
         "partially_paid" => "Partial payment received",
+        "late_paid" => "Payment received late — awaiting merchant review",
+        "refunded" => "Payment refunded",
         _ => "Awaiting payment",
     };
 
@@ -274,24 +276,15 @@ fn render_checkout(
                     let chain = chain_name(option.chain_id);
                     let addr_for_copy = addr.clone();
 
+                    let qr_data = addr.clone();
                     view! {
                         <div class="checkout-payment-details">
-                            // QR code (address as text for now — ui-kit QrCodeCard needs WASM context)
                             <div class="checkout-qr">
-                                <div class="checkout-qr-placeholder">
-                                    <span class="checkout-qr-label">"Scan to pay"</span>
-                                    <div class="checkout-qr-box">
-                                        // QR code rendered via CSS background or JS in production.
-                                        // For now, show the address prominently.
-                                        <span class="checkout-qr-addr-short">{
-                                            if addr.len() >= 10 {
-                                                format!("{}...{}", &addr[..6], &addr[addr.len()-4..])
-                                            } else {
-                                                addr.clone()
-                                            }
-                                        }</span>
-                                    </div>
-                                </div>
+                                <ui_kit::components::crypto::QrCodeCard
+                                    data=qr_data
+                                    label="Scan to pay"
+                                    size=250
+                                />
                             </div>
 
                             // Amount in crypto

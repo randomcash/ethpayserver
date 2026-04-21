@@ -20,9 +20,55 @@ use auth::AuthenticationService;
 use data_service::{PaymentOptionReader, PaymentReader};
 use types::{InvoiceId, InvoiceReader, InvoiceStatus};
 
-use super::invoices::{PaymentOptionResponse, PaymentResponse};
+use super::invoices::PaymentOptionResponse;
 use super::ws::StatusUpdate;
 use crate::state::PgAppState;
+use types::PaymentData;
+
+/// Public view of a payment on the checkout page.
+///
+/// Deliberately omits fields present on the authenticated `PaymentResponse`:
+/// - `from_address` — sender wallet address. Leaking it here would let anyone
+///   with the invoice link correlate an invoice to the customer's wallet.
+/// - `reorged` — internal state that confuses customers with transient
+///   "your payment was invalidated" UX when a transient reorg happens.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CheckoutPaymentInfo {
+    /// Payment ID.
+    pub id: String,
+    /// Chain ID (EIP-155).
+    pub chain_id: u64,
+    /// Transaction hash — already public on-chain.
+    pub tx_hash: String,
+    /// Amount received (smallest unit as string).
+    pub amount: String,
+    /// Asset symbol.
+    pub asset_symbol: String,
+    /// Token contract address (ERC20 only, None for native).
+    pub token_address: Option<String>,
+    /// Block number (for confirmation counting).
+    pub block_number: Option<u64>,
+    /// When the payment was detected.
+    pub detected_at: chrono::DateTime<chrono::Utc>,
+    /// When the payment reached required confirmations (None = pending).
+    pub confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<PaymentData> for CheckoutPaymentInfo {
+    fn from(p: PaymentData) -> Self {
+        Self {
+            id: p.id.to_string(),
+            chain_id: p.chain_id,
+            tx_hash: p.tx_hash,
+            amount: p.amount,
+            asset_symbol: p.asset_symbol,
+            token_address: p.token_address,
+            block_number: p.block_number,
+            detected_at: p.detected_at,
+            confirmed_at: p.confirmed_at,
+        }
+    }
+}
 
 /// Public checkout response — only payment-relevant fields.
 #[derive(Debug, Serialize, ToSchema)]
@@ -45,8 +91,8 @@ pub struct CheckoutResponse {
     pub is_paid: bool,
     /// Payment options (addresses, chains, amounts).
     pub payment_options: Vec<PaymentOptionResponse>,
-    /// Payments received.
-    pub payments: Vec<PaymentResponse>,
+    /// Payments received (privacy-filtered — no sender addresses).
+    pub payments: Vec<CheckoutPaymentInfo>,
 }
 
 /// Get public checkout data for an invoice.
@@ -86,7 +132,10 @@ where
         is_expired: invoice.status == InvoiceStatus::Expired || invoice.expires_at < now,
         is_paid: invoice.status == InvoiceStatus::Paid,
         payment_options: options.into_iter().map(Into::into).collect(),
-        payments: payments.into_iter().map(|p| p.into()).collect(),
+        payments: payments
+            .into_iter()
+            .map(CheckoutPaymentInfo::from)
+            .collect(),
     }))
 }
 
@@ -202,6 +251,36 @@ mod tests {
         assert_eq!(json["id"], "inv_123");
         assert_eq!(json["currency"], "USD");
         assert_eq!(json["is_paid"], false);
+    }
+
+    /// Privacy invariant: the public checkout endpoint MUST NOT leak the
+    /// sender's wallet address (`from_address`) or internal state
+    /// (`reorged`). Anyone with the invoice link hits this endpoint — leaking
+    /// `from_address` would correlate a public invoice to the customer's
+    /// wallet. Guard against a future refactor re-introducing the leak.
+    #[test]
+    fn test_checkout_payment_info_never_exposes_sender() {
+        let info = CheckoutPaymentInfo {
+            id: "pay_1".to_string(),
+            chain_id: 1,
+            tx_hash: "0xabc".to_string(),
+            amount: "1".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            block_number: Some(100),
+            detected_at: chrono::Utc::now(),
+            confirmed_at: None,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(
+            !obj.contains_key("from_address"),
+            "from_address must not be in public checkout response"
+        );
+        assert!(
+            !obj.contains_key("reorged"),
+            "reorged is internal state, must not leak to checkout"
+        );
     }
 
     #[test]

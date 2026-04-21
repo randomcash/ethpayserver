@@ -345,6 +345,25 @@ pub struct UpdateWebhookRequest {
     pub enabled: bool,
 }
 
+/// Privacy-filtered payment view for the public checkout page.
+///
+/// Mirrors `CheckoutPaymentInfo` from the server. Distinct from `Payment`
+/// because the checkout endpoint deliberately omits `from_address` (sender
+/// wallet) and `reorged` (internal state) — anyone with the invoice link
+/// can hit the endpoint, so sender addresses must not leak.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckoutPaymentInfo {
+    pub id: String,
+    pub chain_id: u64,
+    pub tx_hash: String,
+    pub amount: String,
+    pub asset_symbol: String,
+    pub token_address: Option<String>,
+    pub block_number: Option<u64>,
+    pub detected_at: String,
+    pub confirmed_at: Option<String>,
+}
+
 /// Public checkout response.
 ///
 /// Mirrors `CheckoutResponse` from the server checkout API.
@@ -359,7 +378,7 @@ pub struct CheckoutResponse {
     pub is_expired: bool,
     pub is_paid: bool,
     pub payment_options: Vec<PaymentOption>,
-    pub payments: Vec<Payment>,
+    pub payments: Vec<CheckoutPaymentInfo>,
 }
 
 /// Paginated response wrapper.
