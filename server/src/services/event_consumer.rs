@@ -95,6 +95,10 @@ impl<
     /// Run the event consumer as a background task.
     ///
     /// This should be spawned with `tokio::spawn(consumer.run())`.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "main event loop: subscribe, dispatch, log — shared loop state prevents a clean split"
+    )]
     pub async fn run(self) {
         tracing::info!("Starting event consumer");
 
@@ -116,6 +120,10 @@ impl<
     }
 
     /// Handle a single monitor event.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "event-type dispatch match; keeping one function makes branch coverage explicit"
+    )]
     async fn handle_event(&self, event: MonitorEvent) -> Result<(), EventConsumerError> {
         match event {
             MonitorEvent::PaymentDetected(payment) => self.handle_payment_detected(payment).await,
@@ -170,6 +178,11 @@ impl<
     /// Creates a payment record in the database. The DB trigger automatically:
     /// - Updates invoice.amount_received
     /// - Transitions invoice status: pending → processing
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cognitive_complexity,
+        reason = "payment detection state transitions — each branch (partial/full/late/expired) has distinct side effects that shouldn't be unified"
+    )]
     async fn handle_payment_detected(
         &self,
         event: PaymentDetected,
@@ -370,6 +383,11 @@ impl<
     ///
     /// Updates payment confirmation status and transitions invoice to `paid`
     /// if amount_received >= amount.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cognitive_complexity,
+        reason = "confirmation state machine — branches for partial/full, webhook fan-out, late-paid, invoice closure share local state"
+    )]
     async fn handle_payment_confirmed(
         &self,
         event: PaymentConfirmed,
@@ -560,6 +578,10 @@ impl<
     /// Queue a webhook notification for an invoice status change.
     ///
     /// This is a non-blocking operation - errors are logged but don't stop event processing.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "per-event-type payload builder — each arm maps to a distinct WebhookEvent variant"
+    )]
     async fn queue_webhook(
         &self,
         event_type: WebhookEventType,
@@ -648,6 +670,10 @@ impl<
     /// Marks affected payments as reorged and reverts invoice status:
     /// - If other valid payments exist → `processing`
     /// - If no valid payments → `pending`
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "reorg recovery touches payments + invoices + webhooks atomically; shared state across every branch prevents a clean split"
+    )]
     async fn handle_reorg_detected(&self, event: ReorgDetected) -> Result<(), EventConsumerError> {
         // Try to get network from chain_id (None for testnets)
         let network = chain_id_to_network(event.chain_id);
