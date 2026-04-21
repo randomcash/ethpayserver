@@ -40,5 +40,9 @@ The key can be any ASCII string up to 255 characters. A UUID or ULID is recommen
   `IDEMPOTENCY_TTL_SECS` environment variable).
 - The `Idempotency-Key` header is optional. Requests without it are processed
   normally with no caching.
-- Currently supported on `POST /invoices` only. Future endpoints
-  (`/refunds`, `/payouts`) will adopt the same mechanism.
+- Supported on every POST under `/invoices`: create (`POST /invoices`),
+  cancel (`POST /invoices/{id}/cancel`), and refund
+  (`POST /invoices/{id}/refund`). Future endpoints (`/payouts`, …) will
+  adopt the same mechanism.
+- Maximum request body size is 1 MiB; larger POSTs with an idempotency
+  key return `413 Payload Too Large`.

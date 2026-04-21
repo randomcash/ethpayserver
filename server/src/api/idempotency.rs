@@ -7,8 +7,10 @@
 //! On retry with same key + different body: returns 409 Conflict.
 //! On concurrent in-flight request with same key: returns 425 Too Early.
 //!
-//! Applied only to `POST /v1/invoices` in this version; the layer is reusable
-//! for future POST endpoints (`/v1/refunds`, `/v1/payouts`, etc.).
+//! Mounted as a `from_fn_with_state` layer on the invoice router, so it
+//! covers every POST route under `/invoices` (invoice creation, cancel,
+//! refund). Requests without the `Idempotency-Key` header or with a
+//! non-POST method pass through unchanged.
 //!
 //! # Environment Variables
 //!
@@ -29,14 +31,27 @@ use sha2::{Digest, Sha256};
 /// Maximum length for idempotency key values.
 const MAX_KEY_LENGTH: usize = 255;
 
-/// Maximum request body size to buffer (16 MiB).
-const MAX_REQUEST_BODY: usize = 16 * 1024 * 1024;
+/// Maximum request body size to buffer (1 MiB).
+///
+/// Invoice create payloads are small (hundreds of bytes), so 1 MiB is a
+/// generous ceiling while keeping the pre-handler DoS surface bounded —
+/// callers sending larger bodies with an idempotency key get 413.
+const MAX_REQUEST_BODY: usize = 1024 * 1024;
 
-/// Maximum response body size to cache (16 MiB).
-const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024;
+/// Maximum response body size to cache (1 MiB).
+///
+/// Well above expected JSON response size. Larger responses bypass the
+/// cache (logged) rather than eating Redis memory.
+const MAX_RESPONSE_BODY: usize = 1024 * 1024;
 
-/// Lock TTL for in-flight requests (60 seconds).
-const LOCK_TTL_SECS: u64 = 60;
+/// Lock TTL for in-flight requests (5 minutes).
+///
+/// Must be longer than the worst-case handler latency (DB contention,
+/// address derivation, chain RPC). If the lock expires before the handler
+/// finishes, a duplicate retry would bypass idempotency — so err on the
+/// side of holding the lock too long rather than too short. Stale locks
+/// self-clear via the TTL once the original handler returns.
+const LOCK_TTL_SECS: u64 = 300;
 
 /// Redis key prefix for idempotency cache entries.
 const CACHE_PREFIX: &str = "idem";
@@ -77,8 +92,32 @@ struct CachedResponse {
     status: u16,
     /// Response body bytes.
     body: Vec<u8>,
-    /// Content-Type header value.
-    content_type: Option<String>,
+    /// Response headers as (name, value) pairs. Non-UTF8 values are dropped on cache.
+    #[serde(default)]
+    headers: Vec<(String, String)>,
+}
+
+/// Hop-by-hop and server-generated headers that must not be replayed from cache.
+/// On replay we reconstruct these from the live response context.
+const NON_REPLAYABLE_HEADERS: &[&str] = &[
+    "date",
+    "server",
+    "connection",
+    "transfer-encoding",
+    "content-length",
+    "keep-alive",
+    "upgrade",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "idempotency-replayed",
+];
+
+fn is_replayable_header(name: &str) -> bool {
+    !NON_REPLAYABLE_HEADERS
+        .iter()
+        .any(|d| name.eq_ignore_ascii_case(d))
 }
 
 /// Idempotency middleware.
@@ -90,30 +129,20 @@ pub async fn middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    // Only process POST requests with Idempotency-Key header
     if req.method() != Method::POST {
         return next.run(req).await;
     }
-
-    let key_header = match req.headers().get("idempotency-key") {
-        Some(val) => val.clone(),
-        None => return next.run(req).await,
+    let Some(key_header) = req.headers().get("idempotency-key").cloned() else {
+        return next.run(req).await;
+    };
+    let Some(key_str) = validate_key(&key_header) else {
+        return invalid_key_response();
+    };
+    // Missing auth — let the handler's auth extractor reject the request.
+    let Some(scope) = extract_scope(&req) else {
+        return next.run(req).await;
     };
 
-    // Validate key
-    let key_str = match validate_key(&key_header) {
-        Some(k) => k,
-        None => return invalid_key_response(),
-    };
-
-    // Extract auth scope from Authorization header (session ID)
-    let scope = match extract_scope(&req) {
-        Some(s) => s,
-        // No auth header — let the handler's auth extractor reject the request
-        None => return next.run(req).await,
-    };
-
-    // Buffer request body for hashing
     let (parts, body) = req.into_parts();
     let body_bytes = match axum::body::to_bytes(body, MAX_REQUEST_BODY).await {
         Ok(b) => b,
@@ -121,130 +150,185 @@ pub async fn middleware(
             return (StatusCode::PAYLOAD_TOO_LARGE, "Request body too large").into_response();
         }
     };
-
-    // Compute request hash: SHA-256(method:path:body)
     let request_hash = compute_hash(parts.method.as_str(), parts.uri.path(), &body_bytes);
 
-    // Redis keys
     let cache_key = format!("{CACHE_PREFIX}:{scope}:{key_str}");
     let lock_key = format!("{LOCK_PREFIX}:{scope}:{key_str}");
-
-    // Clone the shared connection (cheap — shares underlying TCP socket)
     let mut conn = state.conn.clone();
 
-    // Check for cached response
-    let cached: Option<Vec<u8>> = match redis::cmd("GET")
-        .arg(&cache_key)
-        .query_async(&mut conn)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
+    match cache_lookup(&mut conn, &cache_key, &request_hash).await {
+        CacheLookup::Replay(resp) => return resp,
+        CacheLookup::Conflict => return conflict_response(),
+        CacheLookup::Miss => {}
+        CacheLookup::Error(e) => {
             tracing::warn!(error = %e, "Redis GET failed for idempotency cache, falling through");
             let req = Request::from_parts(parts, Body::from(body_bytes));
             return next.run(req).await;
         }
-    };
-
-    if let Some(cached_bytes) = cached
-        && let Ok(cached) = serde_json::from_slice::<CachedResponse>(&cached_bytes)
-    {
-        if cached.request_hash == request_hash {
-            // Same key + same body → replay cached response
-            return build_replay_response(&cached);
-        }
-        // Same key + different body → conflict
-        return (
-            StatusCode::CONFLICT,
-            axum::Json(serde_json::json!({"error": "idempotency_key_reuse"})),
-        )
-            .into_response();
     }
 
-    // Try to acquire in-flight lock (SET NX EX)
-    let lock_acquired: bool = match redis::cmd("SET")
-        .arg(&lock_key)
+    if !acquire_lock(&mut conn, &lock_key).await {
+        return in_flight_response();
+    }
+
+    let req = Request::from_parts(parts, Body::from(body_bytes));
+    handle_and_cache(
+        conn,
+        cache_key,
+        lock_key,
+        request_hash,
+        state.ttl_secs,
+        req,
+        next,
+    )
+    .await
+}
+
+/// Outcome of a cache GET.
+enum CacheLookup {
+    /// Same key + same body → replay the cached response.
+    Replay(Response),
+    /// Same key + different body → 409.
+    Conflict,
+    /// No cached entry (or entry was malformed and treated as miss).
+    Miss,
+    /// Redis unreachable — caller should fall through to the live handler.
+    Error(redis::RedisError),
+}
+
+/// Look up a cached response and classify it against the current request hash.
+async fn cache_lookup(
+    conn: &mut redis::aio::MultiplexedConnection,
+    cache_key: &str,
+    request_hash: &str,
+) -> CacheLookup {
+    let cached: Option<Vec<u8>> = match redis::cmd("GET").arg(cache_key).query_async(conn).await {
+        Ok(v) => v,
+        Err(e) => return CacheLookup::Error(e),
+    };
+    let Some(bytes) = cached else {
+        return CacheLookup::Miss;
+    };
+    let Ok(entry) = serde_json::from_slice::<CachedResponse>(&bytes) else {
+        // Malformed cache entry — treat as miss so the handler runs fresh.
+        return CacheLookup::Miss;
+    };
+    if entry.request_hash == request_hash {
+        CacheLookup::Replay(build_replay_response(&entry))
+    } else {
+        CacheLookup::Conflict
+    }
+}
+
+/// Try to acquire the in-flight lock via `SET NX EX`. Redis errors do not
+/// block the request — idempotency is best-effort when Redis is unavailable.
+async fn acquire_lock(conn: &mut redis::aio::MultiplexedConnection, lock_key: &str) -> bool {
+    match redis::cmd("SET")
+        .arg(lock_key)
         .arg("1")
         .arg("NX")
         .arg("EX")
         .arg(LOCK_TTL_SECS)
-        .query_async::<Option<String>>(&mut conn)
+        .query_async::<Option<String>>(conn)
         .await
     {
         Ok(Some(_)) => true,
         Ok(None) => false,
         Err(e) => {
             tracing::warn!(error = %e, "Redis SET NX failed for idempotency lock, falling through");
-            true // Don't block on Redis errors
+            true
         }
-    };
-
-    if !lock_acquired {
-        // Another request with the same key is in-flight
-        return (
-            #[allow(clippy::expect_used)] // 425 is always a valid status code
-            StatusCode::from_u16(425).expect("425 is a valid status code"),
-            axum::Json(serde_json::json!({"error": "idempotency_in_progress"})),
-        )
-            .into_response();
     }
+}
 
-    // Reconstruct request and call handler
-    let req = Request::from_parts(parts, Body::from(body_bytes));
+/// Release the in-flight lock. Best-effort — errors are ignored because the
+/// lock will self-expire via TTL.
+async fn release_lock(conn: &mut redis::aio::MultiplexedConnection, lock_key: &str) {
+    let _: Result<(), _> = redis::cmd("DEL").arg(lock_key).query_async(conn).await;
+}
+
+/// Run the downstream handler, then cache the response if it's a 2xx.
+/// In all exit paths the in-flight lock is released.
+async fn handle_and_cache(
+    mut conn: redis::aio::MultiplexedConnection,
+    cache_key: String,
+    lock_key: String,
+    request_hash: String,
+    ttl_secs: u64,
+    req: Request,
+    next: Next,
+) -> Response {
     let response = next.run(req).await;
 
-    // Only cache 2xx responses; non-2xx lets the caller retry
     if !response.status().is_success() {
-        let _: Result<(), _> = redis::cmd("DEL")
-            .arg(&lock_key)
-            .query_async(&mut conn)
-            .await;
+        release_lock(&mut conn, &lock_key).await;
         return response;
     }
 
-    // Buffer response body to cache it
     let (resp_parts, resp_body) = response.into_parts();
     let resp_bytes = match axum::body::to_bytes(resp_body, MAX_RESPONSE_BODY).await {
         Ok(b) => b,
         Err(_) => {
-            let _: Result<(), _> = redis::cmd("DEL")
-                .arg(&lock_key)
-                .query_async(&mut conn)
-                .await;
+            release_lock(&mut conn, &lock_key).await;
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-
-    let content_type = resp_parts
-        .headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
 
     let entry = CachedResponse {
         request_hash,
         status: resp_parts.status.as_u16(),
         body: resp_bytes.to_vec(),
-        content_type,
+        headers: collect_cacheable_headers(&resp_parts.headers),
     };
 
     if let Ok(json) = serde_json::to_vec(&entry) {
         let _: Result<(), _> = redis::cmd("SETEX")
             .arg(&cache_key)
-            .arg(state.ttl_secs)
+            .arg(ttl_secs)
             .arg(&json)
             .query_async(&mut conn)
             .await;
     }
+    release_lock(&mut conn, &lock_key).await;
 
-    // Release the in-flight lock
-    let _: Result<(), _> = redis::cmd("DEL")
-        .arg(&lock_key)
-        .query_async(&mut conn)
-        .await;
-
-    // Reconstruct response from buffered bytes
     Response::from_parts(resp_parts, Body::from(resp_bytes))
+}
+
+/// Filter response headers to only the ones safe to replay, discarding
+/// non-UTF8 values.
+fn collect_cacheable_headers(headers: &axum::http::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, val)| {
+            let name_str = name.as_str();
+            if !is_replayable_header(name_str) {
+                return None;
+            }
+            val.to_str()
+                .ok()
+                .map(|v| (name_str.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// 409 response for an idempotency key reused with a different body.
+fn conflict_response() -> Response {
+    (
+        StatusCode::CONFLICT,
+        axum::Json(serde_json::json!({"error": "idempotency_key_reuse"})),
+    )
+        .into_response()
+}
+
+/// 425 Too Early response when a concurrent request with the same key is
+/// still in-flight.
+fn in_flight_response() -> Response {
+    (
+        #[allow(clippy::expect_used)] // 425 is always a valid status code
+        StatusCode::from_u16(425).expect("425 is a valid status code"),
+        axum::Json(serde_json::json!({"error": "idempotency_in_progress"})),
+    )
+        .into_response()
 }
 
 /// Validate the idempotency key header value.
@@ -292,12 +376,17 @@ fn compute_hash(method: &str, path: &str, body: &[u8]) -> String {
 }
 
 /// Build a response from cached data with `Idempotency-Replayed: true` header.
+///
+/// Restores every cached header (content-type, location, pagination, custom
+/// x-\* headers). Hop-by-hop and server-generated headers are excluded at
+/// cache time (see `NON_REPLAYABLE_HEADERS`), so the stored set is safe to
+/// replay verbatim.
 fn build_replay_response(cached: &CachedResponse) -> Response {
     let status = StatusCode::from_u16(cached.status).unwrap_or(StatusCode::OK);
     let mut builder = Response::builder().status(status);
 
-    if let Some(ref ct) = cached.content_type {
-        builder = builder.header("content-type", ct);
+    for (name, value) in &cached.headers {
+        builder = builder.header(name, value);
     }
     builder = builder.header("idempotency-replayed", "true");
 
@@ -439,7 +528,11 @@ mod tests {
             request_hash: "abc".to_string(),
             status: 201,
             body: b"{}".to_vec(),
-            content_type: Some("application/json".to_string()),
+            headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("location".to_string(), "/invoices/abc".to_string()),
+                ("x-request-id".to_string(), "req-123".to_string()),
+            ],
         };
         let resp = build_replay_response(&cached);
         assert_eq!(resp.status(), StatusCode::CREATED);
@@ -448,20 +541,52 @@ mod tests {
             resp.headers().get("content-type").unwrap(),
             "application/json"
         );
+        assert_eq!(resp.headers().get("location").unwrap(), "/invoices/abc");
+        assert_eq!(resp.headers().get("x-request-id").unwrap(), "req-123");
     }
 
     #[test]
-    fn build_replay_response_no_content_type() {
+    fn build_replay_response_no_headers() {
         let cached = CachedResponse {
             request_hash: "abc".to_string(),
             status: 200,
             body: vec![],
-            content_type: None,
+            headers: vec![],
         };
         let resp = build_replay_response(&cached);
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.headers().get("content-type").is_none());
         assert_eq!(resp.headers().get("idempotency-replayed").unwrap(), "true");
+    }
+
+    #[test]
+    fn is_replayable_header_denies_hop_by_hop() {
+        for name in &[
+            "date",
+            "server",
+            "connection",
+            "transfer-encoding",
+            "content-length",
+            "keep-alive",
+            "idempotency-replayed",
+            "DATE",
+            "Content-Length",
+        ] {
+            assert!(!is_replayable_header(name), "{name} should be denied");
+        }
+    }
+
+    #[test]
+    fn is_replayable_header_allows_typical_response_headers() {
+        for name in &[
+            "content-type",
+            "location",
+            "x-request-id",
+            "cache-control",
+            "etag",
+        ] {
+            assert!(is_replayable_header(name), "{name} should be allowed");
+        }
     }
 
     // ========================================================================
