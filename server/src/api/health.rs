@@ -245,6 +245,11 @@ pub struct DeepHealthResponse {
         (status = 200, description = "Deep health diagnostic", body = DeepHealthResponse),
     )
 )]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "deep health probe: timed Postgres + Redis + per-chain RPC checks, each with its own error mapping; splitting would obscure the HTTP response shape"
+)]
 pub async fn deep_health<A>(
     State(state): State<PgAppState<A>>,
 ) -> (StatusCode, Json<DeepHealthResponse>)

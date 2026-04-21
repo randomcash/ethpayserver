@@ -10,8 +10,8 @@ use leptos_router::hooks::use_params_map;
 use send_wrapper::SendWrapper;
 
 use crate::api::{ApiError, CheckoutResponse, EvmApiClient, PaymentOption};
-use crate::pages::invoices::chain_name;
 use crate::services::websocket::{StatusUpdate, WebSocketService};
+use crate::util::chain_name;
 
 /// Format a human-readable amount from smallest units.
 ///
@@ -69,7 +69,7 @@ pub fn CheckoutPage() -> impl IntoView {
 
     // WebSocket for real-time updates
     let ws = std::rc::Rc::new(WebSocketService::new());
-    let ws_connected = ws.connected();
+    let ws_state = ws.connection_state();
     let ws_update = ws.last_update();
 
     // Connect WebSocket on mount
@@ -139,7 +139,10 @@ pub fn CheckoutPage() -> impl IntoView {
 
                 <div class="checkout-footer">
                     <span class="checkout-ws-status">
-                        {move || if ws_connected.get() { "Live" } else { "" }}
+                        {move || match ws_state.get() {
+                            crate::services::websocket::ConnectionState::Connected => "Live",
+                            _ => "",
+                        }}
                     </span>
                     <span class="checkout-powered">"Powered by ETHPayServer"</span>
                 </div>
