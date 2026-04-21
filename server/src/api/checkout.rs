@@ -135,7 +135,9 @@ async fn handle_checkout_socket(
     let (mut sender, mut receiver) = socket.split();
 
     // Send connected acknowledgement
-    let connected = serde_json::to_string(&StatusUpdate::Connected).unwrap();
+    let Ok(connected) = serde_json::to_string(&StatusUpdate::Connected) else {
+        return;
+    };
     if sender.send(Message::Text(connected.into())).await.is_err() {
         return;
     }
@@ -179,6 +181,7 @@ async fn handle_checkout_socket(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]
