@@ -26,6 +26,10 @@ use server::{
 };
 
 #[tokio::main]
+#[allow(
+    clippy::too_many_lines,
+    reason = "main binary wiring: config load + service graph construction + metrics + server start"
+)]
 async fn main() -> Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();
