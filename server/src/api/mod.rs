@@ -139,6 +139,10 @@ pub struct ApiDoc;
 /// - `/evm` - EVM operations (tokens, networks)
 /// - `/auth` - Authentication
 /// - `/stores` - Store management
+#[allow(
+    clippy::too_many_lines,
+    reason = "router composition is a flat list of route registrations; splitting obscures the routing table"
+)]
 pub fn router<A>(
     state: PgAppState<A>,
     enable_swagger: bool,
