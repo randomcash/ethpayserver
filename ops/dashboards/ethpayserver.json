@@ -1,0 +1,215 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "HTTP Request Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(ethpayserver_http_requests_total[5m])",
+          "legendFormat": "{{method}} {{path}} {{status}}"
+        }
+      ]
+    },
+    {
+      "title": "HTTP Request Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(ethpayserver_http_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(ethpayserver_http_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(ethpayserver_http_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Rate-Limited Requests",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(ethpayserver_rate_limited_total[5m])",
+          "legendFormat": "{{tier}}"
+        }
+      ]
+    },
+    {
+      "title": "Rate-Limited Total",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(ethpayserver_rate_limited_total)",
+          "legendFormat": "total"
+        }
+      ]
+    },
+    {
+      "title": "DB Pool Connections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "idle" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "used" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "ethpayserver_db_pool_connections",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "title": "DB Pool Acquire Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(ethpayserver_db_pool_wait_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(ethpayserver_db_pool_wait_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(ethpayserver_db_pool_wait_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "title": "RPC Request Rate by Method",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (chain_id, method) (rate(ethpayserver_rpc_requests_total[5m]))",
+          "legendFormat": "chain={{chain_id}} {{method}}"
+        }
+      ]
+    },
+    {
+      "title": "RPC Request Latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, chain_id, method) (rate(ethpayserver_rpc_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50 chain={{chain_id}} {{method}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, chain_id, method) (rate(ethpayserver_rpc_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 chain={{chain_id}} {{method}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, chain_id, method) (rate(ethpayserver_rpc_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99 chain={{chain_id}} {{method}}"
+        }
+      ]
+    },
+    {
+      "title": "RPC Error Rate by Kind",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*timeout.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*rate_limited.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "sum by (chain_id, method, error_kind) (rate(ethpayserver_rpc_errors_total[5m]))",
+          "legendFormat": "chain={{chain_id}} {{method}} {{error_kind}}"
+        }
+      ]
+    },
+    {
+      "title": "RPC Success vs Error Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*ok.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*err.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(ethpayserver_rpc_requests_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["ethpayserver", "payments", "evm"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ETHPayServer",
+  "uid": "ethpayserver-overview",
+  "version": 1
+}

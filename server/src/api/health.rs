@@ -530,6 +530,13 @@ where
         metrics::set_stores(count as u64);
     }
 
+    // Scrape DB pool stats
+    let pool = state.data_service.pool();
+    let pool_size = pool.size() as u64;
+    let pool_idle = pool.num_idle() as u64;
+    metrics::set_db_pool_connections("idle", pool_idle);
+    metrics::set_db_pool_connections("used", pool_size.saturating_sub(pool_idle));
+
     match metrics::render() {
         Some(body) => (
             StatusCode::OK,

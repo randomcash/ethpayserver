@@ -27,6 +27,7 @@ thiserror = "2.0"
 async-trait = "0.1"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
 tracing = "0.1"
+metrics = "0.24"
 
 [lints.clippy]
 too_many_lines = { level = "deny", priority = -1 }

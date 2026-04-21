@@ -1,6 +1,8 @@
 //! PostgreSQL implementation of the repository traits.
 
-use sqlx::postgres::PgPool;
+use metrics::histogram;
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::{PgPool, Postgres};
 
 mod auth;
 mod conversions;
@@ -45,24 +47,36 @@ impl PgDataService {
         &self.pool
     }
 
+    /// Acquire a connection from the pool, recording wait duration as a metric.
+    pub async fn acquire(&self) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+        let start = std::time::Instant::now();
+        let conn = self.pool.acquire().await;
+        histogram!("ethpayserver_db_pool_wait_duration_seconds")
+            .record(start.elapsed().as_secs_f64());
+        conn
+    }
+
     /// Check database connectivity.
     pub async fn health_check(&self) -> Result<(), sqlx::Error> {
-        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        let mut conn = self.acquire().await?;
+        sqlx::query("SELECT 1").execute(&mut *conn).await?;
         Ok(())
     }
 
     /// Count total registered users.
     pub async fn count_users(&self) -> Result<i64, sqlx::Error> {
+        let mut conn = self.acquire().await?;
         let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *conn)
             .await?;
         Ok(result.0)
     }
 
     /// Count total stores (non-archived).
     pub async fn count_stores(&self) -> Result<i64, sqlx::Error> {
+        let mut conn = self.acquire().await?;
         let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM stores WHERE archived = false")
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *conn)
             .await?;
         Ok(result.0)
     }
