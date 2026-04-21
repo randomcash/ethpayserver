@@ -5,10 +5,11 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload, CreateInvoiceRequest,
-    CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice, InvoiceListResponse,
-    InvoiceStatusResponse, Payment, PaymentListResponse, Store, StorePaymentMethod, StoreWebhook,
-    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, UserInfo, Wallet,
+    ApiKeyListResponse, CheckoutResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
+    CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
+    InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, Store,
+    StorePaymentMethod, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
+    UpdateWebhookRequest, UserInfo, Wallet,
 };
 
 /// API client errors.
@@ -38,6 +39,13 @@ impl EvmApiClient {
             base_url: base_url.into(),
             token: None,
         }
+    }
+
+    /// Create a client for public endpoints (no auth header sent).
+    ///
+    /// Uses a same-origin relative base URL. Call `with_token` to authenticate later.
+    pub fn unauthenticated() -> Self {
+        Self::new("")
     }
 
     /// Set the authorization token.
@@ -252,6 +260,15 @@ impl EvmApiClient {
     /// Get an invoice by ID.
     pub async fn get_invoice(&self, id: &str) -> Result<Invoice, ApiError> {
         self.get(&format!("/api/invoices/{}", id)).await
+    }
+
+    /// Get public checkout data for an invoice (no auth required).
+    pub async fn get_checkout(&self, invoice_id: &str) -> Result<CheckoutResponse, ApiError> {
+        self.get(&format!(
+            "/checkout/{}",
+            js_sys::encode_uri_component(invoice_id)
+        ))
+        .await
     }
 
     /// Create a new invoice.

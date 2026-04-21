@@ -13,25 +13,7 @@ use crate::api::{
 };
 use crate::app::StoreContext;
 
-/// Helper to get chain name from chain ID.
-fn chain_name(chain_id: u64) -> &'static str {
-    match chain_id {
-        1 => "Ethereum",
-        137 => "Polygon",
-        42161 => "Arbitrum",
-        10 => "Optimism",
-        8453 => "Base",
-        56 => "BSC",
-        43114 => "Avalanche",
-        324 => "zkSync",
-        59144 => "Linea",
-        534352 => "Scroll",
-        100 => "Gnosis",
-        250 => "Fantom",
-        11155111 => "Sepolia",
-        _ => "Unknown",
-    }
-}
+use crate::util::chain_name;
 
 /// Format ISO date string for display.
 fn format_date(iso: &str) -> String {

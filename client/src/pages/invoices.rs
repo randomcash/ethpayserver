@@ -11,25 +11,7 @@ use crate::app::StoreContext;
 use crate::components::{CreateInvoiceSignal, PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
 
-/// Helper to get chain name from chain ID.
-fn chain_name(chain_id: u64) -> &'static str {
-    match chain_id {
-        1 => "Ethereum",
-        137 => "Polygon",
-        42161 => "Arbitrum",
-        10 => "Optimism",
-        8453 => "Base",
-        56 => "BSC",
-        43114 => "Avalanche",
-        324 => "zkSync",
-        59144 => "Linea",
-        534352 => "Scroll",
-        250 => "Fantom",
-        100 => "Gnosis",
-        11155111 => "Sepolia",
-        _ => "Unknown",
-    }
-}
+pub(crate) use crate::util::chain_name;
 
 /// Helper to determine payment status from confirmed_at.
 fn payment_status(payment: &Payment) -> &'static str {
