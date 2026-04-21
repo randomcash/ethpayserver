@@ -1852,8 +1852,7 @@ mod tests {
 
     // =========================================================================
     // ListInvoicesQuery deserialization
-    }
-
+    // =========================================================================
 
     #[test]
     fn test_query_deserializes_all_fields() {
@@ -1991,7 +1990,8 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["total"], 0);
         assert!(json["invoices"].as_array().unwrap().is_empty());
-=======
+    }
+
     // TX Hash Validation Tests
     // =========================================================================
 
