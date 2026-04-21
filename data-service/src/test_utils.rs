@@ -7,12 +7,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, BoxStream, StreamExt};
 use types::{
-    CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
-    InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentMethodId, PaymentOptionData,
-    PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentQueryParams, PaymentReader,
-    PaymentWriter, PendingWatchInfo, RepositoryResult, StoreId, StoreWebhook, StoreWebhookReader,
-    TokenData, TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader,
-    WatchedAddressWriter,
+    CleanupAddressInfo, CreateDeliveryParams, InvoiceData, InvoiceId, InvoiceQueryParams,
+    InvoiceReader, InvoiceStatus, InvoiceWriter, Network, PaymentData, PaymentEventWriter,
+    PaymentMethodId, PaymentOptionData, PaymentOptionId, PaymentOptionReader, PaymentOptionWriter,
+    PaymentQueryParams, PaymentReader, PaymentWriter, PendingWatchInfo, RepositoryResult, StoreId,
+    StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams, TokenReader, TokenWriter,
+    WatchedAddressReader, WatchedAddressWriter, WebhookDelivery, WebhookDeliveryReader,
+    WebhookDeliveryWriter,
 };
 use uuid::Uuid;
 
@@ -27,6 +28,7 @@ pub struct InMemoryDataService {
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
+    deliveries: RwLock<Vec<WebhookDelivery>>,
 }
 
 impl InMemoryDataService {
@@ -784,6 +786,78 @@ impl PaymentEventWriter for InMemoryDataService {
     ) -> RepositoryResult<Uuid> {
         // No-op for tests - just return a new UUID
         Ok(Uuid::new_v4())
+    }
+}
+
+#[async_trait]
+impl WebhookDeliveryWriter for InMemoryDataService {
+    async fn create_delivery(
+        &self,
+        params: CreateDeliveryParams,
+    ) -> RepositoryResult<WebhookDelivery> {
+        let delivery = WebhookDelivery {
+            id: Uuid::new_v4(),
+            store_id: params.store_id,
+            event_type: params.event_type,
+            payload: params.payload,
+            http_status: params.http_status,
+            response_body: params.response_body,
+            latency_ms: params.latency_ms,
+            success: params.success,
+            error_message: params.error_message,
+            attempt_number: params.attempt_number,
+            created_at: Utc::now(),
+        };
+        let mut deliveries = self.deliveries.write().unwrap();
+        deliveries.push(delivery.clone());
+        Ok(delivery)
+    }
+}
+
+#[async_trait]
+impl WebhookDeliveryReader for InMemoryDataService {
+    async fn list_deliveries(
+        &self,
+        store_id: Uuid,
+        event_type: Option<&str>,
+        success: Option<bool>,
+        limit: i64,
+        offset: i64,
+    ) -> RepositoryResult<(i64, Vec<WebhookDelivery>)> {
+        let deliveries = self.deliveries.read().unwrap();
+        let mut filtered: Vec<WebhookDelivery> = deliveries
+            .iter()
+            .filter(|d| {
+                if d.store_id != store_id {
+                    return false;
+                }
+                if let Some(et) = event_type
+                    && d.event_type != et
+                {
+                    return false;
+                }
+                if let Some(s) = success
+                    && d.success != s
+                {
+                    return false;
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let total = filtered.len() as i64;
+        let page = filtered
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok((total, page))
+    }
+
+    async fn get_delivery(&self, delivery_id: Uuid) -> RepositoryResult<Option<WebhookDelivery>> {
+        let deliveries = self.deliveries.read().unwrap();
+        Ok(deliveries.iter().find(|d| d.id == delivery_id).cloned())
     }
 }
 

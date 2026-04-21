@@ -2,7 +2,13 @@
 //!
 //! This module combines all API endpoints from different crates into a single router.
 
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    body::Body,
+    http::{HeaderValue, Response},
+    middleware::Next,
+    routing::get,
+};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -54,6 +60,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::get_store_webhook,
         stores::configure_store_webhook,
         stores::delete_store_webhook,
+        stores::test_store_webhook,
+        stores::list_webhook_deliveries,
+        stores::retry_webhook_delivery,
         // Payment Methods
         stores::list_payment_methods,
         stores::create_payment_method,
@@ -76,6 +85,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::list_api_keys,
         users::create_api_key,
         users::revoke_api_key,
+        users::rotate_api_key,
     ),
     components(schemas(
         health::HealthResponse,
@@ -94,6 +104,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::CreatePaymentMethodRequest,
         stores::UpdatePaymentMethodRequest,
         stores::PaymentMethodResponse,
+        stores::WebhookDeliveryResponse,
+        stores::WebhookDeliveryListResponse,
+        stores::TestWebhookResponse,
         invoices::CreateInvoiceRequest,
         invoices::InvoiceResponse,
         invoices::InvoiceListResponse,
@@ -106,6 +119,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::ApiKeyInfoResponse,
         users::CreateApiKeyPayload,
         users::CreateApiKeyResponsePayload,
+        users::RotateApiKeyResponsePayload,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -166,6 +180,9 @@ where
         .route("/{store_id}/webhook", get(stores::get_store_webhook::<A>))
         .route("/{store_id}/webhook", put(stores::configure_store_webhook::<A>))
         .route("/{store_id}/webhook", delete(stores::delete_store_webhook::<A>))
+        .route("/{store_id}/webhook/test", post(stores::test_store_webhook::<A>))
+        .route("/{store_id}/webhook/deliveries", get(stores::list_webhook_deliveries::<A>))
+        .route("/{store_id}/webhook/deliveries/{delivery_id}/retry", post(stores::retry_webhook_delivery::<A>))
         // Payment methods
         .route("/{store_id}/payment-methods", get(stores::list_payment_methods::<A>))
         .route("/{store_id}/payment-methods", post(stores::create_payment_method::<A>))
@@ -217,6 +234,7 @@ where
         .route("/api-keys", get(users::list_api_keys::<A>))
         .route("/api-keys", post(users::create_api_key::<A>))
         .route("/api-keys/{id}", delete(users::revoke_api_key::<A>))
+        .route("/api-keys/{id}/rotate", post(users::rotate_api_key::<A>))
         .with_state(state.clone());
     // Auth API from auth crate
     let auth_state = auth::api::AuthState::new(state.auth_service.clone());
@@ -274,5 +292,31 @@ where
         app = app.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", openapi));
     }
 
+    // API key deprecation header (outermost = runs first in response path)
+    app = app.layer(axum::middleware::from_fn(api_key_deprecation_middleware));
+
     app
+}
+
+/// Middleware that adds `X-API-Key-Deprecated` response header when the request
+/// was authenticated with a deprecated (but still in-grace-window) API key.
+async fn api_key_deprecation_middleware(
+    req: axum::http::Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let deadline = req
+        .extensions()
+        .get::<extractors::ApiKeyDeprecationDeadline>()
+        .cloned();
+
+    let mut response = next.run(req).await;
+
+    if let Some(extractors::ApiKeyDeprecationDeadline(deadline)) = deadline {
+        let value = format!("rotate before {}", deadline.to_rfc3339());
+        if let Ok(hv) = HeaderValue::from_str(&value) {
+            response.headers_mut().insert("X-API-Key-Deprecated", hv);
+        }
+    }
+
+    response
 }

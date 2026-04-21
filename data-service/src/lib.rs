@@ -21,7 +21,7 @@
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
-pub use postgres::{PendingWatch, PgDataService};
+pub use postgres::{ApiKeyAuthInfo, ApiKeyFullInfo, PendingWatch, PgDataService};
 
 #[cfg(feature = "redis")]
 pub mod redis;
@@ -39,6 +39,7 @@ pub use test_utils::InMemoryDataService;
 pub use types::{
     // Watched Address (for PostgreSQL persistence)
     CleanupAddressInfo,
+    CreateDeliveryParams,
     // Combined traits
     DataService,
     DataServiceReader,
@@ -94,6 +95,10 @@ pub use types::{
     WatchedAddressReader,
     WatchedAddressRepository,
     WatchedAddressWriter,
+    WebhookDelivery,
+    WebhookDeliveryReader,
+    WebhookDeliveryRepository,
+    WebhookDeliveryWriter,
 };
 
 /// Convert sqlx::Error to RepositoryError.

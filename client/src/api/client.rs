@@ -7,8 +7,10 @@ use thiserror::Error;
 use super::{
     ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload, CreateInvoiceRequest,
     CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice, InvoiceListResponse,
-    InvoiceStatusResponse, Payment, PaymentListResponse, Store, StorePaymentMethod, StoreWebhook,
-    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateWebhookRequest, UserInfo, Wallet,
+    InvoiceStatusResponse, Payment, PaymentListResponse, RotateApiKeyResponse, Store,
+    StorePaymentMethod, StoreWebhook, TestWebhookResponse, UpdatePaymentMethodRequest,
+    UpdateStoreRequest, UpdateWebhookRequest, UserInfo, Wallet, WebhookDelivery,
+    WebhookDeliveryList,
 };
 
 /// API client errors.
@@ -111,6 +113,21 @@ impl EvmApiClient {
             .build_request("PUT", path)
             .json(body)
             .map_err(|e| ApiError::Parse(e.to_string()))?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        self.handle_response(response).await
+    }
+
+    /// Make a POST request with no body.
+    async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        let request = self
+            .build_request("POST", path)
+            .build()
+            .map_err(|e| ApiError::Network(e.to_string()))?;
 
         let response = request
             .send()
@@ -387,6 +404,54 @@ impl EvmApiClient {
             .await
     }
 
+    /// Send a test webhook to the store's configured URL.
+    pub async fn test_store_webhook(
+        &self,
+        store_id: &str,
+    ) -> Result<TestWebhookResponse, ApiError> {
+        self.post_empty(&format!("/api/stores/{}/webhook/test", store_id))
+            .await
+    }
+
+    /// List webhook delivery logs for a store.
+    pub async fn list_webhook_deliveries(
+        &self,
+        store_id: &str,
+        event_type: Option<&str>,
+        success: Option<bool>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<WebhookDeliveryList, ApiError> {
+        let mut query = format!(
+            "/api/stores/{}/webhook/deliveries?limit={}",
+            store_id,
+            limit.unwrap_or(20)
+        );
+        if let Some(et) = event_type {
+            query.push_str(&format!("&event_type={}", et));
+        }
+        if let Some(s) = success {
+            query.push_str(&format!("&success={}", s));
+        }
+        if let Some(o) = offset {
+            query.push_str(&format!("&offset={}", o));
+        }
+        self.get(&query).await
+    }
+
+    /// Retry a failed webhook delivery.
+    pub async fn retry_webhook_delivery(
+        &self,
+        store_id: &str,
+        delivery_id: &str,
+    ) -> Result<WebhookDelivery, ApiError> {
+        self.post_empty(&format!(
+            "/api/stores/{}/webhook/deliveries/{}/retry",
+            store_id, delivery_id
+        ))
+        .await
+    }
+
     // =========================================================================
     // Wallets
     // =========================================================================
@@ -421,6 +486,12 @@ impl EvmApiClient {
     /// Revoke an API key.
     pub async fn revoke_api_key(&self, id: &str) -> Result<(), ApiError> {
         self.delete(&format!("/api/users/api-keys/{}", id)).await
+    }
+
+    /// Rotate an API key — deprecates the old one, returns a new plaintext key.
+    pub async fn rotate_api_key(&self, id: &str) -> Result<RotateApiKeyResponse, ApiError> {
+        self.post_empty(&format!("/api/users/api-keys/{}/rotate", id))
+            .await
     }
 }
 

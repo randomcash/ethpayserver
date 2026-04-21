@@ -7,16 +7,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use data_service::PaymentEventWriter;
+use data_service::{CreateDeliveryParams, PaymentEventWriter, WebhookDeliveryWriter};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::metrics;
 
 /// Trait for data service requirements in WebhookService.
-pub trait WebhookDataService: PaymentEventWriter + Send + Sync {}
+pub trait WebhookDataService: PaymentEventWriter + WebhookDeliveryWriter + Send + Sync {}
 
-impl<T> WebhookDataService for T where T: PaymentEventWriter + Send + Sync {}
+impl<T> WebhookDataService for T where T: PaymentEventWriter + WebhookDeliveryWriter + Send + Sync {}
 
 /// Webhook event types that trigger notifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,7 +356,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         let result = self.deliver_webhook(&job).await;
 
         match result {
-            Ok(()) => {
+            Ok(_status) => {
                 tracing::info!(
                     job_id = %job.id,
                     invoice_id = %job.payload.invoice_id,
@@ -422,7 +422,9 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     }
 
     /// Deliver a webhook to the merchant endpoint.
-    async fn deliver_webhook(&self, job: &WebhookJob) -> Result<(), WebhookError> {
+    ///
+    /// Returns the HTTP status code on success, or an error.
+    async fn deliver_webhook(&self, job: &WebhookJob) -> Result<u16, WebhookError> {
         // Serialize payload
         let payload_json = serde_json::to_string(&job.payload)
             .map_err(|e| WebhookError::Serialization(e.to_string()))?;
@@ -430,7 +432,8 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         // Sign payload with HMAC-SHA256
         let signature = self.sign_payload(&payload_json, &job.webhook_secret);
 
-        // Send request
+        // Send request with timing
+        let start = std::time::Instant::now();
         let response = self
             .http_client
             .post(&job.webhook_url)
@@ -442,14 +445,51 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             .send()
             .await
             .map_err(|e| WebhookError::Http(e.to_string()))?;
+        let latency_ms = start.elapsed().as_millis() as i32;
+
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        let truncated_body = if body.len() > 1024 {
+            format!("{}...", &body[..1024])
+        } else {
+            body
+        };
+
+        // Record delivery to webhook_deliveries table
+        let payload_value = serde_json::to_value(&job.payload).unwrap_or_default();
+        let success = (200..300).contains(&status);
+        let error_msg = if success {
+            None
+        } else {
+            Some(format!("HTTP {status}"))
+        };
+
+        if let Err(e) = WebhookDeliveryWriter::create_delivery(
+            &*self.data_service,
+            CreateDeliveryParams {
+                store_id: job.payload.store_id,
+                event_type: job.payload.event_type.to_string(),
+                payload: payload_value,
+                http_status: Some(status as i16),
+                response_body: Some(truncated_body.clone()),
+                latency_ms,
+                success,
+                error_message: error_msg,
+                attempt_number: job.attempts as i32,
+            },
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "Failed to record webhook delivery");
+        }
 
         // Check response status
-        if response.status().is_success() {
-            Ok(())
+        if success {
+            Ok(status)
         } else {
             Err(WebhookError::Http(format!(
                 "HTTP {} from webhook endpoint",
-                response.status()
+                status
             )))
         }
     }

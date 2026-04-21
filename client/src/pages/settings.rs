@@ -2,7 +2,10 @@
 //!
 //! Contains user settings, preferences, API keys, and admin-only server settings.
 
-use crate::api::{ApiKeyInfo, CreateApiKeyRequest, CreateApiKeyResponsePayload, EvmApiClient};
+use crate::api::{
+    ApiKeyInfo, CreateApiKeyRequest, CreateApiKeyResponsePayload, EvmApiClient,
+    RotateApiKeyResponse,
+};
 use leptos::prelude::*;
 
 /// Settings page with tabbed interface.
@@ -367,6 +370,9 @@ fn ApiKeysTab() -> impl IntoView {
         });
     };
 
+    // Rotated key state (shown after rotate completes)
+    let (rotated_key, set_rotated_key) = signal::<Option<RotateApiKeyResponse>>(None);
+
     // Revoke handler factory
     let make_revoke_handler = move |key_id: String| {
         let client = api.get();
@@ -376,6 +382,21 @@ fn ApiKeysTab() -> impl IntoView {
             wasm_bindgen_futures::spawn_local(async move {
                 let _ = client.revoke_api_key(&id).await;
                 set_version.update(|v| *v += 1);
+            });
+        }
+    };
+
+    // Rotate handler factory
+    let make_rotate_handler = move |key_id: String| {
+        let client = api.get();
+        move |_| {
+            let client = client.clone();
+            let id = key_id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Ok(resp) = client.rotate_api_key(&id).await {
+                    set_rotated_key.set(Some(resp));
+                    set_version.update(|v| *v += 1);
+                }
             });
         }
     };
@@ -450,6 +471,27 @@ fn ApiKeysTab() -> impl IntoView {
                 </div>
             })}
 
+            // Rotated key display
+            {move || rotated_key.get().map(|rk| view! {
+                <div class="detail-card" style="margin-bottom: 16px; border: 1px solid var(--accent);">
+                    <div class="detail-card-header">
+                        <h3>"Rotated API Key"</h3>
+                    </div>
+                    <div class="detail-card-body">
+                        <p>"Your new API key (copy now — it won't be shown again):"</p>
+                        <code class="api-key-value" style="word-break: break-all;">{rk.raw_key.clone()}</code>
+                        <p style="margin-top: 8px; color: var(--text-muted);">"The old key is deprecated and will stop working after 48 hours."</p>
+                        <button
+                            class="btn btn-ghost btn-sm"
+                            style="margin-top: 8px;"
+                            on:click=move |_| set_rotated_key.set(None)
+                        >
+                            "Dismiss"
+                        </button>
+                    </div>
+                </div>
+            })}
+
             // API keys list
             <Suspense fallback=move || view! { <p>"Loading API keys..."</p> }>
                 {move || Suspend::new(async move {
@@ -462,10 +504,23 @@ fn ApiKeysTab() -> impl IntoView {
                                 view! {
                                     <div class="api-keys-list">
                                         {keys.into_iter().map(|key: ApiKeyInfo| {
-                                            let status_class = if key.is_active { "badge badge-success" } else { "badge badge-neutral" };
-                                            let status_label = if key.is_active { "Active" } else { "Revoked" };
+                                            let is_deprecated = key.deprecated_at.is_some();
                                             let is_active = key.is_active;
+
+                                            let (status_class, status_label) = if is_deprecated {
+                                                ("badge badge-warning".to_string(), format!(
+                                                    "Deprecated -- expires {}",
+                                                    key.deprecated_at.clone().unwrap_or_default()
+                                                ))
+                                            } else if is_active {
+                                                ("badge badge-success".to_string(), "Active".to_string())
+                                            } else {
+                                                ("badge badge-neutral".to_string(), "Revoked".to_string())
+                                            };
+
                                             let revoke_handler = make_revoke_handler(key.id.clone());
+                                            let rotate_handler = make_rotate_handler(key.id.clone());
+                                            let can_rotate = is_active && !is_deprecated;
 
                                             view! {
                                                 <div class="api-key-item">
@@ -478,6 +533,14 @@ fn ApiKeysTab() -> impl IntoView {
                                                         <span class="api-key-created">"Created "{key.created_at}</span>
                                                     </div>
                                                     <div class="api-key-actions">
+                                                        {can_rotate.then(|| view! {
+                                                            <button
+                                                                class="btn btn-ghost btn-sm"
+                                                                on:click=rotate_handler
+                                                            >
+                                                                "Rotate"
+                                                            </button>
+                                                        })}
                                                         {is_active.then(|| view! {
                                                             <button
                                                                 class="btn btn-ghost btn-sm"
