@@ -28,9 +28,11 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
     "Window",
+    "Location",
     "Document",
     "Element",
     "HtmlElement",
+    "Node",
     "console",
     "WebSocket",
     "MessageEvent",
@@ -49,6 +51,7 @@ gloo-timers = "0.3"
 # Utilities
 thiserror = "2.0"
 console_error_panic_hook = "0.1"
+send_wrapper = "0.6"
 
 # WASM-specific: enable JS random source
 getrandom = { version = "0.3", features = ["wasm_js"] }

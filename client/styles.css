@@ -5681,6 +5681,72 @@ a:hover {
     }
 }
 
+/* WebSocket connection indicator */
+.ws-indicator {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 4px 10px;
+    border-radius: var(--border-radius-full);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    cursor: default;
+    user-select: none;
+    transition: background 0.2s, color 0.2s;
+}
+
+.ws-indicator-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.ws-indicator-connected {
+    background: var(--color-success-light);
+    color: var(--color-success);
+}
+
+.ws-indicator-connected .ws-indicator-dot {
+    background: var(--color-success);
+}
+
+.ws-indicator-reconnecting {
+    background: var(--color-warning-light);
+    color: var(--color-warning);
+}
+
+.ws-indicator-reconnecting .ws-indicator-dot {
+    background: var(--color-warning);
+    animation: ws-pulse 1.5s ease-in-out infinite;
+}
+
+.ws-indicator-disconnected {
+    background: var(--color-gray-100);
+    color: var(--color-gray-500);
+}
+
+.ws-indicator-disconnected .ws-indicator-dot {
+    background: var(--color-gray-400);
+}
+
+@keyframes ws-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+@media (max-width: 768px) {
+    .ws-indicator-label {
+        display: none;
+    }
+
+    .ws-indicator {
+        padding: 4px;
+        min-width: 14px;
+        justify-content: center;
+    }
+}
+
 /* Auth card sizing for recovery page */
 .ps-auth-card {
     overflow: visible;

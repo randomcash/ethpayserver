@@ -9,6 +9,7 @@ use leptos_router::hooks::use_params_map;
 use crate::api::{ApiError, EvmApiClient, Invoice, InvoiceStatusExt, Payment};
 use crate::app::StoreContext;
 use crate::components::CreateInvoiceSignal;
+use crate::services::StatusUpdate;
 
 /// Helper to get chain name from chain ID.
 fn chain_name(chain_id: u64) -> &'static str {
@@ -70,6 +71,29 @@ pub fn InvoicesPage() -> impl IntoView {
 
     // Refresh counter for manual re-fetch
     let (refresh, set_refresh) = signal(0u32);
+
+    // WebSocket-driven status patches applied without full re-fetch.
+    // Maps invoice_id -> new status string from the most recent WS event.
+    let (ws_patches, set_ws_patches) = signal(std::collections::HashMap::<String, String>::new());
+    let ws_update = use_context::<ReadSignal<Option<StatusUpdate>>>();
+    if let Some(ws_update) = ws_update {
+        Effect::new(move || {
+            if let Some(StatusUpdate::InvoiceStatus {
+                ref invoice_id,
+                ref status,
+            }) = ws_update.get()
+            {
+                set_ws_patches.update(|patches| {
+                    patches.insert(invoice_id.clone(), status.clone());
+                });
+            }
+        });
+    }
+    // Clear patches when a fresh fetch completes (the fetched data is authoritative).
+    Effect::new(move || {
+        let _ = refresh.get();
+        set_ws_patches.update(|patches| patches.clear());
+    });
 
     // Use the shared create-invoice modal signal
     let create_invoice_signal =
@@ -181,8 +205,22 @@ pub fn InvoicesPage() -> impl IntoView {
                     }.into_any(),
                     Ok(response) => {
                         let total = response.total;
-                        let invoices = response.invoices.clone();
+                        let mut invoices = response.invoices.clone();
                         let search = search_query.get();
+
+                        // Apply WebSocket status patches in-place (avoids full re-fetch).
+                        let patches = ws_patches.get();
+                        if !patches.is_empty() {
+                            for invoice in &mut invoices {
+                                if let Some(new_status) = patches.get(&invoice.id)
+                                    && let Ok(parsed) = serde_json::from_value(
+                                        serde_json::Value::String(new_status.clone()),
+                                    )
+                                {
+                                    invoice.status = parsed;
+                                }
+                            }
+                        }
 
                         // Client-side search filter
                         let filtered: Vec<Invoice> = if search.is_empty() {

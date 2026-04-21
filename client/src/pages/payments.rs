@@ -8,6 +8,7 @@ use leptos_router::hooks::use_params_map;
 
 use crate::api::{ApiError, EvmApiClient, Payment};
 use crate::app::StoreContext;
+use crate::services::StatusUpdate;
 
 /// Helper to get chain name from chain ID.
 fn chain_name(chain_id: u64) -> &'static str {
@@ -106,6 +107,39 @@ pub fn PaymentsPage() -> impl IntoView {
     // Refresh counter for manual re-fetch
     let (refresh, set_refresh) = signal(0u32);
 
+    // WebSocket-driven payment patches and new-payment detection.
+    // Stores payment_id -> new status for in-place patching.
+    // If a PaymentUpdate arrives for an unknown payment_id, triggers a refetch.
+    let (ws_patches, set_ws_patches) = signal(std::collections::HashMap::<String, String>::new());
+    let ws_update = use_context::<ReadSignal<Option<StatusUpdate>>>();
+    let known_payment_ids: StoredValue<std::collections::HashSet<String>> =
+        StoredValue::new(std::collections::HashSet::new());
+    if let Some(ws_update) = ws_update {
+        Effect::new(move || {
+            if let Some(StatusUpdate::PaymentUpdate {
+                ref payment_id,
+                status: ref new_status,
+                ..
+            }) = ws_update.get()
+            {
+                let is_known = known_payment_ids.with_value(|ids| ids.contains(payment_id));
+                if is_known {
+                    set_ws_patches.update(|patches| {
+                        patches.insert(payment_id.clone(), new_status.clone());
+                    });
+                } else {
+                    // New payment — trigger full refetch.
+                    set_refresh.update(|n| *n = n.wrapping_add(1));
+                }
+            }
+        });
+    }
+    // Clear patches on fresh fetch.
+    Effect::new(move || {
+        let _ = refresh.get();
+        set_ws_patches.update(|patches| patches.clear());
+    });
+
     // Convert active filter to API status param
     let status_param = Signal::derive(move || match active_filter.get().as_str() {
         "all" => None,
@@ -196,8 +230,35 @@ pub fn PaymentsPage() -> impl IntoView {
                     }.into_any(),
                     Ok(response) => {
                         let total = response.total;
-                        let payments = response.payments.clone();
+                        let mut payments = response.payments.clone();
                         let search = search_query.get();
+
+                        // Track known payment IDs so WS can distinguish new vs existing.
+                        known_payment_ids.set_value(
+                            payments.iter().map(|p| p.id.clone()).collect(),
+                        );
+
+                        // Apply WebSocket status patches in-place.
+                        let patches = ws_patches.get();
+                        if !patches.is_empty() {
+                            for payment in &mut payments {
+                                if let Some(new_status) = patches.get(&payment.id) {
+                                    match new_status.as_str() {
+                                        "confirmed" => {
+                                            if payment.confirmed_at.is_none() {
+                                                payment.confirmed_at =
+                                                    Some(String::new());
+                                            }
+                                            payment.reorged = false;
+                                        }
+                                        "reorged" => {
+                                            payment.reorged = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
 
                         // Client-side search filter
                         let filtered: Vec<Payment> = if search.is_empty() {

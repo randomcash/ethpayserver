@@ -2,4 +2,4 @@
 
 pub mod websocket;
 
-pub use websocket::{StatusUpdate, WebSocketService};
+pub use websocket::{ConnectionState, StatusUpdate, WebSocketService};

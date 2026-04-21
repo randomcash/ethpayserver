@@ -1,6 +1,7 @@
 //! Dashboard page - Stripe-inspired overview of EVM payment activity.
 
 use crate::api::EvmApiClient;
+use crate::services::StatusUpdate;
 use leptos::prelude::*;
 use leptos_router::components::A;
 
@@ -41,12 +42,27 @@ fn DashboardHeader() -> impl IntoView {
 }
 
 /// Key metrics section — fetches real data from the dashboard stats API.
+/// Re-fetches when a WebSocket InvoiceStatus or PaymentUpdate arrives.
 #[component]
 fn DashboardMetrics() -> impl IntoView {
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let ws_update = use_context::<ReadSignal<Option<StatusUpdate>>>();
+
+    // Bump to trigger re-fetch when relevant WS messages arrive.
+    let (ws_version, set_ws_version) = signal(0u32);
+    if let Some(ws_update) = ws_update {
+        Effect::new(move || {
+            if let Some(StatusUpdate::InvoiceStatus { .. } | StatusUpdate::PaymentUpdate { .. }) =
+                ws_update.get()
+            {
+                set_ws_version.update(|n| *n = n.wrapping_add(1));
+            }
+        });
+    }
 
     let stats_resource = LocalResource::new(move || {
         let client = api.get();
+        let _ = ws_version.get();
         async move { client.get_dashboard_stats().await.ok() }
     });
 
