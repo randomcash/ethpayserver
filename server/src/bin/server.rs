@@ -5,6 +5,7 @@
 //! DATABASE_URL="postgres://..." cargo run --release
 //! ```
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -30,10 +31,13 @@ async fn main() -> Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();
 
+    // Initialize Sentry (no-op when SENTRY_DSN is unset)
+    let _sentry_guard = init_sentry();
+
     // Load configuration
     let config = Config::from_env()?;
 
-    // Initialize tracing
+    // Initialize tracing (includes Sentry layer when DSN is configured)
     init_tracing(&config.log_level);
 
     // Initialize Prometheus metrics
@@ -222,12 +226,24 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn init_sentry() -> sentry::ClientInitGuard {
+    sentry::init(sentry::ClientOptions {
+        dsn: std::env::var("SENTRY_DSN")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        release: option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from),
+        environment: std::env::var("SENTRY_ENVIRONMENT").ok().map(Cow::from),
+        ..Default::default()
+    })
+}
+
 fn init_tracing(log_level: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
     tracing_subscriber::registry()
         .with(filter)
+        .with(sentry_tracing::layer())
         .with(tracing_subscriber::fmt::layer())
         .init();
 }
