@@ -1361,6 +1361,7 @@ fn build_payment_filter_params(
 ///
 /// Accepts the same query parameters as `list_invoices`. Streams results
 /// in pages of 1000 rows to avoid full-result buffering.
+#[allow(clippy::too_many_lines)] // CSV export: filter assembly + paged stream + row serialization
 pub async fn export_invoices_csv<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
@@ -1488,6 +1489,7 @@ where
 ///
 /// Accepts the same query parameters as `list_payments`. Streams results
 /// in pages of 1000 rows to avoid full-result buffering.
+#[allow(clippy::too_many_lines)] // CSV export: filter assembly + paged stream + row serialization
 pub async fn export_payments_csv<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
