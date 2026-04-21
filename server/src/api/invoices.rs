@@ -1385,11 +1385,11 @@ where
             "max_rows": MAX_EXPORT_ROWS,
             "matched_rows": total,
         });
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .header("Content-Type", "application/json")
             .body(Body::from(body.to_string()))
-            .unwrap());
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     let store_label = store_id
@@ -1473,7 +1473,7 @@ where
 
     let body = Body::from_stream(header_stream.chain(data_stream));
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/csv; charset=utf-8")
         .header(
@@ -1481,7 +1481,7 @@ where
             format!("attachment; filename=\"{}\"", filename),
         )
         .body(body)
-        .unwrap())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Export payments as a streaming CSV file.
@@ -1510,11 +1510,11 @@ where
             "max_rows": MAX_EXPORT_ROWS,
             "matched_rows": total,
         });
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .header("Content-Type", "application/json")
             .body(Body::from(body.to_string()))
-            .unwrap());
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     let store_label = store_id
@@ -1592,7 +1592,7 @@ where
 
     let body = Body::from_stream(header_stream.chain(data_stream));
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/csv; charset=utf-8")
         .header(
@@ -1600,7 +1600,7 @@ where
             format!("attachment; filename=\"{}\"", filename),
         )
         .body(body)
-        .unwrap())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[cfg(test)]
