@@ -17,6 +17,7 @@ pub mod dashboard;
 pub mod extractors;
 pub mod health;
 pub mod http_metrics;
+pub mod idempotency;
 pub mod invoices;
 pub mod payouts;
 pub mod rate_limit;
@@ -151,6 +152,7 @@ pub fn router<A>(
     state: PgAppState<A>,
     enable_swagger: bool,
     rate_limiters: Option<Arc<rate_limit::RateLimitState>>,
+    idempotency: Option<Arc<idempotency::IdempotencyState>>,
 ) -> Router
 where
     A: AuthenticationService + 'static,
@@ -202,8 +204,8 @@ where
         .route("/{store_id}/payouts/{payout_id}", get(payouts::get_payout::<A>))
         .with_state(state.clone());
 
-    // Invoice endpoints
-    let invoice_routes = Router::new()
+    // Invoice endpoints (with idempotency middleware on POST)
+    let mut invoice_routes = Router::new()
         .route("/", get(invoices::list_invoices::<A>))
         .route("/", post(invoices::create_invoice::<A>))
         .route("/{invoice_id}", get(invoices::get_invoice::<A>))
@@ -219,6 +221,13 @@ where
         .route("/{invoice_id}/refund", post(refunds::create_refund::<A>))
         .route("/{invoice_id}/refunds", get(refunds::list_refunds::<A>))
         .with_state(state.clone());
+
+    if let Some(idem) = idempotency {
+        invoice_routes = invoice_routes.layer(axum::middleware::from_fn_with_state(
+            idem,
+            idempotency::middleware,
+        ));
+    }
 
     // Wallet endpoints (cross-store)
     let wallet_routes = Router::new()
