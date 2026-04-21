@@ -370,6 +370,7 @@ mod tests {
     /// is a singleton, parallel tests that each call this will race. In
     /// practice the CI runner executes server unit tests in a single thread
     /// (--test-threads=1 for lib tests) so this is safe.
+    #[allow(clippy::expect_used)]
     fn test_recorder() -> metrics_exporter_prometheus::PrometheusHandle {
         let builder = PrometheusBuilder::new();
         let handle = builder.install_recorder().expect("recorder already set");
