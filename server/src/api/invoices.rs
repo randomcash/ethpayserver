@@ -507,6 +507,16 @@ where
         (status = 403, description = "Insufficient permissions"),
     )
 )]
+// Genuinely too large — 290 lines, complexity 104. Validates the request,
+// resolves every payment option with its pricing source, derives addresses,
+// and persists the whole graph. Splitting requires passing a mutable
+// transactional context across helpers; better handled as a dedicated refactor.
+// Refactor tracked in a follow-up ticket.
+#[allow(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "tightly-coupled invoice-creation transaction; refactor tracked separately"
+)]
 pub async fn create_invoice<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
