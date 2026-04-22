@@ -162,7 +162,22 @@ pub fn PaymentsPage() -> impl IntoView {
                     <p class="page-description">"View all received payments across networks"</p>
                 </div>
                 <div class="page-actions">
-                    <button class="btn btn-secondary btn-sm">
+                    <button class="btn btn-secondary btn-sm" on:click=move |_| {
+                        let api = api.get();
+                        let store_id = store_ctx.selected_store_id.get();
+                        let status = status_param.get();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let Some(sid) = store_id else { return };
+                            match api.export_payments_csv(&sid, status.as_deref()).await {
+                                Ok(csv) => super::trigger_csv_download(&csv, "payments.csv"),
+                                Err(e) => {
+                                    web_sys::console::error_1(
+                                        &format!("CSV export failed: {e}").into(),
+                                    );
+                                }
+                            }
+                        });
+                    }>
                         <IconExport />
                         "Export"
                     </button>

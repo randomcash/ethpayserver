@@ -210,6 +210,7 @@ where
     let mut invoice_routes = Router::new()
         .route("/", get(invoices::list_invoices::<A>))
         .route("/", post(invoices::create_invoice::<A>))
+        .route("/export.csv", get(invoices::export_invoices_csv::<A>))
         .route("/{invoice_id}", get(invoices::get_invoice::<A>))
         .route(
             "/{invoice_id}/payments",
@@ -245,6 +246,7 @@ where
     // Payment endpoints (store-scoped)
     let payment_routes = Router::new()
         .route("/", get(invoices::list_payments::<A>))
+        .route("/export.csv", get(invoices::export_payments_csv::<A>))
         .route("/{payment_id}", get(invoices::get_payment::<A>))
         .with_state(state.clone());
 
