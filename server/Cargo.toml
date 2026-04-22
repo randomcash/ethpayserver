@@ -63,6 +63,7 @@ metrics-exporter-prometheus = "0.16"
 
 # Rate limiting
 governor = "0.10"
+dashmap = "6"
 
 # Ethereum primitives
 alloy-primitives = "1"

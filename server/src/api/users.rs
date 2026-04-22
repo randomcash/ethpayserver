@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, SessionService};
+use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService};
 
 use super::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
@@ -33,6 +33,24 @@ pub struct ApiKeyInfoResponse {
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Per-key rate limit in requests per minute. Null = server default.
+    pub rate_limit_rpm: Option<i32>,
+}
+
+impl ApiKeyInfoResponse {
+    fn from_key_with_rate_limit(key: &ApiKey, rate_limit_rpm: Option<i32>) -> Self {
+        let info = ApiKeyInfo::from(key);
+        Self {
+            id: info.id.0,
+            name: info.name,
+            key_prefix: info.key_prefix,
+            is_active: info.is_active,
+            created_at: info.created_at,
+            last_used_at: info.last_used_at,
+            expires_at: info.expires_at,
+            rate_limit_rpm,
+        }
+    }
 }
 
 impl From<ApiKeyInfo> for ApiKeyInfoResponse {
@@ -45,6 +63,7 @@ impl From<ApiKeyInfo> for ApiKeyInfoResponse {
             created_at: info.created_at,
             last_used_at: info.last_used_at,
             expires_at: info.expires_at,
+            rate_limit_rpm: None,
         }
     }
 }
@@ -91,13 +110,13 @@ where
 {
     let keys = state
         .data_service
-        .list_user_api_keys(user.id)
+        .list_user_api_keys_with_rate_limit(user.id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let keys = keys
         .iter()
-        .map(|k| ApiKeyInfoResponse::from(ApiKeyInfo::from(k)))
+        .map(|(k, rpm)| ApiKeyInfoResponse::from_key_with_rate_limit(k, *rpm))
         .collect();
 
     Ok(Json(ApiKeyListResponse { keys }))
@@ -217,6 +236,74 @@ where
         Ok(()) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+/// Request to update an API key's rate limit.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateApiKeyPayload {
+    /// Per-key rate limit in requests per minute. Null = use server default.
+    pub rate_limit_rpm: Option<i32>,
+}
+
+/// Update an API key's settings (currently: rate_limit_rpm).
+#[utoipa::path(
+    patch,
+    path = "/users/api-keys/{id}",
+    tag = "users",
+    security(("bearer_auth" = [])),
+    params(
+        ("id" = Uuid, Path, description = "API key ID to update"),
+    ),
+    request_body = UpdateApiKeyPayload,
+    responses(
+        (status = 200, description = "API key updated", body = ApiKeyInfoResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "API key not found"),
+    )
+)]
+pub async fn update_api_key<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateApiKeyPayload>,
+) -> Result<Json<ApiKeyInfoResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    // Validate rate_limit_rpm if set
+    if let Some(rpm) = payload.rate_limit_rpm
+        && rpm < 1
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Verify the key belongs to this user
+    let key = state
+        .data_service
+        .get_api_key(ApiKeyId(id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let key = match key {
+        Some(k) => k,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+
+    if key.user_id != user.id && user.role != Role::ServerAdmin {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    state
+        .data_service
+        .update_api_key_rate_limit(ApiKeyId(id), payload.rate_limit_rpm)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ApiKeyInfoResponse::from_key_with_rate_limit(
+        &key,
+        payload.rate_limit_rpm,
+    )))
 }
 
 /// Generate a random hex segment for API key generation.

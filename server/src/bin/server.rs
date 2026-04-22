@@ -21,6 +21,7 @@ use rates::RateProviderConfig;
 use server::{
     AppState, CleanupConfig, EventConsumer, InvoiceCleanupService, RedisEVMMonitor,
     WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService, api,
+    api::api_key_rate_limit::ApiKeyRateLimitState,
     api::rate_limit::{RateLimitConfig, RateLimitState},
     config::Config,
     metrics,
@@ -215,12 +216,21 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Create per-API-key rate limiter
+    let api_key_rate_limiter =
+        Arc::new(ApiKeyRateLimitState::from_env(data_service.pool().clone()));
+    tracing::info!(
+        default_rpm = api_key_rate_limiter.default_rpm,
+        "Per-API-key rate limiting configured"
+    );
+
     // Build router with middleware
     let app = api::router(
         state,
         config.enable_swagger,
         Some(rate_limiters),
         idempotency,
+        Some(api_key_rate_limiter),
     )
     .layer(TraceLayer::new_for_http())
     .layer(
