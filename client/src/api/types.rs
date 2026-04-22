@@ -445,6 +445,34 @@ pub struct CreateApiKeyResponsePayload {
     pub expires_at: Option<String>,
     pub key: String,
 }
+
+/// Store settings (defaults, branding, notification prefs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreSettings {
+    pub store_id: String,
+    pub default_chain_id: Option<i64>,
+    pub default_display_currency: Option<String>,
+    pub logo_url: Option<String>,
+    pub accent_color: Option<String>,
+    pub notification_prefs: serde_json::Value,
+    pub updated_at: String,
+}
+
+/// Request to update store settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateStoreSettingsRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_chain_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_display_currency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accent_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification_prefs: Option<serde_json::Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

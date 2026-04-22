@@ -8,8 +8,8 @@ use super::{
     ApiKeyListResponse, CheckoutResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
     InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, Store,
-    StorePaymentMethod, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
-    UpdateWebhookRequest, UserInfo, Wallet,
+    StorePaymentMethod, StoreSettings, StoreWebhook, UpdatePaymentMethodRequest,
+    UpdateStoreRequest, UpdateStoreSettingsRequest, UpdateWebhookRequest, UserInfo, Wallet,
 };
 
 /// API client errors.
@@ -117,6 +117,25 @@ impl EvmApiClient {
     ) -> Result<T, ApiError> {
         let request = self
             .build_request("PUT", path)
+            .json(body)
+            .map_err(|e| ApiError::Parse(e.to_string()))?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        self.handle_response(response).await
+    }
+
+    /// Make a PATCH request.
+    async fn patch<T: DeserializeOwned, B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        let request = self
+            .build_request("PATCH", path)
             .json(body)
             .map_err(|e| ApiError::Parse(e.to_string()))?;
 
@@ -438,6 +457,26 @@ impl EvmApiClient {
     /// Delete webhook configuration for a store.
     pub async fn delete_store_webhook(&self, store_id: &str) -> Result<(), ApiError> {
         self.delete(&format!("/api/stores/{}/webhook", store_id))
+            .await
+    }
+
+    // =========================================================================
+    // Store Settings
+    // =========================================================================
+
+    /// Get store settings.
+    pub async fn get_store_settings(&self, store_id: &str) -> Result<StoreSettings, ApiError> {
+        self.get(&format!("/api/stores/{}/settings", store_id))
+            .await
+    }
+
+    /// Update store settings (partial update).
+    pub async fn update_store_settings(
+        &self,
+        store_id: &str,
+        request: &UpdateStoreSettingsRequest,
+    ) -> Result<StoreSettings, ApiError> {
+        self.patch(&format!("/api/stores/{}/settings", store_id), request)
             .await
     }
 

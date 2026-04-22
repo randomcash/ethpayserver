@@ -10,9 +10,9 @@ use types::{
     CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
     InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentMethodId, PaymentOptionData,
     PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentQueryParams, PaymentReader,
-    PaymentWriter, PendingWatchInfo, RepositoryResult, StoreId, StoreWebhook, StoreWebhookReader,
-    TokenData, TokenQueryParams, TokenReader, TokenWriter, WatchedAddressReader,
-    WatchedAddressWriter,
+    PaymentWriter, PendingWatchInfo, RepositoryResult, StoreId, StoreSettings, StoreSettingsReader,
+    StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams, TokenReader, TokenWriter,
+    WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
 
@@ -770,6 +770,13 @@ impl StoreWebhookReader for InMemoryDataService {
     async fn get_enabled_webhook(&self, store_id: Uuid) -> RepositoryResult<Option<StoreWebhook>> {
         let webhooks = self.webhooks.read().unwrap();
         Ok(webhooks.get(&store_id).filter(|w| w.enabled).cloned())
+    }
+}
+
+#[async_trait]
+impl StoreSettingsReader for InMemoryDataService {
+    async fn get_store_settings(&self, _store_id: Uuid) -> RepositoryResult<Option<StoreSettings>> {
+        Ok(None)
     }
 }
 

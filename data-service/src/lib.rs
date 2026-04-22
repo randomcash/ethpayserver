@@ -87,6 +87,11 @@ pub use types::{
     StorePaymentMethodReader,
     StorePaymentMethodRepository,
     StorePaymentMethodWriter,
+    // Store Settings
+    StoreSettings,
+    StoreSettingsReader,
+    StoreSettingsRepository,
+    StoreSettingsWriter,
     // Store Wallet (deprecated)
     StoreWallet,
     StoreWalletReader,
