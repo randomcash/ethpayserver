@@ -8,8 +8,9 @@ use super::{
     ApiKeyListResponse, CheckoutResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
     InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, Store,
-    StorePaymentMethod, StoreSettings, StoreWebhook, UpdatePaymentMethodRequest,
-    UpdateStoreRequest, UpdateStoreSettingsRequest, UpdateWebhookRequest, UserInfo, Wallet,
+    StorePaymentMethod, StoreSettings, StoreWebhook, TxHashLookupResponse,
+    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateStoreSettingsRequest,
+    UpdateWebhookRequest, UserInfo, Wallet,
 };
 
 /// API client errors.
@@ -354,6 +355,16 @@ impl EvmApiClient {
             query.push_str(&format!("&status={}", s));
         }
         self.get_text(&query).await
+    }
+
+    /// Look up an invoice by transaction hash.
+    pub async fn lookup_invoice_by_tx(
+        &self,
+        chain_id: u64,
+        tx_hash: &str,
+    ) -> Result<TxHashLookupResponse, ApiError> {
+        self.get(&format!("/api/invoices/by-tx/{}/{}", chain_id, tx_hash))
+            .await
     }
 
     // =========================================================================

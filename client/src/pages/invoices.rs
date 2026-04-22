@@ -4,7 +4,7 @@
 
 use leptos::prelude::*;
 use leptos_router::components::A;
-use leptos_router::hooks::use_params_map;
+use leptos_router::hooks::{use_navigate, use_params_map};
 
 use crate::api::{ApiError, EvmApiClient, Invoice, InvoiceStatusExt, Payment};
 use crate::app::StoreContext;
@@ -46,6 +46,59 @@ pub fn InvoicesPage() -> impl IntoView {
     let (currency_filter, set_currency_filter) = signal("all".to_string());
     let (search_query, set_search_query) = signal(String::new());
     let (current_offset, set_current_offset) = signal(0i64);
+
+    // TX hash lookup state
+    let (tx_search_input, set_tx_search_input) = signal(String::new());
+    let (tx_search_error, set_tx_search_error) = signal(Option::<String>::None);
+    let (tx_searching, set_tx_searching) = signal(false);
+    let navigate = use_navigate();
+
+    // Normalise a tx hash input: add 0x prefix if missing, lowercase
+    let normalise_tx_hash = |input: &str| -> String {
+        let trimmed = input.trim();
+        if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+            trimmed.to_lowercase()
+        } else if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            format!("0x{}", trimmed.to_lowercase())
+        } else {
+            trimmed.to_lowercase()
+        }
+    };
+
+    // TX hash lookup function (uses spawn_local for WASM compatibility)
+    let do_tx_lookup = move |hash: String| {
+        let api = api.get();
+        let navigate = navigate.clone();
+        set_tx_searching.set(true);
+        set_tx_search_error.set(None);
+
+        leptos::task::spawn_local(async move {
+            // Try all common chain IDs
+            let chain_ids: &[u64] = &[1, 137, 42161, 10, 8453, 56, 43114, 250, 100, 11155111];
+            for &chain_id in chain_ids {
+                match api.lookup_invoice_by_tx(chain_id, &hash).await {
+                    Ok(resp) => {
+                        set_tx_searching.set(false);
+                        navigate(
+                            &format!("/evm/invoices/{}", resp.invoice.id),
+                            Default::default(),
+                        );
+                        return;
+                    }
+                    Err(ApiError::Http { status: 404, .. }) => continue,
+                    Err(ApiError::Http { status: 400, .. }) => {
+                        set_tx_searching.set(false);
+                        set_tx_search_error
+                            .set(Some("Invalid transaction hash format".to_string()));
+                        return;
+                    }
+                    Err(_) => continue,
+                }
+            }
+            set_tx_searching.set(false);
+            set_tx_search_error.set(Some("No invoice found for this transaction".to_string()));
+        });
+    };
 
     // Reset offset when any filter or store changes
     let _reset_offset_on_filter = Effect::new(move || {
@@ -207,6 +260,32 @@ pub fn InvoicesPage() -> impl IntoView {
                         prop:value=move || search_query.get()
                         on:input=move |ev| set_search_query.set(event_target_value(&ev))
                     />
+                </div>
+
+                <div class="invoices-search tx-hash-search">
+                    <IconSearch />
+                    <input
+                        type="text"
+                        placeholder="Search by tx hash..."
+                        prop:value=move || tx_search_input.get()
+                        on:input=move |ev| {
+                            set_tx_search_input.set(event_target_value(&ev));
+                            set_tx_search_error.set(None);
+                        }
+                        on:keydown=move |ev| {
+                            if ev.key() == "Enter" {
+                                let raw = tx_search_input.get();
+                                if !raw.trim().is_empty() {
+                                    let hash = normalise_tx_hash(&raw);
+                                    do_tx_lookup(hash);
+                                }
+                            }
+                        }
+                        disabled=move || tx_searching.get()
+                    />
+                    {move || tx_search_error.get().map(|err| view! {
+                        <span class="tx-search-error">{err}</span>
+                    })}
                 </div>
             </div>
 

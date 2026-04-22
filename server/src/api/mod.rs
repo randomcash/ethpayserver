@@ -215,6 +215,10 @@ where
         .route("/", get(invoices::list_invoices::<A>))
         .route("/", post(invoices::create_invoice::<A>))
         .route("/export.csv", get(invoices::export_invoices_csv::<A>))
+        .route(
+            "/by-tx/{chain_id}/{tx_hash}",
+            get(invoices::lookup_by_tx_hash::<A>),
+        )
         .route("/{invoice_id}", get(invoices::get_invoice::<A>))
         .route(
             "/{invoice_id}/payments",

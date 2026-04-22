@@ -309,6 +309,37 @@ impl PaymentWriter for PgDataService {
     }
 }
 
+// =========================================================================
+// Inherent methods (not part of the trait)
+// =========================================================================
+
+impl PgDataService {
+    /// Look up a payment by chain_id and tx_hash.
+    ///
+    /// Uses the UNIQUE constraint on (tx_hash, chain_id) for efficient lookup.
+    pub async fn get_payment_by_tx_hash(
+        &self,
+        chain_id: u64,
+        tx_hash: &str,
+    ) -> RepositoryResult<Option<PaymentData>> {
+        let query = format!(
+            "SELECT {} FROM payments WHERE chain_id = $1 AND tx_hash = $2",
+            PAYMENT_SELECT_COLS
+        );
+        let row = sqlx::query(&query)
+            .bind(chain_id as i64)
+            .bind(tx_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+
+        match row {
+            Some(r) => Ok(Some(try_row_to_payment(&r)?)),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Convert a database row to PaymentData.
 fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentData> {
     let chain_id: i64 = row.get("chain_id");

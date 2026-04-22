@@ -408,6 +408,15 @@ pub struct PaymentListResponse {
     pub payments: Vec<Payment>,
 }
 
+/// Response from tx hash lookup endpoint.
+///
+/// Mirrors `TxHashLookupResponse` from the server API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxHashLookupResponse {
+    pub invoice: Invoice,
+    pub payment: Payment,
+}
+
 /// API key info (returned for list/get).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyInfo {
