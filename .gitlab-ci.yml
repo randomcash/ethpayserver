@@ -48,49 +48,17 @@ before_script:
   - sccache --start-server 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# verify — fmt + clippy + nextest + migrate against a postgres service.
-# Runs on every MR; intentionally light. Coverage and release-build sanity
-# live in dedicated jobs gated to testnet/main.
+# verify — fmt + clippy + lib unit tests. Runs on every MR; intentionally
+# light. Postgres integration, coverage, and release-build sanity all live
+# in verify:coverage (testnet/main only).
 # ---------------------------------------------------------------------------
 
 verify:
   stage: verify
-  services:
-    # Run Postgres as a GitLab CI service sibling container. The previous
-    # `docker run -p 0:5432` + `127.0.0.1:$PGPORT` pattern only worked under
-    # bare-Docker executors; under DinD the mapped port lives on the daemon,
-    # not on the job container, which meant sqlx timed out on every connect
-    # while `pg_isready` via `docker exec` passed. Services are resolved by
-    # hostname (`postgres`) regardless of executor.
-    - name: postgres:16-alpine
-      alias: postgres
-  variables:
-    POSTGRES_USER: test
-    POSTGRES_PASSWORD: test
-    POSTGRES_DB: ethpayserver_test
-    DATABASE_URL: "postgres://test:test@postgres:5432/ethpayserver_test"
   script:
     - cargo fmt -p server -p data-service -p evm -p ethpayserver-client -- --check
     - cargo clippy -p server -p data-service -p evm -p ethpayserver-client --all-targets -- -D warnings
     - cargo nextest run --workspace --lib --no-fail-fast
-    # Integration tests against the Postgres service. Wait briefly for the
-    # service to accept TCP connections; bash's /dev/tcp avoids needing
-    # pg_isready/nc in the runner image.
-    - |
-      for i in $(seq 1 30); do
-        if timeout 2 bash -c '</dev/tcp/postgres/5432' 2>/dev/null; then
-          echo "postgres ready after ${i}s"
-          break
-        fi
-        sleep 1
-      done
-    # Debug build reuses target/debug from the preceding nextest run —
-    # release mode would trigger a full rebuild from scratch here and
-    # adds ~10min for no benefit (one-shot migration binary).
-    - cargo run --bin migrate_postgres
-    - |
-      cargo nextest run -p data-service --no-fail-fast --run-ignored only \
-        || echo "WARNING: integration tests failed (known FK fixture issues, non-blocking)"
     - sccache --show-stats || true
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
@@ -98,15 +66,16 @@ verify:
     - if: $CI_COMMIT_BRANCH == "testnet"
 
 # ---------------------------------------------------------------------------
-# verify:coverage — RCS-110 coverage gate. Heavy: llvm-cov instruments
-# everything so it can't reuse target/debug from `verify`. Restricted to
-# integration branches so MRs stay fast. Release-mode binary sanity is
-# already exercised by the build:* jobs.
+# verify:coverage — RCS-110 coverage gate + postgres integration tests.
+# Heavy: llvm-cov instruments everything so it can't reuse target/debug
+# from `verify`. Restricted to integration branches so MRs stay fast.
+# Release-mode binary sanity is already exercised by the build:* jobs.
 # ---------------------------------------------------------------------------
 
 verify:coverage:
   stage: verify
   services:
+    # Postgres as a GitLab CI service sibling container; resolved via hostname.
     - name: postgres:16-alpine
       alias: postgres
   variables:
@@ -117,6 +86,19 @@ verify:coverage:
   script:
     - rustup component add llvm-tools 2>/dev/null || true
     - command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+    # Wait for the postgres service container to accept TCP, then migrate.
+    - |
+      for i in $(seq 1 30); do
+        if timeout 2 bash -c '</dev/tcp/postgres/5432' 2>/dev/null; then
+          echo "postgres ready after ${i}s"
+          break
+        fi
+        sleep 1
+      done
+    - cargo run --bin migrate_postgres
+    - |
+      cargo nextest run -p data-service --no-fail-fast --run-ignored only \
+        || echo "WARNING: integration tests failed (known FK fixture issues, non-blocking)"
     - RUSTC_WRAPPER="" cargo llvm-cov nextest --workspace --lib --no-fail-fast --fail-under-lines 25 --cobertura --output-path cobertura.xml
     - sccache --show-stats || true
   artifacts:
