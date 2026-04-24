@@ -13,7 +13,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService};
+use data_service::ApiKeyFullInfo;
 
+use super::api_key_hash::hash_api_key;
 use super::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
@@ -35,10 +37,25 @@ pub struct ApiKeyInfoResponse {
     pub expires_at: Option<DateTime<Utc>>,
     /// Per-key rate limit in requests per minute. Null = server default.
     pub rate_limit_rpm: Option<i32>,
+    /// Set when the key is deprecated via rotation. Key remains valid during
+    /// the grace window; null means not deprecated.
+    pub deprecated_at: Option<DateTime<Utc>>,
+    /// When the grace window ends for a deprecated key (computed server-side
+    /// from `deprecated_at` + grace seconds). Null for non-deprecated keys.
+    /// Surfacing this lets the client render the exact expiry without
+    /// hardcoding the grace duration.
+    pub deprecation_expires_at: Option<DateTime<Utc>>,
 }
 
 impl ApiKeyInfoResponse {
-    fn from_key_with_rate_limit(key: &ApiKey, rate_limit_rpm: Option<i32>) -> Self {
+    /// Build from an `ApiKey` plus the ancillary rate-limit / deprecation fields
+    /// not present on the auth-crate struct. Used by endpoints that already
+    /// have an `ApiKey` in hand (e.g. update_api_key after a mutation).
+    fn from_key_with_rate_limit(
+        key: &ApiKey,
+        rate_limit_rpm: Option<i32>,
+        deprecated_at: Option<DateTime<Utc>>,
+    ) -> Self {
         let info = ApiKeyInfo::from(key);
         Self {
             id: info.id.0,
@@ -49,23 +66,34 @@ impl ApiKeyInfoResponse {
             last_used_at: info.last_used_at,
             expires_at: info.expires_at,
             rate_limit_rpm,
+            deprecated_at,
+            deprecation_expires_at: deprecated_at.map(deprecation_expires_at),
         }
     }
 }
 
-impl From<ApiKeyInfo> for ApiKeyInfoResponse {
-    fn from(info: ApiKeyInfo) -> Self {
+impl From<ApiKeyFullInfo> for ApiKeyInfoResponse {
+    fn from(info: ApiKeyFullInfo) -> Self {
         Self {
-            id: info.id.0,
+            id: info.id,
             name: info.name,
             key_prefix: info.key_prefix,
             is_active: info.is_active,
             created_at: info.created_at,
             last_used_at: info.last_used_at,
             expires_at: info.expires_at,
-            rate_limit_rpm: None,
+            rate_limit_rpm: info.rate_limit_rpm,
+            deprecated_at: info.deprecated_at,
+            deprecation_expires_at: info.deprecated_at.map(deprecation_expires_at),
         }
     }
+}
+
+/// Translate a `deprecated_at` into the grace-window deadline. Uses the same
+/// grace-seconds value as the auth extractor, so the client-visible expiry
+/// matches when the server actually starts rejecting the key.
+fn deprecation_expires_at(deprecated_at: DateTime<Utc>) -> DateTime<Utc> {
+    deprecated_at + chrono::Duration::seconds(super::extractors::deprecation_grace_secs())
 }
 
 /// Request to create a new API key.
@@ -90,6 +118,23 @@ pub struct CreateApiKeyResponsePayload {
     pub key: String,
 }
 
+/// Response after rotating an API key.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RotateApiKeyResponsePayload {
+    /// The new API key's ID.
+    pub id: Uuid,
+    pub name: String,
+    pub key_prefix: String,
+    pub created_at: DateTime<Utc>,
+    /// The new plaintext API key. Store this securely.
+    pub key: String,
+    /// When the old key was deprecated (grace window starts here).
+    pub old_key_deprecated_at: DateTime<Utc>,
+    /// When the old key's grace window ends and it stops authenticating.
+    /// Clients should show this directly instead of hardcoding "48 hours".
+    pub old_key_grace_expires_at: DateTime<Utc>,
+}
+
 /// List all API keys for the authenticated user.
 #[utoipa::path(
     get,
@@ -110,14 +155,11 @@ where
 {
     let keys = state
         .data_service
-        .list_user_api_keys_with_rate_limit(user.id)
+        .list_user_api_keys_full(user.id.0)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let keys = keys
-        .iter()
-        .map(|(k, rpm)| ApiKeyInfoResponse::from_key_with_rate_limit(k, *rpm))
-        .collect();
+    let keys = keys.into_iter().map(ApiKeyInfoResponse::from).collect();
 
     Ok(Json(ApiKeyListResponse { keys }))
 }
@@ -148,29 +190,7 @@ where
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Generate a random API key
-    let raw_key = format!(
-        "ak_{}_{}",
-        generate_key_segment(4),
-        generate_key_segment(32)
-    );
-    let key_prefix = format!("{}****{}", &raw_key[..8], &raw_key[raw_key.len() - 4..]);
-
-    // Hash the key for storage
-    let key_hash = hash_api_key(&raw_key);
-
-    let now = Utc::now();
-    let api_key = ApiKey {
-        id: ApiKeyId::new(),
-        user_id: user.id,
-        name: name.clone(),
-        key_hash,
-        key_prefix: key_prefix.clone(),
-        is_active: true,
-        created_at: now,
-        last_used_at: None,
-        expires_at: payload.expires_at,
-    };
+    let (raw_key, api_key) = build_api_key(&name, user.id, payload.expires_at);
 
     state
         .data_service
@@ -183,10 +203,10 @@ where
         Json(CreateApiKeyResponsePayload {
             id: api_key.id.0,
             name,
-            key_prefix,
+            key_prefix: api_key.key_prefix,
             is_active: true,
-            created_at: now,
-            expires_at: payload.expires_at,
+            created_at: api_key.created_at,
+            expires_at: api_key.expires_at,
             key: raw_key,
         }),
     ))
@@ -215,7 +235,6 @@ pub async fn revoke_api_key<A>(
 where
     A: SessionService + 'static,
 {
-    // Verify the key belongs to this user
     let key = state
         .data_service
         .get_api_key(ApiKeyId(id))
@@ -300,10 +319,139 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Preserve any existing deprecation state in the response rather than
+    // always returning None — prevents a stale-UI bug where the client
+    // thinks the key was un-deprecated after a rate-limit update.
+    let deprecated_at = state
+        .data_service
+        .get_api_key_auth_info_by_id(id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|info| info.deprecated_at);
+
     Ok(Json(ApiKeyInfoResponse::from_key_with_rate_limit(
         &key,
         payload.rate_limit_rpm,
+        deprecated_at,
     )))
+}
+
+/// Rotate an API key: creates a new key and deprecates the old one.
+///
+/// The old key remains usable during the grace window (default 48h,
+/// configurable via `API_KEY_DEPRECATION_GRACE_SECS`).
+#[utoipa::path(
+    post,
+    path = "/users/api-keys/{id}/rotate",
+    tag = "users",
+    security(("bearer_auth" = [])),
+    params(
+        ("id" = Uuid, Path, description = "API key ID to rotate"),
+    ),
+    responses(
+        (status = 201, description = "Key rotated", body = RotateApiKeyResponsePayload),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "API key not found"),
+        (status = 409, description = "Key already deprecated or inactive"),
+    )
+)]
+pub async fn rotate_api_key<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<RotateApiKeyResponsePayload>), StatusCode>
+where
+    A: SessionService + 'static,
+{
+    // Fetch the existing key via trait (for ownership + name)
+    let key = state
+        .data_service
+        .get_api_key(ApiKeyId(id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Verify ownership
+    if key.user_id != user.id {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Must be active
+    if !key.is_active {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    // Check deprecation via PgDataService (the trait model doesn't have deprecated_at)
+    let auth_info = state
+        .data_service
+        .get_api_key_auth_info_by_id(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if auth_info.deprecated_at.is_some() {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    // Create the replacement key + deprecate the old one atomically.
+    // Without a transaction a partial failure (new key created, deprecation
+    // fails) would leave TWO active keys on the account — the explicit
+    // enemy of rotation.
+    let new_name = format!("{} (rotated)", key.name);
+    let (raw_key, new_api_key) = build_api_key(&new_name, user.id, key.expires_at);
+    let now = Utc::now();
+
+    state
+        .data_service
+        .rotate_api_key_atomic(&new_api_key, id, now)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(RotateApiKeyResponsePayload {
+            id: new_api_key.id.0,
+            name: new_name,
+            key_prefix: new_api_key.key_prefix,
+            created_at: new_api_key.created_at,
+            key: raw_key,
+            old_key_deprecated_at: now,
+            old_key_grace_expires_at: deprecation_expires_at(now),
+        }),
+    ))
+}
+
+// === Helpers ===
+
+/// Build a new ApiKey struct and return (plaintext, model).
+fn build_api_key(
+    name: &str,
+    user_id: auth::UserId,
+    expires_at: Option<DateTime<Utc>>,
+) -> (String, ApiKey) {
+    let raw_key = format!(
+        "ak_{}_{}",
+        generate_key_segment(4),
+        generate_key_segment(32)
+    );
+    let key_prefix = format!("{}****{}", &raw_key[..8], &raw_key[raw_key.len() - 4..]);
+    let key_hash = hash_api_key(&raw_key);
+    let now = Utc::now();
+
+    let api_key = ApiKey {
+        id: ApiKeyId::new(),
+        user_id,
+        name: name.to_string(),
+        key_hash,
+        key_prefix,
+        is_active: true,
+        created_at: now,
+        last_used_at: None,
+        expires_at,
+    };
+
+    (raw_key, api_key)
 }
 
 /// Generate a random hex segment for API key generation.
@@ -329,12 +477,4 @@ fn generate_key_segment(bytes: usize) -> String {
         write!(s, "{:02x}", b).unwrap();
     }
     s
-}
-
-/// Hash an API key with SHA-256 for storage.
-fn hash_api_key(raw_key: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(raw_key.as_bytes());
-    hex::encode(hasher.finalize())
 }

@@ -1,5 +1,11 @@
 -- Webhook delivery tracking table.
 -- Records every delivery attempt for audit and retry management.
+--
+-- Originally shipped as 20260418000001 alongside api_key_rate_limit, which
+-- had the same version prefix and caused a _sqlx_migrations PK collision on
+-- fresh DBs. Renamed to …000002; every statement below is now idempotent so
+-- re-running on environments where it already ran under the old version is
+-- a no-op rather than an error.
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -15,20 +21,20 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 );
 
 -- Query by webhook
-CREATE INDEX idx_webhook_deliveries_store_webhook_id
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_store_webhook_id
     ON webhook_deliveries (store_webhook_id);
 
 -- Query by invoice
-CREATE INDEX idx_webhook_deliveries_invoice_id
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_invoice_id
     ON webhook_deliveries (invoice_id);
 
 -- Find deliveries needing retry
-CREATE INDEX idx_webhook_deliveries_status
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status
     ON webhook_deliveries (status)
     WHERE status IN ('pending', 'retrying');
 
 -- Time-based queries / cleanup
-CREATE INDEX idx_webhook_deliveries_created_at
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at
     ON webhook_deliveries (created_at);
 
 -- Trigger to auto-update updated_at (reuses the function from
@@ -41,6 +47,9 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
+-- Drop-then-create so re-runs replace any existing trigger rather than
+-- erroring on "trigger already exists".
+DROP TRIGGER IF EXISTS set_updated_at ON webhook_deliveries;
 CREATE TRIGGER set_updated_at
     BEFORE UPDATE ON webhook_deliveries
     FOR EACH ROW

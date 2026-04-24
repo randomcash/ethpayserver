@@ -12,6 +12,8 @@ use auth::AuthenticationService;
 
 use crate::state::PgAppState;
 
+pub mod api_key_deprecation;
+pub mod api_key_hash;
 pub mod api_key_rate_limit;
 pub mod checkout;
 pub mod dashboard;
@@ -89,6 +91,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::create_api_key,
         users::revoke_api_key,
         users::update_api_key,
+        users::rotate_api_key,
     ),
     components(schemas(
         health::HealthResponse,
@@ -128,6 +131,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::CreateApiKeyPayload,
         users::CreateApiKeyResponsePayload,
         users::UpdateApiKeyPayload,
+        users::RotateApiKeyResponsePayload,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -277,6 +281,10 @@ where
             "/api-keys/{id}",
             axum::routing::patch(users::update_api_key::<A>),
         )
+        .route(
+            "/api-keys/{id}/rotate",
+            axum::routing::post(users::rotate_api_key::<A>),
+        )
         .with_state(state.clone());
     // Auth API from auth crate (with optional CAPTCHA provider)
     let auth_state = match state.captcha_provider.clone() {
@@ -359,6 +367,11 @@ where
 
         app = app.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", openapi));
     }
+
+    // API-key deprecation response header — runs on every response so any
+    // handler that was reached via a deprecated-but-in-grace key gets the
+    // `X-API-Key-Deprecated` header stamped automatically.
+    app = app.layer(axum::middleware::from_fn(api_key_deprecation::middleware));
 
     // HTTP request metrics (innermost layer = runs closest to handlers)
     app = app.layer(axum::middleware::from_fn(http_metrics::middleware));

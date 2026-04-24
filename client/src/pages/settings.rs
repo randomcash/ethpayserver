@@ -2,7 +2,10 @@
 //!
 //! Contains user settings, preferences, API keys, and admin-only server settings.
 
-use crate::api::{ApiKeyInfo, CreateApiKeyRequest, CreateApiKeyResponsePayload, EvmApiClient};
+use crate::api::{
+    ApiKeyInfo, CreateApiKeyRequest, CreateApiKeyResponsePayload, EvmApiClient,
+    RotateApiKeyResponse,
+};
 use leptos::prelude::*;
 
 /// Settings page with tabbed interface.
@@ -380,6 +383,33 @@ fn ApiKeysTab() -> impl IntoView {
         }
     };
 
+    // State for rotated key display
+    let (rotated_key, set_rotated_key) = signal(Option::<RotateApiKeyResponse>::None);
+    // Error surfaced on a failed rotation — previously the handler swallowed
+    // errors silently, leaving the user wondering if the click had any effect.
+    let (rotate_error, set_rotate_error) = signal(Option::<String>::None);
+
+    // Rotate handler factory
+    let make_rotate_handler = move |key_id: String| {
+        let client = api.get();
+        move |_| {
+            let client = client.clone();
+            let id = key_id.clone();
+            set_rotate_error.set(None);
+            wasm_bindgen_futures::spawn_local(async move {
+                match client.rotate_api_key(&id).await {
+                    Ok(resp) => {
+                        set_rotated_key.set(Some(resp));
+                        set_version.update(|v| *v += 1);
+                    }
+                    Err(err) => {
+                        set_rotate_error.set(Some(format!("Failed to rotate key: {err}")));
+                    }
+                }
+            });
+        }
+    };
+
     view! {
         <div class="settings-tab-api-keys">
             <div class="section-header">
@@ -450,6 +480,45 @@ fn ApiKeysTab() -> impl IntoView {
                 </div>
             })}
 
+            // Rotation error — user must know when a rotate click failed.
+            {move || rotate_error.get().map(|msg| view! {
+                <div class="detail-card" style="margin-bottom: 16px; border-color: var(--color-danger);">
+                    <div class="detail-card-body">
+                        <p><strong>{msg}</strong></p>
+                        <button
+                            class="btn btn-ghost btn-sm"
+                            on:click=move |_| set_rotate_error.set(None)
+                        >
+                            "Dismiss"
+                        </button>
+                    </div>
+                </div>
+            })}
+
+            // Show rotated key (plaintext shown once)
+            {move || rotated_key.get().map(|key| {
+                let grace_line = key.old_key_grace_expires_at
+                    .as_deref()
+                    .map(|exp| format!("The old key remains valid until {exp}."))
+                    .unwrap_or_else(|| "The old key remains valid during the grace period.".to_string());
+                view! {
+                <div class="detail-card" style="margin-bottom: 16px; border-color: var(--color-warning);">
+                    <div class="detail-card-body">
+                        <p><strong>"Key rotated successfully. Copy your new key now — it will not be shown again."</strong></p>
+                        <p>{grace_line}</p>
+                        <code class="api-key-value" style="display: block; margin: 8px 0; padding: 8px; background: var(--color-bg-secondary); word-break: break-all;">
+                            {key.key.clone()}
+                        </code>
+                        <button
+                            class="btn btn-ghost btn-sm"
+                            on:click=move |_| set_rotated_key.set(None)
+                        >
+                            "Dismiss"
+                        </button>
+                    </div>
+                </div>
+            }})}
+
             // API keys list
             <Suspense fallback=move || view! { <p>"Loading API keys..."</p> }>
                 {move || Suspend::new(async move {
@@ -462,10 +531,24 @@ fn ApiKeysTab() -> impl IntoView {
                                 view! {
                                     <div class="api-keys-list">
                                         {keys.into_iter().map(|key: ApiKeyInfo| {
-                                            let status_class = if key.is_active { "badge badge-success" } else { "badge badge-neutral" };
-                                            let status_label = if key.is_active { "Active" } else { "Revoked" };
+                                            let (status_class, status_label) = if !key.is_active {
+                                                ("badge badge-neutral".to_string(), "Revoked".to_string())
+                                            } else if key.deprecated_at.is_some() {
+                                                // Surface the actual expiry rather than a
+                                                // static "Deprecated" — users need to know
+                                                // when the grace window ends.
+                                                let label = match key.deprecation_expires_at.as_deref() {
+                                                    Some(exp) => format!("Deprecated — expires {exp}"),
+                                                    None => "Deprecated".to_string(),
+                                                };
+                                                ("badge badge-warning".to_string(), label)
+                                            } else {
+                                                ("badge badge-success".to_string(), "Active".to_string())
+                                            };
                                             let is_active = key.is_active;
+                                            let is_deprecated = key.deprecated_at.is_some();
                                             let revoke_handler = make_revoke_handler(key.id.clone());
+                                            let rotate_handler = make_rotate_handler(key.id.clone());
 
                                             view! {
                                                 <div class="api-key-item">
@@ -478,6 +561,14 @@ fn ApiKeysTab() -> impl IntoView {
                                                         <span class="api-key-created">"Created "{key.created_at}</span>
                                                     </div>
                                                     <div class="api-key-actions">
+                                                        {(is_active && !is_deprecated).then(|| view! {
+                                                            <button
+                                                                class="btn btn-ghost btn-sm"
+                                                                on:click=rotate_handler
+                                                            >
+                                                                "Rotate"
+                                                            </button>
+                                                        })}
                                                         {is_active.then(|| view! {
                                                             <button
                                                                 class="btn btn-ghost btn-sm"

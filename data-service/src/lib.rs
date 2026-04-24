@@ -21,7 +21,9 @@
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
-pub use postgres::{ApiKeyRateLimitInfo, PendingWatch, PgDataService};
+pub use postgres::{
+    ApiKeyAuthInfo, ApiKeyFullInfo, ApiKeyRateLimitInfo, PendingWatch, PgDataService,
+};
 
 #[cfg(feature = "redis")]
 pub mod redis;
