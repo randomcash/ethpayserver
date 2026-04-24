@@ -55,32 +55,39 @@ before_script:
 
 verify:
   stage: verify
+  services:
+    # Run Postgres as a GitLab CI service sibling container. The previous
+    # `docker run -p 0:5432` + `127.0.0.1:$PGPORT` pattern only worked under
+    # bare-Docker executors; under DinD the mapped port lives on the daemon,
+    # not on the job container, which meant sqlx timed out on every connect
+    # while `pg_isready` via `docker exec` passed. Services are resolved by
+    # hostname (`postgres`) regardless of executor.
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: test
+    POSTGRES_PASSWORD: test
+    POSTGRES_DB: ethpayserver_test
+    DATABASE_URL: "postgres://test:test@postgres:5432/ethpayserver_test"
   script:
     - cargo fmt -p server -p data-service -p evm -p ethpayserver-client -- --check
     - cargo clippy -p server -p data-service -p evm -p ethpayserver-client --all-targets -- -D warnings
     - cargo nextest run --workspace --lib --no-fail-fast
-    # Integration tests against ephemeral Postgres (requires Docker socket).
+    # Integration tests against the Postgres service. Wait briefly for the
+    # service to accept TCP connections; bash's /dev/tcp avoids needing
+    # pg_isready/nc in the runner image.
     - |
-      if ! docker info >/dev/null 2>&1; then
-        echo "WARNING: Docker not available, skipping integration tests"
-      else
-        PGCONTAINER="ci_postgres_${CI_JOB_ID}"
-        docker rm -f $PGCONTAINER 2>/dev/null || true
-        docker run -d --name $PGCONTAINER -p 0:5432 \
-          -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ethpayserver_test \
-          postgres:16-alpine
-        PGPORT=$(docker port $PGCONTAINER 5432 | head -1 | cut -d: -f2)
-        cleanup() { docker rm -f $PGCONTAINER 2>/dev/null; }
-        trap cleanup EXIT
-        for i in $(seq 1 30); do
-          docker exec $PGCONTAINER pg_isready -U test && break || sleep 1
-        done
-        DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_test" \
-          cargo run --release --bin migrate_postgres
-        DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_test" \
-          cargo nextest run -p data-service --no-fail-fast --run-ignored only \
-          || echo "WARNING: integration tests failed (known FK fixture issues, non-blocking)"
-      fi
+      for i in $(seq 1 30); do
+        if timeout 2 bash -c '</dev/tcp/postgres/5432' 2>/dev/null; then
+          echo "postgres ready after ${i}s"
+          break
+        fi
+        sleep 1
+      done
+    - cargo run --release --bin migrate_postgres
+    - |
+      cargo nextest run -p data-service --no-fail-fast --run-ignored only \
+        || echo "WARNING: integration tests failed (known FK fixture issues, non-blocking)"
     # Coverage gating (RCS-110) — install cargo-llvm-cov if not in ci-base image.
     # TODO: bake into ci-base image (RCS-111) and remove the install-if-missing.
     - rustup component add llvm-tools 2>/dev/null || true
@@ -164,32 +171,31 @@ e2e:
   needs:
     - build:server
     - build:client
+  # Postgres and Redis run as service sibling containers; the previous
+  # `docker run -p 0:5432` pattern silently broke under DinD because the
+  # random host port was bound on the daemon, unreachable from the job.
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+    - name: redis:7-alpine
+      alias: redis
   variables:
     E2E_API_URL: "http://127.0.0.1:3000"
     E2E_BASE_URL: "http://127.0.0.1:8080"
+    POSTGRES_USER: test
+    POSTGRES_PASSWORD: test
+    POSTGRES_DB: ethpayserver_e2e
+    DATABASE_URL: "postgres://test:test@postgres:5432/ethpayserver_e2e"
+    REDIS_URL: "redis://redis:6379"
   script:
     - |
-      PGCONTAINER="ci_e2e_postgres_${CI_JOB_ID}"
-      docker rm -f $PGCONTAINER 2>/dev/null || true
-      docker run -d --name $PGCONTAINER -p 0:5432 \
-        -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=ethpayserver_e2e \
-        postgres:16-alpine
-      PGPORT=$(docker port $PGCONTAINER 5432 | head -1 | cut -d: -f2)
-      cleanup_pg() { docker rm -f $PGCONTAINER 2>/dev/null; }
-      trap cleanup_pg EXIT
-    - |
-      REDISCONTAINER="ci_e2e_redis_${CI_JOB_ID}"
-      docker rm -f $REDISCONTAINER 2>/dev/null || true
-      docker run -d --name $REDISCONTAINER -p 0:6379 redis:7-alpine
-      REDISPORT=$(docker port $REDISCONTAINER 6379 | head -1 | cut -d: -f2)
-      cleanup_all() { docker rm -f $PGCONTAINER $REDISCONTAINER 2>/dev/null; }
-      trap cleanup_all EXIT
-    - |
       for i in $(seq 1 30); do
-        docker exec $PGCONTAINER pg_isready -U test && break || sleep 1
+        if timeout 2 bash -c '</dev/tcp/postgres/5432' 2>/dev/null; then
+          echo "postgres ready after ${i}s"
+          break
+        fi
+        sleep 1
       done
-    - export DATABASE_URL="postgres://test:test@127.0.0.1:$PGPORT/ethpayserver_e2e"
-    - export REDIS_URL="redis://127.0.0.1:$REDISPORT"
     - ./target/release/migrate_postgres
     - ./target/release/ethpayserver &
     - |
