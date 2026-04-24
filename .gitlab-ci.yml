@@ -84,7 +84,10 @@ verify:
         fi
         sleep 1
       done
-    - cargo run --release --bin migrate_postgres
+    # Debug build reuses target/debug from the preceding nextest run —
+    # release mode would trigger a full rebuild from scratch here and
+    # adds ~10min for no benefit (one-shot migration binary).
+    - cargo run --bin migrate_postgres
     - |
       cargo nextest run -p data-service --no-fail-fast --run-ignored only \
         || echo "WARNING: integration tests failed (known FK fixture issues, non-blocking)"
