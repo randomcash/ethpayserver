@@ -12,6 +12,8 @@ use auth::AuthenticationService;
 
 use crate::state::PgAppState;
 
+pub mod api_key_deprecation;
+pub mod api_key_hash;
 pub mod api_key_rate_limit;
 pub mod checkout;
 pub mod dashboard;
@@ -365,6 +367,11 @@ where
 
         app = app.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", openapi));
     }
+
+    // API-key deprecation response header — runs on every response so any
+    // handler that was reached via a deprecated-but-in-grace key gets the
+    // `X-API-Key-Deprecated` header stamped automatically.
+    app = app.layer(axum::middleware::from_fn(api_key_deprecation::middleware));
 
     // HTTP request metrics (innermost layer = runs closest to handlers)
     app = app.layer(axum::middleware::from_fn(http_metrics::middleware));

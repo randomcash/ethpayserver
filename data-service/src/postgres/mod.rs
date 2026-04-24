@@ -186,6 +186,63 @@ impl PgDataService {
             .await?;
         Ok(())
     }
+
+    /// Atomically create a replacement API key and mark the old key as
+    /// deprecated. Wraps the insert + update in a single transaction so we
+    /// cannot end up with two active keys (new created, old still active)
+    /// if the second statement fails.
+    ///
+    /// Returns `Ok(())` on success. On failure the transaction rolls back
+    /// and the database is left unchanged.
+    pub async fn rotate_api_key_atomic(
+        &self,
+        new_key: &::auth::ApiKey,
+        old_id: Uuid,
+        deprecated_at: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        // Insert the replacement key.
+        sqlx::query(
+            "INSERT INTO api_keys \
+               (id, user_id, name, key_hash, key_prefix, is_active, \
+                created_at, last_used_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(new_key.id.0)
+        .bind(new_key.user_id.0)
+        .bind(&new_key.name)
+        .bind(&new_key.key_hash)
+        .bind(&new_key.key_prefix)
+        .bind(new_key.is_active)
+        .bind(new_key.created_at)
+        .bind(new_key.last_used_at)
+        .bind(new_key.expires_at)
+        .execute(&mut *tx)
+        .await?;
+
+        // Mark the old key deprecated — only succeeds if old_id exists and
+        // is not already deprecated, so concurrent rotates don't double-
+        // deprecate (whichever commits first wins; the other sees
+        // `rows_affected == 0` and aborts).
+        let result = sqlx::query(
+            "UPDATE api_keys SET deprecated_at = $1 WHERE id = $2 AND deprecated_at IS NULL",
+        )
+        .bind(deprecated_at)
+        .bind(old_id)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            // Another rotate deprecated this key between our pre-check and
+            // now, or the row vanished. Roll back the inserted new key.
+            tx.rollback().await?;
+            return Err(sqlx::Error::RowNotFound);
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 impl PgDataService {

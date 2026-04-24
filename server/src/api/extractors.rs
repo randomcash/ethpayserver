@@ -9,9 +9,22 @@ use axum::{
 };
 
 use auth::{Permission, Role, SessionId, SessionService, UserId, UserInfo};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
+use super::api_key_hash::hash_api_key;
 use crate::state::PgAppState;
+
+/// Stamped into request extensions by `validate_api_key` whenever an
+/// authenticated request uses a deprecated-but-still-valid API key during its
+/// grace window. The `api_key_deprecation_header` middleware reads this and
+/// sets the `X-API-Key-Deprecated` response header so API consumers know to
+/// rotate. This is the bridge between the extractor path (can read request
+/// state only) and the response path (needs to set headers).
+#[derive(Debug, Clone)]
+pub struct ApiKeyDeprecationInfo {
+    pub deprecated_at: DateTime<Utc>,
+    pub grace_deadline: DateTime<Utc>,
+}
 
 /// Extractor that validates any authenticated user.
 ///
@@ -44,8 +57,11 @@ fn extract_bearer_token(parts: &Parts) -> Result<String, (StatusCode, &'static s
 }
 
 /// Validate session and return user info.
+///
+/// Takes `&mut Parts` so the API-key branch can stamp `ApiKeyDeprecationInfo`
+/// into request extensions when a deprecated-but-still-valid key is used.
 async fn validate_session<A>(
-    parts: &Parts,
+    parts: &mut Parts,
     state: &PgAppState<A>,
 ) -> Result<UserInfo, (StatusCode, &'static str)>
 where
@@ -55,7 +71,7 @@ where
 
     // If the token starts with "ak_", validate as API key
     if token.starts_with("ak_") {
-        return validate_api_key(&token, state).await;
+        return validate_api_key(&token, parts, state).await;
     }
 
     // Otherwise treat as session UUID
@@ -74,8 +90,13 @@ where
 }
 
 /// Validate an API key and return the associated user info.
+///
+/// When the key is deprecated but within its grace window, stamps an
+/// `ApiKeyDeprecationInfo` into `parts.extensions` so the response-header
+/// middleware can emit `X-API-Key-Deprecated: rotate before <iso>`.
 async fn validate_api_key<A>(
     raw_key: &str,
+    parts: &mut Parts,
     state: &PgAppState<A>,
 ) -> Result<UserInfo, (StatusCode, &'static str)>
 where
@@ -106,13 +127,22 @@ where
     // Check deprecation grace window
     if let Some(deprecated_at) = key_info.deprecated_at {
         let grace_secs = deprecation_grace_secs();
-        let deadline = deprecated_at + chrono::Duration::seconds(grace_secs);
-        if Utc::now() > deadline {
+        let now = Utc::now();
+        if is_grace_expired(deprecated_at, now, grace_secs) {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "API key deprecated and grace period expired",
             ));
         }
+        let deadline = deprecated_at + chrono::Duration::seconds(grace_secs);
+        // Signal to the response-header middleware that this request used a
+        // deprecated-but-still-valid key. The middleware will stamp
+        // `X-API-Key-Deprecated: rotate before <iso>` onto the outgoing
+        // response regardless of handler success/failure.
+        parts.extensions.insert(ApiKeyDeprecationInfo {
+            deprecated_at,
+            grace_deadline: deadline,
+        });
     }
 
     // Resolve the user via data_service (PgDataService implements UserRepository)
@@ -138,16 +168,13 @@ where
     Ok(user)
 }
 
-/// Hash an API key with SHA-256.
-fn hash_api_key(raw_key: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(raw_key.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
 /// Get the deprecation grace period in seconds (default: 48 hours).
-fn deprecation_grace_secs() -> i64 {
+///
+/// Also used by `users::list_api_keys` to compute the
+/// `deprecation_expires_at` deadline surfaced on list responses, so the
+/// client can show an accurate expiry even when operators override the
+/// grace window via `API_KEY_DEPRECATION_GRACE_SECS`.
+pub(super) fn deprecation_grace_secs() -> i64 {
     std::env::var("API_KEY_DEPRECATION_GRACE_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -211,5 +238,69 @@ impl AdminAuth {
     /// Get the user ID.
     pub fn user_id(&self) -> UserId {
         self.0.id
+    }
+}
+
+/// Pure predicate: is a deprecated key past its grace window at `now`?
+///
+/// Extracted so the grace-expiry rule can be unit-tested without booting a
+/// database or touching the extractor wiring. Matches the live check in
+/// `validate_api_key` exactly.
+pub(super) fn is_grace_expired(
+    deprecated_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    grace_secs: i64,
+) -> bool {
+    now > deprecated_at + chrono::Duration::seconds(grace_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+
+    fn at(hour: i64) -> DateTime<Utc> {
+        // Fixed base date so tests are deterministic; chrono's Utc::now drift
+        // would otherwise race the grace-window arithmetic.
+        Utc.with_ymd_and_hms(2026, 4, 23, 0, 0, 0).unwrap() + Duration::hours(hour)
+    }
+
+    const GRACE_48H: i64 = 48 * 3600;
+
+    #[test]
+    fn in_grace_is_not_expired() {
+        // deprecated at hour 0, now at hour 24, 48h grace → still valid
+        assert!(!is_grace_expired(at(0), at(24), GRACE_48H));
+    }
+
+    #[test]
+    fn exactly_at_deadline_is_not_expired() {
+        // at the exact boundary we're still inside; strictly > means at == not expired
+        assert!(!is_grace_expired(at(0), at(48), GRACE_48H));
+    }
+
+    #[test]
+    fn past_deadline_is_expired() {
+        // 1 second past the 48h grace
+        let deadline = at(0) + Duration::hours(48);
+        assert!(is_grace_expired(
+            at(0),
+            deadline + Duration::seconds(1),
+            GRACE_48H
+        ));
+    }
+
+    #[test]
+    fn zero_grace_means_immediate_expiry_next_moment() {
+        assert!(!is_grace_expired(at(0), at(0), 0));
+        assert!(is_grace_expired(at(0), at(0) + Duration::seconds(1), 0));
+    }
+
+    #[test]
+    fn long_grace_keeps_key_valid() {
+        // 30-day grace
+        let grace = 30 * 24 * 3600;
+        assert!(!is_grace_expired(at(0), at(24 * 20), grace));
+        assert!(is_grace_expired(at(0), at(24 * 31), grace));
     }
 }

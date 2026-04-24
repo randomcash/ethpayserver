@@ -15,6 +15,7 @@ use uuid::Uuid;
 use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService};
 use data_service::ApiKeyFullInfo;
 
+use super::api_key_hash::hash_api_key;
 use super::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
@@ -39,6 +40,11 @@ pub struct ApiKeyInfoResponse {
     /// Set when the key is deprecated via rotation. Key remains valid during
     /// the grace window; null means not deprecated.
     pub deprecated_at: Option<DateTime<Utc>>,
+    /// When the grace window ends for a deprecated key (computed server-side
+    /// from `deprecated_at` + grace seconds). Null for non-deprecated keys.
+    /// Surfacing this lets the client render the exact expiry without
+    /// hardcoding the grace duration.
+    pub deprecation_expires_at: Option<DateTime<Utc>>,
 }
 
 impl ApiKeyInfoResponse {
@@ -61,6 +67,7 @@ impl ApiKeyInfoResponse {
             expires_at: info.expires_at,
             rate_limit_rpm,
             deprecated_at,
+            deprecation_expires_at: deprecated_at.map(deprecation_expires_at),
         }
     }
 }
@@ -77,8 +84,16 @@ impl From<ApiKeyFullInfo> for ApiKeyInfoResponse {
             expires_at: info.expires_at,
             rate_limit_rpm: info.rate_limit_rpm,
             deprecated_at: info.deprecated_at,
+            deprecation_expires_at: info.deprecated_at.map(deprecation_expires_at),
         }
     }
+}
+
+/// Translate a `deprecated_at` into the grace-window deadline. Uses the same
+/// grace-seconds value as the auth extractor, so the client-visible expiry
+/// matches when the server actually starts rejecting the key.
+fn deprecation_expires_at(deprecated_at: DateTime<Utc>) -> DateTime<Utc> {
+    deprecated_at + chrono::Duration::seconds(super::extractors::deprecation_grace_secs())
 }
 
 /// Request to create a new API key.
@@ -115,6 +130,9 @@ pub struct RotateApiKeyResponsePayload {
     pub key: String,
     /// When the old key was deprecated (grace window starts here).
     pub old_key_deprecated_at: DateTime<Utc>,
+    /// When the old key's grace window ends and it stops authenticating.
+    /// Clients should show this directly instead of hardcoding "48 hours".
+    pub old_key_grace_expires_at: DateTime<Utc>,
 }
 
 /// List all API keys for the authenticated user.
@@ -376,21 +394,17 @@ where
         return Err(StatusCode::CONFLICT);
     }
 
-    // Create the replacement key
+    // Create the replacement key + deprecate the old one atomically.
+    // Without a transaction a partial failure (new key created, deprecation
+    // fails) would leave TWO active keys on the account — the explicit
+    // enemy of rotation.
     let new_name = format!("{} (rotated)", key.name);
     let (raw_key, new_api_key) = build_api_key(&new_name, user.id, key.expires_at);
-
-    state
-        .data_service
-        .create_api_key(&new_api_key)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Deprecate the old key
     let now = Utc::now();
+
     state
         .data_service
-        .set_api_key_deprecated(id, now)
+        .rotate_api_key_atomic(&new_api_key, id, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -403,6 +417,7 @@ where
             created_at: new_api_key.created_at,
             key: raw_key,
             old_key_deprecated_at: now,
+            old_key_grace_expires_at: deprecation_expires_at(now),
         }),
     ))
 }
@@ -462,12 +477,4 @@ fn generate_key_segment(bytes: usize) -> String {
         write!(s, "{:02x}", b).unwrap();
     }
     s
-}
-
-/// Hash an API key with SHA-256 for storage.
-fn hash_api_key(raw_key: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(raw_key.as_bytes());
-    hex::encode(hasher.finalize())
 }

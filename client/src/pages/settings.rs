@@ -385,6 +385,9 @@ fn ApiKeysTab() -> impl IntoView {
 
     // State for rotated key display
     let (rotated_key, set_rotated_key) = signal(Option::<RotateApiKeyResponse>::None);
+    // Error surfaced on a failed rotation — previously the handler swallowed
+    // errors silently, leaving the user wondering if the click had any effect.
+    let (rotate_error, set_rotate_error) = signal(Option::<String>::None);
 
     // Rotate handler factory
     let make_rotate_handler = move |key_id: String| {
@@ -392,10 +395,16 @@ fn ApiKeysTab() -> impl IntoView {
         move |_| {
             let client = client.clone();
             let id = key_id.clone();
+            set_rotate_error.set(None);
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(resp) = client.rotate_api_key(&id).await {
-                    set_rotated_key.set(Some(resp));
-                    set_version.update(|v| *v += 1);
+                match client.rotate_api_key(&id).await {
+                    Ok(resp) => {
+                        set_rotated_key.set(Some(resp));
+                        set_version.update(|v| *v += 1);
+                    }
+                    Err(err) => {
+                        set_rotate_error.set(Some(format!("Failed to rotate key: {err}")));
+                    }
                 }
             });
         }
@@ -471,12 +480,32 @@ fn ApiKeysTab() -> impl IntoView {
                 </div>
             })}
 
+            // Rotation error — user must know when a rotate click failed.
+            {move || rotate_error.get().map(|msg| view! {
+                <div class="detail-card" style="margin-bottom: 16px; border-color: var(--color-danger);">
+                    <div class="detail-card-body">
+                        <p><strong>{msg}</strong></p>
+                        <button
+                            class="btn btn-ghost btn-sm"
+                            on:click=move |_| set_rotate_error.set(None)
+                        >
+                            "Dismiss"
+                        </button>
+                    </div>
+                </div>
+            })}
+
             // Show rotated key (plaintext shown once)
-            {move || rotated_key.get().map(|key| view! {
+            {move || rotated_key.get().map(|key| {
+                let grace_line = key.old_key_grace_expires_at
+                    .as_deref()
+                    .map(|exp| format!("The old key remains valid until {exp}."))
+                    .unwrap_or_else(|| "The old key remains valid during the grace period.".to_string());
+                view! {
                 <div class="detail-card" style="margin-bottom: 16px; border-color: var(--color-warning);">
                     <div class="detail-card-body">
                         <p><strong>"Key rotated successfully. Copy your new key now — it will not be shown again."</strong></p>
-                        <p>"The old key remains valid for 48 hours (grace period)."</p>
+                        <p>{grace_line}</p>
                         <code class="api-key-value" style="display: block; margin: 8px 0; padding: 8px; background: var(--color-bg-secondary); word-break: break-all;">
                             {key.key.clone()}
                         </code>
@@ -488,7 +517,7 @@ fn ApiKeysTab() -> impl IntoView {
                         </button>
                     </div>
                 </div>
-            })}
+            }})}
 
             // API keys list
             <Suspense fallback=move || view! { <p>"Loading API keys..."</p> }>
@@ -505,7 +534,14 @@ fn ApiKeysTab() -> impl IntoView {
                                             let (status_class, status_label) = if !key.is_active {
                                                 ("badge badge-neutral".to_string(), "Revoked".to_string())
                                             } else if key.deprecated_at.is_some() {
-                                                ("badge badge-warning".to_string(), "Deprecated".to_string())
+                                                // Surface the actual expiry rather than a
+                                                // static "Deprecated" — users need to know
+                                                // when the grace window ends.
+                                                let label = match key.deprecation_expires_at.as_deref() {
+                                                    Some(exp) => format!("Deprecated — expires {exp}"),
+                                                    None => "Deprecated".to_string(),
+                                                };
+                                                ("badge badge-warning".to_string(), label)
                                             } else {
                                                 ("badge badge-success".to_string(), "Active".to_string())
                                             };
