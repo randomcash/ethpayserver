@@ -11,15 +11,19 @@ use axum::{
 use auth::{Permission, Role, SessionId, SessionService, UserId, UserInfo};
 use chrono::{DateTime, Utc};
 
+use super::api_key_deprecation::DeprecationSlot;
 use super::api_key_hash::hash_api_key;
 use crate::state::PgAppState;
 
-/// Stamped into request extensions by `validate_api_key` whenever an
-/// authenticated request uses a deprecated-but-still-valid API key during its
-/// grace window. The `api_key_deprecation_header` middleware reads this and
-/// sets the `X-API-Key-Deprecated` response header so API consumers know to
-/// rotate. This is the bridge between the extractor path (can read request
-/// state only) and the response path (needs to set headers).
+/// Carried in the shared `DeprecationSlot` that the deprecation-header
+/// middleware installs into request extensions before the handler runs.
+/// `validate_api_key` writes into the slot when an authenticated request
+/// uses a deprecated-but-still-valid API key, and the middleware reads it
+/// afterwards to stamp the `X-API-Key-Deprecated` response header.
+///
+/// Request extensions set from inside a handler/extractor are NOT visible
+/// to the outer middleware after `next.run(req)` — that's why the transport
+/// is an Arc-shared slot rather than a direct extension write.
 #[derive(Debug, Clone)]
 pub struct ApiKeyDeprecationInfo {
     pub deprecated_at: DateTime<Utc>,
@@ -135,14 +139,20 @@ where
             ));
         }
         let deadline = deprecated_at + chrono::Duration::seconds(grace_secs);
-        // Signal to the response-header middleware that this request used a
-        // deprecated-but-still-valid key. The middleware will stamp
-        // `X-API-Key-Deprecated: rotate before <iso>` onto the outgoing
-        // response regardless of handler success/failure.
-        parts.extensions.insert(ApiKeyDeprecationInfo {
-            deprecated_at,
-            grace_deadline: deadline,
-        });
+        // Write into the shared slot the deprecation-header middleware
+        // installed. Direct `parts.extensions.insert` would be invisible to
+        // the outer middleware after `next.run` — only an Arc-shared handle
+        // survives that boundary. If the middleware isn't wired (tests,
+        // unusual router builds) we quietly skip: auth still succeeds, the
+        // consumer just doesn't see the header on this one request.
+        if let Some(slot) = parts.extensions.get::<DeprecationSlot>()
+            && let Ok(mut guard) = slot.lock()
+        {
+            *guard = Some(ApiKeyDeprecationInfo {
+                deprecated_at,
+                grace_deadline: deadline,
+            });
+        }
     }
 
     // Resolve the user via data_service (PgDataService implements UserRepository)
