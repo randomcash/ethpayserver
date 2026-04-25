@@ -223,6 +223,10 @@ pub struct MonitorHealth {
 /// Deep health diagnostic response.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct DeepHealthResponse {
+    /// Build commit SHA (short) baked in at compile time.
+    pub build_sha: String,
+    /// Service version from Cargo.toml.
+    pub version: String,
     /// Postgres health.
     pub postgres: DependencyHealth,
     /// Redis health.
@@ -277,6 +281,10 @@ where
     (
         StatusCode::OK,
         Json(DeepHealthResponse {
+            build_sha: option_env!("ETHPAYSERVER_BUILD_SHA")
+                .unwrap_or("dev")
+                .to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             postgres,
             redis,
             rpcs,
@@ -614,6 +622,8 @@ mod tests {
         );
 
         let resp = DeepHealthResponse {
+            build_sha: "abc1234".to_string(),
+            version: "0.1.0".to_string(),
             postgres: DependencyHealth {
                 status: "ok".to_string(),
                 latency_ms: 3,
@@ -632,6 +642,8 @@ mod tests {
         };
 
         let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["build_sha"], "abc1234");
+        assert_eq!(json["version"], "0.1.0");
         assert_eq!(json["postgres"]["status"], "ok");
         assert_eq!(json["postgres"]["latency_ms"], 3);
         assert!(json["postgres"].get("error").is_none());
@@ -648,6 +660,8 @@ mod tests {
     #[test]
     fn deep_health_no_monitor_configured() {
         let resp = DeepHealthResponse {
+            build_sha: "dev".to_string(),
+            version: "0.1.0".to_string(),
             postgres: DependencyHealth {
                 status: "ok".to_string(),
                 latency_ms: 2,
@@ -666,6 +680,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["build_sha"], "dev");
         assert_eq!(json["redis"]["error"], "not configured");
         assert!(json["rpcs"].as_object().unwrap().is_empty());
         assert_eq!(json["monitor"]["data_fresh"], false);

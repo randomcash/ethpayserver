@@ -5,6 +5,7 @@ stages:
   - audit
   - docker
   - notify
+  - post-deploy
   - mutation
 
 default:
@@ -123,7 +124,7 @@ build:server:
   stage: build
   needs: ["verify"]
   script:
-    - cargo build --release --bin ethpayserver
+    - ETHPAYSERVER_BUILD_SHA=$CI_COMMIT_SHORT_SHA cargo build --release --bin ethpayserver
     - cargo build --release --bin migrate_postgres
     - sccache --show-stats || true
   artifacts:
@@ -323,13 +324,55 @@ notify:deploy:
   script:
     - |
       if [ -n "$DEPLOY_TRIGGER_URL" ]; then
-        curl -s -X POST -F "token=$DEPLOY_TRIGGER_TOKEN" -F "ref=main" "$DEPLOY_TRIGGER_URL"
+        curl -s -X POST -F "token=$DEPLOY_TRIGGER_TOKEN" -F "ref=$CI_COMMIT_BRANCH" "$DEPLOY_TRIGGER_URL"
       else
         echo "DEPLOY_TRIGGER_URL not set, skipping"
       fi
   rules:
     - if: $CI_COMMIT_BRANCH == "testnet"
     - if: $CI_COMMIT_BRANCH == "main"
+      when: manual
+      allow_failure: false
+
+# ---------------------------------------------------------------------------
+# post-deploy — poll /health/deep on the target environment after deploy to
+# verify the new image is running and all chains are connected.
+# Runs after notify:deploy. Uses the smoke script adapted for the target env.
+# ---------------------------------------------------------------------------
+
+post-deploy:health-gate:
+  stage: post-deploy
+  needs: ["notify:deploy"]
+  image: archlinux:base
+  before_script: []
+  script:
+    - pacman -Sy --noconfirm curl python3 >/dev/null 2>&1
+    - bash scripts/health-gate.sh
+  variables:
+    HEALTH_URL: ${DEPLOY_HEALTH_URL:-}
+    HEALTH_TIMEOUT: "60"
+    EXPECTED_SHA: $CI_COMMIT_SHORT_SHA
+  rules:
+    - if: $CI_COMMIT_BRANCH == "testnet"
+    - if: $CI_COMMIT_BRANCH == "main"
+  allow_failure: true
+
+post-deploy:smoke:
+  stage: post-deploy
+  needs: ["post-deploy:health-gate"]
+  image: archlinux:base
+  before_script: []
+  script:
+    - pacman -Sy --noconfirm curl python3 >/dev/null 2>&1
+    - bash scripts/smoke-prod.sh
+  variables:
+    SMOKE_BASE_URL: ${DEPLOY_SMOKE_URL:-}
+    SMOKE_API_KEY: ${DEPLOY_SMOKE_API_KEY:-}
+    SMOKE_STORE_ID: ${DEPLOY_SMOKE_STORE_ID:-}
+  rules:
+    - if: $CI_COMMIT_BRANCH == "testnet"
+    - if: $CI_COMMIT_BRANCH == "main"
+  allow_failure: true
 
 # ---------------------------------------------------------------------------
 # loadtest — weekly load-testing baseline against testnet (RCS-118).
