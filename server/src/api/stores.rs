@@ -1151,6 +1151,143 @@ where
 }
 
 // =============================================================================
+// Wallet XPub Rotation
+// =============================================================================
+
+/// Request to rotate wallet xpub.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RotateWalletRequest {
+    /// New extended public key to rotate to.
+    pub xpub: String,
+    /// Optional reason for rotation (e.g., "key compromise", "scheduled rotation").
+    pub reason: Option<String>,
+}
+
+/// A single rotation event in the response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RotationEntry {
+    /// Rotation ID.
+    pub id: Uuid,
+    /// Payment method that was rotated.
+    pub payment_method_id: Uuid,
+    /// Chain ID of the rotated payment method.
+    pub chain_id: u64,
+    /// Asset symbol of the rotated payment method.
+    pub asset_symbol: String,
+    /// Previous xpub (masked).
+    pub previous_xpub_masked: String,
+    /// Derivation index at time of rotation.
+    pub previous_derivation_index: i32,
+    /// When the rotation occurred.
+    pub rotated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response from wallet rotation.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RotateWalletResponse {
+    /// Store ID.
+    pub store_id: Uuid,
+    /// New xpub (masked).
+    pub new_xpub_masked: String,
+    /// Number of payment methods rotated.
+    pub methods_rotated: usize,
+    /// Individual rotation entries.
+    pub rotations: Vec<RotationEntry>,
+}
+
+/// Rotate wallet xpub for a store.
+///
+/// Replaces the xpub on all payment methods for this store, resetting derivation
+/// indices to zero. Old addresses remain watched until their parent invoices
+/// resolve. A rotation history record is kept for each payment method.
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/wallet/rotate",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID")
+    ),
+    request_body = RotateWalletRequest,
+    responses(
+        (status = 200, description = "Wallet rotated", body = RotateWalletResponse),
+        (status = 400, description = "Invalid xpub or same as current"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "No payment methods found for store"),
+    )
+)]
+pub async fn rotate_store_wallet<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(store_id): Path<Uuid>,
+    Json(req): Json<RotateWalletRequest>,
+) -> Result<Json<RotateWalletResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    require_store_settings_permission(&state, &user, store_id).await?;
+
+    // Validate the new xpub
+    if !validate_xpub(&req.xpub) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Verify store exists
+    let _ = state
+        .data_service
+        .get_store(auth::StoreId(store_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Get all payment methods for this store
+    let methods = StorePaymentMethodReader::get_payment_methods(&*state.data_service, store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if methods.is_empty() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Reject if all methods already use this xpub (pointless rotation)
+    if methods.iter().all(|m| m.xpub == req.xpub) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Rotate each payment method that has a different xpub
+    let mut rotations = Vec::new();
+    for method in &methods {
+        if method.xpub == req.xpub {
+            continue;
+        }
+
+        let rotation = state
+            .data_service
+            .rotate_payment_method_xpub(store_id, method.id, &req.xpub, req.reason.as_deref())
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        rotations.push(RotationEntry {
+            id: rotation.id,
+            payment_method_id: method.id,
+            chain_id: method.chain_id,
+            asset_symbol: method.asset_symbol.clone(),
+            previous_xpub_masked: mask_xpub(&rotation.previous_xpub),
+            previous_derivation_index: rotation.previous_derivation_index,
+            rotated_at: rotation.rotated_at,
+        });
+    }
+
+    Ok(Json(RotateWalletResponse {
+        store_id,
+        new_xpub_masked: mask_xpub(&req.xpub),
+        methods_rotated: rotations.len(),
+        rotations,
+    }))
+}
+
+// =============================================================================
 // Webhook Management
 // =============================================================================
 
@@ -2483,5 +2620,86 @@ mod tests {
         assert!(req.logo_url.is_none());
         assert_eq!(req.accent_color.as_deref(), Some("#AABBCC"));
         assert!(req.notification_prefs.is_none());
+    }
+
+    // =========================================================================
+    // Wallet rotation
+    // =========================================================================
+
+    #[test]
+    fn test_rotate_wallet_request_deserialization() {
+        let json = r#"{"xpub": "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz", "reason": "key compromise"}"#;
+        let req: RotateWalletRequest = serde_json::from_str(json).unwrap();
+        assert!(req.xpub.starts_with("xpub"));
+        assert_eq!(req.reason, Some("key compromise".to_string()));
+    }
+
+    #[test]
+    fn test_rotate_wallet_request_without_reason() {
+        let json = r#"{"xpub": "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz"}"#;
+        let req: RotateWalletRequest = serde_json::from_str(json).unwrap();
+        assert!(req.xpub.starts_with("xpub"));
+        assert!(req.reason.is_none());
+    }
+
+    #[test]
+    fn test_rotate_wallet_request_missing_xpub() {
+        let json = r#"{"reason": "test"}"#;
+        let result = serde_json::from_str::<RotateWalletRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rotate_wallet_response_serialization() {
+        let response = RotateWalletResponse {
+            store_id: Uuid::nil(),
+            new_xpub_masked: "xpub6CUG...3fDVmz".to_string(),
+            methods_rotated: 2,
+            rotations: vec![
+                RotationEntry {
+                    id: Uuid::new_v4(),
+                    payment_method_id: Uuid::new_v4(),
+                    chain_id: 1,
+                    asset_symbol: "ETH".to_string(),
+                    previous_xpub_masked: "xpub6D4B...cLW5".to_string(),
+                    previous_derivation_index: 5,
+                    rotated_at: Utc::now(),
+                },
+                RotationEntry {
+                    id: Uuid::new_v4(),
+                    payment_method_id: Uuid::new_v4(),
+                    chain_id: 137,
+                    asset_symbol: "USDC".to_string(),
+                    previous_xpub_masked: "xpub6D4B...cLW5".to_string(),
+                    previous_derivation_index: 12,
+                    rotated_at: Utc::now(),
+                },
+            ],
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["methods_rotated"], 2);
+        assert_eq!(json["new_xpub_masked"], "xpub6CUG...3fDVmz");
+        let rotations = json["rotations"].as_array().unwrap();
+        assert_eq!(rotations.len(), 2);
+        assert_eq!(rotations[0]["chain_id"], 1);
+        assert_eq!(rotations[0]["asset_symbol"], "ETH");
+        assert_eq!(rotations[0]["previous_derivation_index"], 5);
+        assert_eq!(rotations[1]["chain_id"], 137);
+        assert_eq!(rotations[1]["asset_symbol"], "USDC");
+    }
+
+    #[test]
+    fn test_rotate_wallet_response_empty_rotations() {
+        let response = RotateWalletResponse {
+            store_id: Uuid::nil(),
+            new_xpub_masked: "xpub6CUG...3fDVmz".to_string(),
+            methods_rotated: 0,
+            rotations: vec![],
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["methods_rotated"], 0);
+        assert!(json["rotations"].as_array().unwrap().is_empty());
     }
 }

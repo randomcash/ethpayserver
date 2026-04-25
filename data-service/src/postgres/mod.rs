@@ -18,9 +18,11 @@ mod store_settings;
 mod store_wallet;
 mod store_webhook;
 mod token;
+mod wallet_rotation;
 mod watched_address;
 
 pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository};
+pub use wallet_rotation::WalletRotation;
 pub use watched_address::PendingWatch;
 
 #[cfg(test)]
