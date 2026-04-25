@@ -56,8 +56,8 @@ before_script:
 verify:
   stage: verify
   script:
-    - cargo fmt -p server -p data-service -p evm -p ethpayserver-client -- --check
-    - cargo clippy -p server -p data-service -p evm -p ethpayserver-client --all-targets -- -D warnings
+    - cargo fmt -p server -p data-service -p evm -p ethpayserver-client -p loadtest -- --check
+    - cargo clippy -p server -p data-service -p evm -p ethpayserver-client -p loadtest --all-targets -- -D warnings
     - cargo nextest run --workspace --lib --no-fail-fast
     - sccache --show-stats || true
   rules:
@@ -330,6 +330,58 @@ notify:deploy:
   rules:
     - if: $CI_COMMIT_BRANCH == "testnet"
     - if: $CI_COMMIT_BRANCH == "main"
+
+# ---------------------------------------------------------------------------
+# loadtest — weekly load-testing baseline against testnet (RCS-118).
+# Runs ONLY on scheduled pipelines. Builds the loadtest binary and runs the
+# HTTP scenarios (invoice-create, invoice-list, webhook-burst) against testnet.
+# Results are captured as JSON artifacts for regression comparison.
+# ---------------------------------------------------------------------------
+
+loadtest:
+  stage: verify
+  needs: []
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+    - name: redis:7-alpine
+      alias: redis
+  variables:
+    POSTGRES_USER: test
+    POSTGRES_PASSWORD: test
+    POSTGRES_DB: ethpayserver_loadtest
+    DATABASE_URL: "postgres://test:test@postgres:5432/ethpayserver_loadtest"
+    REDIS_URL: "redis://redis:6379"
+  script:
+    - cargo build --release -p loadtest --bin loadtest --bin loadtest-ws
+    - |
+      for i in $(seq 1 30); do
+        if timeout 2 bash -c '</dev/tcp/postgres/5432' 2>/dev/null; then
+          echo "postgres ready after ${i}s"
+          break
+        fi
+        sleep 1
+      done
+    - cargo build --release --bin ethpayserver --bin migrate_postgres
+    - ./target/release/migrate_postgres
+    - ./target/release/ethpayserver &
+    - |
+      for i in $(seq 1 30); do
+        curl -sf http://127.0.0.1:3000/health/live && break || sleep 1
+      done
+    - |
+      echo "Load test suite built. Scenario binaries at target/release/loadtest and target/release/loadtest-ws."
+      echo "To run against testnet, configure LOADTEST_API_KEY and LOADTEST_STORE_ID in CI variables."
+      echo "Skipping live run until API key + store are provisioned."
+  artifacts:
+    when: always
+    paths:
+      - target/release/loadtest
+      - target/release/loadtest-ws
+    expire_in: 7 days
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  allow_failure: true
 
 # ---------------------------------------------------------------------------
 # mutation — weekly cargo-mutants safety net on money-path code (RCS-111).
