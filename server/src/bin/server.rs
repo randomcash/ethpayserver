@@ -159,12 +159,14 @@ async fn main() -> Result<()> {
     // 3. Event consumer - processes PaymentDetected/Confirmed events
     //    Also triggers expiration checks on block events and queues webhooks
     let bridge_dyn: Arc<dyn evm::monitor::bridge::EventBridge> = bridge.clone();
+    let email_sender = server::services::create_email_sender();
     let event_consumer = EventConsumer::new(
         bridge_dyn,
         Arc::clone(&data_service),
         Some(cleanup_service),
         Some(webhook_service),
         Some(Arc::clone(&ws_broadcast)),
+        email_sender,
     );
     tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");

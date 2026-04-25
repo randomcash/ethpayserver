@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use auth::StoreRepository;
 use chrono::Utc;
 use data_service::{PaymentOptionReader, StoreWebhookReader};
 use evm::monitor::bridge::EventBridge;
@@ -18,6 +19,7 @@ use types::{
 };
 use uuid::Uuid;
 
+use super::email::{EmailSender, ReceiptData};
 use super::evm_monitor::EVMMonitor;
 use super::invoice_cleanup::{CleanupDataService, InvoiceCleanupService};
 use super::webhook::{
@@ -38,6 +40,7 @@ pub trait EventConsumerDataService:
     + WatchedAddressReader
     + StoreWebhookReader
     + StoreSettingsReader
+    + StoreRepository
     + CleanupDataService
     + Send
     + Sync
@@ -54,6 +57,7 @@ impl<T> EventConsumerDataService for T where
         + WatchedAddressReader
         + StoreWebhookReader
         + StoreSettingsReader
+        + StoreRepository
         + CleanupDataService
         + Send
         + Sync
@@ -69,6 +73,7 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     cleanup_service: Option<Arc<InvoiceCleanupService<D, M, W>>>,
     webhook_service: Option<Arc<WebhookService<W>>>,
     ws_broadcast: Option<Arc<WsBroadcast>>,
+    email_sender: Arc<dyn EmailSender>,
 }
 
 impl<
@@ -84,6 +89,7 @@ impl<
         cleanup_service: Option<Arc<InvoiceCleanupService<D, M, W>>>,
         webhook_service: Option<Arc<WebhookService<W>>>,
         ws_broadcast: Option<Arc<WsBroadcast>>,
+        email_sender: Arc<dyn EmailSender>,
     ) -> Self {
         Self {
             bridge,
@@ -91,6 +97,7 @@ impl<
             cleanup_service,
             webhook_service,
             ws_broadcast,
+            email_sender,
         }
     }
 
@@ -478,6 +485,10 @@ impl<
                         )
                         .await;
                     }
+
+                    // Send customer receipt email (best-effort, never blocks payment flow)
+                    self.send_customer_receipt(&invoice, payment, event.chain_id)
+                        .await;
                 }
             }
             InvoiceStatus::Expired => {
@@ -561,6 +572,89 @@ impl<
                 );
             }
         }
+    }
+
+    /// Send a payment receipt email to the customer (best-effort).
+    ///
+    /// Checks: customer_email in metadata, store's customer_receipts_enabled toggle.
+    /// Errors are logged but never propagated — email must not block the payment flow.
+    async fn send_customer_receipt(
+        &self,
+        invoice: &InvoiceData,
+        payment: &PaymentData,
+        chain_id: u64,
+    ) {
+        let Some(email) = Self::extract_customer_email(invoice) else {
+            return;
+        };
+
+        if self.receipts_disabled_for_store(invoice.store_id.0).await {
+            return;
+        }
+
+        let merchant_name = match StoreRepository::get_store(
+            &*self.data_service,
+            types::StoreId(invoice.store_id.0),
+        )
+        .await
+        {
+            Ok(Some(store)) => store.name,
+            _ => "Merchant".to_string(),
+        };
+
+        let explorer_url = get_any_chain_config(chain_id)
+            .map(|cfg| cfg.tx_explorer_url(&payment.tx_hash))
+            .unwrap_or_else(|| payment.tx_hash.clone());
+
+        let receipt = ReceiptData {
+            invoice_id: invoice.id.as_str().to_string(),
+            amount: invoice.amount.clone(),
+            currency: invoice.currency.clone(),
+            tx_hash: payment.tx_hash.clone(),
+            explorer_url,
+            paid_at: payment.confirmed_at.unwrap_or_else(Utc::now),
+            merchant_name,
+        };
+
+        if let Err(e) = self.email_sender.send_receipt(email, &receipt).await {
+            tracing::warn!(
+                invoice_id = %invoice.id.as_str(),
+                customer_email = %email,
+                error = %e,
+                "Failed to send customer receipt email"
+            );
+        } else {
+            tracing::info!(
+                invoice_id = %invoice.id.as_str(),
+                customer_email = %email,
+                "Customer receipt email sent"
+            );
+        }
+    }
+
+    /// Extract customer email from invoice metadata.
+    fn extract_customer_email(invoice: &InvoiceData) -> Option<&str> {
+        invoice
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("customer_email").or_else(|| m.get("buyer_email")))
+            .and_then(|v| v.as_str())
+    }
+
+    /// Check if customer receipts are disabled for the given store.
+    async fn receipts_disabled_for_store(&self, store_id: uuid::Uuid) -> bool {
+        if let Ok(Some(settings)) =
+            StoreSettingsReader::get_store_settings(&*self.data_service, store_id).await
+            && settings.notification_prefs.get("customer_receipts_enabled")
+                == Some(&serde_json::Value::Bool(false))
+        {
+            tracing::trace!(
+                store_id = %store_id,
+                "Customer receipts disabled for store"
+            );
+            return true;
+        }
+        false
     }
 
     /// Queue a webhook notification for an invoice status change.
@@ -817,6 +911,7 @@ pub enum EventConsumerError {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::services::email;
     use async_trait::async_trait;
 
     /// Get the native asset symbol for a network (test helper).
@@ -940,8 +1035,14 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+            None,
+            Arc::new(email::NoopEmailSender),
+        );
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -985,8 +1086,14 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+            None,
+            Arc::new(email::NoopEmailSender),
+        );
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1041,8 +1148,14 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+            None,
+            Arc::new(email::NoopEmailSender),
+        );
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1120,8 +1233,14 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+            None,
+            Arc::new(email::NoopEmailSender),
+        );
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1193,8 +1312,14 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+            None,
+            Arc::new(email::NoopEmailSender),
+        );
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1271,8 +1396,14 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+            None,
+            Arc::new(email::NoopEmailSender),
+        );
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1372,8 +1503,14 @@ mod tests {
         let ds = Arc::new(InMemoryDataService::new());
         let bridge = Arc::new(MemoryBridge::new());
 
-        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> =
-            EventConsumer::new(bridge.clone(), ds.clone(), None, None, None);
+        let consumer: EventConsumer<InMemoryDataService, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+            None,
+            Arc::new(email::NoopEmailSender),
+        );
 
         let invoice_id = InvoiceId::new();
         let store_id = StoreId::new();
@@ -1453,5 +1590,188 @@ mod tests {
 
         let data_err = EventConsumerError::InvalidData("bad data".into());
         assert!(data_err.to_string().contains("invalid data"));
+    }
+
+    /// Mock email sender that records calls for test assertions.
+    struct MockEmailSender {
+        calls: std::sync::Mutex<Vec<(String, String)>>, // (to, invoice_id)
+    }
+
+    impl MockEmailSender {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl email::EmailSender for MockEmailSender {
+        async fn send_receipt(
+            &self,
+            to: &str,
+            data: &email::ReceiptData,
+        ) -> Result<(), email::EmailError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((to.to_string(), data.invoice_id.clone()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_receipt_sent_on_paid_with_email() {
+        let ds = Arc::new(InMemoryDataService::new());
+        let bridge = Arc::new(MemoryBridge::new());
+        let mock_email = Arc::new(MockEmailSender::new());
+        let consumer: EventConsumer<_, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+            None,
+            mock_email.clone(),
+        );
+
+        let invoice_id = InvoiceId::new();
+        let store_id = StoreId::new();
+
+        // Create invoice with customer_email in metadata
+        let invoice = InvoiceData {
+            id: invoice_id.clone(),
+            store_id,
+            currency: "USD".to_string(),
+            status: InvoiceStatus::Processing,
+            amount: "100.00".to_string(),
+            amount_received: "100.00".to_string(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            metadata: Some(serde_json::json!({"customer_email": "buyer@example.com"})),
+            extra: None,
+        };
+        InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
+
+        // Create payment
+        let tx_hash = B256::repeat_byte(0xee);
+        let payment = PaymentData {
+            id: Uuid::new_v4(),
+            invoice_id: invoice_id.clone(),
+            payment_option_id: None,
+            chain_id: 1,
+            asset_type: types::AssetType::Native,
+            amount: "50000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            tx_hash: format!("{:#x}", tx_hash),
+            block_number: Some(12346000),
+            detected_at: Utc::now(),
+            confirmed_at: None,
+            from_address: Some("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string()),
+            reorged: false,
+            extra: None,
+            credited_amount: Some("100.00".to_string()),
+            rate_used: Some("2000.00".to_string()),
+            rate_applied_at: Some(Utc::now()),
+        };
+        PaymentWriter::upsert(&*ds, &payment).await.unwrap();
+
+        // Handle payment confirmed event
+        let event = PaymentConfirmed {
+            chain_id: 1,
+            invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+            payment_address: Address::ZERO,
+            amount: U256::from(50000000000000000u64),
+            tx_hash,
+            block_number: 12346000,
+            confirmations: 12,
+            confirmed_at: Utc::now(),
+        };
+
+        consumer.handle_payment_confirmed(event).await.unwrap();
+
+        // Verify receipt email was sent
+        assert_eq!(mock_email.call_count(), 1);
+        let calls = mock_email.calls.lock().unwrap();
+        assert_eq!(calls[0].0, "buyer@example.com");
+        assert_eq!(calls[0].1, invoice_id.as_str());
+    }
+
+    #[tokio::test]
+    async fn test_no_receipt_when_email_absent() {
+        let ds = Arc::new(InMemoryDataService::new());
+        let bridge = Arc::new(MemoryBridge::new());
+        let mock_email = Arc::new(MockEmailSender::new());
+        let consumer: EventConsumer<_, MockEVMMonitor> = EventConsumer::new(
+            bridge.clone(),
+            ds.clone(),
+            None,
+            None,
+            None,
+            mock_email.clone(),
+        );
+
+        let invoice_id = InvoiceId::new();
+        let store_id = StoreId::new();
+
+        // Create invoice WITHOUT customer_email
+        let invoice = InvoiceData {
+            id: invoice_id.clone(),
+            store_id,
+            currency: "USD".to_string(),
+            status: InvoiceStatus::Processing,
+            amount: "100.00".to_string(),
+            amount_received: "100.00".to_string(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            metadata: None,
+            extra: None,
+        };
+        InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
+
+        // Create payment
+        let tx_hash = B256::repeat_byte(0xff);
+        let payment = PaymentData {
+            id: Uuid::new_v4(),
+            invoice_id: invoice_id.clone(),
+            payment_option_id: None,
+            chain_id: 1,
+            asset_type: types::AssetType::Native,
+            amount: "50000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            tx_hash: format!("{:#x}", tx_hash),
+            block_number: Some(12347000),
+            detected_at: Utc::now(),
+            confirmed_at: None,
+            from_address: Some("0xffffffffffffffffffffffffffffffffffffffff".to_string()),
+            reorged: false,
+            extra: None,
+            credited_amount: Some("100.00".to_string()),
+            rate_used: Some("2000.00".to_string()),
+            rate_applied_at: Some(Utc::now()),
+        };
+        PaymentWriter::upsert(&*ds, &payment).await.unwrap();
+
+        // Handle payment confirmed event
+        let event = PaymentConfirmed {
+            chain_id: 1,
+            invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+            payment_address: Address::ZERO,
+            amount: U256::from(50000000000000000u64),
+            tx_hash,
+            block_number: 12347000,
+            confirmations: 12,
+            confirmed_at: Utc::now(),
+        };
+
+        consumer.handle_payment_confirmed(event).await.unwrap();
+
+        // Verify NO receipt email was sent
+        assert_eq!(mock_email.call_count(), 0);
     }
 }

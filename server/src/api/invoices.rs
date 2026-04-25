@@ -194,6 +194,8 @@ pub struct CreateInvoiceRequest {
     pub expiration_seconds: Option<u64>,
     /// Optional metadata.
     pub metadata: Option<serde_json::Value>,
+    /// Optional customer email for payment receipt.
+    pub customer_email: Option<String>,
     /// Optional webhook URL.
     pub webhook_url: Option<String>,
     /// Optional redirect URL after payment.
@@ -261,8 +263,18 @@ pub struct InvoiceResponse {
     pub expires_at: chrono::DateTime<chrono::Utc>,
     /// Metadata.
     pub metadata: Option<serde_json::Value>,
+    /// Customer email for payment receipt (if set).
+    pub customer_email: Option<String>,
     /// Payment options for this invoice.
     pub payment_options: Vec<PaymentOptionResponse>,
+}
+
+fn extract_customer_email(metadata: &Option<serde_json::Value>) -> Option<String> {
+    metadata
+        .as_ref()
+        .and_then(|m| m.get("customer_email").or_else(|| m.get("buyer_email")))
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 /// Payment response.
@@ -484,6 +496,7 @@ where
             .await
             .unwrap_or_default();
 
+        let customer_email = extract_customer_email(&invoice.metadata);
         responses.push(InvoiceResponse {
             id: invoice.id.0,
             currency: invoice.currency,
@@ -493,6 +506,7 @@ where
             created_at: invoice.created_at,
             expires_at: invoice.expires_at,
             metadata: invoice.metadata,
+            customer_email,
             payment_options: options.into_iter().map(Into::into).collect(),
         });
     }
@@ -716,6 +730,19 @@ where
         .unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
     let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
+    // Merge customer_email into metadata so the generated DB column picks it up.
+    let metadata = match (req.customer_email, req.metadata) {
+        (Some(email), Some(mut meta)) => {
+            if let Some(obj) = meta.as_object_mut() {
+                obj.entry("customer_email")
+                    .or_insert_with(|| serde_json::Value::String(email));
+            }
+            Some(meta)
+        }
+        (Some(email), None) => Some(serde_json::json!({ "customer_email": email })),
+        (None, meta) => meta,
+    };
+
     // Create invoice (network-agnostic) - only after validating payment methods
     let invoice = InvoiceData {
         id: InvoiceId::new(),
@@ -726,7 +753,7 @@ where
         amount_received: "0".to_string(),
         created_at: Utc::now(),
         expires_at,
-        metadata: req.metadata,
+        metadata,
         extra: None,
     };
 
@@ -870,6 +897,7 @@ where
     // Record metrics
     metrics::record_invoice_created(&invoice.currency);
 
+    let customer_email = extract_customer_email(&invoice.metadata);
     let response = InvoiceResponse {
         id: invoice.id.0,
         currency: invoice.currency,
@@ -879,6 +907,7 @@ where
         created_at: invoice.created_at,
         expires_at: invoice.expires_at,
         metadata: invoice.metadata,
+        customer_email,
         payment_options: created_options.into_iter().map(|o| o.into()).collect(),
     };
 
@@ -936,6 +965,7 @@ where
         .await
         .unwrap_or_default();
 
+    let customer_email = extract_customer_email(&invoice.metadata);
     let response = InvoiceResponse {
         id: invoice.id.0,
         currency: invoice.currency,
@@ -945,6 +975,7 @@ where
         created_at: invoice.created_at,
         expires_at: invoice.expires_at,
         metadata: invoice.metadata,
+        customer_email,
         payment_options: options.into_iter().map(Into::into).collect(),
     };
 
@@ -1234,6 +1265,7 @@ where
         .await
         .unwrap_or_default();
 
+    let customer_email = extract_customer_email(&cancelled.metadata);
     let response = InvoiceResponse {
         id: cancelled.id.0,
         currency: cancelled.currency,
@@ -1243,6 +1275,7 @@ where
         created_at: cancelled.created_at,
         expires_at: cancelled.expires_at,
         metadata: cancelled.metadata,
+        customer_email,
         payment_options: options.into_iter().map(Into::into).collect(),
     };
 
@@ -1362,6 +1395,7 @@ where
         .await
         .unwrap_or_default();
 
+    let customer_email = extract_customer_email(&invoice.metadata);
     let response = TxHashLookupResponse {
         invoice: InvoiceResponse {
             id: invoice.id.0,
@@ -1372,6 +1406,7 @@ where
             created_at: invoice.created_at,
             expires_at: invoice.expires_at,
             metadata: invoice.metadata,
+            customer_email,
             payment_options: options.into_iter().map(Into::into).collect(),
         },
         payment: payment.into(),

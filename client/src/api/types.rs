@@ -302,6 +302,8 @@ pub struct CreateInvoiceRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub customer_email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect_url: Option<String>,
@@ -1261,6 +1263,7 @@ mod tests {
             currency: "USD".to_string(),
             expiration_seconds: Some(1800),
             metadata: None,
+            customer_email: None,
             webhook_url: None,
             redirect_url: None,
         };
@@ -1282,6 +1285,7 @@ mod tests {
             currency: "ETH".to_string(),
             expiration_seconds: None,
             metadata: None,
+            customer_email: None,
             webhook_url: None,
             redirect_url: None,
         };

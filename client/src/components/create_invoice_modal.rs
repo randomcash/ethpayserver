@@ -132,6 +132,11 @@ pub fn CreateInvoiceModal() -> impl IntoView {
             amount: amount_val,
             expiration_seconds: exp_seconds,
             metadata,
+            customer_email: if buyer_email_val.is_empty() {
+                None
+            } else {
+                Some(buyer_email_val)
+            },
             webhook_url: if notif_url.is_empty() {
                 None
             } else {

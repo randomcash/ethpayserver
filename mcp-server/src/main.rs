@@ -120,10 +120,10 @@ async fn validate_api_key(
         bail!("API key is deactivated");
     }
 
-    if let Some(expires_at) = api_key.expires_at {
-        if expires_at < chrono::Utc::now() {
-            bail!("API key has expired");
-        }
+    if let Some(expires_at) = api_key.expires_at
+        && expires_at < chrono::Utc::now()
+    {
+        bail!("API key has expired");
     }
 
     // Update last_used timestamp

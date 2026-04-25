@@ -51,6 +51,8 @@ pub struct CreateInvoiceArgs {
     pub expiration_seconds: Option<u64>,
     #[schemars(description = "Optional metadata as JSON object")]
     pub metadata: Option<serde_json::Value>,
+    #[schemars(description = "Optional customer email for payment receipt")]
+    pub customer_email: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -100,6 +102,7 @@ pub struct GetPaymentStatusArgs {
 #[derive(Clone)]
 pub struct EthpayMcpServer {
     data_service: Arc<PgDataService>,
+    #[allow(dead_code)]
     user_id: UserId,
     store_ids: Vec<StoreId>,
     rate_provider: Arc<dyn RateProvider>,
@@ -300,6 +303,18 @@ impl EthpayMcpServer {
             .unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
         let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
+        let metadata = match (args.customer_email, args.metadata) {
+            (Some(email), Some(mut meta)) => {
+                if let Some(obj) = meta.as_object_mut() {
+                    obj.entry("customer_email")
+                        .or_insert_with(|| serde_json::Value::String(email));
+                }
+                Some(meta)
+            }
+            (Some(email), None) => Some(serde_json::json!({ "customer_email": email })),
+            (None, meta) => meta,
+        };
+
         let invoice = InvoiceData {
             id: InvoiceId::new(),
             store_id,
@@ -309,7 +324,7 @@ impl EthpayMcpServer {
             amount_received: "0".to_string(),
             created_at: Utc::now(),
             expires_at,
-            metadata: args.metadata,
+            metadata,
             extra: None,
         };
 
@@ -367,38 +382,38 @@ impl EthpayMcpServer {
             .map_err(|e| format!("Failed to save watched address: {e}"))?;
 
             // Notify EVM monitor if available
-            if let Some(ref monitor) = self.evm_monitor {
-                if let Ok(invoice_uuid) = Uuid::parse_str(&invoice.id.0) {
-                    let expected = option.amount.parse::<evm::U256>().ok();
-                    let token_contract: Option<evm::Address> =
-                        pm.token_address.as_ref().and_then(|a| a.parse().ok());
+            if let Some(ref monitor) = self.evm_monitor
+                && let Ok(invoice_uuid) = Uuid::parse_str(&invoice.id.0)
+            {
+                let expected = option.amount.parse::<evm::U256>().ok();
+                let token_contract: Option<evm::Address> =
+                    pm.token_address.as_ref().and_then(|a| a.parse().ok());
 
-                    let cmd = evm::monitor::events::MonitorCommand::WatchAddress(
-                        evm::monitor::events::WatchAddressCommand {
-                            chain_id: pm.chain_id,
-                            address,
-                            invoice_id: invoice_uuid,
-                            expected_amount: expected,
-                            token_contract,
-                        },
+                let cmd = evm::monitor::events::MonitorCommand::WatchAddress(
+                    evm::monitor::events::WatchAddressCommand {
+                        chain_id: pm.chain_id,
+                        address,
+                        invoice_id: invoice_uuid,
+                        expected_amount: expected,
+                        token_contract,
+                    },
+                );
+                if let Err(e) = monitor.publish_command(&cmd).await {
+                    tracing::warn!(
+                        invoice_id = %invoice.id.0,
+                        address = %payment_address,
+                        error = %e,
+                        "Failed to send WatchAddress command, will be retried"
                     );
-                    if let Err(e) = monitor.publish_command(&cmd).await {
-                        tracing::warn!(
-                            invoice_id = %invoice.id.0,
-                            address = %payment_address,
-                            error = %e,
-                            "Failed to send WatchAddress command, will be retried"
-                        );
-                    } else if let Err(e) = WatchedAddressWriter::mark_notified(
-                        &*self.data_service,
-                        &payment_address,
-                        pm.chain_id,
-                        token_addr_str,
-                    )
-                    .await
-                    {
-                        tracing::warn!(error = %e, "Failed to mark watch as notified");
-                    }
+                } else if let Err(e) = WatchedAddressWriter::mark_notified(
+                    &*self.data_service,
+                    &payment_address,
+                    pm.chain_id,
+                    token_addr_str,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "Failed to mark watch as notified");
                 }
             }
 

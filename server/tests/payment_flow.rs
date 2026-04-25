@@ -183,6 +183,7 @@ fn spawn_consumer(
         None, // no cleanup service
         None, // no webhook service (requires Redis)
         None, // no WsBroadcast
+        Arc::new(server::services::email::NoopEmailSender),
     );
     tokio::spawn(async move { consumer.run().await })
 }
