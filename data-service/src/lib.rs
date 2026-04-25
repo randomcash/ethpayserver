@@ -23,6 +23,7 @@ pub mod postgres;
 #[cfg(feature = "postgres")]
 pub use postgres::{
     ApiKeyAuthInfo, ApiKeyFullInfo, ApiKeyRateLimitInfo, PendingWatch, PgDataService,
+    WalletRotation,
 };
 
 #[cfg(feature = "redis")]

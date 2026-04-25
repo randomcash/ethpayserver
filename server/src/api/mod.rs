@@ -61,6 +61,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::get_store_wallet,
         stores::configure_store_wallet,
         stores::delete_store_wallet,
+        stores::rotate_store_wallet,
         stores::list_wallets,
         stores::get_wallet_by_id,
         stores::export_wallet_xpub,
@@ -118,6 +119,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::CreatePaymentMethodRequest,
         stores::UpdatePaymentMethodRequest,
         stores::PaymentMethodResponse,
+        stores::RotateWalletRequest,
+        stores::RotateWalletResponse,
+        stores::RotationEntry,
         invoices::CreateInvoiceRequest,
         invoices::InvoiceResponse,
         invoices::InvoiceListResponse,
@@ -197,6 +201,7 @@ where
         .route("/{store_id}/wallet", get(stores::get_store_wallet::<A>))
         .route("/{store_id}/wallet", put(stores::configure_store_wallet::<A>))
         .route("/{store_id}/wallet", delete(stores::delete_store_wallet::<A>))
+        .route("/{store_id}/wallet/rotate", post(stores::rotate_store_wallet::<A>))
         .route("/{store_id}/settings", get(stores::get_store_settings::<A>))
         .route("/{store_id}/settings", patch(stores::update_store_settings::<A>))
         .route("/{store_id}/webhook", get(stores::get_store_webhook::<A>))
