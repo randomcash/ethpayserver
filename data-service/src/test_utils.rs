@@ -781,6 +781,37 @@ impl StoreSettingsReader for InMemoryDataService {
 }
 
 #[async_trait]
+impl auth::StoreRepository for InMemoryDataService {
+    async fn create_store(&self, _store: &types::Store) -> auth::error::Result<()> {
+        Ok(())
+    }
+    async fn get_store(&self, _id: types::StoreId) -> auth::error::Result<Option<types::Store>> {
+        Ok(None)
+    }
+    async fn get_stores_for_user(
+        &self,
+        _user_id: types::UserId,
+    ) -> auth::error::Result<Vec<types::Store>> {
+        Ok(vec![])
+    }
+    async fn get_stores_owned_by(
+        &self,
+        _user_id: types::UserId,
+    ) -> auth::error::Result<Vec<types::Store>> {
+        Ok(vec![])
+    }
+    async fn update_store(&self, _store: &types::Store) -> auth::error::Result<()> {
+        Ok(())
+    }
+    async fn archive_store(&self, _id: types::StoreId) -> auth::error::Result<()> {
+        Ok(())
+    }
+    async fn delete_store(&self, _id: types::StoreId) -> auth::error::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl PaymentEventWriter for InMemoryDataService {
     async fn create_event(
         &self,
