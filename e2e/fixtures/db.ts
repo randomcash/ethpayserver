@@ -27,6 +27,9 @@ const TABLES_TO_TRUNCATE = [
 ];
 
 export async function resetDatabase(): Promise<void> {
+  if (process.env.E2E_SKIP_DB_RESET || process.env.E2E_REMOTE) {
+    return;
+  }
   const client = new Client({ connectionString: DATABASE_URL });
   await client.connect();
   try {
