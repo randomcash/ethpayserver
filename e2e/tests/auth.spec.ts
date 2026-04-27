@@ -1,7 +1,12 @@
 import { test, expect, register, login } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
 
+const SKIP_AUTH = process.env.E2E_SKIP_AUTH
+  ? process.env.E2E_SKIP_AUTH === 'true'
+  : !!process.env.E2E_REMOTE;
+
 test.describe('Authentication', () => {
+  test.skip(() => SKIP_AUTH, 'Skipped: passkey origin mismatch in remote mode (E2E_SKIP_AUTH)');
   test.beforeAll(async () => {
     await resetDatabase();
   });

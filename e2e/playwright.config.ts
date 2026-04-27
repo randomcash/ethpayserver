@@ -1,7 +1,9 @@
 import { defineConfig } from '@playwright/test';
 
-const API_URL = process.env.E2E_API_URL || 'http://localhost:3000';
-const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:8080';
+const REMOTE = !!process.env.E2E_REMOTE;
+
+const API_URL = process.env.E2E_API_URL || (REMOTE ? 'https://testnet.random.cash' : 'http://localhost:3000');
+const BASE_URL = process.env.E2E_BASE_URL || (REMOTE ? 'https://testnet.random.cash' : 'http://localhost:8080');
 
 export default defineConfig({
   testDir: './tests',
@@ -12,7 +14,7 @@ export default defineConfig({
   reporter: process.env.CI
     ? [['html', { open: 'never' }], ['./perf-reporter.ts']]
     : [['list'], ['./perf-reporter.ts']],
-  timeout: 30_000,
+  timeout: REMOTE ? 60_000 : 30_000,
   use: {
     baseURL: BASE_URL,
     trace: 'on-first-retry',
@@ -24,19 +26,21 @@ export default defineConfig({
       use: { browserName: 'chromium' },
     },
   ],
-  webServer: [
-    {
-      command: 'cargo run --release --bin ethpayserver',
-      url: `${API_URL}/health/live`,
-      reuseExistingServer: true,
-      timeout: 120_000,
-    },
-    {
-      command: 'trunk serve',
-      cwd: '../client',
-      url: BASE_URL,
-      reuseExistingServer: true,
-      timeout: 60_000,
-    },
-  ],
+  ...(!REMOTE && {
+    webServer: [
+      {
+        command: 'cargo run --release --bin ethpayserver',
+        url: `${API_URL}/health/live`,
+        reuseExistingServer: true,
+        timeout: 120_000,
+      },
+      {
+        command: 'trunk serve',
+        cwd: '../client',
+        url: BASE_URL,
+        reuseExistingServer: true,
+        timeout: 60_000,
+      },
+    ],
+  }),
 });
