@@ -4091,7 +4091,7 @@ dependencies = [
  "futures-io",
  "futures-util",
  "httpdate",
- "idna",
+ "idna 1.1.0",
  "mime",
  "nom 8.0.0",
  "percent-encoding",

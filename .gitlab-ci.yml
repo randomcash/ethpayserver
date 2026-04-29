@@ -4,6 +4,7 @@ stages:
   - e2e
   - audit
   - docker
+  - sign
   - notify
   - post-deploy
   - mutation
@@ -26,6 +27,7 @@ variables:
   SCCACHE_DIR: "/sccache"
   SCCACHE_CACHE_SIZE: "20G"
   RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+  COSIGN_VERSION: "2.4.1"
   SERVER_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
   SERVER_IMAGE_LATEST: $CI_REGISTRY_IMAGE:$CI_COMMIT_BRANCH-latest
   MONITOR_IMAGE: $CI_REGISTRY_IMAGE/evmmonitor:$CI_COMMIT_SHORT_SHA
@@ -65,6 +67,7 @@ verify:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
 
 # ---------------------------------------------------------------------------
 # verify:coverage — RCS-110 coverage gate + postgres integration tests.
@@ -136,6 +139,7 @@ build:server:
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
 
 build:monitor:
   stage: build
@@ -150,6 +154,7 @@ build:monitor:
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
 
 build:client:
   stage: build
@@ -313,6 +318,72 @@ docker:client:
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
+
+# ---------------------------------------------------------------------------
+# sign — cosign keyless signatures for every pushed image (RCS-95).
+# Uses GitLab OIDC to obtain a Sigstore identity — no long-lived signing key.
+# The pipeline fails if any signing step fails; there is no "publish without
+# signature" path.
+# ---------------------------------------------------------------------------
+
+.sign:
+  stage: sign
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  before_script:
+    - curl -sLO https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64
+    - chmod +x cosign-linux-amd64
+    - mv cosign-linux-amd64 /usr/local/bin/cosign
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
+
+sign:server:
+  extends: .sign
+  needs: ["docker:server"]
+  script:
+    - cosign sign --yes "$SERVER_IMAGE"
+
+sign:monitor:
+  extends: .sign
+  needs: ["docker:monitor"]
+  script:
+    - cosign sign --yes "$MONITOR_IMAGE"
+
+sign:client:
+  extends: .sign
+  needs: ["docker:client"]
+  script:
+    - cosign sign --yes "$CLIENT_IMAGE"
+
+# ---------------------------------------------------------------------------
+# sign:release-blobs — on tag push, package server binaries into tarballs,
+# sign each with cosign sign-blob, and attach artifacts + signatures to a
+# GitLab release. Depends on RCS-94 (Nix flake) for bit-identical binaries;
+# until then, tarballs are produced from the cargo --release build.
+# ---------------------------------------------------------------------------
+
+sign:release-blobs:
+  extends: .sign
+  needs: ["build:server", "build:monitor"]
+  variables:
+    TARBALL_SERVER: "server-${CI_COMMIT_TAG}-x86_64-linux.tar.gz"
+    TARBALL_MONITOR: "evmmonitor-${CI_COMMIT_TAG}-x86_64-linux.tar.gz"
+  script:
+    - tar czf "$TARBALL_SERVER" -C target/release ethpayserver migrate_postgres
+    - tar czf "$TARBALL_MONITOR" -C target/release evmmonitor
+    - cosign sign-blob --yes --output-signature "${TARBALL_SERVER}.sig" --output-certificate "${TARBALL_SERVER}.cert" "$TARBALL_SERVER"
+    - cosign sign-blob --yes --output-signature "${TARBALL_MONITOR}.sig" --output-certificate "${TARBALL_MONITOR}.cert" "$TARBALL_MONITOR"
+  artifacts:
+    paths:
+      - "*.tar.gz"
+      - "*.tar.gz.sig"
+      - "*.tar.gz.cert"
+    expire_in: 90 days
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
 
 # ---------------------------------------------------------------------------
 # notify — trigger downstream deploy (if configured)
