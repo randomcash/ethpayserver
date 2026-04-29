@@ -1,5 +1,6 @@
 stages:
   - verify
+  - nix
   - build
   - e2e
   - audit
@@ -114,6 +115,54 @@ verify:coverage:
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_COMMIT_BRANCH == "testnet"
+
+# ---------------------------------------------------------------------------
+# nix — flake check + reproducibility verification (Nix-enabled image).
+# ---------------------------------------------------------------------------
+
+nix:check:
+  stage: nix
+  needs: []
+  image: nixos/nix:latest
+  before_script:
+    - echo "extra-experimental-features = nix-command flakes" >> /etc/nix/nix.conf
+  script:
+    - nix flake check --no-update-lock-file
+  timeout: 1 hour
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "testnet"
+
+# Nightly reproducibility: rebuild last 7 commits, fail if output hashes differ
+# across two builds of the same commit. Only on scheduled pipelines.
+nix:reproducibility:
+  stage: nix
+  needs: []
+  image: nixos/nix:latest
+  before_script:
+    - echo "extra-experimental-features = nix-command flakes" >> /etc/nix/nix.conf
+  script:
+    - |
+      set -e
+      for sha in $(git log -7 --format=%H); do
+        echo "=== Checking reproducibility for $sha ==="
+        git checkout "$sha"
+        hash1=$(nix build .#ethpayserver --no-link --print-out-paths --no-update-lock-file)
+        nix store delete "$hash1" 2>/dev/null || true
+        hash2=$(nix build .#ethpayserver --rebuild --no-link --print-out-paths --no-update-lock-file)
+        if [ "$hash1" != "$hash2" ]; then
+          echo "FAIL: non-reproducible build at $sha"
+          echo "  build 1: $hash1"
+          echo "  build 2: $hash2"
+          exit 1
+        fi
+        echo "OK: $sha -> $hash1"
+      done
+  timeout: 3 hours
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  allow_failure: true
 
 # ---------------------------------------------------------------------------
 # build:* — produce release binary artifacts on integration branches only.
