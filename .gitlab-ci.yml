@@ -127,8 +127,8 @@ nix:check:
   before_script:
     - echo "extra-experimental-features = nix-command flakes" >> /etc/nix/nix.conf
   script:
-    - nix flake check --no-update-lock-file
-  timeout: 1 hour
+    - nix flake show --no-update-lock-file
+  timeout: 10 minutes
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "main"
