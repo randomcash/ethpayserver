@@ -37,7 +37,7 @@
         # Rust toolchain pinned via rust-toolchain.toml, resolved by fenix.
         toolchain = fenix.packages.${system}.fromToolchainFile {
           file = ./rust-toolchain.toml;
-          sha256 = lib.fakeSha256;
+          sha256 = "sha256-zC8E38iDVJ1oPIzCqTk/Ujo9+9kx9dXq7wAwPMpkpg0=";
         };
 
         # Extended toolchain with wasm32 target for the Leptos client.
