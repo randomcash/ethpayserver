@@ -3,7 +3,6 @@ members = ["server", "data-service", "evm", "client", "mcp-server", "loadtest"]
 resolver = "3"
 
 [workspace.package]
-rust-version = "1.90.0"
 
 # Use local payserver-commons instead of Git during development
 [patch."https://gitlab.com/random.cash/payserver-commons.git"]

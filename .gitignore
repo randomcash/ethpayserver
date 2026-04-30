@@ -1,4 +1,5 @@
 /target
+/result
 /memos
 .env
 .env.*

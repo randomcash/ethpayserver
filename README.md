@@ -22,7 +22,7 @@ ETHPayServer is a free, open-source payment processor that enables merchants to 
 
 ### Prerequisites
 
-- Rust 1.90+ (edition 2024)
+- Rust (pinned via `rust-toolchain.toml`)
 - PostgreSQL 14+
 - Redis 7+
 - Ethereum RPC access (Alchemy, Infura, or self-hosted node)
@@ -540,6 +540,70 @@ ETHPayServer implements several security measures:
 - Payment detection: <5 seconds after confirmation
 - Concurrent monitored addresses: 10,000+
 - Uptime: 99.9%
+
+## Reproducible Builds
+
+ETHPayServer uses [Nix flakes](https://nix.dev/concepts/flakes) with
+[crane](https://github.com/ipetkov/crane) to produce bit-identical binaries
+from a given commit. This lets merchants, auditors, and contributors verify
+that the deployed binary matches the source.
+
+### Prerequisites
+
+Install Nix with flakes enabled:
+
+```bash
+# Install Nix (multi-user, recommended)
+sh <(curl -L https://nixos.org/nix/install) --daemon
+
+# Enable flakes (add to ~/.config/nix/nix.conf)
+echo "extra-experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
+```
+
+### Build from source
+
+```bash
+# Build the main server binary
+nix build .#ethpayserver
+
+# Build other binaries
+nix build .#migrate-postgres
+nix build .#evmmonitor
+nix build .#ethpay-mcp
+
+# Build the WASM client
+nix build .#client
+```
+
+The output is a symlink at `./result` pointing to the Nix store path.
+
+### Verify a build
+
+```bash
+# Build and note the store path
+nix build .#ethpayserver --no-link --print-out-paths
+# e.g. /nix/store/abc123...-ethpayserver-0.1.0
+
+# On a second machine (or after garbage-collecting), rebuild:
+nix build .#ethpayserver --rebuild --no-link --print-out-paths
+# Should print the same store path — identical binary.
+```
+
+### Local development with payserver-commons
+
+The flake pulls `payserver-commons` from GitLab by default. To use your local
+checkout instead:
+
+```bash
+nix build .#ethpayserver --override-input payserver-commons path:../payserver-commons
+```
+
+### Run checks
+
+```bash
+# Run all flake checks (clippy, fmt, nextest)
+nix flake check
+```
 
 ## Contributing
 

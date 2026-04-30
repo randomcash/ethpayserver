@@ -2,7 +2,6 @@
 name = "server"
 version = "0.1.0"
 edition = "2024"
-rust-version.workspace = true
 description = "Main server for ethpayserver - unified API and service orchestration"
 license = "MIT"
 
