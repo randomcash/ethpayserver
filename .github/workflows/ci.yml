@@ -18,23 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone payserver-commons
-        uses: actions/checkout@v4
-        with:
-          repository: randomcash/payserver-commons
-          path: ../payserver-commons
-          ref: ${{ github.head_ref || github.ref_name }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Fallback payserver-commons to main
-        if: failure()
-        uses: actions/checkout@v4
-        with:
-          repository: randomcash/payserver-commons
-          path: ../payserver-commons
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clone payserver-commons (sibling)
+        run: |
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          cd ..
+          git clone --depth 1 -b "$BRANCH" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
+            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
+          echo "Cloned payserver-commons"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -46,10 +36,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y mold
 
       - name: Format check
-        run: cargo fmt -p server -p data-service -p evm -p ethpayserver-client -- --check
+        run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy -p server -p data-service -p evm -p ethpayserver-client --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: Test
@@ -72,23 +62,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone payserver-commons
-        uses: actions/checkout@v4
-        with:
-          repository: randomcash/payserver-commons
-          path: ../payserver-commons
-          ref: ${{ github.head_ref || github.ref_name }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Fallback payserver-commons to main
-        if: failure()
-        uses: actions/checkout@v4
-        with:
-          repository: randomcash/payserver-commons
-          path: ../payserver-commons
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clone payserver-commons (sibling)
+        run: |
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          cd ..
+          git clone --depth 1 -b "$BRANCH" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
+            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -134,23 +113,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone payserver-commons
-        uses: actions/checkout@v4
-        with:
-          repository: randomcash/payserver-commons
-          path: ../payserver-commons
-          ref: ${{ github.ref_name }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      - name: Fallback payserver-commons to main
-        if: failure()
-        uses: actions/checkout@v4
-        with:
-          repository: randomcash/payserver-commons
-          path: ../payserver-commons
-          ref: main
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clone payserver-commons (sibling)
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          cd ..
+          git clone --depth 1 -b "$BRANCH" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
+            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
 
       - uses: dtolnay/rust-toolchain@stable
 
