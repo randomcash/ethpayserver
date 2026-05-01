@@ -299,7 +299,7 @@ jobs:
             export SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:${{ github.ref_name }}-latest
             export MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:${{ github.ref_name }}-latest
             export CLIENT_IMAGE=ghcr.io/randomcash/ethpayserver/client:${{ github.ref_name }}-latest
-            cd ~/central-infrastructure/ethpayserver/${{ github.ref_name }}
+            cd ~/deploy/ethpayserver/${{ github.ref_name }}
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             docker compose pull
             docker compose up -d --remove-orphans
