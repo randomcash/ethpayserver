@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main, testnet]
+    tags: ["v*"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -255,32 +256,32 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}-latest" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build & push server
         run: |
           docker build -f docker/ethpayserver.Dockerfile \
-            -t ${{ env.IMAGE_BASE }}:${{ github.sha }} \
-            -t ${{ env.IMAGE_BASE }}:${{ github.ref_name }}-latest \
-            .
-          docker push ${{ env.IMAGE_BASE }}:${{ github.sha }}
-          docker push ${{ env.IMAGE_BASE }}:${{ github.ref_name }}-latest
+            -t ${{ env.IMAGE_BASE }}:${{ steps.tag.outputs.tag }} .
+          docker push ${{ env.IMAGE_BASE }}:${{ steps.tag.outputs.tag }}
 
       - name: Build & push monitor
         run: |
           docker build -f docker/evmmonitor.Dockerfile \
-            -t ${{ env.IMAGE_BASE }}/evmmonitor:${{ github.sha }} \
-            -t ${{ env.IMAGE_BASE }}/evmmonitor:${{ github.ref_name }}-latest \
-            .
-          docker push ${{ env.IMAGE_BASE }}/evmmonitor:${{ github.sha }}
-          docker push ${{ env.IMAGE_BASE }}/evmmonitor:${{ github.ref_name }}-latest
+            -t ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.tag }} .
+          docker push ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.tag }}
 
       - name: Build & push client
         run: |
           docker build -f docker/client.Dockerfile \
-            -t ${{ env.IMAGE_BASE }}/client:${{ github.sha }} \
-            -t ${{ env.IMAGE_BASE }}/client:${{ github.ref_name }}-latest \
-            .
-          docker push ${{ env.IMAGE_BASE }}/client:${{ github.sha }}
-          docker push ${{ env.IMAGE_BASE }}/client:${{ github.ref_name }}-latest
+            -t ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.tag }} .
+          docker push ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.tag }}
 
   notify-deploy:
     name: Notify Deploy
@@ -296,4 +297,4 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $DEPLOY_PAT" \
             https://api.github.com/repos/randomcash/central-infrastructure/dispatches \
-            -d '{"event_type": "deploy", "client_payload": {"service": "ethpayserver", "environment": "${{ github.ref_name }}", "sha": "${{ github.sha }}"}}'
+            -d '{"event_type": "deploy", "client_payload": {"service": "ethpayserver", "environment": "${{ github.ref_name }}", "sha": "${{ github.sha }}", "tag": "${{ github.ref_name }}-latest"}}'
