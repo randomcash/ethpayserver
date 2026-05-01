@@ -416,14 +416,30 @@ sqlx migrate revert --source data-service/migrations/postgres
 - [x] Watch retry service
 - [x] Webhook notifications with HMAC-SHA256
 
+#### Exchange Rates
+- [x] Kraken + CoinGecko rate providers with caching and fallback
+- [x] Fiat-to-crypto conversion integrated into invoice creation
+- [x] Rate staleness validation
+
+#### Real-time Updates
+- [x] Payment status WebSocket endpoint (/ws authenticated, /checkout/ws public)
+- [x] tokio broadcast for event fan-out
+
+#### Observability
+- [x] Prometheus metrics endpoint (/metrics)
+- [x] HTTP request counters and latency histograms
+- [x] Payment, webhook, invoice, and DB pool metrics
+
+#### Load Testing
+- [x] Goose-based load test scenarios (invoice create, list, webhook burst)
+- [x] WebSocket connection stress test
+- [x] Baseline targets documented
+
 ### What's Remaining
 
-- [ ] gRPC API for gateway integration
-- [ ] Exchange rate feeds
-- [ ] Payment status WebSocket endpoint
-- [ ] Prometheus metrics
-- [ ] Load testing
-- [ ] Security audit
+- [ ] Load test CI integration and regression tracking
+- [ ] Security audit (pre-mainnet)
+- [ ] Public /rates API endpoint for frontends
 
 ## Testing
 
