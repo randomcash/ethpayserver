@@ -146,6 +146,8 @@ jobs:
 
       - name: Build client
         run: cd client && trunk build --release
+        env:
+          RUSTFLAGS: ""
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
