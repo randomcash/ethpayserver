@@ -124,6 +124,8 @@ jobs:
             || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
