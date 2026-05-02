@@ -124,8 +124,6 @@ jobs:
             || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -146,8 +144,6 @@ jobs:
 
       - name: Build client
         run: cd client && trunk build --release
-        env:
-          RUSTFLAGS: ""
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
