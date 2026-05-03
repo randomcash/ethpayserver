@@ -7,8 +7,8 @@
 FROM archlinux:base
 RUN pacman -Sy --noconfirm ca-certificates && pacman -Scc --noconfirm
 RUN useradd -r -s /bin/false ethpayserver
-COPY target/release/ethpayserver /usr/local/bin/
-COPY target/release/migrate_postgres /usr/local/bin/
+COPY --chmod=755 target/release/ethpayserver /usr/local/bin/
+COPY --chmod=755 target/release/migrate_postgres /usr/local/bin/
 USER ethpayserver
 
 ENV RUST_LOG=info

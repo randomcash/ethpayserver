@@ -6,7 +6,7 @@
 FROM archlinux:base
 RUN pacman -Sy --noconfirm ca-certificates && pacman -Scc --noconfirm
 RUN useradd -r -s /bin/false evmmonitor
-COPY target/release/evmmonitor /usr/local/bin/
+COPY --chmod=755 target/release/evmmonitor /usr/local/bin/
 USER evmmonitor
 
 ENV RUST_LOG=info
