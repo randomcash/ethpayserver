@@ -497,27 +497,27 @@ where
 
     let toggle_menu = move |_: web_sys::MouseEvent| set_menu_open.update(|v| *v = !*v);
 
-    // Close menu on click outside
-    leptos::prelude::Effect::new(move |_| {
-        if menu_open.get() {
-            let closure =
-                wasm_bindgen::closure::Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
-                    if let Some(el) = menu_ref.get()
+    // Close menu on click outside — single listener, no leak.
+    {
+        let closure =
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
+                if menu_open.get_untracked() {
+                    if let Some(el) = menu_ref.get_untracked()
                         && let Some(target) =
                             e.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok())
                         && !el.contains(Some(&target))
                     {
                         set_menu_open.set(false);
                     }
-                })
-                    as Box<dyn FnMut(web_sys::MouseEvent)>);
+                }
+            })
+                as Box<dyn FnMut(web_sys::MouseEvent)>);
 
-            let window = web_sys::window().unwrap();
-            let _ =
-                window.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref());
-            closure.forget();
-        }
-    });
+        let window = web_sys::window().unwrap();
+        let _ =
+            window.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref());
+        closure.forget();
+    }
 
     let on_logout = move |_: web_sys::MouseEvent| {
         let api = api.get();
