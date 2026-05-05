@@ -8,9 +8,9 @@ use leptos_router::hooks::{use_navigate, use_params_map};
 use wasm_bindgen::JsCast;
 
 use crate::api::{
-    CreatePaymentMethodRequest, CreateStoreRequest, EvmApiClient, Store, StorePaymentMethod,
-    StoreSettings, StoreWebhook, UpdatePaymentMethodRequest, UpdateStoreRequest,
-    UpdateStoreSettingsRequest, UpdateWebhookRequest,
+    CreatePaymentMethodRequest, CreateStoreRequest, EvmApiClient, SetTokenPolicyRequest, Store,
+    StorePaymentMethod, StoreSettings, StoreWebhook, TokenPolicyEntry, UpdatePaymentMethodRequest,
+    UpdateStoreRequest, UpdateStoreSettingsRequest, UpdateWebhookRequest,
 };
 use crate::app::StoreContext;
 
@@ -1490,6 +1490,244 @@ fn SettingsTab(store_id: String) -> impl IntoView {
                     </button>
                 </div>
             </form>
+
+            <TokenPolicyPanel store_id=store_id.clone() />
+        </div>
+    }
+}
+
+/// Token policy panel: allowlist/blocklist management.
+#[component]
+fn TokenPolicyPanel(store_id: String) -> impl IntoView {
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let store_id_load = store_id.clone();
+    let store_id_save = store_id.clone();
+    let store_id_del = store_id.clone();
+
+    let (refresh, set_refresh) = signal(0u32);
+
+    let policy_resource = LocalResource::new(move || {
+        let api = api.get();
+        let id = store_id_load.clone();
+        refresh.get();
+        async move { api.get_token_policy(&id).await }
+    });
+
+    // Form state
+    let (mode, set_mode) = signal("allowlist".to_string());
+    let (entries, set_entries) = signal(Vec::<TokenPolicyEntry>::new());
+    let (has_policy, set_has_policy) = signal(false);
+    let (saving, set_saving) = signal(false);
+    let (error_msg, set_error_msg) = signal(Option::<String>::None);
+    let (success_msg, set_success_msg) = signal(false);
+
+    // New entry form
+    let (new_chain_id, set_new_chain_id) = signal(String::new());
+    let (new_token_address, set_new_token_address) = signal(String::new());
+    let (new_asset_symbol, set_new_asset_symbol) = signal(String::new());
+
+    let populate = move |loaded: &Option<crate::api::TokenPolicy>| match loaded {
+        Some(p) => {
+            set_mode.set(p.mode.clone());
+            set_entries.set(p.entries.clone());
+            set_has_policy.set(true);
+        }
+        None => {
+            set_mode.set("allowlist".to_string());
+            set_entries.set(Vec::new());
+            set_has_policy.set(false);
+        }
+    };
+
+    let add_entry = move |_| {
+        let chain: i64 = match new_chain_id.get().parse() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let symbol = new_asset_symbol.get();
+        if symbol.is_empty() {
+            return;
+        }
+        let addr = {
+            let a = new_token_address.get();
+            if a.is_empty() { None } else { Some(a) }
+        };
+        set_entries.update(|v| {
+            v.push(TokenPolicyEntry {
+                chain_id: chain,
+                token_address: addr,
+                asset_symbol: symbol,
+            });
+        });
+        set_new_chain_id.set(String::new());
+        set_new_token_address.set(String::new());
+        set_new_asset_symbol.set(String::new());
+    };
+
+    let on_save = move |_: leptos::ev::MouseEvent| {
+        set_saving.set(true);
+        set_error_msg.set(None);
+        set_success_msg.set(false);
+
+        let api = api.get();
+        let id = store_id_save.clone();
+        let req = SetTokenPolicyRequest {
+            mode: mode.get(),
+            entries: entries.get(),
+        };
+
+        leptos::task::spawn_local(async move {
+            match api.set_token_policy(&id, &req).await {
+                Ok(_) => {
+                    set_success_msg.set(true);
+                    set_refresh.update(|n| *n += 1);
+                }
+                Err(e) => set_error_msg.set(Some(format!("{}", e))),
+            }
+            set_saving.set(false);
+        });
+    };
+
+    let on_delete = move |_: leptos::ev::MouseEvent| {
+        set_saving.set(true);
+        set_error_msg.set(None);
+        set_success_msg.set(false);
+
+        let api = api.get();
+        let id = store_id_del.clone();
+
+        leptos::task::spawn_local(async move {
+            match api.delete_token_policy(&id).await {
+                Ok(_) => {
+                    set_has_policy.set(false);
+                    set_entries.set(Vec::new());
+                    set_refresh.update(|n| *n += 1);
+                }
+                Err(e) => set_error_msg.set(Some(format!("{}", e))),
+            }
+            set_saving.set(false);
+        });
+    };
+
+    view! {
+        <div class="settings-section" style="margin-top: 1.5rem;">
+            <h3 class="settings-section-title">"Token Policy"</h3>
+            <p class="settings-section-desc">
+                "Control which chain+token pairs this store accepts for payments."
+            </p>
+
+            <Suspense fallback=move || view! { <p style="color: var(--text-muted);">"Loading policy..."</p> }>
+                {move || policy_resource.get().map(|result| match &*result {
+                    Ok(policy) => {
+                        populate(policy);
+                        view! { <div></div> }.into_any()
+                    }
+                    Err(_) => view! { <div></div> }.into_any(),
+                })}
+            </Suspense>
+
+            <div class="form-group">
+                <label>"Mode"</label>
+                <select
+                    prop:value=move || mode.get()
+                    on:change=move |ev| set_mode.set(event_target_value(&ev))
+                >
+                    <option value="allowlist">"Allowlist (only listed tokens accepted)"</option>
+                    <option value="blocklist">"Blocklist (all except listed tokens)"</option>
+                </select>
+            </div>
+
+            // Entries table
+            <div class="notification-matrix" style="margin-top: 0.75rem;">
+                <div class="notification-row" style="font-weight: 600;">
+                    <span style="flex: 1;">"Chain ID"</span>
+                    <span style="flex: 2;">"Token Address"</span>
+                    <span style="flex: 1;">"Symbol"</span>
+                    <span style="width: 40px;"></span>
+                </div>
+                <For
+                    each=move || {
+                        let e = entries.get();
+                        e.into_iter().enumerate().collect::<Vec<_>>()
+                    }
+                    key=|(_i, e)| format!("{}:{:?}:{}", e.chain_id, e.token_address, e.asset_symbol)
+                    children=move |(idx, entry)| {
+                        let remove = move |_: leptos::ev::MouseEvent| {
+                            set_entries.update(|v| { v.remove(idx); });
+                        };
+                        view! {
+                            <div class="notification-row">
+                                <span style="flex: 1;">{entry.chain_id.to_string()}</span>
+                                <span style="flex: 2; font-family: monospace; font-size: 0.8rem;">
+                                    {entry.token_address.clone().unwrap_or_else(|| "(native)".to_string())}
+                                </span>
+                                <span style="flex: 1;">{entry.asset_symbol.clone()}</span>
+                                <button type="button" class="btn btn-sm btn-danger" style="width: 40px;" on:click=remove>"X"</button>
+                            </div>
+                        }
+                    }
+                />
+            </div>
+
+            // Add entry form
+            <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: flex-end;">
+                <div style="flex: 1;">
+                    <label style="font-size: 0.75rem;">"Chain"</label>
+                    <select
+                        prop:value=move || new_chain_id.get()
+                        on:change=move |ev| set_new_chain_id.set(event_target_value(&ev))
+                    >
+                        <option value="">"Select..."</option>
+                        <option value="1">"1 (Ethereum)"</option>
+                        <option value="137">"137 (Polygon)"</option>
+                        <option value="42161">"42161 (Arbitrum)"</option>
+                        <option value="10">"10 (Optimism)"</option>
+                        <option value="8453">"8453 (Base)"</option>
+                        <option value="56">"56 (BSC)"</option>
+                        <option value="43114">"43114 (Avalanche)"</option>
+                        <option value="100">"100 (Gnosis)"</option>
+                        <option value="250">"250 (Fantom)"</option>
+                    </select>
+                </div>
+                <div style="flex: 2;">
+                    <label style="font-size: 0.75rem;">"Token Address"</label>
+                    <input type="text" placeholder="0x... (empty for native)"
+                        prop:value=move || new_token_address.get()
+                        on:input=move |ev| set_new_token_address.set(event_target_value(&ev))
+                    />
+                </div>
+                <div style="flex: 1;">
+                    <label style="font-size: 0.75rem;">"Symbol"</label>
+                    <input type="text" placeholder="USDC"
+                        prop:value=move || new_asset_symbol.get()
+                        on:input=move |ev| set_new_asset_symbol.set(event_target_value(&ev))
+                    />
+                </div>
+                <button type="button" class="btn btn-secondary" on:click=add_entry>"Add"</button>
+            </div>
+
+            {move || error_msg.get().map(|msg| view! {
+                <div class="alert alert-error" style="margin-top: 0.5rem;">{msg}</div>
+            })}
+            {move || success_msg.get().then(|| view! {
+                <div class="alert alert-success" style="margin-top: 0.5rem;">"Token policy saved."</div>
+            })}
+
+            <div class="form-actions" style="margin-top: 0.75rem;">
+                <button type="button" class="btn btn-primary"
+                    disabled=move || saving.get()
+                    on:click=on_save
+                >
+                    {move || if saving.get() { "Saving..." } else { "Save Policy" }}
+                </button>
+                <button type="button" class="btn btn-danger"
+                    style=move || if has_policy.get() { "margin-left: 0.5rem;" } else { "display: none;" }
+                    disabled=move || saving.get()
+                    on:click=on_delete
+                >
+                    "Remove Policy"
+                </button>
+            </div>
         </div>
     }
 }

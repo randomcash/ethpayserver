@@ -557,6 +557,32 @@ pub struct UpdateStoreSettingsRequest {
     pub notification_prefs: Option<serde_json::Value>,
 }
 
+/// Token policy entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenPolicyEntry {
+    pub chain_id: i64,
+    pub token_address: Option<String>,
+    pub asset_symbol: String,
+}
+
+/// Token policy response from the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenPolicy {
+    pub id: String,
+    pub store_id: String,
+    pub mode: String,
+    pub entries: Vec<TokenPolicyEntry>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Request to set a token policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetTokenPolicyRequest {
+    pub mode: String,
+    pub entries: Vec<TokenPolicyEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

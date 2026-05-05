@@ -227,6 +227,10 @@ where
         .route("/{store_id}/payment-methods/{method_id}", get(stores::get_payment_method::<A>))
         .route("/{store_id}/payment-methods/{method_id}", put(stores::update_payment_method::<A>))
         .route("/{store_id}/payment-methods/{method_id}", delete(stores::delete_payment_method::<A>))
+        // Token Policy
+        .route("/{store_id}/token-policy", get(stores::get_token_policy::<A>))
+        .route("/{store_id}/token-policy", put(stores::set_token_policy::<A>))
+        .route("/{store_id}/token-policy", delete(stores::delete_token_policy::<A>))
         // Payouts
         .route("/{store_id}/payouts", get(payouts::list_payouts::<A>))
         .route("/{store_id}/payouts", post(payouts::create_payout::<A>))

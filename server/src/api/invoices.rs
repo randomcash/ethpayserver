@@ -559,13 +559,35 @@ where
     }
 
     // Get ALL enabled payment methods for the store
-    let payment_methods =
+    let mut payment_methods =
         StorePaymentMethodReader::get_enabled_payment_methods(&*state.data_service, req.store_id)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Apply token policy filter (allowlist/blocklist)
+    if let Some(policy) =
+        data_service::StoreTokenPolicyReader::get_token_policy(&*state.data_service, req.store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        payment_methods.retain(|pm| {
+            let chain_id = pm.chain_id as i64;
+            let matches_entry = policy
+                .entries
+                .iter()
+                .any(|e| e.chain_id == chain_id && e.token_address == pm.token_address);
+            match policy.mode {
+                types::TokenPolicyMode::Allowlist => matches_entry,
+                types::TokenPolicyMode::Blocklist => !matches_entry,
+            }
+        });
+    }
+
     if payment_methods.is_empty() {
-        tracing::warn!("Store {} has no enabled payment methods", req.store_id);
+        tracing::warn!(
+            "Store {} has no enabled payment methods (after token policy filter)",
+            req.store_id
+        );
         return Err(StatusCode::BAD_REQUEST);
     }
 
