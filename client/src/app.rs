@@ -514,8 +514,7 @@ where
                 as Box<dyn FnMut(web_sys::MouseEvent)>);
 
         let window = web_sys::window().unwrap();
-        let _ =
-            window.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref());
+        let _ = window.add_event_listener_with_callback("click", closure.as_ref().unchecked_ref());
         closure.forget();
     }
 

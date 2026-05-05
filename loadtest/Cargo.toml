@@ -13,7 +13,7 @@ name = "loadtest-ws"
 path = "src/ws_main.rs"
 
 [dependencies]
-goose = "0.17"
+goose = "0.18"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
