@@ -501,14 +501,13 @@ where
     {
         let closure =
             wasm_bindgen::closure::Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
-                if menu_open.get_untracked() {
-                    if let Some(el) = menu_ref.get_untracked()
-                        && let Some(target) =
-                            e.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok())
-                        && !el.contains(Some(&target))
-                    {
-                        set_menu_open.set(false);
-                    }
+                if menu_open.get_untracked()
+                    && let Some(el) = menu_ref.get_untracked()
+                    && let Some(target) =
+                        e.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok())
+                    && !el.contains(Some(&target))
+                {
+                    set_menu_open.set(false);
                 }
             })
                 as Box<dyn FnMut(web_sys::MouseEvent)>);
