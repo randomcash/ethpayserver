@@ -98,14 +98,15 @@ cargo run -p loadtest --bin loadtest-ws
 
 ## Interpreting regressions
 
-The CI scheduled job runs the suite weekly against testnet. A regression is
-flagged when any metric degrades by more than **25%** from its recorded
-baseline. The regression gate is initially disabled (`allow_failure: true`)
-until the first stable baseline run produces reference numbers.
+The GitHub Actions workflow (`.github/workflows/loadtest.yml`) runs the suite
+weekly against testnet. It can also be triggered manually via `workflow_dispatch`
+or on release tags. A regression is flagged when any metric degrades by more
+than **25%** from its recorded baseline (configured in `loadtest/baselines.json`).
 
-Once a baseline is established:
-1. Update the target numbers in this document
-2. Enable the regression gate in `.gitlab-ci.yml` by removing `allow_failure`
+The regression gate initially uses `continue-on-error: true` so failures are
+visible but non-blocking. Once a stable baseline is established:
+1. Update the target numbers in this document and in `loadtest/baselines.json`
+2. Remove `continue-on-error` from the workflow to make regressions blocking
 
 ## Environment variables reference
 
