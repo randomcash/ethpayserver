@@ -7,6 +7,7 @@ pub use api_key::{ApiKeyRateLimitInfo, PostgresApiKeyRepository};
 mod challenge;
 mod device;
 mod passkey;
+mod server_settings;
 mod session;
 mod store;
 mod user;

@@ -12,6 +12,7 @@ use auth::AuthenticationService;
 
 use crate::state::PgAppState;
 
+pub mod admin;
 pub mod api_key_deprecation;
 pub mod api_key_hash;
 pub mod api_key_rate_limit;
@@ -93,6 +94,13 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::revoke_api_key,
         users::update_api_key,
         users::rotate_api_key,
+        // Admin
+        admin::list_users,
+        admin::update_user_role,
+        admin::lock_user,
+        admin::unlock_user,
+        admin::get_settings,
+        admin::update_settings,
     ),
     components(schemas(
         health::HealthResponse,
@@ -136,6 +144,11 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         users::CreateApiKeyResponsePayload,
         users::UpdateApiKeyPayload,
         users::RotateApiKeyResponsePayload,
+        admin::UserListResponse,
+        admin::AdminUserInfo,
+        admin::UpdateRoleRequest,
+        admin::ServerSettingsResponse,
+        admin::UpdateServerSettingsRequest,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -147,6 +160,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         (name = "auth", description = "Authentication (from Auth API)"),
         (name = "dashboard", description = "Dashboard statistics"),
         (name = "users", description = "User management (API keys)"),
+        (name = "admin", description = "Server administration"),
     )
 )]
 pub struct ApiDoc;
@@ -291,6 +305,25 @@ where
             axum::routing::post(users::rotate_api_key::<A>),
         )
         .with_state(state.clone());
+    // Admin endpoints (ServerAdmin only)
+    let admin_routes = Router::new()
+        .route("/users", get(admin::list_users::<A>))
+        .route(
+            "/users/{id}/role",
+            axum::routing::patch(admin::update_user_role::<A>),
+        )
+        .route(
+            "/users/{id}/lock",
+            axum::routing::post(admin::lock_user::<A>),
+        )
+        .route(
+            "/users/{id}/unlock",
+            axum::routing::post(admin::unlock_user::<A>),
+        )
+        .route("/settings", get(admin::get_settings::<A>))
+        .route("/settings", axum::routing::put(admin::update_settings::<A>))
+        .with_state(state.clone());
+
     // Auth API from auth crate (with optional CAPTCHA provider)
     let auth_state = match state.captcha_provider.clone() {
         Some(captcha) => auth::api::AuthState::with_captcha(state.auth_service.clone(), captcha),
@@ -318,6 +351,7 @@ where
         .merge(ws_route)
         .nest("/dashboard", dashboard_routes)
         .nest("/users", user_routes)
+        .nest("/admin", admin_routes)
         .nest("/auth", auth_routes)
         .nest("/evm", evm_routes);
 

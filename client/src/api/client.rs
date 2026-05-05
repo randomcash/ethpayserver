@@ -8,9 +8,10 @@ use super::{
     ApiKeyListResponse, CheckoutResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
     InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, RotateApiKeyResponse,
-    Store, StorePaymentMethod, StoreSettings, StoreWebhook, TxHashLookupResponse,
-    UpdatePaymentMethodRequest, UpdateStoreRequest, UpdateStoreSettingsRequest,
-    UpdateWebhookRequest, UserInfo, Wallet,
+    ServerSettingsResponse, Store, StorePaymentMethod, StoreSettings, StoreWebhook,
+    TxHashLookupResponse, UpdatePaymentMethodRequest, UpdateServerSettingsRequest,
+    UpdateStoreRequest, UpdateStoreSettingsRequest, UpdateUserRoleRequest, UpdateWebhookRequest,
+    UserInfo, UserListResponse, Wallet,
 };
 
 /// API client errors.
@@ -218,6 +219,81 @@ impl EvmApiClient {
             .map_err(|e| ApiError::Network(e.to_string()))?;
 
         self.handle_response(response).await
+    }
+
+    /// Make a POST request without a body, ignoring response body.
+    async fn post_empty_body(&self, path: &str) -> Result<(), ApiError> {
+        let request = self
+            .build_request("POST", path)
+            .build()
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if response.status() == 401 {
+            return Err(ApiError::Unauthorized);
+        }
+        if !response.ok() {
+            let message = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http {
+                status: response.status(),
+                message,
+            });
+        }
+        Ok(())
+    }
+
+    /// Make a PATCH request with body, ignoring response body.
+    async fn patch_empty<B: Serialize>(&self, path: &str, body: &B) -> Result<(), ApiError> {
+        let request = self
+            .build_request("PATCH", path)
+            .json(body)
+            .map_err(|e| ApiError::Parse(e.to_string()))?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if response.status() == 401 {
+            return Err(ApiError::Unauthorized);
+        }
+        if !response.ok() {
+            let message = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http {
+                status: response.status(),
+                message,
+            });
+        }
+        Ok(())
+    }
+
+    /// Make a PUT request with body, ignoring response body.
+    async fn put_empty<B: Serialize>(&self, path: &str, body: &B) -> Result<(), ApiError> {
+        let request = self
+            .build_request("PUT", path)
+            .json(body)
+            .map_err(|e| ApiError::Parse(e.to_string()))?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if response.status() == 401 {
+            return Err(ApiError::Unauthorized);
+        }
+        if !response.ok() {
+            let message = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http {
+                status: response.status(),
+                message,
+            });
+        }
+        Ok(())
     }
 
     /// Handle response and parse JSON.
@@ -602,6 +678,54 @@ impl EvmApiClient {
     pub async fn rotate_api_key(&self, id: &str) -> Result<RotateApiKeyResponse, ApiError> {
         self.post_empty(&format!("/api/users/api-keys/{}/rotate", id))
             .await
+    }
+
+    // =========================================================================
+    // Admin
+    // =========================================================================
+
+    /// List all users (admin only).
+    pub async fn list_users(&self, offset: i64, limit: i64) -> Result<UserListResponse, ApiError> {
+        self.get(&format!(
+            "/api/admin/users?offset={}&limit={}",
+            offset, limit
+        ))
+        .await
+    }
+
+    /// Update a user's role (admin only).
+    pub async fn update_user_role(
+        &self,
+        user_id: &str,
+        request: &UpdateUserRoleRequest,
+    ) -> Result<(), ApiError> {
+        self.patch_empty(&format!("/api/admin/users/{}/role", user_id), request)
+            .await
+    }
+
+    /// Lock a user account (admin only).
+    pub async fn lock_user(&self, user_id: &str) -> Result<(), ApiError> {
+        self.post_empty_body(&format!("/api/admin/users/{}/lock", user_id))
+            .await
+    }
+
+    /// Unlock a user account (admin only).
+    pub async fn unlock_user(&self, user_id: &str) -> Result<(), ApiError> {
+        self.post_empty_body(&format!("/api/admin/users/{}/unlock", user_id))
+            .await
+    }
+
+    /// Get server settings (admin only).
+    pub async fn get_server_settings(&self) -> Result<ServerSettingsResponse, ApiError> {
+        self.get("/api/admin/settings").await
+    }
+
+    /// Update server settings (admin only).
+    pub async fn update_server_settings(
+        &self,
+        request: &UpdateServerSettingsRequest,
+    ) -> Result<(), ApiError> {
+        self.put_empty("/api/admin/settings", request).await
     }
 }
 
