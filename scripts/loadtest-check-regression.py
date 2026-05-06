@@ -36,6 +36,7 @@ def check_http(results: dict, baselines: dict, threshold_pct: float) -> list[str
     for name, baseline in scenarios.items():
         actual = requests.get(name)
         if actual is None:
+            print(f"  WARNING: baseline scenario '{name}' not found in results", file=sys.stderr)
             continue
 
         # p95 latency check (higher is worse)

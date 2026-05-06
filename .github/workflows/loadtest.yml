@@ -76,6 +76,12 @@ jobs:
             --no-reset-metrics \
             > results-http.json 2>loadtest-stderr.log || true
 
+          if [ ! -s results-http.json ]; then
+            echo "::error::Load test binary produced no output — possible crash"
+            tail -20 loadtest-stderr.log
+            exit 1
+          fi
+
           echo "--- Goose summary ---"
           tail -40 loadtest-stderr.log
           echo "--- JSON output ---"
@@ -90,6 +96,12 @@ jobs:
         run: |
           ./target/release/loadtest-ws \
             > results-ws.json 2>loadtest-ws-stderr.log || true
+
+          if [ ! -s results-ws.json ]; then
+            echo "::error::WebSocket load test binary produced no output — possible crash"
+            tail -20 loadtest-ws-stderr.log
+            exit 1
+          fi
 
           echo "--- WS summary ---"
           cat loadtest-ws-stderr.log
@@ -116,7 +128,7 @@ jobs:
           retention-days: 90
 
       - name: Alert on regression
-        if: failure() && steps.regression.outcome == 'failure'
+        if: steps.regression.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
