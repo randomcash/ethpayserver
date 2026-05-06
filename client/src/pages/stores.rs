@@ -1553,11 +1553,17 @@ fn TokenPolicyPanel(store_id: String) -> impl IntoView {
             if a.is_empty() { None } else { Some(a) }
         };
         set_entries.update(|v| {
-            v.push(TokenPolicyEntry {
-                chain_id: chain,
-                token_address: addr,
-                asset_symbol: symbol,
+            // Prevent duplicates (same chain+token_address+symbol)
+            let dup = v.iter().any(|e| {
+                e.chain_id == chain && e.token_address == addr && e.asset_symbol == symbol
             });
+            if !dup {
+                v.push(TokenPolicyEntry {
+                    chain_id: chain,
+                    token_address: addr,
+                    asset_symbol: symbol,
+                });
+            }
         });
         set_new_chain_id.set(String::new());
         set_new_token_address.set(String::new());
@@ -1693,7 +1699,7 @@ fn TokenPolicyPanel(store_id: String) -> impl IntoView {
                     <span style="font-size: 0.7rem; color: var(--text-muted);">
                         {move || {
                             let id = new_chain_id.get();
-                            if let Ok(n) = id.parse::<u64>() { chain_name(n).to_string() } else { String::new() }
+                            if let Ok(n) = id.parse::<u64>() { chain_name(n) } else { "" }
                         }}
                     </span>
                 </div>
