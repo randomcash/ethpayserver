@@ -169,14 +169,29 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
     let (selected_store_id, set_selected_store_id) = signal(saved_id);
     let refetch = ArcTrigger::new();
 
+    // Guard: prevents stale async callbacks from acting after this layout is disposed.
+    // Without this, a route change that disposes the old ProtectedLayout can have its
+    // in-flight store fetch complete and call auth.logout() on a transient error,
+    // killing the session and redirecting to /login.
+    let disposed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let disposed_for_cleanup = disposed.clone();
+    on_cleanup(move || {
+        disposed_for_cleanup.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+
     // Fetch stores on mount and whenever refetch is triggered.
     let refetch_for_effect = refetch.clone();
+    let disposed_for_effect = disposed.clone();
     Effect::new(move || {
         refetch_for_effect.track();
         let api = api.get();
+        let disposed = disposed_for_effect.clone();
         leptos::task::spawn_local(async move {
             match api.list_stores().await {
                 Ok(fetched) => {
+                    if disposed.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
                     // If selected store no longer exists, clear selection.
                     if let Some(ref id) = selected_store_id.get_untracked()
                         && !fetched.iter().any(|s| &s.id == id)
@@ -196,6 +211,9 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
                 }
                 Err(e) => {
                     web_sys::console::error_1(&format!("Failed to fetch stores: {}", e).into());
+                    if disposed.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
                     // If the server rejected our session, log out so we redirect to login
                     // instead of showing a stalled loading state.
                     let msg = e.to_string();
