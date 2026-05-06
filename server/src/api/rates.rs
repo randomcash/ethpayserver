@@ -77,7 +77,9 @@ where
             }
         })?;
 
-    let age_seconds = (chrono::Utc::now() - exchange_rate.timestamp).num_seconds();
+    let age_seconds = (chrono::Utc::now() - exchange_rate.timestamp)
+        .num_seconds()
+        .max(0);
 
     Ok(Json(RateResponse {
         from: exchange_rate.from,
