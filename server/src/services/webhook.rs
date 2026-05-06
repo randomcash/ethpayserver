@@ -567,7 +567,12 @@ fn truncate_error(error: &str, max_len: usize) -> String {
     if error.len() <= max_len {
         error.to_string()
     } else {
-        format!("{}...", &error[..max_len.saturating_sub(3)])
+        // Find a safe truncation point that doesn't split a multi-byte UTF-8 char
+        let mut end = max_len.saturating_sub(3);
+        while end > 0 && !error.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &error[..end])
     }
 }
 
