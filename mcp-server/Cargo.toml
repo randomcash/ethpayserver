@@ -12,11 +12,11 @@ path = "src/main.rs"
 [dependencies]
 # Internal crates
 data-service = { path = "../data-service" }
-auth = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
-types = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
+auth = { git = "https://github.com/randomcash/payserver-commons.git" }
+types = { git = "https://github.com/randomcash/payserver-commons.git" }
 evm = { path = "../evm", features = ["redis"] }
-rates = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
-crypto = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
+rates = { git = "https://github.com/randomcash/payserver-commons.git" }
+crypto = { git = "https://github.com/randomcash/payserver-commons.git" }
 
 # MCP SDK
 rmcp = { version = "1.5", features = ["server", "transport-io", "schemars"] }

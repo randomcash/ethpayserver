@@ -12,8 +12,8 @@ redis = ["dep:redis"]
 test-utils = []
 
 [dependencies]
-types = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
-auth = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
+types = { git = "https://github.com/randomcash/payserver-commons.git" }
+auth = { git = "https://github.com/randomcash/payserver-commons.git" }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid"], optional = true }
 tokio = { version = "1.42", features = ["sync"] }
 futures = "0.3"
@@ -34,4 +34,4 @@ cognitive_complexity = "deny"
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros"] }
-crypto = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
+crypto = { git = "https://github.com/randomcash/payserver-commons.git" }
