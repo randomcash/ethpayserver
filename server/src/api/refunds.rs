@@ -12,7 +12,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use auth::SessionService;
+use auth::{SessionService, UserStoreRepository};
 use data_service::{InvoiceReader, PaymentReader, RefundReader, RefundWriter};
 use types::{InvoiceId, InvoiceStatus, RefundData, RefundStatus};
 
@@ -78,7 +78,7 @@ impl From<RefundData> for RefundResponse {
 /// payment, and creates a refund record. The actual transaction signing and
 /// broadcasting is handled by a background service.
 pub async fn create_refund<A>(
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
     Json(body): Json<CreateRefundRequest>,
@@ -94,19 +94,26 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    match invoice.status {
-        InvoiceStatus::Paid | InvoiceStatus::LatePaid => {}
-        _ => {
-            tracing::warn!(
-                invoice_id = %id.0,
-                status = %invoice.status,
-                "Cannot refund invoice in this status"
-            );
-            return Err(StatusCode::BAD_REQUEST);
-        }
+    // Verify user has access to this invoice's store
+    if !user.role.is_admin()
+        && state
+            .data_service
+            .get_user_store(user.id, invoice.store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
     }
 
-    // Get confirmed payments for this invoice
+    if !matches!(
+        invoice.status,
+        InvoiceStatus::Paid | InvoiceStatus::LatePaid
+    ) {
+        tracing::warn!(invoice_id = %id.0, status = %invoice.status, "Cannot refund invoice in this status");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let payments = PaymentReader::get_valid_for_invoice(&*state.data_service, &id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -129,7 +136,6 @@ where
         StatusCode::BAD_REQUEST
     })?;
 
-    // Determine refund amount
     let refund_amount = body.amount.unwrap_or_else(|| payment.amount.clone());
 
     // Create refund record
@@ -161,7 +167,6 @@ where
         })?;
 
     metrics::record_refund_initiated(payment.chain_id, &payment.asset_symbol);
-
     tracing::info!(
         refund_id = %refund.id,
         invoice_id = %id.0,
@@ -175,7 +180,7 @@ where
 
 /// List refunds for an invoice.
 pub async fn list_refunds<A>(
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<Vec<RefundResponse>>, StatusCode>
@@ -185,10 +190,22 @@ where
     let id = InvoiceId::from_string(invoice_id);
 
     // Verify invoice exists
-    InvoiceReader::get(&*state.data_service, &id)
+    let invoice = InvoiceReader::get(&*state.data_service, &id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Verify user has access to this invoice's store
+    if !user.role.is_admin()
+        && state
+            .data_service
+            .get_user_store(user.id, invoice.store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     let refunds = RefundReader::get_refunds_for_invoice(&*state.data_service, &id)
         .await

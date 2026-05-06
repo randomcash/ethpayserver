@@ -196,6 +196,12 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
                 }
                 Err(e) => {
                     web_sys::console::error_1(&format!("Failed to fetch stores: {}", e).into());
+                    // If the server rejected our session, log out so we redirect to login
+                    // instead of showing a stalled loading state.
+                    let msg = e.to_string();
+                    if msg.contains("Unauthorized") || msg.contains("401") {
+                        auth.logout();
+                    }
                 }
             }
         });

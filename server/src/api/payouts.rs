@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use alloy_primitives::U256;
-use auth::SessionService;
+use auth::{SessionService, UserStoreRepository};
 use data_service::{PaymentReader, PayoutReader, PayoutWriter};
 use types::{PayoutData, PayoutStatus, StoreId};
 
@@ -90,7 +90,7 @@ pub struct PayoutListResponse {
 /// Creates a payout record. The actual transaction signing and broadcasting
 /// is handled by a background service that monitors pending payouts.
 pub async fn create_payout<A>(
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(body): Json<CreatePayoutRequest>,
@@ -99,6 +99,18 @@ where
     A: SessionService + 'static,
 {
     let store_id = StoreId(store_id);
+
+    // Verify user has access to this store
+    if !user.role.is_admin()
+        && state
+            .data_service
+            .get_user_store(user.id, store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     // Validate destination address is not empty
     if body.destination_address.trim().is_empty() {
@@ -185,7 +197,7 @@ where
 
 /// List payouts for a store.
 pub async fn list_payouts<A>(
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<PayoutListResponse>, StatusCode>
@@ -193,6 +205,18 @@ where
     A: SessionService + 'static,
 {
     let store_id = StoreId(store_id);
+
+    // Verify user has access to this store
+    if !user.role.is_admin()
+        && state
+            .data_service
+            .get_user_store(user.id, store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     let (total, payouts) =
         PayoutReader::get_payouts_for_store(&*state.data_service, store_id, 50, 0)
@@ -207,13 +231,25 @@ where
 
 /// Get a specific payout.
 pub async fn get_payout<A>(
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
-    Path((_store_id, payout_id)): Path<(Uuid, Uuid)>,
+    Path((store_id, payout_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<PayoutResponse>, StatusCode>
 where
     A: SessionService + 'static,
 {
+    // Verify user has access to this store
+    if !user.role.is_admin()
+        && state
+            .data_service
+            .get_user_store(user.id, StoreId(store_id))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     let payout = PayoutReader::get_payout(&*state.data_service, payout_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
