@@ -1552,18 +1552,19 @@ fn TokenPolicyPanel(store_id: String) -> impl IntoView {
             let a = new_token_address.get();
             if a.is_empty() { None } else { Some(a) }
         };
+        let is_dup = entries
+            .get()
+            .iter()
+            .any(|e| e.chain_id == chain && e.token_address == addr && e.asset_symbol == symbol);
+        if is_dup {
+            return;
+        }
         set_entries.update(|v| {
-            // Prevent duplicates (same chain+token_address+symbol)
-            let dup = v.iter().any(|e| {
-                e.chain_id == chain && e.token_address == addr && e.asset_symbol == symbol
+            v.push(TokenPolicyEntry {
+                chain_id: chain,
+                token_address: addr,
+                asset_symbol: symbol,
             });
-            if !dup {
-                v.push(TokenPolicyEntry {
-                    chain_id: chain,
-                    token_address: addr,
-                    asset_symbol: symbol,
-                });
-            }
         });
         set_new_chain_id.set(String::new());
         set_new_token_address.set(String::new());
