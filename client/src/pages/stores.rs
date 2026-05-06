@@ -1589,6 +1589,18 @@ fn TokenPolicyPanel(store_id: String) -> impl IntoView {
     };
 
     let on_delete = move |_: leptos::ev::MouseEvent| {
+        let confirmed = web_sys::window()
+            .and_then(|w| {
+                w.confirm_with_message(
+                    "Remove token policy? This will revert the store to accepting all tokens.",
+                )
+                .ok()
+            })
+            .unwrap_or(false);
+        if !confirmed {
+            return;
+        }
+
         set_saving.set(true);
         set_error_msg.set(None);
         set_success_msg.set(false);
@@ -1646,14 +1658,15 @@ fn TokenPolicyPanel(store_id: String) -> impl IntoView {
                     <span style="width: 40px;"></span>
                 </div>
                 <For
-                    each=move || {
-                        let e = entries.get();
-                        e.into_iter().enumerate().collect::<Vec<_>>()
-                    }
-                    key=|(_i, e)| format!("{}:{:?}:{}", e.chain_id, e.token_address, e.asset_symbol)
-                    children=move |(idx, entry)| {
+                    each=move || entries.get()
+                    key=|e| format!("{}:{:?}:{}", e.chain_id, e.token_address, e.asset_symbol)
+                    children=move |entry| {
+                        let entry_key = format!("{}:{:?}:{}", entry.chain_id, entry.token_address, entry.asset_symbol);
                         let remove = move |_: leptos::ev::MouseEvent| {
-                            set_entries.update(|v| { v.remove(idx); });
+                            let key = entry_key.clone();
+                            set_entries.update(|v| {
+                                v.retain(|e| format!("{}:{:?}:{}", e.chain_id, e.token_address, e.asset_symbol) != key);
+                            });
                         };
                         view! {
                             <div class="notification-row">
@@ -1672,22 +1685,17 @@ fn TokenPolicyPanel(store_id: String) -> impl IntoView {
             // Add entry form
             <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: flex-end;">
                 <div style="flex: 1;">
-                    <label style="font-size: 0.75rem;">"Chain"</label>
-                    <select
+                    <label style="font-size: 0.75rem;">"Chain ID"</label>
+                    <input type="number" placeholder="1"
                         prop:value=move || new_chain_id.get()
-                        on:change=move |ev| set_new_chain_id.set(event_target_value(&ev))
-                    >
-                        <option value="">"Select..."</option>
-                        <option value="1">"1 (Ethereum)"</option>
-                        <option value="137">"137 (Polygon)"</option>
-                        <option value="42161">"42161 (Arbitrum)"</option>
-                        <option value="10">"10 (Optimism)"</option>
-                        <option value="8453">"8453 (Base)"</option>
-                        <option value="56">"56 (BSC)"</option>
-                        <option value="43114">"43114 (Avalanche)"</option>
-                        <option value="100">"100 (Gnosis)"</option>
-                        <option value="250">"250 (Fantom)"</option>
-                    </select>
+                        on:input=move |ev| set_new_chain_id.set(event_target_value(&ev))
+                    />
+                    <span style="font-size: 0.7rem; color: var(--text-muted);">
+                        {move || {
+                            let id = new_chain_id.get();
+                            if let Ok(n) = id.parse::<u64>() { chain_name(n).to_string() } else { String::new() }
+                        }}
+                    </span>
                 </div>
                 <div style="flex: 2;">
                     <label style="font-size: 0.75rem;">"Token Address"</label>
