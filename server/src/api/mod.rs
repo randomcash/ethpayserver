@@ -25,6 +25,7 @@ pub mod idempotency;
 pub mod invoices;
 pub mod payouts;
 pub mod rate_limit;
+pub mod rates;
 pub mod refunds;
 pub mod stores;
 pub mod users;
@@ -88,6 +89,8 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::get_payment,
         // Dashboard
         dashboard::get_stats,
+        // Rates
+        rates::get_rate,
         // Users
         users::list_api_keys,
         users::create_api_key,
@@ -138,6 +141,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::PaymentOptionResponse,
         invoices::InvoiceStatusResponse,
         dashboard::DashboardStats,
+        rates::RateResponse,
         users::ApiKeyListResponse,
         users::ApiKeyInfoResponse,
         users::CreateApiKeyPayload,
@@ -159,6 +163,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         (name = "networks", description = "Network information (from EVM API)"),
         (name = "auth", description = "Authentication (from Auth API)"),
         (name = "dashboard", description = "Dashboard statistics"),
+        (name = "rates", description = "Exchange rates"),
         (name = "users", description = "User management (API keys)"),
         (name = "admin", description = "Server administration"),
     )
@@ -290,6 +295,11 @@ where
         .route("/ws", get(ws::ws_handler::<A>))
         .with_state(state.clone());
 
+    // Rates endpoint
+    let rates_routes = Router::new()
+        .route("/", get(rates::get_rate::<A>))
+        .with_state(state.clone());
+
     // Dashboard endpoint
     let dashboard_routes = Router::new()
         .route("/stats", get(dashboard::get_stats::<A>))
@@ -353,6 +363,7 @@ where
         .nest("/invoices", invoice_routes)
         .nest("/payments", payment_routes)
         .merge(ws_route)
+        .nest("/rates", rates_routes)
         .nest("/dashboard", dashboard_routes)
         .nest("/users", user_routes)
         .nest("/admin", admin_routes)
