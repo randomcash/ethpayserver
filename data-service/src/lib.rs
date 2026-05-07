@@ -95,6 +95,12 @@ pub use types::{
     StoreSettingsReader,
     StoreSettingsRepository,
     StoreSettingsWriter,
+    // Store Token Policy
+    StoreTokenPolicyEntry,
+    StoreTokenPolicyReader,
+    StoreTokenPolicyRepository,
+    StoreTokenPolicyWithEntries,
+    StoreTokenPolicyWriter,
     // Store Wallet (deprecated)
     StoreWallet,
     StoreWalletReader,
@@ -107,6 +113,8 @@ pub use types::{
     StoreWebhookWriter,
     // Token
     TokenData,
+    TokenPolicyEntryInput,
+    TokenPolicyMode,
     TokenQueryParams,
     TokenReader,
     TokenRepository,

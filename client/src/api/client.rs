@@ -8,10 +8,10 @@ use super::{
     ApiKeyListResponse, CheckoutResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload,
     CreateInvoiceRequest, CreatePaymentMethodRequest, CreateStoreRequest, DashboardStats, Invoice,
     InvoiceListResponse, InvoiceStatusResponse, Payment, PaymentListResponse, RotateApiKeyResponse,
-    ServerSettingsResponse, Store, StorePaymentMethod, StoreSettings, StoreWebhook,
-    TxHashLookupResponse, UpdatePaymentMethodRequest, UpdateServerSettingsRequest,
-    UpdateStoreRequest, UpdateStoreSettingsRequest, UpdateUserRoleRequest, UpdateWebhookRequest,
-    UserInfo, UserListResponse, Wallet,
+    ServerSettingsResponse, SetTokenPolicyRequest, Store, StorePaymentMethod, StoreSettings,
+    StoreWebhook, TokenPolicy, TxHashLookupResponse, UpdatePaymentMethodRequest,
+    UpdateServerSettingsRequest, UpdateStoreRequest, UpdateStoreSettingsRequest,
+    UpdateUserRoleRequest, UpdateWebhookRequest, UserInfo, UserListResponse, Wallet,
 };
 
 /// API client errors.
@@ -635,6 +635,32 @@ impl EvmApiClient {
         request: &UpdateStoreSettingsRequest,
     ) -> Result<StoreSettings, ApiError> {
         self.patch(&format!("/api/stores/{}/settings", store_id), request)
+            .await
+    }
+
+    // =========================================================================
+    // Token Policy
+    // =========================================================================
+
+    /// Get the token policy for a store.
+    pub async fn get_token_policy(&self, store_id: &str) -> Result<Option<TokenPolicy>, ApiError> {
+        self.get(&format!("/api/stores/{}/token-policy", store_id))
+            .await
+    }
+
+    /// Set (upsert) the token policy for a store.
+    pub async fn set_token_policy(
+        &self,
+        store_id: &str,
+        request: &SetTokenPolicyRequest,
+    ) -> Result<TokenPolicy, ApiError> {
+        self.put(&format!("/api/stores/{}/token-policy", store_id), request)
+            .await
+    }
+
+    /// Delete the token policy for a store.
+    pub async fn delete_token_policy(&self, store_id: &str) -> Result<(), ApiError> {
+        self.delete(&format!("/api/stores/{}/token-policy", store_id))
             .await
     }
 

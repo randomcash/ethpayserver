@@ -78,9 +78,9 @@ sentry-tracing = { version = "0.47", optional = true }
 # API (optional)
 axum = { version = "0.8", optional = true }
 utoipa = { version = "5", features = ["axum_extras"], optional = true }
-types = { git = "https://gitlab.com/random.cash/payserver-commons.git", optional = true }
+types = { git = "https://github.com/randomcash/payserver-commons.git", optional = true }
 data-service = { path = "../data-service", optional = true }
-auth = { git = "https://gitlab.com/random.cash/payserver-commons.git", optional = true }
+auth = { git = "https://github.com/randomcash/payserver-commons.git", optional = true }
 
 [lints.clippy]
 too_many_lines = { level = "deny", priority = -1 }

@@ -15,12 +15,12 @@ path = "src/bin/migrate_postgres.rs"
 
 [dependencies]
 # Internal crates
-auth = { git = "https://gitlab.com/random.cash/payserver-commons.git", features = ["metrics", "captcha"] }
-crypto = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
+auth = { git = "https://github.com/randomcash/payserver-commons.git", features = ["metrics", "captcha"] }
+crypto = { git = "https://github.com/randomcash/payserver-commons.git" }
 data-service = { path = "../data-service" }
 evm = { path = "../evm", features = ["api", "redis"] }
-rates = { git = "https://gitlab.com/random.cash/payserver-commons.git" }
-types = { git = "https://gitlab.com/random.cash/payserver-commons.git", features = ["openapi"] }
+rates = { git = "https://github.com/randomcash/payserver-commons.git" }
+types = { git = "https://github.com/randomcash/payserver-commons.git", features = ["openapi"] }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
