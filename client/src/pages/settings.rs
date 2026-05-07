@@ -850,8 +850,12 @@ fn AdminTab() -> impl IntoView {
                                     let user_id_lock = user.id.clone();
                                     let is_locked = user.locked_until.is_some();
                                     let display_name = user.email.clone()
-                                        .or(user.primary_wallet_address.clone().map(|w| format!("{}...{}", &w[..6], &w[w.len()-4..])))
-                                        .unwrap_or_else(|| user.id[..8].to_string());
+                                        .or(user.primary_wallet_address.clone().map(|w| {
+                                            let prefix = w.get(..6).unwrap_or(w.as_str());
+                                            let suffix = w.get(w.len().saturating_sub(4)..).unwrap_or("");
+                                            format!("{prefix}...{suffix}")
+                                        }))
+                                        .unwrap_or_else(|| user.id.get(..8).unwrap_or(user.id.as_str()).to_string());
                                     let current_role = user.role.clone();
                                     let created_date = user.created_at.get(..10).unwrap_or(&user.created_at).to_string();
                                     view! {

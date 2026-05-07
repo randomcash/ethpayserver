@@ -241,7 +241,7 @@ where
         .data_service
         .lock_user(uid, far_future)
         .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "User not found"))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to lock user"))?;
 
     Ok(StatusCode::OK)
 }
@@ -276,7 +276,7 @@ where
         .data_service
         .unlock_user(uid)
         .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "User not found"))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to unlock user"))?;
 
     Ok(StatusCode::OK)
 }
