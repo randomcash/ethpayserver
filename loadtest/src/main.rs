@@ -32,6 +32,8 @@ mod config;
 mod scenarios;
 mod session;
 
+use std::collections::BTreeMap;
+
 use goose::prelude::*;
 
 use crate::config::Config;
@@ -52,9 +54,22 @@ async fn setup(user: &mut GooseUser) -> TransactionResult {
     Ok(())
 }
 
+/// Compute a percentile from Goose's bucketed response-time histogram.
+fn percentile(times: &BTreeMap<usize, usize>, total: usize, pct: f64) -> usize {
+    let target = (total as f64 * pct).ceil() as usize;
+    let mut accumulated = 0;
+    for (time, count) in times {
+        accumulated += count;
+        if accumulated >= target {
+            return *time;
+        }
+    }
+    0
+}
+
 #[tokio::main]
 async fn main() -> Result<(), GooseError> {
-    GooseAttack::initialize()?
+    let metrics = GooseAttack::initialize()?
         .register_scenario(
             scenario!("InvoiceCreate")
                 .register_transaction(transaction!(setup).set_on_start())
@@ -74,6 +89,42 @@ async fn main() -> Result<(), GooseError> {
         )
         .execute()
         .await?;
+
+    // Output machine-readable JSON for CI regression detection.
+    let mut request_results = Vec::new();
+    for (key, agg) in &metrics.requests {
+        let total = agg.success_count + agg.fail_count;
+        let rps = if metrics.duration > 0 {
+            agg.success_count as f64 / metrics.duration as f64
+        } else {
+            0.0
+        };
+        let p95 = percentile(&agg.raw_data.times, agg.raw_data.counter, 0.95);
+        let avg = if agg.raw_data.counter > 0 {
+            agg.raw_data.total_time as f64 / agg.raw_data.counter as f64
+        } else {
+            0.0
+        };
+
+        request_results.push(serde_json::json!({
+            "name": key,
+            "total_requests": total,
+            "success": agg.success_count,
+            "fail": agg.fail_count,
+            "rps": (rps * 100.0).round() / 100.0,
+            "avg_ms": (avg * 100.0).round() / 100.0,
+            "min_ms": agg.raw_data.minimum_time,
+            "max_ms": agg.raw_data.maximum_time,
+            "p95_ms": p95,
+        }));
+    }
+
+    let output = serde_json::json!({
+        "duration_secs": metrics.duration,
+        "maximum_users": metrics.maximum_users,
+        "requests": request_results,
+    });
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
 
     Ok(())
 }

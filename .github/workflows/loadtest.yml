@@ -1,0 +1,149 @@
+name: Load Test
+
+on:
+  schedule:
+    # Weekly: Sunday 03:00 UTC
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      host:
+        description: "Target host URL (default: testnet)"
+        required: false
+      users:
+        description: "Number of concurrent users"
+        required: false
+        default: "20"
+      run_time:
+        description: "Run time (e.g. 60s, 120s)"
+        required: false
+        default: "60s"
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+jobs:
+  loadtest:
+    name: Load Test
+    runs-on: ubuntu-latest
+    # Only run if secrets are configured (skips forks without secrets).
+    if: github.repository == 'randomcash/ethpayserver'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone payserver-commons (sibling)
+        env:
+          BRANCH_HINT: ${{ github.head_ref || github.ref_name }}
+        run: |
+          cd ..
+          git clone --depth 1 -b "$BRANCH_HINT" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
+            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: loadtest
+
+      - name: Install mold
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - name: Build load test binaries
+        run: |
+          cargo build --release -p loadtest --bin loadtest
+          cargo build --release -p loadtest --bin loadtest-ws
+
+      - name: Run HTTP load tests
+        env:
+          LOADTEST_API_KEY: ${{ secrets.LOADTEST_API_KEY }}
+          LOADTEST_STORE_ID: ${{ secrets.LOADTEST_STORE_ID }}
+          INPUT_HOST: ${{ inputs.host }}
+          SECRET_HOST: ${{ secrets.LOADTEST_HOST }}
+          INPUT_USERS: ${{ inputs.users }}
+          INPUT_RUN_TIME: ${{ inputs.run_time }}
+        run: |
+          HOST="${INPUT_HOST:-$SECRET_HOST}"
+          USERS="${INPUT_USERS:-20}"
+          RUN_TIME="${INPUT_RUN_TIME:-60s}"
+
+          ./target/release/loadtest \
+            --host "$HOST" \
+            --users "$USERS" \
+            --run-time "$RUN_TIME" \
+            --no-reset-metrics \
+            > results-http.json 2>loadtest-stderr.log || true
+
+          if [ ! -s results-http.json ]; then
+            echo "::error::Load test binary produced no output — possible crash"
+            tail -20 loadtest-stderr.log
+            exit 1
+          fi
+
+          echo "--- Goose summary ---"
+          tail -40 loadtest-stderr.log
+          echo "--- JSON output ---"
+          cat results-http.json
+
+      - name: Run WebSocket load test
+        env:
+          LOADTEST_WS_URL: ${{ secrets.LOADTEST_WS_URL }}
+          LOADTEST_WS_CLIENTS: "50"
+          LOADTEST_WS_DURATION_SECS: "60"
+          LOADTEST_WS_RAMP_SECS: "10"
+        run: |
+          ./target/release/loadtest-ws \
+            > results-ws.json 2>loadtest-ws-stderr.log || true
+
+          if [ ! -s results-ws.json ]; then
+            echo "::error::WebSocket load test binary produced no output — possible crash"
+            tail -20 loadtest-ws-stderr.log
+            exit 1
+          fi
+
+          echo "--- WS summary ---"
+          cat loadtest-ws-stderr.log
+          echo "--- JSON output ---"
+          cat results-ws.json
+
+      - name: Check for regressions
+        id: regression
+        run: |
+          python3 scripts/loadtest-check-regression.py \
+            --http results-http.json \
+            --ws results-ws.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loadtest-results-${{ github.run_id }}
+          path: |
+            results-http.json
+            results-ws.json
+            loadtest-stderr.log
+            loadtest-ws-stderr.log
+          retention-days: 90
+
+      - name: Alert on regression
+        if: steps.regression.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          BODY="Weekly load test detected a performance regression.
+
+          **Run:** ${RUN_URL}
+
+          Download the \`loadtest-results\` artifact for full metrics.
+
+          Review baselines in \`loadtest/baselines.json\` and sizing targets in \`docs/src/operations/sizing.md\`."
+
+          gh issue create \
+            --repo "$REPO" \
+            --title "Load test regression detected ($(date -u +%Y-%m-%d))" \
+            --body "$BODY" \
+            --label "performance,automated"

@@ -1,0 +1,21 @@
+{
+  "regression_threshold_pct": 25,
+  "http_scenarios": {
+    "POST POST /invoices": {
+      "p95_ms": 200,
+      "description": "Invoice creation p95 latency (target: < 200ms at 50 RPS)"
+    },
+    "GET GET /invoices": {
+      "p95_ms": 50,
+      "description": "Postgres pool saturation p95 connection-acquisition wait (target: < 50ms at 20 concurrent)"
+    },
+    "POST POST /invoices (webhook)": {
+      "min_rps": 1.67,
+      "description": "Webhook insertion sustained rate (target: 100 deliveries/min = 1.67 RPS)"
+    }
+  },
+  "websocket": {
+    "max_disconnect_rate_pct": 0.1,
+    "description": "WebSocket disconnect rate (target: < 0.1% over 5 minutes with 500 clients)"
+  }
+}
