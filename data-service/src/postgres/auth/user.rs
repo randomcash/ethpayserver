@@ -203,6 +203,32 @@ impl UserRepository for PgDataService {
         }
         Ok(())
     }
+
+    async fn list_users(&self, offset: i64, limit: i64) -> Result<Vec<User>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
+                   recovery_verification_hash, created_at, last_login_at,
+                   failed_login_attempts, locked_until, role
+            FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_auth_error)?;
+
+        rows.iter().map(row_to_user).collect()
+    }
+
+    async fn count_users(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COUNT(*) as count FROM users")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(sqlx_to_auth_error)?;
+        Ok(row.get::<i64, _>("count"))
+    }
 }
 
 fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
