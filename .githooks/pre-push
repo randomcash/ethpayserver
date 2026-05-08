@@ -6,6 +6,9 @@
 
 set -e
 
+# Ensure rustup's cargo is used so rust-toolchain.toml is respected.
+export PATH="$HOME/.cargo/bin:$PATH"
+
 CRATES="-p server -p data-service -p evm -p ethpayserver-client"
 
 echo "=== pre-push: checking format ==="
