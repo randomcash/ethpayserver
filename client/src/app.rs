@@ -2,10 +2,10 @@
 
 use std::rc::Rc;
 
-use leptos::children::{Children, ChildrenFn};
+use leptos::children::Children;
 use leptos::prelude::*;
 use leptos_router::{
-    components::{A, Route, Router, Routes},
+    components::{A, Outlet, ParentRoute, Route, Router, Routes},
     hooks::use_location,
     path,
 };
@@ -76,78 +76,33 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/register") view=|| view! { <RegisterPage /> } />
                     <Route path=path!("/checkout/:id") view=|| view! { <CheckoutPage /> } />
 
-                    // Protected routes with layout
-                    <Route path=path!("/") view=DashboardProtected />
-                    <Route path=path!("/evm") view=DashboardProtected />
-                    <Route path=path!("/evm/invoices") view=InvoicesProtected />
-                    <Route path=path!("/evm/invoices/:id") view=InvoiceDetailProtected />
-                    <Route path=path!("/evm/payments") view=PaymentsProtected />
-                    <Route path=path!("/evm/payments/:id") view=PaymentDetailProtected />
-                    <Route path=path!("/evm/stores") view=StoresProtected />
-                    <Route path=path!("/evm/stores/:id") view=StoreDetailProtected />
-                    <Route path=path!("/evm/wallets") view=WalletsProtected />
-                    <Route path=path!("/evm/wallets/:id") view=WalletDetailProtected />
-                    <Route path=path!("/evm/settings") view=SettingsProtected />
+                    // Protected routes — single ProtectedLayout, child pages swap via <Outlet/>
+                    <ParentRoute path=path!("/") view=ProtectedLayout>
+                        <Route path=path!("") view=DashboardPage />
+                        <ParentRoute path=path!("/evm") view=|| view! { <Outlet /> }>
+                            <Route path=path!("") view=DashboardPage />
+                            <Route path=path!("/invoices") view=InvoicesPage />
+                            <Route path=path!("/invoices/:id") view=InvoiceDetailPage />
+                            <Route path=path!("/payments") view=PaymentsPage />
+                            <Route path=path!("/payments/:id") view=PaymentDetailPage />
+                            <Route path=path!("/stores") view=StoresPage />
+                            <Route path=path!("/stores/:id") view=StoreDetailPage />
+                            <Route path=path!("/wallets") view=WalletsPage />
+                            <Route path=path!("/wallets/:id") view=WalletDetailPage />
+                            <Route path=path!("/settings") view=SettingsPage />
+                        </ParentRoute>
+                    </ParentRoute>
                 </Routes>
             </Router>
         </AuthProvider>
     }
 }
 
-// Protected route wrappers
-#[component]
-fn DashboardProtected() -> impl IntoView {
-    view! { <ProtectedLayout><DashboardPage /></ProtectedLayout> }
-}
-
-#[component]
-fn InvoicesProtected() -> impl IntoView {
-    view! { <ProtectedLayout><InvoicesPage /></ProtectedLayout> }
-}
-
-#[component]
-fn InvoiceDetailProtected() -> impl IntoView {
-    view! { <ProtectedLayout><InvoiceDetailPage /></ProtectedLayout> }
-}
-
-#[component]
-fn PaymentsProtected() -> impl IntoView {
-    view! { <ProtectedLayout><PaymentsPage /></ProtectedLayout> }
-}
-
-#[component]
-fn PaymentDetailProtected() -> impl IntoView {
-    view! { <ProtectedLayout><PaymentDetailPage /></ProtectedLayout> }
-}
-
-#[component]
-fn StoresProtected() -> impl IntoView {
-    view! { <ProtectedLayout><StoresPage /></ProtectedLayout> }
-}
-
-#[component]
-fn StoreDetailProtected() -> impl IntoView {
-    view! { <ProtectedLayout><StoreDetailPage /></ProtectedLayout> }
-}
-
-#[component]
-fn WalletsProtected() -> impl IntoView {
-    view! { <ProtectedLayout><WalletsPage /></ProtectedLayout> }
-}
-
-#[component]
-fn WalletDetailProtected() -> impl IntoView {
-    view! { <ProtectedLayout><WalletDetailPage /></ProtectedLayout> }
-}
-
-#[component]
-fn SettingsProtected() -> impl IntoView {
-    view! { <ProtectedLayout><SettingsPage /></ProtectedLayout> }
-}
-
 /// Protected layout with AuthGuard and app shell.
+///
+/// Mounted once via `<ParentRoute>` — child pages render in the `<Outlet/>`.
 #[component]
-fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
+fn ProtectedLayout() -> impl IntoView {
     // Mobile sidebar state
     let (sidebar_open, set_sidebar_open) = signal(false);
 
@@ -169,29 +124,14 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
     let (selected_store_id, set_selected_store_id) = signal(saved_id);
     let refetch = ArcTrigger::new();
 
-    // Guard: prevents stale async callbacks from acting after this layout is disposed.
-    // Without this, a route change that disposes the old ProtectedLayout can have its
-    // in-flight store fetch complete and call auth.logout() on a transient error,
-    // killing the session and redirecting to /login.
-    let disposed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let disposed_for_cleanup = disposed.clone();
-    on_cleanup(move || {
-        disposed_for_cleanup.store(true, std::sync::atomic::Ordering::Relaxed);
-    });
-
     // Fetch stores on mount and whenever refetch is triggered.
     let refetch_for_effect = refetch.clone();
-    let disposed_for_effect = disposed.clone();
     Effect::new(move || {
         refetch_for_effect.track();
         let api = api.get();
-        let disposed = disposed_for_effect.clone();
         leptos::task::spawn_local(async move {
             match api.list_stores().await {
                 Ok(fetched) => {
-                    if disposed.load(std::sync::atomic::Ordering::Relaxed) {
-                        return;
-                    }
                     // If selected store no longer exists, clear selection.
                     if let Some(ref id) = selected_store_id.get_untracked()
                         && !fetched.iter().any(|s| &s.id == id)
@@ -211,11 +151,6 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
                 }
                 Err(e) => {
                     web_sys::console::error_1(&format!("Failed to fetch stores: {}", e).into());
-                    if disposed.load(std::sync::atomic::Ordering::Relaxed) {
-                        return;
-                    }
-                    // If the server rejected our session, log out so we redirect to login
-                    // instead of showing a stalled loading state.
                     let msg = e.to_string();
                     if msg.contains("Unauthorized") || msg.contains("401") {
                         auth.logout();
@@ -302,7 +237,7 @@ fn ProtectedLayout(children: ChildrenFn) -> impl IntoView {
                 <div class="main-content">
                     <MainHeader on_menu_click=toggle_sidebar />
                     <main class="page-container">
-                        {children()}
+                        <Outlet />
                     </main>
                 </div>
             </div>
