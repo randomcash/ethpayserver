@@ -406,7 +406,7 @@ impl EvmApiClient {
     /// Get public checkout data for an invoice (no auth required).
     pub async fn get_checkout(&self, invoice_id: &str) -> Result<CheckoutResponse, ApiError> {
         self.get(&format!(
-            "/checkout/{}",
+            "/api/checkout/{}",
             js_sys::encode_uri_component(invoice_id)
         ))
         .await
