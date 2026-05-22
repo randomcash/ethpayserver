@@ -55,12 +55,13 @@ const BASE_RECONNECT_DELAY_MS: u32 = 1_000;
 /// Usage:
 /// ```rust,ignore
 /// let ws = WebSocketService::new();
-/// ws.connect("ws://localhost:5000/ws?token=session_id");
+/// ws.connect("ws://localhost:5000/ws", Some("session_token"));
 /// // Read ws.connection_state() signal, ws.last_update() signal
 /// ```
 pub struct WebSocketService {
     ws: Rc<RefCell<Option<WebSocket>>>,
     url: Rc<RefCell<Option<String>>>,
+    token: Rc<RefCell<Option<String>>>,
     connection_state: ReadSignal<ConnectionState>,
     set_connection_state: WriteSignal<ConnectionState>,
     last_update: ReadSignal<Option<StatusUpdate>>,
@@ -84,6 +85,7 @@ impl WebSocketService {
         Self {
             ws: Rc::new(RefCell::new(None)),
             url: Rc::new(RefCell::new(None)),
+            token: Rc::new(RefCell::new(None)),
             connection_state,
             set_connection_state,
             last_update,
@@ -106,8 +108,12 @@ impl WebSocketService {
 
     /// Connect to the WebSocket endpoint with automatic reconnection.
     ///
+    /// If a token is provided, it is sent as the first message after connection
+    /// (not in the URL) to avoid leaking credentials in browser history, server
+    /// logs, and proxy logs. Pass `None` for public endpoints (e.g. checkout).
+    ///
     /// Closes any existing connection before opening the new one.
-    pub fn connect(&self, url: &str) -> Result<(), String> {
+    pub fn connect(&self, url: &str, token: Option<&str>) -> Result<(), String> {
         // Close existing connection without triggering reconnect.
         if let Some(ws) = self.ws.borrow_mut().take() {
             *self.intentional_disconnect.borrow_mut() = true;
@@ -121,12 +127,13 @@ impl WebSocketService {
 
         *self.intentional_disconnect.borrow_mut() = false;
         *self.url.borrow_mut() = Some(url.to_string());
+        *self.token.borrow_mut() = token.map(|t| t.to_string());
         *self.reconnect_attempts.borrow_mut() = 0;
-        self.connect_inner(url)
+        self.connect_inner(url, token)
     }
 
     /// Internal connection logic shared by initial connect and reconnect.
-    fn connect_inner(&self, url: &str) -> Result<(), String> {
+    fn connect_inner(&self, url: &str, token: Option<&str>) -> Result<(), String> {
         use wasm_bindgen::closure::Closure;
         use web_sys::Event;
 
@@ -134,11 +141,17 @@ impl WebSocketService {
 
         let ws_clone = ws.clone();
 
-        // On open — reset reconnect counter, set connected
+        // On open — reset reconnect counter, send auth message if token provided
         let set_state = self.set_connection_state;
         let reconnect_attempts = self.reconnect_attempts.clone();
+        let ws_for_auth = ws.clone();
+        let auth_token = token.map(|t| t.to_string());
         let onopen = Closure::once(move |_: Event| {
             *reconnect_attempts.borrow_mut() = 0;
+            if let Some(ref t) = auth_token {
+                let auth_msg = format!(r#"{{"type":"auth","token":"{}"}}"#, t);
+                let _ = ws_for_auth.send_with_str(&auth_msg);
+            }
             set_state.set(ConnectionState::Connected);
         });
         ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
@@ -147,6 +160,7 @@ impl WebSocketService {
         // On close — schedule reconnect unless intentionally disconnected
         let set_state = self.set_connection_state;
         let url_rc = self.url.clone();
+        let token_rc = self.token.clone();
         let ws_rc = self.ws.clone();
         let reconnect_attempts = self.reconnect_attempts.clone();
         let reconnect_handle = self.reconnect_handle.clone();
@@ -171,6 +185,8 @@ impl WebSocketService {
             *reconnect_attempts.borrow_mut() = attempts.saturating_add(1);
 
             let url_for_reconnect = url_rc.clone();
+            let token_for_reconnect = token_rc.clone();
+            let ws_storage = ws_rc.clone();
             let set_state_inner = set_state;
             let set_last_update_inner = set_last_update;
             let reconnect_attempts_inner = reconnect_attempts.clone();
@@ -182,15 +198,16 @@ impl WebSocketService {
                 reconnect_handle_inner.borrow_mut().take();
 
                 let url_opt = url_for_reconnect.borrow().clone();
+                let token_opt = token_for_reconnect.borrow().clone();
                 if let Some(ref url) = url_opt {
-                    // Build a minimal reconnect — we can't call self methods from
-                    // a closure, so we inline the essential WebSocket setup. The
-                    // reconnect re-triggers onclose which re-schedules if needed.
                     reconnect_one(
                         url,
+                        token_opt.as_deref(),
                         set_state_inner,
                         set_last_update_inner,
                         url_for_reconnect.clone(),
+                        token_for_reconnect.clone(),
+                        ws_storage,
                         reconnect_attempts_inner,
                         intentional_inner,
                     );
@@ -262,6 +279,7 @@ impl WebSocketService {
         }
         self.set_connection_state.set(ConnectionState::Disconnected);
         *self.url.borrow_mut() = None;
+        *self.token.borrow_mut() = None;
         *self.reconnect_attempts.borrow_mut() = 0;
     }
 }
@@ -273,11 +291,19 @@ impl Drop for WebSocketService {
 }
 
 /// Create a single reconnection WebSocket (used from the onclose callback).
+///
+/// Fixes RCS-131: the new WebSocket is now stored in `ws_storage` so it can
+/// be closed by `disconnect()`. Previously the socket was created but never
+/// stored, leaving orphaned connections after network blips.
+#[allow(clippy::too_many_arguments)]
 fn reconnect_one(
     url: &str,
+    token: Option<&str>,
     set_state: WriteSignal<ConnectionState>,
     set_update: WriteSignal<Option<StatusUpdate>>,
     url_rc: Rc<RefCell<Option<String>>>,
+    token_rc: Rc<RefCell<Option<String>>>,
+    ws_storage: Rc<RefCell<Option<WebSocket>>>,
     reconnect_attempts: Rc<RefCell<u32>>,
     intentional: Rc<RefCell<bool>>,
 ) {
@@ -287,7 +313,7 @@ fn reconnect_one(
     let ws = match WebSocket::new(url) {
         Ok(ws) => ws,
         Err(_) => {
-            // Schedule another reconnect via a synthetic close path
+            // Schedule another reconnect
             set_state.set(ConnectionState::Reconnecting);
             let attempts = *reconnect_attempts.borrow();
             let delay = BASE_RECONNECT_DELAY_MS
@@ -296,12 +322,25 @@ fn reconnect_one(
             *reconnect_attempts.borrow_mut() = attempts.saturating_add(1);
 
             let url_rc2 = url_rc.clone();
+            let token_rc2 = token_rc.clone();
+            let ws_storage2 = ws_storage.clone();
             let ra2 = reconnect_attempts.clone();
             let int2 = intentional.clone();
             let closure = Closure::once(move || {
                 let url_opt = url_rc2.borrow().clone();
+                let token_opt = token_rc2.borrow().clone();
                 if let Some(ref u) = url_opt {
-                    reconnect_one(u, set_state, set_update, url_rc2.clone(), ra2, int2);
+                    reconnect_one(
+                        u,
+                        token_opt.as_deref(),
+                        set_state,
+                        set_update,
+                        url_rc2.clone(),
+                        token_rc2.clone(),
+                        ws_storage2,
+                        ra2,
+                        int2,
+                    );
                 }
             });
             let window = web_sys::window().unwrap();
@@ -314,10 +353,19 @@ fn reconnect_one(
         }
     };
 
-    // On open
+    // Store the new WebSocket so disconnect() can close it (RCS-131 fix)
+    *ws_storage.borrow_mut() = Some(ws.clone());
+
+    // On open — send auth message if token provided, reset reconnect counter
     let ra_open = reconnect_attempts.clone();
+    let ws_for_auth = ws.clone();
+    let auth_token = token.map(|t| t.to_string());
     let onopen = Closure::once(move |_: Event| {
         *ra_open.borrow_mut() = 0;
+        if let Some(ref t) = auth_token {
+            let auth_msg = format!(r#"{{"type":"auth","token":"{}"}}"#, t);
+            let _ = ws_for_auth.send_with_str(&auth_msg);
+        }
         set_state.set(ConnectionState::Connected);
     });
     ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
@@ -325,9 +373,13 @@ fn reconnect_one(
 
     // On close — schedule reconnect
     let url_rc2 = url_rc.clone();
+    let token_rc2 = token_rc.clone();
+    let ws_storage2 = ws_storage.clone();
     let ra2 = reconnect_attempts.clone();
     let int2 = intentional.clone();
     let onclose = Closure::wrap(Box::new(move |_: web_sys::CloseEvent| {
+        ws_storage2.borrow_mut().take();
+
         if *int2.borrow() {
             set_state.set(ConnectionState::Disconnected);
             return;
@@ -341,12 +393,25 @@ fn reconnect_one(
         *ra2.borrow_mut() = attempts.saturating_add(1);
 
         let url_rc3 = url_rc2.clone();
+        let token_rc3 = token_rc2.clone();
+        let ws_storage3 = ws_storage2.clone();
         let ra3 = ra2.clone();
         let int3 = int2.clone();
         let closure = Closure::once(move || {
             let url_opt = url_rc3.borrow().clone();
+            let token_opt = token_rc3.borrow().clone();
             if let Some(ref u) = url_opt {
-                reconnect_one(u, set_state, set_update, url_rc3.clone(), ra3, int3);
+                reconnect_one(
+                    u,
+                    token_opt.as_deref(),
+                    set_state,
+                    set_update,
+                    url_rc3.clone(),
+                    token_rc3.clone(),
+                    ws_storage3,
+                    ra3,
+                    int3,
+                );
             }
         });
         let window = web_sys::window().unwrap();
