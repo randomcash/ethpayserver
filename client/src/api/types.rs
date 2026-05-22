@@ -104,6 +104,13 @@ pub struct Payment {
     /// Whether this payment was invalidated by a chain reorganization.
     #[serde(default)]
     pub reorged: bool,
+    /// Token decimals (for display formatting).
+    #[serde(default = "default_decimals")]
+    pub decimals: u8,
+}
+
+fn default_decimals() -> u8 {
+    18
 }
 
 /// Payment option for an invoice (a specific chain/asset the payer can use).
@@ -631,6 +638,7 @@ mod tests {
             confirmed_at: Some("2024-01-01T00:05:00Z".to_string()),
             from_address: Some("0x1234...".to_string()),
             reorged: false,
+            decimals: 18,
         };
 
         let json = serde_json::to_string(&payment).unwrap();
@@ -640,6 +648,7 @@ mod tests {
         assert_eq!(payment.chain_id, parsed.chain_id);
         assert_eq!(payment.invoice_id, parsed.invoice_id);
         assert_eq!(payment.confirmed_at, parsed.confirmed_at);
+        assert_eq!(payment.decimals, parsed.decimals);
     }
 
     #[test]
