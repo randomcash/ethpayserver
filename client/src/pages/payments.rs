@@ -348,7 +348,7 @@ fn PaymentRow(payment: Payment) -> impl IntoView {
     let payment_link = payment.id.clone();
     let amount_display = format!(
         "{} {}",
-        format_crypto_amount(&payment.amount, &payment.asset_symbol),
+        format_crypto_amount(&payment.amount, payment.decimals),
         payment.asset_symbol
     );
 
@@ -401,7 +401,7 @@ fn PaymentCard(payment: Payment) -> impl IntoView {
     let payment_link = payment.id.clone();
     let amount_display = format!(
         "{} {}",
-        format_crypto_amount(&payment.amount, &payment.asset_symbol),
+        format_crypto_amount(&payment.amount, payment.decimals),
         payment.asset_symbol
     );
 
@@ -486,7 +486,7 @@ fn PaymentDetailView(payment: Payment) -> impl IntoView {
     let status_class = payment_status_class(&payment);
     let amount_display = format!(
         "{} {}",
-        format_crypto_amount(&payment.amount, &payment.asset_symbol),
+        format_crypto_amount(&payment.amount, payment.decimals),
         payment.asset_symbol
     );
     let detected_display = format_date(&payment.detected_at);
@@ -725,19 +725,14 @@ fn PaymentDetailView(payment: Payment) -> impl IntoView {
     }
 }
 
-/// Format crypto amount from wei/smallest unit to human readable.
-fn format_crypto_amount(amount: &str, symbol: &str) -> String {
-    // Get decimals based on token
-    let decimals = match symbol {
-        "ETH" | "POL" | "MATIC" => 18,
-        "USDC" | "USDT" => 6,
-        "DAI" => 18,
-        _ => 18,
-    };
+/// Format crypto amount from smallest unit to human readable using token decimals.
+fn format_crypto_amount(amount: &str, decimals: u8) -> String {
+    if decimals == 0 {
+        return amount.to_string();
+    }
 
-    // Parse amount and convert
     if let Ok(val) = amount.parse::<u128>() {
-        let divisor = 10u128.pow(decimals);
+        let divisor = 10u128.pow(decimals as u32);
         let whole = val / divisor;
         let frac = val % divisor;
 
@@ -745,7 +740,6 @@ fn format_crypto_amount(amount: &str, symbol: &str) -> String {
             return whole.to_string();
         }
 
-        // Format with appropriate decimal places
         let frac_str = format!("{:0width$}", frac, width = decimals as usize);
         let trimmed = frac_str.trim_end_matches('0');
         if trimmed.is_empty() {

@@ -452,6 +452,17 @@ fn GeneralTab(store: Store) -> impl IntoView {
 
     let store_id_delete = store_id.clone();
     let on_delete = move |_| {
+        let confirmed = web_sys::window()
+            .and_then(|w| {
+                w.confirm_with_message(
+                    "Are you sure you want to delete this store? This action cannot be undone.",
+                )
+                .ok()
+            })
+            .unwrap_or(false);
+        if !confirmed {
+            return;
+        }
         let api = api.get();
         let id = store_id_delete.clone();
         let navigate = navigate.clone();

@@ -325,10 +325,13 @@ pub struct PaymentResponse {
     pub confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Whether this payment was invalidated by a chain reorg.
     pub reorged: bool,
+    /// Token decimals (for display formatting).
+    pub decimals: u8,
 }
 
 impl From<PaymentData> for PaymentResponse {
     fn from(p: PaymentData) -> Self {
+        let decimals = token_decimals(&p.asset_symbol, p.token_address.as_deref());
         Self {
             id: p.id.to_string(),
             chain_id: p.chain_id,
@@ -342,6 +345,34 @@ impl From<PaymentData> for PaymentResponse {
             detected_at: p.detected_at,
             confirmed_at: p.confirmed_at,
             reorged: p.reorged,
+            decimals,
+        }
+    }
+}
+
+/// Resolve token decimals from symbol and optional contract address.
+fn token_decimals(symbol: &str, token_address: Option<&str>) -> u8 {
+    match symbol {
+        "ETH" | "POL" | "MATIC" | "FTM" | "xDAI" | "DAI" | "WETH" => 18,
+        "USDC" | "USDT" => 6,
+        "WBTC" => 8,
+        _ => {
+            // ERC20 without a known symbol — check well-known contract addresses.
+            if let Some(addr) = token_address {
+                let addr_lower = addr.to_lowercase();
+                // USDC on major chains
+                if addr_lower == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+                    || addr_lower == "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
+                    || addr_lower == "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"
+                {
+                    return 6;
+                }
+                // WBTC on Ethereum
+                if addr_lower == "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599" {
+                    return 8;
+                }
+            }
+            18 // default to 18 for unknown tokens
         }
     }
 }

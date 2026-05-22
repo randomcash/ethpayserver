@@ -134,6 +134,7 @@ where
         payment_options: options.into_iter().map(Into::into).collect(),
         payments: payments
             .into_iter()
+            .filter(|p| !p.reorged)
             .map(CheckoutPaymentInfo::from)
             .collect(),
     }))

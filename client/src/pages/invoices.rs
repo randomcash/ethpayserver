@@ -950,6 +950,7 @@ mod tests {
             confirmed_at: Some("2024-01-01T00:05:00Z".into()),
             from_address: None,
             reorged: false,
+            decimals: 18,
         };
         assert_eq!(payment_status(&p), "confirmed");
         assert_eq!(payment_status_class(&p), "badge badge-success");
@@ -970,6 +971,7 @@ mod tests {
             confirmed_at: None,
             from_address: None,
             reorged: false,
+            decimals: 18,
         };
         assert_eq!(payment_status(&p), "confirming");
         assert_eq!(payment_status_class(&p), "badge badge-warning");
@@ -990,6 +992,7 @@ mod tests {
             confirmed_at: Some("2024-01-01T00:05:00Z".into()),
             from_address: None,
             reorged: true,
+            decimals: 18,
         };
         assert_eq!(payment_status(&p), "reorged");
         assert_eq!(payment_status_class(&p), "badge badge-error");
@@ -1060,6 +1063,7 @@ mod tests {
                 confirmed_at: Some("2024-01-01T00:05:00Z".into()),
                 from_address: None,
                 reorged: false,
+                decimals: 18,
             },
             Payment {
                 id: "p2".into(),
@@ -1074,6 +1078,7 @@ mod tests {
                 confirmed_at: None,
                 from_address: None,
                 reorged: false,
+                decimals: 18,
             },
             Payment {
                 id: "p3".into(),
@@ -1088,6 +1093,7 @@ mod tests {
                 confirmed_at: Some("2024-01-01T00:10:00Z".into()),
                 from_address: None,
                 reorged: true,
+                decimals: 18,
             },
         ];
         // Only p1 is confirmed and not reorged
