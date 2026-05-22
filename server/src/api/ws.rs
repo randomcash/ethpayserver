@@ -1,12 +1,12 @@
 //! WebSocket endpoint for real-time invoice and payment status updates.
 //!
-//! Clients connect to `/ws` and receive JSON-encoded status updates whenever
-//! invoice or payment states change. The connection requires authentication
-//! via a `token` query parameter (session ID).
+//! Clients connect to `/ws` and authenticate by sending an auth message as the
+//! first frame: `{"type":"auth","token":"SESSION_ID"}`. The server validates
+//! the session and then forwards JSON-encoded status updates.
 
 use axum::{
     extract::{
-        Query, State, WebSocketUpgrade,
+        State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     response::IntoResponse,
@@ -19,11 +19,13 @@ use auth::SessionService;
 
 use crate::state::PgAppState;
 
-/// Query parameters for WebSocket connection.
+/// Client-to-server messages.
 #[derive(Debug, Deserialize)]
-pub struct WsQuery {
-    /// Session token for authentication.
-    pub token: String,
+#[serde(tag = "type")]
+enum ClientMessage {
+    /// Authentication message — must be the first frame after connection.
+    #[serde(rename = "auth")]
+    Auth { token: String },
 }
 
 /// Status update sent to WebSocket clients.
@@ -76,41 +78,88 @@ impl WsBroadcast {
 
 /// WebSocket upgrade handler.
 ///
-/// Authenticates the user via the `token` query parameter, then upgrades
-/// the HTTP connection to a WebSocket.
+/// Accepts the upgrade immediately. Authentication happens inside the
+/// WebSocket session: the client must send `{"type":"auth","token":"..."}` as
+/// the first frame. This avoids leaking the session token in URL query
+/// parameters (browser history, proxy logs, server access logs).
 pub async fn ws_handler<A>(
     ws: WebSocketUpgrade,
-    Query(query): Query<WsQuery>,
     State(state): State<PgAppState<A>>,
 ) -> impl IntoResponse
 where
     A: SessionService + 'static,
 {
-    // Validate session token
-    let session_id = match uuid::Uuid::parse_str(&query.token) {
-        Ok(uuid) => auth::SessionId(uuid),
-        Err(_) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-    };
-
-    match state.auth_service.validate_session(session_id).await {
-        Ok(_) => {}
-        Err(_) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-    }
-
     // Get broadcast receiver. In deployments without WS configured, return 503
     // rather than panicking the handler task.
     let Some(ws_broadcast) = state.ws_broadcast.as_ref() else {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let rx = ws_broadcast.subscribe();
+    let auth_service = state.auth_service.clone();
 
-    ws.on_upgrade(move |socket| handle_socket(socket, rx))
+    ws.on_upgrade(move |socket| handle_socket(socket, rx, auth_service))
+        .into_response()
 }
 
+/// Maximum time to wait for the auth message before closing the connection.
+const AUTH_TIMEOUT_SECS: u64 = 10;
+
 /// Handle an individual WebSocket connection.
-async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<StatusUpdate>) {
+///
+/// Waits for the client to send an auth message, validates the session,
+/// then forwards broadcast updates.
+async fn handle_socket<A: SessionService>(
+    socket: WebSocket,
+    rx: broadcast::Receiver<StatusUpdate>,
+    auth_service: std::sync::Arc<A>,
+) {
     let (mut sender, mut receiver) = socket.split();
 
+    // Wait for auth message from client
+    let auth_result = tokio::time::timeout(
+        std::time::Duration::from_secs(AUTH_TIMEOUT_SECS),
+        receiver.next(),
+    )
+    .await;
+
+    let token = match auth_result {
+        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
+            Ok(ClientMessage::Auth { token }) => token,
+            Err(_) => {
+                let _ = sender.close().await;
+                return;
+            }
+        },
+        _ => {
+            let _ = sender.close().await;
+            return;
+        }
+    };
+
+    // Validate session token
+    let session_id = match uuid::Uuid::parse_str(&token) {
+        Ok(uuid) => auth::SessionId(uuid),
+        Err(_) => {
+            let _ = sender.close().await;
+            return;
+        }
+    };
+
+    if auth_service.validate_session(session_id).await.is_err() {
+        let _ = sender.close().await;
+        return;
+    }
+
+    // Auth succeeded — hand off to the forwarding loop
+    handle_socket_forwarding(sender, receiver, rx).await;
+}
+
+/// Forward broadcast updates to an authenticated WebSocket client.
+async fn handle_socket_forwarding(
+    mut sender: futures::stream::SplitSink<WebSocket, Message>,
+    receiver: futures::stream::SplitStream<WebSocket>,
+    mut rx: broadcast::Receiver<StatusUpdate>,
+) {
     // Send connected acknowledgement. Serialising a unit-variant is infallible.
     #[allow(
         clippy::unwrap_used,
@@ -136,6 +185,7 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<StatusUpda
 
     // Spawn a task to handle incoming messages (ping/pong, close)
     let mut recv_task = tokio::spawn(async move {
+        let mut receiver = receiver;
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Close(_) = msg {
                 break;
@@ -211,10 +261,16 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_query_deserialize() {
-        let json = serde_json::json!({ "token": "abc-123" });
-        let query: WsQuery = serde_json::from_value(json).unwrap();
-        assert_eq!(query.token, "abc-123");
+    fn test_client_message_auth_deserialize() {
+        let json = r#"{"type":"auth","token":"abc-123"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, ClientMessage::Auth { token } if token == "abc-123"));
+    }
+
+    #[test]
+    fn test_client_message_missing_type_fails() {
+        let json = r#"{"token":"abc-123"}"#;
+        assert!(serde_json::from_str::<ClientMessage>(json).is_err());
     }
 
     #[test]
@@ -280,28 +336,17 @@ mod tests {
         assert!(matches!(msg2, StatusUpdate::Ping));
     }
 
-    #[test]
-    fn test_ws_query_missing_token_fails() {
-        let json = serde_json::json!({});
-        let result = serde_json::from_value::<WsQuery>(json);
-        assert!(result.is_err(), "WsQuery should require a token field");
-    }
-
-    #[test]
-    fn test_ws_query_wrong_type_fails() {
-        let json = serde_json::json!({ "token": 12345 });
-        let result = serde_json::from_value::<WsQuery>(json);
-        assert!(result.is_err(), "WsQuery token must be a string");
-    }
-
     /// Helper handler for integration tests — upgrades to WebSocket and delegates
-    /// to `handle_socket` with the broadcast receiver from state.
+    /// to `handle_socket_forwarding` (skips auth for unit test isolation).
     async fn test_upgrade(
         ws: WebSocketUpgrade,
         axum::extract::State(bc): axum::extract::State<WsBroadcast>,
     ) -> impl IntoResponse {
         let rx = bc.subscribe();
-        ws.on_upgrade(move |socket| handle_socket(socket, rx))
+        ws.on_upgrade(move |socket| {
+            let (sender, receiver) = socket.split();
+            handle_socket_forwarding(sender, receiver, rx)
+        })
     }
 
     /// Spin up a one-shot axum server that exposes `handle_socket` at `/ws`.

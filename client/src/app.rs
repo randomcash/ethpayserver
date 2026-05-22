@@ -196,8 +196,8 @@ fn ProtectedLayout() -> impl IntoView {
                     let host = web_sys::window()
                         .and_then(|w| w.location().host().ok())
                         .unwrap_or_default();
-                    let url = format!("{}://{}/ws?token={}", protocol, host, t);
-                    if let Err(e) = ws.connect(&url) {
+                    let url = format!("{}://{}/ws", protocol, host);
+                    if let Err(e) = ws.connect(&url, Some(t)) {
                         web_sys::console::error_1(
                             &format!("WebSocket connect error: {}", e).into(),
                         );

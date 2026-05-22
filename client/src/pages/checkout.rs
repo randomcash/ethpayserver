@@ -93,7 +93,7 @@ pub fn CheckoutPage() -> impl IntoView {
             host,
             js_sys::encode_uri_component(&id_for_ws)
         );
-        let _ = ws.connect(&ws_url);
+        let _ = ws.connect(&ws_url, None);
     }
 
     // Clean up WebSocket on unmount
