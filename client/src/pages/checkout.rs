@@ -88,7 +88,7 @@ pub fn CheckoutPage() -> impl IntoView {
             .and_then(|w| w.location().host().ok())
             .unwrap_or_default();
         let ws_url = format!(
-            "{}://{}/checkout/ws?invoice_id={}",
+            "{}://{}/api/checkout/ws?invoice_id={}",
             protocol,
             host,
             js_sys::encode_uri_component(&id_for_ws)
