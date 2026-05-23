@@ -27,6 +27,9 @@ pub struct HealthResponse {
     /// Service version.
     pub version: String,
 
+    /// Build commit SHA (short) baked in at compile time.
+    pub build_sha: String,
+
     /// Database connectivity.
     pub database: bool,
 
@@ -73,6 +76,9 @@ where
             "unhealthy".to_string()
         },
         version: env!("CARGO_PKG_VERSION").to_string(),
+        build_sha: option_env!("ETHPAYSERVER_BUILD_SHA")
+            .unwrap_or("dev")
+            .to_string(),
         database: db_healthy,
         redis: redis_healthy,
     };
