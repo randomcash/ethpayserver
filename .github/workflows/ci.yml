@@ -100,6 +100,14 @@ jobs:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
+
+      - name: Clone payserver-commons (sibling)
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          cd ..
+          git clone --depth 1 -b "$BRANCH" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
+            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
+
       - uses: dtolnay/rust-toolchain@stable
       - name: Install audit tools
         run: cargo install cargo-audit cargo-deny --locked
