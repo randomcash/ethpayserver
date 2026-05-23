@@ -76,9 +76,7 @@ where
             "unhealthy".to_string()
         },
         version: env!("CARGO_PKG_VERSION").to_string(),
-        build_sha: option_env!("ETHPAYSERVER_BUILD_SHA")
-            .unwrap_or("dev")
-            .to_string(),
+        build_sha: env!("ETHPAYSERVER_BUILD_SHA").to_string(),
         database: db_healthy,
         redis: redis_healthy,
     };
