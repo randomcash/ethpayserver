@@ -224,6 +224,7 @@ jobs:
         env:
           E2E_API_URL: http://127.0.0.1:3000
           E2E_BASE_URL: http://127.0.0.1:8080
+          E2E_DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
         run: npx playwright test
 
       - name: Upload report
