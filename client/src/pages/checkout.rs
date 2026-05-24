@@ -72,9 +72,15 @@ pub fn CheckoutPage() -> impl IntoView {
     let ws_state = ws.connection_state();
     let ws_update = ws.last_update();
 
-    // Connect WebSocket on mount
-    let id_for_ws = invoice_id();
-    if !id_for_ws.is_empty() {
+    // Connect WebSocket reactively — reconnects when invoice_id changes
+    // (e.g. navigating from /checkout/A to /checkout/B without unmounting).
+    let ws_for_effect = ws.clone();
+    Effect::new(move |_| {
+        let id = invoice_id();
+        if id.is_empty() {
+            ws_for_effect.disconnect();
+            return;
+        }
         let protocol = if web_sys::window()
             .and_then(|w| w.location().protocol().ok())
             .as_deref()
@@ -91,10 +97,12 @@ pub fn CheckoutPage() -> impl IntoView {
             "{}://{}/api/checkout/ws?invoice_id={}",
             protocol,
             host,
-            js_sys::encode_uri_component(&id_for_ws)
+            js_sys::encode_uri_component(&id)
         );
-        let _ = ws.connect(&ws_url, None);
-    }
+        let _ = ws_for_effect.connect(&ws_url, None);
+        // Reset refresh so the resource re-fetches with fresh WS state
+        set_refresh.update(|n| *n += 1);
+    });
 
     // Clean up WebSocket on unmount
     let ws_cleanup = SendWrapper::new(ws.clone());
