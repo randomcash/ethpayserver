@@ -21,7 +21,7 @@ impl<
     /// Marks affected payments as reorged and reverts invoice status:
     /// - If other valid payments exist → `processing`
     /// - If no valid payments → `pending`
-    #[allow(clippy::cognitive_complexity)] // reorg recovery with multi-payment rollback logic
+    #[allow(clippy::cognitive_complexity)]
     pub(super) async fn handle_reorg_detected(
         &self,
         event: ReorgDetected,

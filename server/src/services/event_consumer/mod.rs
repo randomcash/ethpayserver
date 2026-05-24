@@ -103,7 +103,7 @@ impl<
     /// Run the event consumer as a background task.
     ///
     /// This should be spawned with `tokio::spawn(consumer.run())`.
-    #[allow(clippy::cognitive_complexity)] // event-loop with stream + error handling
+    #[allow(clippy::cognitive_complexity)]
     pub async fn run(self) {
         tracing::info!("Starting event consumer");
 
@@ -125,7 +125,7 @@ impl<
     }
 
     /// Handle a single monitor event.
-    #[allow(clippy::cognitive_complexity)] // match on event variants with per-variant logging
+    #[allow(clippy::cognitive_complexity)]
     async fn handle_event(&self, event: MonitorEvent) -> Result<(), EventConsumerError> {
         match event {
             MonitorEvent::PaymentDetected(payment) => self.handle_payment_detected(payment).await,
