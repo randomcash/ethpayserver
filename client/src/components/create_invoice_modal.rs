@@ -176,165 +176,164 @@ pub fn CreateInvoiceModal() -> impl IntoView {
         }
     };
 
-    move || {
-        if !modal_signal.show.get() {
-            return None;
-        }
-        Some(view! {
-            <div class="modal-overlay" on:click=move |_| close()>
-                <div class="modal modal-md" on:click=|ev| ev.stop_propagation()>
-                    <div class="modal-header">
-                        <h2>"Create Invoice"</h2>
-                        <button class="btn btn-ghost btn-sm btn-icon" on:click=move |_| close()>
-                            <IconClose />
-                        </button>
-                    </div>
-                    <form on:submit=on_submit.clone()>
-                        <div class="modal-body">
-                            // Error banner
-                            {move || error.get().map(|e| view! {
-                                <div class="form-alert form-alert-error">{e}</div>
-                            })}
+    view! {
+        <div
+            class="modal-overlay"
+            style:display=move || if modal_signal.show.get() { "flex" } else { "none" }
+            on:click=move |_| close()
+        >
+            <div class="modal modal-md" on:click=|ev| ev.stop_propagation()>
+                <div class="modal-header">
+                    <h2>"Create Invoice"</h2>
+                    <button class="btn btn-ghost btn-sm btn-icon" on:click=move |_| close()>
+                        <IconClose />
+                    </button>
+                </div>
+                <form on:submit=on_submit>
+                    <div class="modal-body">
+                        // Error banner
+                        {move || error.get().map(|e| view! {
+                            <div class="form-alert form-alert-error">{e}</div>
+                        })}
 
-                            // Store info
-                            <div class="form-store-info">
-                                <IconStore />
-                                <span>{store_name.clone()}</span>
-                            </div>
+                        // Store info
+                        <div class="form-store-info">
+                            <IconStore />
+                            <span>{store_name}</span>
+                        </div>
 
-                            // Amount + Currency (side by side)
-                            <div class="form-row">
-                                <div class="form-group form-group-grow">
-                                    <label class="form-label" for="ci-amount">"Amount"</label>
-                                    <input
-                                        type="text"
-                                        inputmode="decimal"
-                                        id="ci-amount"
-                                        class="form-input"
-                                        placeholder="0.00"
-                                        prop:value=move || amount.get()
-                                        on:input=move |ev| set_amount.set(event_target_value(&ev))
-                                        required
-                                    />
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label" for="ci-currency">"Currency"</label>
-                                    <select
-                                        id="ci-currency"
-                                        class="form-input"
-                                        prop:value=move || currency.get()
-                                        on:change=move |ev| set_currency.set(event_target_value(&ev))
-                                    >
-                                        {INVOICE_CURRENCY_OPTIONS.iter().map(|(value, label)| {
-                                            view! { <option value=*value>{*label}</option> }
-                                        }).collect_view()}
-                                    </select>
-                                </div>
-                            </div>
-
-                            // Expiration
-                            <div class="form-group">
-                                <label class="form-label" for="ci-expiration">"Expiration"</label>
-                                <select
-                                    id="ci-expiration"
+                        // Amount + Currency (side by side)
+                        <div class="form-row">
+                            <div class="form-group form-group-grow">
+                                <label class="form-label" for="ci-amount">"Amount"</label>
+                                <input
+                                    type="text"
+                                    inputmode="decimal"
+                                    id="ci-amount"
                                     class="form-input"
-                                    prop:value=move || expiration_minutes.get()
-                                    on:change=move |ev| set_expiration_minutes.set(event_target_value(&ev))
+                                    placeholder="0.00"
+                                    prop:value=move || amount.get()
+                                    on:input=move |ev| set_amount.set(event_target_value(&ev))
+                                    required
+                                />
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" for="ci-currency">"Currency"</label>
+                                <select
+                                    id="ci-currency"
+                                    class="form-input"
+                                    prop:value=move || currency.get()
+                                    on:change=move |ev| set_currency.set(event_target_value(&ev))
                                 >
-                                    {EXPIRATION_PRESETS.iter().map(|(value, label)| {
+                                    {INVOICE_CURRENCY_OPTIONS.iter().map(|(value, label)| {
                                         view! { <option value=*value>{*label}</option> }
                                     }).collect_view()}
                                 </select>
-                                <p class="form-help">"Time until the invoice expires if unpaid."</p>
                             </div>
-
-                            // Order ID
-                            <div class="form-group">
-                                <label class="form-label" for="ci-order-id">"Order ID "<span class="form-optional">"(optional)"</span></label>
-                                <input
-                                    type="text"
-                                    id="ci-order-id"
-                                    class="form-input"
-                                    placeholder="e.g. ORD-12345"
-                                    prop:value=move || order_id.get()
-                                    on:input=move |ev| set_order_id.set(event_target_value(&ev))
-                                />
-                                <p class="form-help">"Your internal order reference. Stored in invoice metadata."</p>
-                            </div>
-
-                            // Buyer Email
-                            <div class="form-group">
-                                <label class="form-label" for="ci-buyer-email">"Buyer Email "<span class="form-optional">"(optional)"</span></label>
-                                <input
-                                    type="email"
-                                    id="ci-buyer-email"
-                                    class="form-input"
-                                    placeholder="buyer@example.com"
-                                    prop:value=move || buyer_email.get()
-                                    on:input=move |ev| set_buyer_email.set(event_target_value(&ev))
-                                />
-                            </div>
-
-                            // Advanced section (collapsed by default)
-                            <div class="form-advanced-toggle">
-                                <button
-                                    type="button"
-                                    class="btn btn-ghost btn-sm"
-                                    on:click=move |_| set_show_advanced.update(|v| *v = !*v)
-                                >
-                                    <IconChevron expanded=show_advanced />
-                                    {move || if show_advanced.get() { "Hide advanced options" } else { "Show advanced options" }}
-                                </button>
-                            </div>
-
-                            {move || show_advanced.get().then(|| view! {
-                                <div class="form-advanced-section">
-                                    // Notification URL (Webhook)
-                                    <div class="form-group">
-                                        <label class="form-label" for="ci-notification-url">"Notification URL"</label>
-                                        <input
-                                            type="url"
-                                            id="ci-notification-url"
-                                            class="form-input"
-                                            placeholder="https://example.com/webhook"
-                                            prop:value=move || notification_url.get()
-                                            on:input=move |ev| set_notification_url.set(event_target_value(&ev))
-                                        />
-                                        <p class="form-help">"Receives a POST when the invoice status changes."</p>
-                                    </div>
-
-                                    // Redirect URL
-                                    <div class="form-group">
-                                        <label class="form-label" for="ci-redirect-url">"Redirect URL"</label>
-                                        <input
-                                            type="url"
-                                            id="ci-redirect-url"
-                                            class="form-input"
-                                            placeholder="https://example.com/thank-you"
-                                            prop:value=move || redirect_url.get()
-                                            on:input=move |ev| set_redirect_url.set(event_target_value(&ev))
-                                        />
-                                        <p class="form-help">"Customer is sent here after payment."</p>
-                                    </div>
-                                </div>
-                            })}
                         </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary btn-sm" on:click=move |_| close()>
-                                "Cancel"
-                            </button>
-                            <button
-                                type="submit"
-                                class="btn btn-primary btn-sm"
-                                disabled=move || submitting.get()
+
+                        // Expiration
+                        <div class="form-group">
+                            <label class="form-label" for="ci-expiration">"Expiration"</label>
+                            <select
+                                id="ci-expiration"
+                                class="form-input"
+                                prop:value=move || expiration_minutes.get()
+                                on:change=move |ev| set_expiration_minutes.set(event_target_value(&ev))
                             >
-                                {move || if submitting.get() { "Creating..." } else { "Create Invoice" }}
+                                {EXPIRATION_PRESETS.iter().map(|(value, label)| {
+                                    view! { <option value=*value>{*label}</option> }
+                                }).collect_view()}
+                            </select>
+                            <p class="form-help">"Time until the invoice expires if unpaid."</p>
+                        </div>
+
+                        // Order ID
+                        <div class="form-group">
+                            <label class="form-label" for="ci-order-id">"Order ID "<span class="form-optional">"(optional)"</span></label>
+                            <input
+                                type="text"
+                                id="ci-order-id"
+                                class="form-input"
+                                placeholder="e.g. ORD-12345"
+                                prop:value=move || order_id.get()
+                                on:input=move |ev| set_order_id.set(event_target_value(&ev))
+                            />
+                            <p class="form-help">"Your internal order reference. Stored in invoice metadata."</p>
+                        </div>
+
+                        // Buyer Email
+                        <div class="form-group">
+                            <label class="form-label" for="ci-buyer-email">"Buyer Email "<span class="form-optional">"(optional)"</span></label>
+                            <input
+                                type="email"
+                                id="ci-buyer-email"
+                                class="form-input"
+                                placeholder="buyer@example.com"
+                                prop:value=move || buyer_email.get()
+                                on:input=move |ev| set_buyer_email.set(event_target_value(&ev))
+                            />
+                        </div>
+
+                        // Advanced section (collapsed by default)
+                        <div class="form-advanced-toggle">
+                            <button
+                                type="button"
+                                class="btn btn-ghost btn-sm"
+                                on:click=move |_| set_show_advanced.update(|v| *v = !*v)
+                            >
+                                <IconChevron expanded=show_advanced />
+                                {move || if show_advanced.get() { "Hide advanced options" } else { "Show advanced options" }}
                             </button>
                         </div>
-                    </form>
-                </div>
+
+                        <Show when=move || show_advanced.get()>
+                            <div class="form-advanced-section">
+                                // Notification URL (Webhook)
+                                <div class="form-group">
+                                    <label class="form-label" for="ci-notification-url">"Notification URL"</label>
+                                    <input
+                                        type="url"
+                                        id="ci-notification-url"
+                                        class="form-input"
+                                        placeholder="https://example.com/webhook"
+                                        prop:value=move || notification_url.get()
+                                        on:input=move |ev| set_notification_url.set(event_target_value(&ev))
+                                    />
+                                    <p class="form-help">"Receives a POST when the invoice status changes."</p>
+                                </div>
+
+                                // Redirect URL
+                                <div class="form-group">
+                                    <label class="form-label" for="ci-redirect-url">"Redirect URL"</label>
+                                    <input
+                                        type="url"
+                                        id="ci-redirect-url"
+                                        class="form-input"
+                                        placeholder="https://example.com/thank-you"
+                                        prop:value=move || redirect_url.get()
+                                        on:input=move |ev| set_redirect_url.set(event_target_value(&ev))
+                                    />
+                                    <p class="form-help">"Customer is sent here after payment."</p>
+                                </div>
+                            </div>
+                        </Show>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" on:click=move |_| close()>
+                            "Cancel"
+                        </button>
+                        <button
+                            type="submit"
+                            class="btn btn-primary btn-sm"
+                            disabled=move || submitting.get()
+                        >
+                            {move || if submitting.get() { "Creating..." } else { "Create Invoice" }}
+                        </button>
+                    </div>
+                </form>
             </div>
-        })
+        </div>
     }
 }
 
