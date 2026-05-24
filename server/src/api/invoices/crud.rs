@@ -1,140 +1,27 @@
-use axum::{
-    Json,
-    extract::{Path, Query, State},
-    http::StatusCode,
-};
+use axum::{Json, extract::State, http::StatusCode};
 use chrono::Utc;
 use uuid::Uuid;
 
 use ::types::{
-    InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentMethodId,
-    PaymentOptionData, PaymentOptionId, StoreId, StorePaymentMethodWriter, WatchedAddressWriter,
-    traits::InvoiceData,
+    InvoiceId, InvoiceStatus, PaymentMethodId, PaymentOptionData, PaymentOptionId, StoreId,
+    StorePaymentMethodWriter, WatchedAddressWriter, traits::InvoiceData,
 };
 use auth::{SessionService, repository::UserStoreRepository};
-use data_service::{PaymentOptionReader, PaymentOptionWriter, StorePaymentMethodReader};
+use data_service::StorePaymentMethodReader;
 use evm::{Address, U256, XpubDeriver};
 use rust_decimal::Decimal;
 
-use super::super::extractors::{AdminAuth, AuthenticatedUser};
-use super::{
-    CreateInvoiceRequest, InvoiceListResponse, InvoiceResponse, ListInvoicesQuery,
-    apply_token_policy_filter, convert_human_to_smallest_unit, convert_to_crypto_smallest_unit,
-    extract_customer_email, invoice_error, rate_stale_reject_secs, rate_stale_warn_secs,
-};
+use crate::api::extractors::AuthenticatedUser;
 use crate::metrics;
-use crate::services::EVMMonitor;
 use crate::state::PgAppState;
 use ::types::currency::DEFAULT_INVOICE_EXPIRATION_SECS;
 use rates::{RateError, is_fiat_currency};
 
-/// List invoices with optional filters.
-///
-/// Users can only see invoices for stores they are members of.
-/// store_id is required unless user is a server admin.
-#[utoipa::path(
-    get,
-    path = "/invoices",
-    tag = "invoices",
-    security(("bearer_auth" = [])),
-    params(ListInvoicesQuery),
-    responses(
-        (status = 200, description = "List of invoices", body = InvoiceListResponse),
-        (status = 400, description = "store_id required"),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not a member of the store"),
-    )
-)]
-pub async fn list_invoices<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<A>>,
-    Query(query): Query<ListInvoicesQuery>,
-) -> Result<Json<InvoiceListResponse>, StatusCode>
-where
-    A: SessionService + 'static,
-{
-    // For non-admins, store_id is required
-    let store_id = match query.store_id {
-        Some(id) => id,
-        None => {
-            // Admins can list all invoices, non-admins need store_id
-            if user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            // For admins without store_id, we'll query all
-            uuid::Uuid::nil()
-        }
-    };
-
-    // Check user has access to the store (unless admin or no store filter)
-    if store_id != uuid::Uuid::nil() {
-        let is_member = state
-            .data_service
-            .get_user_store(user.id, StoreId(store_id))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .is_some();
-
-        if !is_member && user.role != auth::Role::ServerAdmin {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
-
-    let mut params = InvoiceQueryParams::new();
-
-    if let Some(status) = query.status {
-        let status: InvoiceStatus = status.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-        params = params.with_status(status);
-    }
-
-    if let Some(currency) = query.currency {
-        params = params.with_currency(currency);
-    }
-
-    if let Some(limit) = query.limit {
-        params = params.with_limit(limit);
-    }
-
-    if let Some(offset) = query.offset {
-        params = params.with_offset(offset);
-    }
-
-    // Add store_id filter if provided (nil means admin querying all)
-    if store_id != uuid::Uuid::nil() {
-        params = params.with_store_id(StoreId(store_id));
-    }
-
-    let (total, invoices) = InvoiceReader::query(&*state.data_service, &params)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Get payment options for each invoice
-    let mut responses = Vec::with_capacity(invoices.len());
-    for invoice in invoices {
-        let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &invoice.id)
-            .await
-            .unwrap_or_default();
-
-        let customer_email = extract_customer_email(&invoice.metadata);
-        responses.push(InvoiceResponse {
-            id: invoice.id.0,
-            currency: invoice.currency,
-            status: invoice.status.to_string(),
-            amount: invoice.amount,
-            amount_received: invoice.amount_received,
-            created_at: invoice.created_at,
-            expires_at: invoice.expires_at,
-            metadata: invoice.metadata,
-            customer_email,
-            payment_options: options.into_iter().map(Into::into).collect(),
-        });
-    }
-
-    Ok(Json(InvoiceListResponse {
-        total,
-        invoices: responses,
-    }))
-}
+use super::{
+    CreateInvoiceRequest, InvoiceResponse, apply_token_policy_filter,
+    convert_human_to_smallest_unit, convert_to_crypto_smallest_unit, extract_customer_email,
+    invoice_error, rate_stale_reject_secs, rate_stale_warn_secs,
+};
 
 /// Create a new invoice.
 ///
@@ -438,7 +325,7 @@ where
         extra: None,
     };
 
-    InvoiceWriter::upsert(&*state.data_service, &invoice)
+    ::types::InvoiceWriter::upsert(&*state.data_service, &invoice)
         .await
         .map_err(|_| {
             invoice_error(
@@ -506,7 +393,7 @@ where
             created_at: Utc::now(),
         };
 
-        PaymentOptionWriter::create(&*state.data_service, &payment_option)
+        data_service::PaymentOptionWriter::create(&*state.data_service, &payment_option)
             .await
             .map_err(|_| {
                 invoice_error(
@@ -540,66 +427,23 @@ where
             )
         })?;
 
-        // Send WatchAddress command to EVM monitor if configured
-        if let Some(ref monitor) = state.evm_monitor {
-            // Parse invoice ID as UUID
-            let invoice_uuid = Uuid::parse_str(&invoice.id.0).map_err(|e| {
-                tracing::error!("Failed to parse invoice ID as UUID: {}", e);
-                invoice_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
-                    "Internal error processing invoice",
-                )
-            })?;
-
-            // Parse amount as U256 (optional - only if we can parse it)
-            let expected_amount = payment_option.amount.parse::<U256>().ok();
-
-            // Token contract address (for ERC20 payments)
-            let token_contract: Option<Address> = payment_method
-                .token_address
-                .as_ref()
-                .and_then(|addr| addr.parse().ok());
-
-            match monitor
-                .watch_address_by_chain_id(
-                    payment_method.chain_id,
-                    address,
-                    invoice_uuid,
-                    expected_amount,
-                    token_contract,
-                )
-                .await
-            {
-                Ok(()) => {
-                    // Mark as notified in database
-                    if let Err(e) = WatchedAddressWriter::mark_notified(
-                        &*state.data_service,
-                        &payment_address,
-                        payment_method.chain_id,
-                        token_address_str,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            address = %payment_address,
-                            error = %e,
-                            "Failed to mark watch as notified"
-                        );
-                    }
-                }
-                Err(e) => {
-                    // Log the error but don't fail invoice creation
-                    // The address is recorded in the database and retry service will handle it
-                    tracing::warn!(
-                        invoice_id = %invoice_uuid,
-                        address = %address,
-                        error = %e,
-                        "Failed to send WatchAddress command, will be retried"
-                    );
-                }
-            }
-        }
+        // Notify the EVM monitor (best-effort — retry service handles misses)
+        let expected_amount = payment_option.amount.parse::<U256>().ok();
+        let token_contract: Option<Address> = payment_method
+            .token_address
+            .as_ref()
+            .and_then(|addr| addr.parse().ok());
+        super::notify_evm_watch(
+            &state,
+            &invoice.id.0,
+            &payment_address,
+            payment_method.chain_id,
+            token_address_str,
+            address,
+            expected_amount,
+            token_contract,
+        )
+        .await;
 
         created_options.push(payment_option);
     }
@@ -628,148 +472,4 @@ where
     };
 
     Ok((StatusCode::CREATED, Json(response)))
-}
-
-/// Get an invoice by ID.
-///
-/// User must be a member of the store the invoice belongs to.
-#[utoipa::path(
-    get,
-    path = "/invoices/{invoice_id}",
-    tag = "invoices",
-    security(("bearer_auth" = [])),
-    params(
-        ("invoice_id" = String, Path, description = "Invoice ID")
-    ),
-    responses(
-        (status = 200, description = "Invoice details", body = InvoiceResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not a member of the invoice's store"),
-        (status = 404, description = "Invoice not found"),
-    )
-)]
-pub async fn get_invoice<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<A>>,
-    Path(invoice_id): Path<String>,
-) -> Result<Json<InvoiceResponse>, StatusCode>
-where
-    A: SessionService + 'static,
-{
-    let id = InvoiceId::from_string(invoice_id);
-
-    let invoice = InvoiceReader::get(&*state.data_service, &id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    // Check user has access to the invoice's store (unless admin)
-    if user.role != auth::Role::ServerAdmin {
-        let is_member = state
-            .data_service
-            .get_user_store(user.id, invoice.store_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .is_some();
-
-        if !is_member {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
-
-    let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
-        .await
-        .unwrap_or_default();
-
-    let customer_email = extract_customer_email(&invoice.metadata);
-    let response = InvoiceResponse {
-        id: invoice.id.0,
-        currency: invoice.currency,
-        status: invoice.status.to_string(),
-        amount: invoice.amount,
-        amount_received: invoice.amount_received,
-        created_at: invoice.created_at,
-        expires_at: invoice.expires_at,
-        metadata: invoice.metadata,
-        customer_email,
-        payment_options: options.into_iter().map(Into::into).collect(),
-    };
-
-    Ok(Json(response))
-}
-
-/// Cancel an invoice (admin only).
-///
-/// Only works for pending/processing invoices.
-#[utoipa::path(
-    post,
-    path = "/admin/invoices/{invoice_id}/cancel",
-    tag = "admin",
-    security(("bearer_auth" = [])),
-    params(
-        ("invoice_id" = String, Path, description = "Invoice ID")
-    ),
-    responses(
-        (status = 200, description = "Invoice cancelled", body = InvoiceResponse),
-        (status = 400, description = "Cannot cancel - already paid/cancelled"),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not an admin"),
-        (status = 404, description = "Invoice not found"),
-    )
-)]
-pub async fn cancel_invoice<A>(
-    AdminAuth(_admin): AdminAuth,
-    State(state): State<PgAppState<A>>,
-    Path(invoice_id): Path<String>,
-) -> Result<Json<InvoiceResponse>, StatusCode>
-where
-    A: SessionService + 'static,
-{
-    let id = InvoiceId::from_string(invoice_id);
-
-    let invoice = InvoiceReader::get(&*state.data_service, &id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    // Can only cancel pending/processing invoices
-    match invoice.status {
-        InvoiceStatus::Pending | InvoiceStatus::Processing | InvoiceStatus::PartiallyPaid => {}
-        _ => return Err(StatusCode::BAD_REQUEST),
-    }
-
-    InvoiceWriter::update_status(&*state.data_service, &id, InvoiceStatus::Cancelled)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Deactivate payment options
-    if let Err(e) = PaymentOptionWriter::deactivate_for_invoice(&*state.data_service, &id).await {
-        tracing::warn!(invoice_id = %id.0, error = %e, "Failed to deactivate payment options");
-    }
-
-    let mut cancelled = invoice;
-    cancelled.status = InvoiceStatus::Cancelled;
-
-    let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
-        .await
-        .unwrap_or_default();
-
-    let customer_email = extract_customer_email(&cancelled.metadata);
-    let response = InvoiceResponse {
-        id: cancelled.id.0,
-        currency: cancelled.currency,
-        status: cancelled.status.to_string(),
-        amount: cancelled.amount,
-        amount_received: cancelled.amount_received,
-        created_at: cancelled.created_at,
-        expires_at: cancelled.expires_at,
-        metadata: cancelled.metadata,
-        customer_email,
-        payment_options: options.into_iter().map(Into::into).collect(),
-    };
-
-    // Record metrics
-    metrics::record_invoice_cancelled();
-
-    Ok(Json(response))
 }

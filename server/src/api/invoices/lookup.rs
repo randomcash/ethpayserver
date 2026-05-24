@@ -9,8 +9,8 @@ use ::types::InvoiceReader;
 use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
-use super::super::extractors::AuthenticatedUser;
 use super::{InvoiceResponse, TxHashLookupResponse, extract_customer_email};
+use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
 /// Validate a tx hash: must be 0x followed by 64 hex characters.
@@ -141,11 +141,4 @@ where
     };
 
     Ok(Json(response))
-}
-
-/// Generate a payment URI (EIP-681 format for native transfers).
-fn _generate_payment_uri(address: &str, amount: &str, _asset_symbol: &str) -> String {
-    // For native assets, use simple ethereum: URI
-    // For ERC20, would need to add function call data
-    format!("ethereum:{}?value={}", address, amount)
 }
