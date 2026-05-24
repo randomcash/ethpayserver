@@ -282,7 +282,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
 
     /// Queue a webhook for delivery.
     ///
-    /// This pushes the job to Redis for async processing.
+    /// This adds the job to a Redis sorted set keyed by `scheduled_at` timestamp.
     pub async fn queue_webhook(&self, job: WebhookJob) -> Result<(), WebhookError> {
         let mut conn = self
             .redis_client
@@ -293,8 +293,10 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         let job_json =
             serde_json::to_string(&job).map_err(|e| WebhookError::Serialization(e.to_string()))?;
 
-        redis::cmd("RPUSH")
+        let score = job.scheduled_at.timestamp() as f64;
+        redis::cmd("ZADD")
             .arg(&self.config.queue_key)
+            .arg(score)
             .arg(&job_json)
             .query_async::<i64>(&mut conn)
             .await
@@ -340,7 +342,8 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
 
     /// Process the next job from the queue.
     ///
-    /// Returns Ok(true) if a job was processed, Ok(false) if queue was empty.
+    /// Returns Ok(true) if a job was processed, Ok(false) if queue was empty
+    /// or no jobs are ready yet.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // Redis dequeue + HTTP delivery + retry logic
     async fn process_next_job(&self) -> Result<bool, WebhookError> {
         let mut conn = self
@@ -349,33 +352,41 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             .await
             .map_err(|e| WebhookError::Redis(e.to_string()))?;
 
-        // Pop job from queue (LPOP for FIFO)
-        let job_json: Option<String> = redis::cmd("LPOP")
+        let now = Utc::now().timestamp() as f64;
+
+        // Fetch the earliest ready job (score <= now)
+        let results: Vec<String> = redis::cmd("ZRANGEBYSCORE")
             .arg(&self.config.queue_key)
+            .arg("-inf")
+            .arg(now)
+            .arg("LIMIT")
+            .arg(0)
+            .arg(1)
             .query_async(&mut conn)
             .await
             .map_err(|e| WebhookError::Redis(e.to_string()))?;
 
-        let Some(json) = job_json else {
-            // Queue is empty - update gauge to 0
-            metrics::set_webhook_queue_depth(0);
+        let Some(json) = results.into_iter().next() else {
+            // No ready jobs — update gauges
+            self.update_queue_gauges(&mut conn).await;
             return Ok(false);
         };
 
-        let mut job: WebhookJob =
-            serde_json::from_str(&json).map_err(|e| WebhookError::Serialization(e.to_string()))?;
+        // Atomically remove the job we just read
+        let removed: i64 = redis::cmd("ZREM")
+            .arg(&self.config.queue_key)
+            .arg(&json)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| WebhookError::Redis(e.to_string()))?;
 
-        // Check if job is scheduled for later
-        if job.scheduled_at > Utc::now() {
-            // Re-queue the job for later
-            redis::cmd("RPUSH")
-                .arg(&self.config.queue_key)
-                .arg(&json)
-                .query_async::<i64>(&mut conn)
-                .await
-                .map_err(|e| WebhookError::Redis(e.to_string()))?;
+        if removed == 0 {
+            // Another worker grabbed it — try again next tick
             return Ok(false);
         }
+
+        let mut job: WebhookJob =
+            serde_json::from_str(&json).map_err(|e| WebhookError::Serialization(e.to_string()))?;
 
         // Attempt delivery with timing
         job.attempts += 1;
@@ -444,8 +455,10 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     let job_json = serde_json::to_string(&job)
                         .map_err(|e| WebhookError::Serialization(e.to_string()))?;
 
-                    redis::cmd("RPUSH")
+                    let score = job.scheduled_at.timestamp() as f64;
+                    redis::cmd("ZADD")
                         .arg(&self.config.queue_key)
+                        .arg(score)
                         .arg(&job_json)
                         .query_async::<i64>(&mut conn)
                         .await
@@ -461,16 +474,31 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             }
         }
 
-        // Update queue depth gauge
-        if let Ok(depth) = redis::cmd("LLEN")
+        // Update queue depth gauges
+        self.update_queue_gauges(&mut conn).await;
+
+        Ok(true)
+    }
+
+    /// Update both queue depth gauges (total via ZCARD, ready via ZCOUNT).
+    async fn update_queue_gauges(&self, conn: &mut redis::aio::MultiplexedConnection) {
+        if let Ok(depth) = redis::cmd("ZCARD")
             .arg(&self.config.queue_key)
-            .query_async::<u64>(&mut conn)
+            .query_async::<u64>(conn)
             .await
         {
             metrics::set_webhook_queue_depth(depth);
         }
-
-        Ok(true)
+        let now = Utc::now().timestamp() as f64;
+        if let Ok(ready) = redis::cmd("ZCOUNT")
+            .arg(&self.config.queue_key)
+            .arg("-inf")
+            .arg(now)
+            .query_async::<u64>(conn)
+            .await
+        {
+            metrics::set_webhook_ready_queue_depth(ready);
+        }
     }
 
     /// Deliver a webhook to the merchant endpoint.
