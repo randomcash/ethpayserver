@@ -20,7 +20,7 @@ use super::super::extractors::{AdminAuth, AuthenticatedUser};
 use super::{
     CreateInvoiceRequest, InvoiceListResponse, InvoiceResponse, ListInvoicesQuery,
     apply_token_policy_filter, convert_human_to_smallest_unit, convert_to_crypto_smallest_unit,
-    extract_customer_email, rate_stale_reject_secs, rate_stale_warn_secs,
+    extract_customer_email, invoice_error, rate_stale_reject_secs, rate_stale_warn_secs,
 };
 use crate::metrics;
 use crate::services::EVMMonitor;
@@ -158,7 +158,7 @@ pub async fn create_invoice<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Json(req): Json<CreateInvoiceRequest>,
-) -> Result<(StatusCode, Json<InvoiceResponse>), StatusCode>
+) -> Result<(StatusCode, Json<InvoiceResponse>), (StatusCode, Json<serde_json::Value>)>
 where
     A: SessionService + 'static,
 {
@@ -171,23 +171,45 @@ where
             "ethpay.store.cancreateinvoice",
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| {
+            invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to check store permissions",
+            )
+        })?;
 
     if !has_permission {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(invoice_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Insufficient permissions to create invoices for this store",
+        ));
     }
 
     // Get ALL enabled payment methods for the store
     let mut payment_methods =
         StorePaymentMethodReader::get_enabled_payment_methods(&*state.data_service, req.store_id)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_| {
+                invoice_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Failed to load payment methods",
+                )
+            })?;
 
     // Apply token policy filter (allowlist/blocklist)
     if let Some(policy) =
         data_service::StoreTokenPolicyReader::get_token_policy(&*state.data_service, req.store_id)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map_err(|_| {
+                invoice_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Failed to load token policy",
+                )
+            })?
     {
         apply_token_policy_filter(&mut payment_methods, &policy);
     }
@@ -197,7 +219,11 @@ where
             "Store {} has no enabled payment methods (after token policy filter)",
             req.store_id
         );
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(invoice_error(
+            StatusCode::BAD_REQUEST,
+            "no_payment_methods",
+            "Store has no enabled payment methods. Configure at least one payment method before creating invoices.",
+        ));
     }
 
     // Pre-validate: Fetch rates for cross-currency invoices to avoid creating orphan invoices
@@ -236,7 +262,7 @@ where
                             error = %e,
                             "Failed to convert amount to smallest units"
                         );
-                        StatusCode::BAD_REQUEST
+                        invoice_error(StatusCode::BAD_REQUEST, "invalid_amount", e)
                     },
                 )?
             };
@@ -265,7 +291,11 @@ where
                             rate = %exchange_rate.rate,
                             "Received non-positive exchange rate"
                         );
-                        return Err(StatusCode::SERVICE_UNAVAILABLE);
+                        return Err(invoice_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "invalid_rate",
+                            "Received invalid exchange rate, please try again later",
+                        ));
                     }
 
                     // Staleness guard: reject rates older than threshold
@@ -278,7 +308,11 @@ where
                             max_age_secs = reject_secs,
                             "Exchange rate too stale, rejecting"
                         );
-                        return Err(StatusCode::SERVICE_UNAVAILABLE);
+                        return Err(invoice_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "rate_stale",
+                            "Exchange rate data is too old, please try again later",
+                        ));
                     }
 
                     // Warn for rates older than warning threshold
@@ -306,7 +340,7 @@ where
                             error = %e,
                             "Failed to convert amount to crypto"
                         );
-                        StatusCode::BAD_REQUEST
+                        invoice_error(StatusCode::BAD_REQUEST, "conversion_error", e)
                     })?;
 
                     tracing::debug!(
@@ -340,7 +374,11 @@ where
                         error = %e,
                         "Failed to fetch exchange rate"
                     );
-                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                    return Err(invoice_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "rate_unavailable",
+                        "Exchange rate service is unavailable, please try again later",
+                    ));
                 }
             }
         }
@@ -353,7 +391,11 @@ where
             currency = %req.currency,
             "No payment methods with supported rate pairs for this currency"
         );
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        return Err(invoice_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no_supported_pairs",
+            "No payment methods support the requested invoice currency",
+        ));
     }
 
     let expiration_secs = req
@@ -390,7 +432,13 @@ where
 
     InvoiceWriter::upsert(&*state.data_service, &invoice)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| {
+            invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to create invoice",
+            )
+        })?;
 
     // Create payment options for each validated payment method
     let mut created_options: Vec<PaymentOptionData> = Vec::with_capacity(validated_methods.len());
@@ -404,14 +452,29 @@ where
             payment_method.id,
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| {
+            invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to allocate payment address",
+            )
+        })?;
 
         // Derive payment address from the payment method's xpub
-        let deriver = XpubDeriver::from_xpub(&payment_method.xpub)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let address = deriver
-            .derive_address(index as u32)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let deriver = XpubDeriver::from_xpub(&payment_method.xpub).map_err(|_| {
+            invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to derive payment address",
+            )
+        })?;
+        let address = deriver.derive_address(index as u32).map_err(|_| {
+            invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to derive payment address",
+            )
+        })?;
 
         let payment_address = address.to_string();
 
@@ -437,7 +500,13 @@ where
 
         PaymentOptionWriter::create(&*state.data_service, &payment_option)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_| {
+                invoice_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Failed to create payment option",
+                )
+            })?;
 
         // Save watched address to database (required for payment detection & retry mechanism)
         let token_address_str = payment_method.token_address.as_deref();
@@ -456,7 +525,11 @@ where
                 error = %e,
                 "Failed to save watched address - invoice creation aborted"
             );
-            StatusCode::INTERNAL_SERVER_ERROR
+            invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to save watched address",
+            )
         })?;
 
         // Send WatchAddress command to EVM monitor if configured
@@ -464,7 +537,11 @@ where
             // Parse invoice ID as UUID
             let invoice_uuid = Uuid::parse_str(&invoice.id.0).map_err(|e| {
                 tracing::error!("Failed to parse invoice ID as UUID: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
+                invoice_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Internal error processing invoice",
+                )
             })?;
 
             // Parse amount as U256 (optional - only if we can parse it)
