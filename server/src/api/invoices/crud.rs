@@ -262,7 +262,11 @@ where
                             error = %e,
                             "Failed to convert amount to smallest units"
                         );
-                        invoice_error(StatusCode::BAD_REQUEST, "invalid_amount", e)
+                        invoice_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_amount",
+                            "Invalid amount format",
+                        )
                     },
                 )?
             };
@@ -340,7 +344,11 @@ where
                             error = %e,
                             "Failed to convert amount to crypto"
                         );
-                        invoice_error(StatusCode::BAD_REQUEST, "conversion_error", e)
+                        invoice_error(
+                            StatusCode::BAD_REQUEST,
+                            "conversion_error",
+                            "Invalid amount or conversion error",
+                        )
                     })?;
 
                     tracing::debug!(
