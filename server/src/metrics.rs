@@ -134,6 +134,10 @@ fn describe_gauges() {
         "Current number of webhooks in the queue"
     );
     describe_gauge!(
+        "ethpayserver_webhook_ready_queue_depth",
+        "Number of webhooks ready for immediate delivery"
+    );
+    describe_gauge!(
         "ethpayserver_watched_addresses",
         "Current number of watched addresses per chain"
     );
@@ -276,9 +280,14 @@ pub fn record_webhook_retry_attempt(attempt: u32) {
     histogram!("ethpayserver_webhook_retry_attempts").record(f64::from(attempt));
 }
 
-/// Update the webhook queue depth gauge.
+/// Update the webhook queue depth gauge (total jobs in ZSET).
 pub fn set_webhook_queue_depth(depth: u64) {
     gauge!("ethpayserver_webhook_queue_depth").set(depth as f64);
+}
+
+/// Update the ready-queue depth gauge (jobs with `scheduled_at` <= now).
+pub fn set_webhook_ready_queue_depth(depth: u64) {
+    gauge!("ethpayserver_webhook_ready_queue_depth").set(depth as f64);
 }
 
 /// Update the watched addresses gauge for a chain.
