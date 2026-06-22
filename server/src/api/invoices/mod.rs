@@ -24,7 +24,7 @@ pub(crate) use csv_export::{csv_escape_field, csv_row};
 #[cfg(test)]
 pub(crate) use lookup::is_valid_tx_hash;
 
-use axum::http::StatusCode;
+use axum::{Json, http::StatusCode};
 
 use ::types::{InvoiceId, InvoiceReader, traits::InvoiceData};
 use auth::{SessionService, repository::UserStoreRepository};
@@ -32,6 +32,18 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
 use crate::state::PgAppState;
+
+/// Build a JSON error response for the create-invoice endpoint.
+pub(crate) fn invoice_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({"error": code, "message": message})),
+    )
+}
 
 /// Maximum age (seconds) before an exchange rate is rejected outright.
 /// Override with `RATE_STALE_REJECT_SECS` env var. Default: 300 (5 minutes).
