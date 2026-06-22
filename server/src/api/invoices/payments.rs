@@ -11,11 +11,11 @@ use ::types::{
 use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
-use super::super::extractors::AuthenticatedUser;
 use super::{
     InvoiceStatusResponse, ListPaymentsQuery, PaymentListResponse, PaymentResponse,
     get_invoice_with_permission,
 };
+use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
 /// Get payments for an invoice.

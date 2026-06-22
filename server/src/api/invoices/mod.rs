@@ -3,8 +3,10 @@
 //! All endpoints require authentication. Users can only access invoices
 //! for stores they are members of.
 
+mod cancel;
 mod crud;
 mod csv_export;
+mod list;
 mod lookup;
 mod payments;
 mod types;
@@ -12,8 +14,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use cancel::*;
 pub use crud::*;
 pub use csv_export::*;
+pub use list::*;
 pub use lookup::*;
 pub use payments::*;
 pub use types::*;
@@ -31,6 +35,7 @@ use auth::{SessionService, repository::UserStoreRepository};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
+use crate::services::EVMMonitor;
 use crate::state::PgAppState;
 
 /// Build a JSON error response for the create-invoice endpoint.
@@ -218,4 +223,58 @@ pub(crate) fn extract_customer_email(metadata: &Option<serde_json::Value>) -> Op
         .and_then(|m| m.get("customer_email").or_else(|| m.get("buyer_email")))
         .and_then(|v| v.as_str())
         .map(String::from)
+}
+
+/// Notify the EVM monitor to watch an address, then mark it as notified in the DB.
+/// Logs warnings on failure but never errors out — the retry service picks up misses.
+pub(crate) async fn notify_evm_watch<A: SessionService>(
+    state: &PgAppState<A>,
+    invoice_id_str: &str,
+    payment_address: &str,
+    chain_id: u64,
+    token_address: Option<&str>,
+    address: evm::Address,
+    expected_amount: Option<evm::U256>,
+    token_contract: Option<evm::Address>,
+) {
+    let Some(ref monitor) = state.evm_monitor else {
+        return;
+    };
+    let Ok(invoice_uuid) = uuid::Uuid::parse_str(invoice_id_str) else {
+        tracing::error!(id = %invoice_id_str, "Failed to parse invoice ID as UUID");
+        return;
+    };
+
+    match monitor
+        .watch_address_by_chain_id(
+            chain_id,
+            address,
+            invoice_uuid,
+            expected_amount,
+            token_contract,
+        )
+        .await
+    {
+        Ok(()) => {
+            if let Err(e) = ::types::WatchedAddressWriter::mark_notified(
+                &*state.data_service,
+                payment_address,
+                chain_id,
+                token_address,
+            )
+            .await
+            {
+                tracing::warn!(
+                    address = %payment_address, error = %e,
+                    "Failed to mark watch as notified"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                invoice_id = %invoice_uuid, address = %address, error = %e,
+                "Failed to send WatchAddress command, will be retried"
+            );
+        }
+    }
 }

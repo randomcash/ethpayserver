@@ -13,8 +13,8 @@ use ::types::{
 };
 use auth::{SessionService, repository::UserStoreRepository};
 
-use super::super::extractors::AuthenticatedUser;
 use super::{ListInvoicesQuery, ListPaymentsQuery};
+use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 use uuid::Uuid;
 
