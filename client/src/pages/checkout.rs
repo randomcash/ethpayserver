@@ -13,6 +13,9 @@ use crate::api::{ApiError, CheckoutResponse, EvmApiClient, PaymentOption};
 use crate::services::websocket::{StatusUpdate, WebSocketService};
 use crate::util::chain_name;
 
+mod countdown;
+use countdown::CountdownTimer;
+
 /// Format a human-readable amount from smallest units.
 ///
 /// e.g., "1000000" with 6 decimals -> "1.000000"
@@ -72,9 +75,15 @@ pub fn CheckoutPage() -> impl IntoView {
     let ws_state = ws.connection_state();
     let ws_update = ws.last_update();
 
-    // Connect WebSocket on mount
-    let id_for_ws = invoice_id();
-    if !id_for_ws.is_empty() {
+    // Connect WebSocket reactively — reconnects when invoice_id changes
+    // (e.g. navigating from /checkout/A to /checkout/B without unmounting).
+    let ws_for_effect = ws.clone();
+    Effect::new(move |_| {
+        let id = invoice_id();
+        if id.is_empty() {
+            ws_for_effect.disconnect();
+            return;
+        }
         let protocol = if web_sys::window()
             .and_then(|w| w.location().protocol().ok())
             .as_deref()
@@ -91,10 +100,12 @@ pub fn CheckoutPage() -> impl IntoView {
             "{}://{}/api/checkout/ws?invoice_id={}",
             protocol,
             host,
-            js_sys::encode_uri_component(&id_for_ws)
+            js_sys::encode_uri_component(&id)
         );
-        let _ = ws.connect(&ws_url, None);
-    }
+        let _ = ws_for_effect.connect(&ws_url, None);
+        // Reset refresh so the resource re-fetches with fresh WS state
+        set_refresh.update(|n| *n += 1);
+    });
 
     // Clean up WebSocket on unmount
     let ws_cleanup = SendWrapper::new(ws.clone());
@@ -331,64 +342,4 @@ fn render_checkout(
         </div>
     }
     .into_any()
-}
-
-/// Countdown timer component.
-#[component]
-fn CountdownTimer(expires_at: String) -> impl IntoView {
-    let (remaining, set_remaining) = signal(String::new());
-
-    // Parse expiration and tick every second
-    let expires = expires_at.clone();
-    let interval_handle: std::rc::Rc<std::cell::RefCell<Option<gloo_timers::callback::Interval>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
-    let handle_for_effect = interval_handle.clone();
-    Effect::new(move |_| {
-        let expires = expires.clone();
-        let interval = gloo_timers::callback::Interval::new(1000, move || {
-            let exp = js_sys::Date::parse(&expires);
-            // Date::parse returns NaN for malformed input. Without this guard
-            // `NaN - now = NaN`, `NaN <= 0.0` is false, and `NaN as u64 = 0`,
-            // so the timer would silently show "0m 0s" instead of surfacing
-            // the error. Surface it explicitly so we notice if the server
-            // ever serialises expires_at in an unexpected shape.
-            if exp.is_nan() {
-                set_remaining.set("—".to_string());
-                return;
-            }
-            let now = js_sys::Date::now();
-            let diff_ms = exp - now;
-            if diff_ms <= 0.0 {
-                set_remaining.set("Expired".to_string());
-                return;
-            }
-            let secs = (diff_ms / 1000.0) as u64;
-            let days = secs / 86_400;
-            let hrs = (secs % 86_400) / 3600;
-            let mins = (secs % 3600) / 60;
-            let s = secs % 60;
-            let label = if days > 0 {
-                format!("{days}d {hrs}h {mins}m")
-            } else if hrs > 0 {
-                format!("{hrs}h {mins}m {s}s")
-            } else {
-                format!("{mins}m {s}s")
-            };
-            set_remaining.set(label);
-        });
-        *handle_for_effect.borrow_mut() = Some(interval);
-    });
-
-    // Drop interval on unmount
-    let handle_for_cleanup = SendWrapper::new(interval_handle);
-    on_cleanup(move || {
-        handle_for_cleanup.borrow_mut().take();
-    });
-
-    view! {
-        <div class="checkout-countdown">
-            <span class="checkout-countdown-label">"Expires in "</span>
-            <span class="checkout-countdown-time">{remaining}</span>
-        </div>
-    }
 }
