@@ -1037,10 +1037,20 @@ a:hover {
     display: flex;
     gap: var(--space-3);
     align-items: flex-start;
+    margin-bottom: var(--space-4);
+}
+
+.form-row > .form-group {
+    margin-top: 0;
+    margin-bottom: 0;
 }
 
 .form-group-grow {
     flex: 1;
+}
+
+.form-row > .form-group:not(.form-group-grow) {
+    flex: 0 0 180px;
 }
 
 .form-store-info {
