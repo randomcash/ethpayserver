@@ -147,12 +147,15 @@ async fn setup_test_env() -> (
     let payment_address = Address::random();
     let payment_address_str = format!("{:#x}", payment_address);
 
-    // 0.05 ETH at rate 2000 = $100
+    // Rate convention (see ExchangeRate: "1 `from` = `rate` `to`", fetched as
+    // get_rate(invoice_currency, asset) = get_rate(USD, ETH)): for ETH at $2000,
+    // 1 USD = 0.0005 ETH. So $100 invoice = 100 * 0.0005 = 0.05 ETH, and the
+    // confirmation converts back: 0.05 ETH / 0.0005 = $100 (fully paid).
     let payment_option = test_payment_option(
         &invoice.id,
         &payment_address_str,
         "50000000000000000", // 0.05 ETH in wei
-        "2000.00",           // ETH/USD rate
+        "0.0005",            // USD->ETH rate (1 USD = 0.0005 ETH)
     );
     data_service::PaymentOptionWriter::create(&*ds, &payment_option)
         .await
