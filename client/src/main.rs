@@ -22,6 +22,11 @@ fn main() {
 
     web_sys::console::log_1(&"EVM PayServer: Found #app element, mounting...".into());
 
+    // Remove the inline first-paint loader (#initial-loader in index.html).
+    // Leptos `mount_to` appends to #app rather than replacing its contents,
+    // so the placeholder must be cleared explicitly before mounting.
+    app_element.set_inner_html("");
+
     mount_to(app_element, App).forget();
 
     web_sys::console::log_1(&"EVM PayServer: App mounted successfully".into());

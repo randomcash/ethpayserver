@@ -5,9 +5,47 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>EVM PayServer</title>
     <link data-trunk rel="css" href="styles.css">
+    <style>
+        /* First-paint loader. Inlined (no external stylesheet) so it renders
+           immediately, before the WASM bundle and styles.css are fetched.
+           Removed from the DOM when Leptos mounts — see client/src/main.rs. */
+        #initial-loader {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            background: #0f1115;
+            color: #c9d1d9;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        #initial-loader .spinner {
+            width: 42px;
+            height: 42px;
+            border: 4px solid rgba(201, 209, 217, 0.2);
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: initial-loader-spin 0.8s linear infinite;
+        }
+        #initial-loader .loading-text {
+            font-size: 0.95rem;
+            letter-spacing: 0.02em;
+            opacity: 0.85;
+        }
+        @keyframes initial-loader-spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
 </head>
 <body>
-    <div id="app"></div>
+    <div id="app">
+        <div id="initial-loader" role="status" aria-live="polite">
+            <div class="spinner"></div>
+            <div class="loading-text">Loading…</div>
+        </div>
+    </div>
     <link data-trunk rel="rust" data-target-name="ethpayserver_client" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory" />
 </body>
 </html>

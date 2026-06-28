@@ -11,3 +11,10 @@ auth = { path = "../payserver-commons/auth" }
 crypto = { path = "../payserver-commons/crypto" }
 rates = { path = "../payserver-commons/rates" }
 ui-kit = { path = "../payserver-commons/ui-kit" }
+
+# Size-optimize the WASM client only. Scoped to this package (not a
+# workspace-wide `[profile.release]`) so the server / monitor / migrate
+# binaries keep their runtime-optimized release builds. wasm-opt -Oz runs on
+# top of this via the trunk `data-wasm-opt="z"` flag in client/index.html.
+[profile.release.package.ethpayserver-client]
+opt-level = "z"
