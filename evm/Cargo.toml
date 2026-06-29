@@ -7,7 +7,7 @@ license = "MIT"
 
 [[bin]]
 name = "evmmonitor"
-path = "src/bin/evmmonitor.rs"
+path = "src/bin/evmmonitor/main.rs"
 required-features = ["monitor-bin"]
 
 [features]
