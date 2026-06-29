@@ -263,6 +263,12 @@ fn init_sentry() -> sentry::ClientInitGuard {
             .and_then(|s| s.parse().ok()),
         release: option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from),
         environment: std::env::var("SENTRY_ENVIRONMENT").ok().map(Cow::from),
+        // Never attach default PII (IP, cookies, request bodies). This is a
+        // payment processor — see `evm::telemetry::scrub_event`.
+        send_default_pii: false,
+        // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
+        // API keys, emails and on-chain addresses before events leave the host.
+        before_send: Some(Arc::new(evm::telemetry::scrub_event)),
         ..Default::default()
     })
 }
