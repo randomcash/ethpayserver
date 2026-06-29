@@ -8,6 +8,7 @@ mod crud;
 mod csv_export;
 mod list;
 mod lookup;
+mod payment_options;
 mod payments;
 mod types;
 
