@@ -36,6 +36,8 @@ pub mod metrics;
 pub mod monitor;
 pub mod network;
 pub mod provider;
+#[cfg(feature = "sentry-scrub")]
+pub mod telemetry;
 pub mod testnet;
 pub mod tokens;
 pub mod transaction;

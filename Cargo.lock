@@ -2650,6 +2650,7 @@ dependencies = [
  "metrics",
  "rand 0.9.4",
  "redis",
+ "regex",
  "sentry",
  "sentry-tracing",
  "serde",

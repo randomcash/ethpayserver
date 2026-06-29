@@ -15,7 +15,10 @@ default = []
 api = ["axum", "utoipa", "types", "data-service", "auth"]
 redis = ["dep:redis"]
 test-utils = []
-monitor-bin = ["redis", "types", "data-service", "data-service/redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "dep:sentry", "dep:sentry-tracing", "tokio/full"]
+# Sentry/errex `before_send` PII scrubber. Shared by the `server` and
+# `evmmonitor` binaries so both run one audited scrubber implementation.
+sentry-scrub = ["dep:sentry", "dep:regex"]
+monitor-bin = ["redis", "types", "data-service", "data-service/redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "dep:sentry", "dep:sentry-tracing", "sentry-scrub", "tokio/full"]
 
 [dependencies]
 # Ethereum/EVM - alloy ecosystem
@@ -74,6 +77,9 @@ clap = { version = "4", features = ["derive", "env"], optional = true }
 anyhow = { version = "1.0", optional = true }
 sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls"], optional = true }
 sentry-tracing = { version = "0.47", optional = true }
+
+# PII/secret scrubber for Sentry error payloads (sentry-scrub feature)
+regex = { version = "1", optional = true }
 
 # API (optional)
 axum = { version = "0.8", optional = true }
