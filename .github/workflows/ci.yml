@@ -95,7 +95,7 @@ jobs:
     name: Audit
     runs-on: ubuntu-latest
     needs: [lint]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     env:
       RUSTFLAGS: ""
     steps:
@@ -120,7 +120,7 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     needs: [lint, audit]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
@@ -170,7 +170,7 @@ jobs:
     name: E2E
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     services:
       postgres:
         image: postgres:16-alpine
@@ -248,7 +248,7 @@ jobs:
     name: Docker
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
       packages: write
@@ -294,12 +294,27 @@ jobs:
             -t ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.tag }} .
           docker push ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.tag }}
 
+  # staging (main) + production (tags) deploy via SSH push — see central-infrastructure/deploy.yml
   notify-deploy:
-    name: Notify Deploy
+    name: Notify Deploy (staging / production)
     runs-on: ubuntu-latest
     needs: [docker]
-    if: github.ref == 'refs/heads/testnet' || github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     steps:
+      - name: Resolve environment + tag
+        id: resolve
+        run: |
+          REF="${{ github.ref }}"
+          if [[ "$REF" == refs/tags/v* ]]; then
+            # release tag -> production, deploy the exact version
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            # main -> staging
+            echo "environment=staging" >> "$GITHUB_OUTPUT"
+            echo "tag=main-latest" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Trigger central-infrastructure deploy
         env:
           DEPLOY_PAT: ${{ secrets.DEPLOY_PAT }}
@@ -308,4 +323,29 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $DEPLOY_PAT" \
             https://api.github.com/repos/randomcash/central-infrastructure/dispatches \
-            -d '{"event_type": "deploy", "client_payload": {"service": "ethpayserver", "environment": "${{ github.ref_name }}", "sha": "${{ github.sha }}", "tag": "${{ github.ref_name }}-latest"}}'
+            -d '{"event_type": "deploy", "client_payload": {"service": "ethpayserver", "environment": "${{ steps.resolve.outputs.environment }}", "sha": "${{ github.sha }}", "tag": "${{ steps.resolve.outputs.tag }}"}}'
+
+  # testnet deploys via a self-hosted runner on debianbase (tailnet-only, no inbound) —
+  # reverse/pull CD: the runner is already on the box and runs docker compose locally.
+  deploy-testnet:
+    name: Deploy testnet (self-hosted · debianbase)
+    runs-on: [self-hosted, debianbase]
+    needs: [docker]
+    if: github.ref == 'refs/heads/testnet'
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Deploy via local docker compose
+        run: |
+          set -e
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          cd ~/deploy/ethpayserver/testnet
+          export SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:testnet-latest
+          export CLIENT_IMAGE=ghcr.io/randomcash/ethpayserver/client:testnet-latest
+          export MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:testnet-latest
+          docker compose pull
+          docker compose up -d --remove-orphans
+          docker image prune -f
+          docker compose ps
+          docker logout ghcr.io || true

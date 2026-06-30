@@ -376,4 +376,3 @@ pub fn InvoicesPage() -> impl IntoView {
         </div>
     }
 }
-

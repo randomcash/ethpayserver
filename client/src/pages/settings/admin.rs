@@ -1,8 +1,6 @@
 //! Admin settings tab - server settings and user management (admin only).
 
-use crate::api::{
-    AdminUserInfo, EvmApiClient, UpdateServerSettingsRequest, UpdateUserRoleRequest,
-};
+use crate::api::{AdminUserInfo, EvmApiClient, UpdateServerSettingsRequest, UpdateUserRoleRequest};
 use leptos::prelude::*;
 
 use super::IconShield;

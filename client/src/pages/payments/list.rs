@@ -12,7 +12,7 @@ use crate::util::chain_name;
 use super::format::{
     format_crypto_amount, format_date, payment_status, payment_status_class, truncate_hash,
 };
-use super::icons::{IconChevronRight, IconExternalLink, IconExport, IconMore, IconSearch};
+use super::icons::{IconChevronRight, IconExport, IconExternalLink, IconMore, IconSearch};
 
 /// Payments list page.
 #[component]
