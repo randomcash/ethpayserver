@@ -52,6 +52,12 @@ pub(super) fn ProtectedLayout() -> impl IntoView {
     let refetch_for_effect = refetch.clone();
     Effect::new(move || {
         refetch_for_effect.track();
+        // Don't fetch protected data until authenticated. Reading `api` here would
+        // track `auth.token`, and `logout()` on a 401 writes that token — a reactive
+        // feedback loop that races the login redirect. Gating on auth state breaks it.
+        if !matches!(auth.state.get(), ui_kit::types::AuthState::Authenticated(_)) {
+            return;
+        }
         let api = api.get();
         leptos::task::spawn_local(async move {
             match api.list_stores().await {
