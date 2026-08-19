@@ -6581,6 +6581,7 @@ dependencies = [
  "redis",
  "reqwest 0.12.28",
  "rust_decimal",
+ "secrecy",
  "sentry",
  "sentry-tracing",
  "serde",
