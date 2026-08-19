@@ -59,6 +59,7 @@ use evm::monitor::bridge::{EventBridge, RedisBridge};
 use evm::monitor::{
     CoordinatorConfig, EventHandler, LoggingHandler, MonitorCoordinator, MonitorEvent,
 };
+use secrecy::ExposeSecret;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -115,6 +116,10 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .or(config.bridge.redis_url.clone())
         .ok_or_else(|| anyhow::anyhow!("redis_url is required"))?;
+    // One explicit expose for the bridge and health publisher below, both of
+    // which need an owned 'static value. The URL stays a secret where it is
+    // stored — the CLI args and the config-file struct, which both derive Debug.
+    let redis_url = redis_url.expose_secret().to_string();
 
     let events_channel = config
         .bridge

@@ -6,6 +6,11 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tracing::warn;
 
+/// Clap value parser for secret-bearing flags.
+fn parse_secret(raw: &str) -> Result<SecretString, std::convert::Infallible> {
+    Ok(SecretString::from(raw.to_string()))
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "evmmonitor")]
 #[command(about = "EVM chain payment monitor")]
@@ -16,8 +21,12 @@ pub(crate) struct Args {
     pub config: Option<PathBuf>,
 
     /// Redis URL for event bridge
-    #[arg(long, env = "EVMMONITOR_REDIS_URL")]
-    pub redis_url: Option<String>,
+    ///
+    /// Secret: may carry credentials (`redis://user:pass@host`). Clap derives
+    /// Debug on this struct, so `SecretString` is what keeps `--help` output
+    /// and any `{:?}` of the args from printing it.
+    #[arg(long, env = "EVMMONITOR_REDIS_URL", value_parser = parse_secret)]
+    pub redis_url: Option<SecretString>,
 
     /// Redis channel for events (monitor -> API server)
     #[arg(
@@ -59,7 +68,8 @@ pub(crate) struct Config {
 
 #[derive(Debug, Deserialize, Default)]
 pub(crate) struct BridgeConfigFile {
-    pub redis_url: Option<String>,
+    /// Secret: may carry credentials (`redis://user:pass@host`).
+    pub redis_url: Option<SecretString>,
     pub events_channel: Option<String>,
     pub commands_channel: Option<String>,
 }
