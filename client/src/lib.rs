@@ -181,8 +181,3 @@ pub fn mount_app() {
 pub fn init() {
     mount_app();
 }
-
-/// Public init function that can be called manually.
-pub fn initialize() {
-    console_error_panic_hook::set_once();
-}
