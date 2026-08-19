@@ -25,6 +25,32 @@ const STATUS_CONNECTING: u8 = 1;
 const STATUS_DISCONNECTED: u8 = 2;
 const STATUS_FAILED: u8 = 3;
 
+/// Strip credentials out of an RPC URL before it reaches a log line or an error.
+///
+/// Provider URLs carry the API key in the path (`.../v2/<key>`) or the query
+/// (`?api-key=<key>`), so the whole URL is a secret. Keep scheme, host and port —
+/// enough to tell providers apart when reading logs, useless to anyone who
+/// scrapes them.
+fn redact_url(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(url) => {
+            let host = url.host_str().unwrap_or("<unknown-host>");
+            match url.port() {
+                Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
+                None => format!("{}://{}", url.scheme(), host),
+            }
+        }
+        Err(_) => "<unparseable-url>".to_string(),
+    }
+}
+
+/// Render a provider error with any occurrence of `url` replaced by its redacted
+/// form. Alloy embeds the endpoint it was given in connection errors, so an
+/// unfiltered error string leaks the key just as a log line would.
+fn redact_err(e: impl std::fmt::Display, url: &str) -> String {
+    e.to_string().replace(url, &redact_url(url))
+}
+
 /// Configuration for RPC block source.
 #[derive(Debug, Clone)]
 pub struct RpcSourceConfig {
@@ -109,7 +135,12 @@ impl RpcBlockSource {
             .disable_recommended_fillers()
             .connect(&config.http_url)
             .await
-            .map_err(|e| EvmError::Connection(format!("HTTP connection failed: {}", e)))?;
+            .map_err(|e| {
+                EvmError::Connection(format!(
+                    "HTTP connection failed: {}",
+                    redact_err(e, &config.http_url)
+                ))
+            })?;
 
         // Verify chain ID
         let chain_id = http_provider
@@ -124,7 +155,7 @@ impl RpcBlockSource {
             )));
         }
 
-        info!(chain_id, http_url = %config.http_url, "RPC block source created");
+        info!(chain_id, http_url = %redact_url(&config.http_url), "RPC block source created");
 
         Ok(Self {
             config,
@@ -151,7 +182,10 @@ impl RpcBlockSource {
             .await
             .map_err(|e| {
                 self.status.store(STATUS_DISCONNECTED, Ordering::SeqCst);
-                EvmError::Connection(format!("WebSocket connection failed: {}", e))
+                EvmError::Connection(format!(
+                    "WebSocket connection failed: {}",
+                    redact_err(e, ws_url)
+                ))
             })?;
 
         // Verify chain ID
@@ -168,7 +202,7 @@ impl RpcBlockSource {
         }
 
         self.status.store(STATUS_CONNECTED, Ordering::SeqCst);
-        info!(chain_id, ws_url, "WebSocket connected");
+        info!(chain_id, ws_url = %redact_url(ws_url), "WebSocket connected");
 
         // Subscribe to new blocks (returns headers)
         let subscription = ws_provider
@@ -461,6 +495,47 @@ impl std::fmt::Debug for RpcBlockSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_url_drops_api_key_path() {
+        assert_eq!(
+            redact_url("https://eth-sepolia.g.alchemy.com/v2/alch_supersecretkey"),
+            "https://eth-sepolia.g.alchemy.com"
+        );
+        assert_eq!(
+            redact_url("wss://eth-sepolia.g.alchemy.com/v2/alch_supersecretkey"),
+            "wss://eth-sepolia.g.alchemy.com"
+        );
+    }
+
+    #[test]
+    fn redact_url_drops_api_key_query() {
+        assert_eq!(
+            redact_url("https://rpc.example.com/rpc?api-key=secret123"),
+            "https://rpc.example.com"
+        );
+    }
+
+    #[test]
+    fn redact_url_keeps_port_for_self_hosted_nodes() {
+        assert_eq!(
+            redact_url("http://192.168.1.10:8545/"),
+            "http://192.168.1.10:8545"
+        );
+    }
+
+    #[test]
+    fn redact_url_handles_garbage() {
+        assert_eq!(redact_url("not a url"), "<unparseable-url>");
+    }
+
+    #[test]
+    fn redact_err_scrubs_embedded_endpoint() {
+        let url = "https://eth-sepolia.g.alchemy.com/v2/alch_supersecretkey";
+        let rendered = redact_err(format!("error sending request for url ({})", url), url);
+        assert!(!rendered.contains("alch_supersecretkey"));
+        assert!(rendered.contains("https://eth-sepolia.g.alchemy.com"));
+    }
 
     #[test]
     fn test_config_with_websocket() {
