@@ -389,3 +389,52 @@ jobs:
           docker image prune -f
           docker compose ps
           docker logout ghcr.io || true
+
+      - name: Verify deploy is actually configured (RCS-187)
+        run: |
+          set -e
+          # `docker compose up` succeeding proves the containers started, not
+          # that they were configured. When the deploy user cannot read .env,
+          # compose substitutes every variable as empty and the stack comes up
+          # healthy-looking with no RPC endpoints at all — a green deploy with
+          # dead payment monitoring. Assert the things that were silently wrong.
+
+          echo "::group::server /health"
+          for i in $(seq 1 30); do
+            body=$(curl -sf --max-time 5 http://127.0.0.1:3100/health) && break || sleep 5
+          done
+          [ -n "${body:-}" ] || { echo "::error::server /health never responded"; exit 1; }
+          echo "$body"
+          echo "$body" | grep -q '"database":true' || { echo "::error::database not connected"; exit 1; }
+          echo "$body" | grep -q '"redis":true'    || { echo "::error::redis not connected"; exit 1; }
+          echo "::endgroup::"
+
+          echo "::group::chain monitors"
+          # evmmonitor republishes health on a timer; give it a few cycles.
+          for i in $(seq 1 24); do
+            health=$(docker exec ethpayserver_testnet_redis redis-cli --raw get evmmonitor:health 2>/dev/null || true)
+            [ -n "$health" ] && [ "$health" != "[]" ] && break
+            sleep 5
+          done
+          echo "${health:-<empty>}"
+          python3 - "$health" <<'PY'
+          import json, sys
+
+          raw = sys.argv[1] if len(sys.argv) > 1 else ""
+          if not raw.strip() or raw.strip() == "[]":
+              print("::error::evmmonitor published no chain health — every RPC endpoint is "
+                    "probably empty (is .env readable by the deploy user?)")
+              sys.exit(1)
+
+          chains = json.loads(raw)
+          bad = [c for c in chains if c.get("status") != "connected" or not c.get("is_healthy")]
+          for c in chains:
+              print(f"  {c['chain_name']:18} {c['status']:12} healthy={c['is_healthy']} "
+                    f"block={c.get('current_block')}")
+          if bad:
+              names = ", ".join(c["chain_name"] for c in bad)
+              print(f"::error::chain monitors not connected: {names}")
+              sys.exit(1)
+          print(f"all {len(chains)} chain monitors connected")
+          PY
+          echo "::endgroup::"
