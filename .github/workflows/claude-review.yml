@@ -1,0 +1,71 @@
+name: Claude review
+
+# Replaces the Chef reviewer for the first-pass review.
+#
+# Chef ran on a self-hosted receiver (chef-hooks.random.cash). When that host's
+# DNS record was deleted the review stage went silently dead — 44 PRs with zero
+# reviewers, GitHub retrying deliveries into a 502 for weeks, and nothing that
+# noticed. A review that lives in the pipeline cannot be taken out by a DNS
+# change, and it fails visibly when it fails at all.
+#
+# Deliberately NOT a merge gate. It is a first pass: it catches the mechanical
+# things so human review is spent on judgement. The sensitive class in
+# automation/random.cash/AGENTS.md (auth, crypto, wallet/key derivation,
+# migrations, invoice/payment handlers, central-infrastructure) still requires
+# Gus's review regardless of what this says.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    name: First-pass review
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The `secrets` context is not available to a job-level `if` (only github,
+      # needs, vars, inputs), so the no-key guard has to sit on the step, where
+      # `env` is readable. Without a key the step skips; it starts working on
+      # its own once ANTHROPIC_API_KEY is set, with no edit here.
+      - name: Review
+        if: env.ANTHROPIC_API_KEY != ''
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review this pull request as a first pass for a Rust payment
+            processor. Prioritise, in order:
+
+            1. Correctness bugs that tests would not catch — especially money
+               handling: amount conversion, decimal scale, aggregation,
+               reorg handling, confirmation counting.
+            2. Secrets reaching logs or errors. Provider URLs carry API keys in
+               the path; database URLs carry passwords. Endpoints and
+               credentials belong in secrecy::SecretString.
+            3. Tests that cannot fail — assertions that are always true,
+               fixtures that never reach the assertion, steps marked
+               continue-on-error.
+            4. Reuse and simplification where it is genuinely clearer.
+
+            Comment inline on the exact lines. Be concrete: state the input or
+            state that triggers the problem. If you are unsure whether
+            something is a real defect, say so rather than asserting it.
+
+            Do not approve or request changes — this is advisory. Anything
+            touching auth, crypto, wallet or key derivation, migrations,
+            invoice/payment handlers, or central-infrastructure is reviewed by
+            a human regardless; flag it as sensitive rather than judging it
+            merged-ready.
