@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>EVM PayServer</title>
     <link data-trunk rel="css" href="styles.css">
+    <!-- Client error capture (errex, Sentry protocol) — see client/src/telemetry.
+         Empty content disables reporting, which is the default: errex lives on
+         the tailnet (errex.homeboy.cloud) and is unreachable from an end-user
+         browser, so only fill this in for internal/dev deployments whose
+         browsers are on the tailnet. -->
+    <meta name="errex-dsn" content="">
+    <meta name="errex-environment" content="">
     <style>
         /* First-paint loader. Inlined (no external stylesheet) so it renders
            immediately, before the WASM bundle and styles.css are fetched.

@@ -2663,6 +2663,7 @@ name = "ethpayserver-client"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "evm",
  "getrandom 0.3.4",
  "gloo-net",
  "gloo-timers",

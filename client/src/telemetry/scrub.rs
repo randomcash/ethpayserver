@@ -1,0 +1,434 @@
+//! Secret/PII redaction for client-side error reports.
+//!
+//! This is the browser-side twin of `evm::telemetry::redact_secrets`: the same
+//! seven rules, in the same order, producing the same output. `evm` is the
+//! audited source of truth, but it is a native crate (sqlx/alloy) that cannot
+//! be compiled to `wasm32`, so the rules are mirrored here rather than shared.
+//!
+//! They are mirrored as hand-written scanners rather than as regexes because
+//! pulling `regex` into the bundle costs ~1 MB of WASM (measured: 2.28 MB →
+//! 3.28 MB), which is not a price worth paying in a client that is deliberately
+//! built with `opt-level = "z"` plus `wasm-opt -Oz`. Each rule carries the
+//! pattern it implements in its doc comment, and `parity_with_evm_scrubber`
+//! (native-only test) checks the two implementations agree — so a change to the
+//! `evm` rule table fails the build here until this copy follows.
+//!
+//! The event bodies built in the sibling `event` module are assembled field by
+//! field (never a blind dump of application state), so only the free-text
+//! redaction is needed here — the key-aware map scrubbing `evm` does for
+//! `extra` / breadcrumb blobs has no counterpart on this side.
+
+use std::borrow::Cow;
+
+/// One redaction rule: at byte offset `at`, either a match — its end offset and
+/// what to put in its place — or nothing. Offsets are always char boundaries
+/// because every pattern is pure ASCII.
+type Rule = fn(&str, usize) -> Option<(usize, String)>;
+
+/// Ordered exactly as in `evm::telemetry`. Order is load-bearing: the JWT rule
+/// has to run before the keyed-value rule can swallow a `Bearer <jwt>`.
+const RULES: &[Rule] = &[
+    jwt,
+    rpc_key,
+    prefixed_hex,
+    bare_hex,
+    mnemonic,
+    email,
+    keyed_value,
+];
+
+/// Redact secret-shaped substrings from a free-text string.
+///
+/// Defence-in-depth for panic messages and stack traces, which routinely
+/// interpolate whatever the failing code was holding. Rules intentionally err
+/// on the side of over-redaction.
+#[must_use]
+pub fn redact_secrets(input: &str) -> String {
+    let mut out = Cow::Borrowed(input);
+    for rule in RULES {
+        if let Some(redacted) = replace_all(&out, *rule) {
+            out = Cow::Owned(redacted);
+        }
+    }
+    out.into_owned()
+}
+
+/// Leftmost, non-overlapping replacement of every match — `Regex::replace_all`
+/// semantics. `None` when the rule never matched, so the input is left alone.
+fn replace_all(input: &str, rule: Rule) -> Option<String> {
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    while at < input.len() {
+        match rule(input, at) {
+            Some((end, replacement)) if end > at => {
+                out.push_str(&input[copied..at]);
+                out.push_str(&replacement);
+                copied = end;
+                at = end;
+            }
+            _ => at = next_boundary(input, at),
+        }
+    }
+    (copied > 0).then(|| {
+        out.push_str(&input[copied..]);
+        out
+    })
+}
+
+/// `eyJ[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+` — JSON Web Tokens
+/// (header.payload.signature).
+fn jwt(input: &str, at: usize) -> Option<(usize, String)> {
+    if !input[at..].starts_with("eyJ") {
+        return None;
+    }
+    let mut end = run(input, at + 3, is_base64url);
+    if end == at + 3 {
+        return None;
+    }
+    for _ in 0..2 {
+        if byte(input, end) != Some(b'.') {
+            return None;
+        }
+        let segment = run(input, end + 1, is_base64url);
+        if segment == end + 1 {
+            return None;
+        }
+        end = segment;
+    }
+    Some((end, "[redacted-jwt]".to_string()))
+}
+
+/// `((?:https?|wss?)://<host>(?::<port>)?(?:/<seg 1-15>)*/)<seg 16+>` — RPC
+/// provider URLs carry the API key in the path (Alchemy `/v2/<key>`, Infura
+/// `/v3/<key>`, QuickNode `/<token>/`). Scheme and host are kept so reports
+/// still say which provider failed; the credential-length segment is not.
+fn rpc_key(input: &str, at: usize) -> Option<(usize, String)> {
+    let mut pos = ["https://", "http://", "wss://", "ws://"]
+        .iter()
+        .find_map(|scheme| input[at..].starts_with(scheme).then(|| at + scheme.len()))?;
+
+    let host = run(input, pos, |b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')
+    });
+    if host == pos {
+        return None;
+    }
+    pos = host;
+    if byte(input, pos) == Some(b':') {
+        let port = run(input, pos + 1, |b| b.is_ascii_digit());
+        if port == pos + 1 {
+            return None;
+        }
+        pos = port;
+    }
+
+    // Walk the path: any number of ordinary segments, then the first one long
+    // enough to be a credential.
+    loop {
+        if byte(input, pos) != Some(b'/') {
+            return None;
+        }
+        let segment = run(input, pos + 1, is_path_byte);
+        let length = segment - (pos + 1);
+        if length >= 16 {
+            return Some((segment, format!("{}[redacted-rpc-key]", &input[at..=pos])));
+        }
+        if length == 0 {
+            return None;
+        }
+        pos = segment;
+    }
+}
+
+/// `0x[0-9a-fA-F]{40,}` — addresses (40), private keys / tx hashes / block
+/// hashes (64), signatures (130).
+fn prefixed_hex(input: &str, at: usize) -> Option<(usize, String)> {
+    if !input[at..].starts_with("0x") {
+        return None;
+    }
+    let end = run(input, at + 2, |b| b.is_ascii_hexdigit());
+    (end - (at + 2) >= 40).then(|| (end, "[redacted-hex]".to_string()))
+}
+
+/// `\b[0-9a-fA-F]{64}\b` — private keys / hashes without the `0x` prefix.
+fn bare_hex(input: &str, at: usize) -> Option<(usize, String)> {
+    if !at_word_start(input, at) {
+        return None;
+    }
+    let end = run(input, at, |b| b.is_ascii_hexdigit());
+    (end - at == 64 && at_word_end(input, end)).then(|| (end, "[redacted-hex]".to_string()))
+}
+
+/// `\b(?:[a-z]+\s+){11,}[a-z]+\b` — BIP-39 mnemonics, i.e. 12+ consecutive
+/// lowercase words.
+fn mnemonic(input: &str, at: usize) -> Option<(usize, String)> {
+    if !at_word_start(input, at) {
+        return None;
+    }
+    let (mut pos, mut words, mut end) = (at, 0_usize, at);
+    loop {
+        let word = run(input, pos, |b| b.is_ascii_lowercase());
+        if word == pos || !at_word_end(input, word) {
+            break;
+        }
+        words += 1;
+        end = word;
+        let space = run(input, word, |b| b.is_ascii_whitespace());
+        if space == word {
+            break;
+        }
+        pos = space;
+    }
+    (words >= 12).then(|| (end, "[redacted-mnemonic]".to_string()))
+}
+
+/// `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}` — customer PII.
+fn email(input: &str, at: usize) -> Option<(usize, String)> {
+    let local = run(input, at, |b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'%' | b'+' | b'-')
+    });
+    if local == at || byte(input, local) != Some(b'@') {
+        return None;
+    }
+    let domain = local + 1;
+    let domain_end = run(input, domain, |b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')
+    });
+
+    // The greedy `+` backtracks to the *last* dot still followed by a TLD, so
+    // `a@b.co.uk` matches through `.uk`, not through `.co`.
+    let mut end = None;
+    for (offset, _) in input[domain..domain_end].match_indices('.') {
+        let tld = run(input, domain + offset + 1, |b| b.is_ascii_alphabetic());
+        if tld - (domain + offset + 1) >= 2 {
+            end = Some(tld);
+        }
+    }
+    end.map(|end| (end, "[redacted-email]".to_string()))
+}
+
+/// `(?i)\b(api[_-]?key|secret|password|passwd|token|mnemonic|seed|private[_-]?key|authorization|bearer)\b(\s*[:=]\s*|\s+)("?)[^\s,;"']+`
+/// — `key: value` / `key=value` for sensitive keys, plus `Bearer <token>`. Key,
+/// separator and opening quote are kept; only the value is replaced.
+fn keyed_value(input: &str, at: usize) -> Option<(usize, String)> {
+    if !at_word_start(input, at) {
+        return None;
+    }
+    let key = sensitive_key_end(input, at)?;
+    if !at_word_end(input, key) {
+        return None;
+    }
+    let separated = separator_end(input, key)?;
+    let value = separated + usize::from(byte(input, separated) == Some(b'"'));
+    let end = run(input, value, |b| {
+        !b.is_ascii_whitespace() && !matches!(b, b',' | b';' | b'"' | b'\'')
+    });
+    (end > value).then(|| (end, format!("{}[redacted]", &input[at..value])))
+}
+
+/// End offset of a sensitive key starting at `at`, case-insensitively.
+fn sensitive_key_end(input: &str, at: usize) -> Option<usize> {
+    // Spelled out rather than `api[_-]?key`, longest spelling first.
+    const KEYS: &[&str] = &[
+        "api_key",
+        "api-key",
+        "apikey",
+        "secret",
+        "password",
+        "passwd",
+        "token",
+        "mnemonic",
+        "seed",
+        "private_key",
+        "private-key",
+        "privatekey",
+        "authorization",
+        "bearer",
+    ];
+    KEYS.iter().find_map(|key| {
+        let end = at + key.len();
+        input
+            .as_bytes()
+            .get(at..end)
+            .is_some_and(|found| found.eq_ignore_ascii_case(key.as_bytes()))
+            .then_some(end)
+    })
+}
+
+/// `(\s*[:=]\s*|\s+)` — end offset of the separator between key and value.
+fn separator_end(input: &str, from: usize) -> Option<usize> {
+    let spaced = run(input, from, |b| b.is_ascii_whitespace());
+    if matches!(byte(input, spaced), Some(b':' | b'=')) {
+        return Some(run(input, spaced + 1, |b| b.is_ascii_whitespace()));
+    }
+    (spaced > from).then_some(spaced)
+}
+
+/// End offset of the run of bytes matching `predicate` that starts at `from`.
+fn run(input: &str, from: usize, predicate: impl Fn(u8) -> bool) -> usize {
+    input.as_bytes()[from.min(input.len())..]
+        .iter()
+        .position(|byte| !predicate(*byte))
+        .map_or(input.len(), |length| from + length)
+}
+
+fn byte(input: &str, at: usize) -> Option<u8> {
+    input.as_bytes().get(at).copied()
+}
+
+fn is_base64url(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'=' | b'-')
+}
+
+fn is_path_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+}
+
+/// `\w` for the purposes of `\b`.
+fn is_word(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn at_word_start(input: &str, at: usize) -> bool {
+    at == 0 || byte(input, at - 1).is_none_or(|b| !is_word(b))
+}
+
+fn at_word_end(input: &str, at: usize) -> bool {
+    byte(input, at).is_none_or(|b| !is_word(b))
+}
+
+/// Next char boundary at or after `at + 1`.
+fn next_boundary(input: &str, at: usize) -> usize {
+    input[at..]
+        .chars()
+        .next()
+        .map_or(at + 1, |c| at + c.len_utf8())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_secrets;
+
+    #[test]
+    fn redacts_jwt() {
+        let text = "auth failed for eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc-_123";
+        let out = redact_secrets(text);
+        assert!(out.contains("[redacted-jwt]"), "{out}");
+        assert!(!out.contains("eyJhbGciOiJIUzI1NiJ9"), "{out}");
+    }
+
+    #[test]
+    fn redacts_wallet_addresses_and_keys() {
+        let address = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
+        let private_key = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let out = redact_secrets(&format!("send from {address} signed with {private_key}"));
+        assert_eq!(out, "send from [redacted-hex] signed with [redacted-hex]");
+    }
+
+    #[test]
+    fn redacts_bare_64_char_hex() {
+        let out = redact_secrets(
+            "seed 4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 leaked",
+        );
+        // The hex rule fires first, then the `seed <value>` rule rewrites its
+        // placeholder — belt and braces, and identical to the `evm` behaviour.
+        assert_eq!(out, "seed [redacted] leaked");
+    }
+
+    #[test]
+    fn redacts_emails() {
+        let out = redact_secrets("no store for merchant@example.com");
+        assert_eq!(out, "no store for [redacted-email]");
+    }
+
+    #[test]
+    fn redacts_bearer_tokens_and_keyed_values() {
+        let out = redact_secrets(
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig api_key=zzz999",
+        );
+        assert!(!out.contains("eyJhbGciOiJIUzI1NiJ9"), "{out}");
+        assert!(!out.contains("zzz999"), "{out}");
+    }
+
+    /// Pins a known gap inherited from `evm::telemetry`, so that fixing the
+    /// rule table there fails here and both copies get updated together:
+    /// `authorization` and `bearer` are alternatives of the *same* rule, so the
+    /// match starting at `Authorization` consumes `Bearer` as its value and an
+    /// opaque token behind it survives. The tokens this client actually holds
+    /// are JWTs, which the JWT rule above redacts before this rule runs.
+    #[test]
+    fn known_gap_opaque_token_after_authorization_bearer() {
+        let out = redact_secrets("Authorization: Bearer rc_live_opaque123");
+        assert_eq!(out, "Authorization: [redacted] rc_live_opaque123");
+    }
+
+    #[test]
+    fn redacts_rpc_provider_keys() {
+        let out = redact_secrets("GET https://eth-mainnet.g.alchemy.com/v2/9f8e7d6c5b4a3210zz");
+        assert_eq!(
+            out,
+            "GET https://eth-mainnet.g.alchemy.com/v2/[redacted-rpc-key]"
+        );
+    }
+
+    #[test]
+    fn redacts_mnemonics() {
+        let out = redact_secrets(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        );
+        assert_eq!(out, "[redacted-mnemonic]");
+    }
+
+    #[test]
+    fn leaves_ordinary_messages_alone() {
+        let text = "failed to fetch /api/invoices/inv_001: HTTP 502";
+        assert_eq!(redact_secrets(text), text);
+    }
+
+    #[test]
+    fn handles_multibyte_text() {
+        let text = "façade ↔ merchant@example.com ↔ façade";
+        assert_eq!(redact_secrets(text), "façade ↔ [redacted-email] ↔ façade");
+    }
+
+    /// The reason this module may be hand-written: it must behave exactly like
+    /// the audited regex table in `evm::telemetry`. Native-only — `evm` does
+    /// not build for `wasm32`, and it is a dev-dependency, so it never reaches
+    /// the shipped bundle.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parity_with_evm_scrubber() {
+        const CORPUS: &[&str] = &[
+            "",
+            "plain message with no secrets",
+            "failed to fetch /api/invoices/inv_001: HTTP 502",
+            "auth failed for eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc-_123 (401)",
+            "eyJ.a.b eyJa..b eyJa.b.c",
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e paid 0x1234",
+            "tx 4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 mined",
+            "zz4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318zz",
+            "GET https://eth-mainnet.g.alchemy.com/v2/9f8e7d6c5b4a3210zz failed",
+            "wss://polygon-mainnet.infura.io:443/ws/v3/0123456789abcdefzz closed",
+            "https://api.coingecko.com/api/v3/simple/price?ids=ethereum",
+            "https://errex.homeboy.cloud/api/random.cash/envelope/",
+            "no store for merchant@example.com or a@b.co.uk or bad@b.c",
+            "Authorization: Bearer rc_live_opaque123",
+            "authorization=eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig; token: abc, secret = \"s3cr3t\"",
+            "api-key: k1 apikey:k2 API_KEY = k3 private-key k4 passwd:\tk5",
+            "secretariat: not a secret keyword",
+            "seed abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            "twelve plain lowercase words here really do trip the mnemonic rule ok now",
+            "façade ↔ merchant@example.com ↔ 0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            "token",
+            "token=",
+        ];
+        for input in CORPUS {
+            assert_eq!(
+                redact_secrets(input),
+                evm::telemetry::redact_secrets(input),
+                "diverged from evm::telemetry on: {input}"
+            );
+        }
+    }
+}
