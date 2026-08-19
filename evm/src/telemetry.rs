@@ -31,6 +31,18 @@ fn rules() -> &'static [(Regex, &'static str)] {
                 build(r"eyJ[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_=-]+"),
                 "[redacted-jwt]",
             ),
+            // RPC provider URLs carry the API key in the path (Alchemy
+            // `/v2/<key>`, Infura `/v3/<key>`, QuickNode `/<token>/`), which no
+            // `key=value` rule can see. Redact any path segment long enough to
+            // be a credential and keep scheme/host, so reports still say which
+            // provider failed. Query-string forms (`?api-key=`) are already
+            // covered by the `key: value` rule below.
+            (
+                build(
+                    r"((?:https?|wss?)://[A-Za-z0-9.\-]+(?::[0-9]+)?(?:/[A-Za-z0-9._\-]{1,19})*/)[A-Za-z0-9._\-]{20,}",
+                ),
+                "${1}[redacted-rpc-key]",
+            ),
             // 0x-prefixed hex of address length or longer: addresses (40),
             // private keys / tx hashes / block hashes (64), signatures (130).
             (build(r"0x[0-9a-fA-F]{40,}"), "[redacted-hex]"),
@@ -98,15 +110,16 @@ pub fn scrub_event(mut event: Event<'static>) -> Option<Event<'static>> {
     event.server_name = None; // host identity
 
     // Redact secret-shaped text from remaining free-text fields.
-    for field in [
+    for text in [
         &mut event.message,
         &mut event.culprit,
         &mut event.transaction,
         &mut event.logger,
-    ] {
-        if let Some(text) = field {
-            *text = redact_secrets(text);
-        }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *text = redact_secrets(text);
     }
     if let Some(logentry) = event.logentry.as_mut() {
         logentry.message = redact_secrets(&logentry.message);
@@ -190,6 +203,54 @@ mod tests {
     }
 
     #[test]
+    fn redacts_api_key_in_rpc_url_path() {
+        for url in [
+            "https://eth-sepolia.g.alchemy.com/v2/alch_EPqFizwy30wuSFY4ewmD-",
+            "wss://eth-sepolia.g.alchemy.com/v2/alch_EPqFizwy30wuSFY4ewmD-",
+            "https://mainnet.infura.io/v3/0123456789abcdef0123456789abcdef",
+        ] {
+            let out = redact_secrets(url);
+            assert!(
+                out.contains("[redacted-rpc-key]"),
+                "not redacted: {url} -> {out}"
+            );
+            assert!(
+                !out.contains("alch_EPqFizwy30wuSFY4ewmD-"),
+                "key leaked: {out}"
+            );
+            assert!(!out.contains("0123456789abcdef"), "key leaked: {out}");
+        }
+    }
+
+    #[test]
+    fn redacts_rpc_key_inside_a_provider_error_string() {
+        // The shape alloy produces when a connection fails.
+        let msg = "error sending request for url \
+                   (https://eth-sepolia.g.alchemy.com/v2/alch_EPqFizwy30wuSFY4ewmD-)";
+        let out = redact_secrets(msg);
+        assert!(
+            !out.contains("alch_EPqFizwy30wuSFY4ewmD-"),
+            "key leaked: {out}"
+        );
+        assert!(
+            out.contains("eth-sepolia.g.alchemy.com"),
+            "host should survive for diagnosis: {out}"
+        );
+    }
+
+    #[test]
+    fn keeps_keyless_rpc_urls_readable() {
+        for url in [
+            "https://eth.llamarpc.com",
+            "https://polygon-rpc.com/",
+            "http://192.168.1.10:8545/",
+            "https://api.coingecko.com/api/v3/simple/price",
+        ] {
+            assert_eq!(redact_secrets(url), url, "over-redacted: {url}");
+        }
+    }
+
+    #[test]
     fn keeps_innocuous_text() {
         let msg = "failed to connect to database after 3 retries";
         assert_eq!(redact_secrets(msg), msg);
@@ -197,10 +258,12 @@ mod tests {
 
     #[test]
     fn scrub_event_drops_request_user_and_server_name() {
-        let mut event = Event::default();
-        event.request = Some(sentry::protocol::Request::default());
-        event.user = Some(sentry::protocol::User::default());
-        event.server_name = Some("payserver-prod-01".into());
+        let event = Event {
+            request: Some(sentry::protocol::Request::default()),
+            user: Some(sentry::protocol::User::default()),
+            server_name: Some("payserver-prod-01".into()),
+            ..Default::default()
+        };
 
         let scrubbed = scrub_event(event).expect("event passes through");
         assert!(scrubbed.request.is_none());
@@ -210,11 +273,14 @@ mod tests {
 
     #[test]
     fn scrub_event_redacts_message_and_extra() {
-        let mut event = Event::default();
-        event.message = Some(
-            "panic: invalid key 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
-                .to_string(),
-        );
+        let mut event = Event {
+            message: Some(
+                "panic: invalid key \
+                 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
         event.extra.insert(
             "ctx".to_string(),
             Value::String("token=sk_live_supersecret".to_string()),
