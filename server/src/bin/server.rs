@@ -5,6 +5,7 @@
 //! DATABASE_URL="postgres://..." cargo run --release
 //! ```
 
+use secrecy::ExposeSecret;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -49,7 +50,7 @@ async fn main() -> Result<()> {
 
     // Connect to database
     tracing::info!("Connecting to database...");
-    let data_service = Arc::new(PgDataService::connect(&config.database_url).await?);
+    let data_service = Arc::new(PgDataService::connect(config.database_url.expose_secret()).await?);
     tracing::info!("Database connected");
 
     // Create auth service with custom config
@@ -105,9 +106,12 @@ async fn main() -> Result<()> {
     };
 
     // Connect to Redis (REQUIRED for event processing)
+    // One explicit expose for the three consumers below (bridge, webhooks,
+    // idempotency); the URL stays a secret everywhere else.
     let redis_url = config
         .redis_url
         .as_ref()
+        .map(ExposeSecret::expose_secret)
         .ok_or_else(|| anyhow::anyhow!("REDIS_URL is required for event processing"))?;
 
     tracing::info!("Connecting to Redis...");

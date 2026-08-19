@@ -40,16 +40,19 @@
 //! - `WATCH_RETRY_INTERVAL_SECS` - Retry interval in seconds (default: 30)
 //! - `WATCH_RETRY_ENABLED` - Enable/disable retry service (default: true)
 
+use secrecy::{ExposeSecret, SecretString};
 use std::env;
 
 /// Server configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Database connection URL.
-    pub database_url: String,
+    /// Database connection URL. Secret: carries the Postgres password.
+    /// `SecretString` keeps it out of the derived `Debug` above.
+    pub database_url: SecretString,
 
-    /// Redis connection URL for monitor communication.
-    pub redis_url: Option<String>,
+    /// Redis connection URL for monitor communication. Secret: may carry
+    /// credentials (`redis://user:pass@host`).
+    pub redis_url: Option<SecretString>,
 
     /// HTTP server host.
     pub host: String,
@@ -80,10 +83,12 @@ impl Config {
     /// - `LOG_LEVEL` - Log level (default: info)
     /// - `ENABLE_SWAGGER` - Enable Swagger UI (default: true)
     pub fn from_env() -> anyhow::Result<Self> {
-        let database_url = env::var("DATABASE_URL")
-            .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?;
+        let database_url = SecretString::from(
+            env::var("DATABASE_URL")
+                .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?,
+        );
 
-        let redis_url = env::var("REDIS_URL").ok();
+        let redis_url = env::var("REDIS_URL").ok().map(SecretString::from);
 
         let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port = env::var("PORT")
@@ -113,14 +118,13 @@ impl Config {
     /// Validate configuration values.
     fn validate(&self) -> anyhow::Result<()> {
         // Validate DATABASE_URL format
-        if !self.database_url.starts_with("postgres://")
-            && !self.database_url.starts_with("postgresql://")
-        {
+        let database_url = self.database_url.expose_secret();
+        if !database_url.starts_with("postgres://") && !database_url.starts_with("postgresql://") {
             anyhow::bail!("DATABASE_URL must start with 'postgres://' or 'postgresql://'");
         }
 
         // Validate REDIS_URL format (if provided)
-        if let Some(ref redis_url) = self.redis_url
+        if let Some(redis_url) = self.redis_url.as_ref().map(ExposeSecret::expose_secret)
             && !redis_url.starts_with("redis://")
             && !redis_url.starts_with("rediss://")
         {
@@ -187,6 +191,31 @@ pub fn parse_captcha_env() -> anyhow::Result<Option<(String, String, String)>> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn debug_does_not_leak_database_credentials() {
+        // DATABASE_URL carries the Postgres password in every deployment and
+        // Config derives Debug — SecretString is what keeps `{:?}` safe here.
+        let config = Config {
+            database_url: SecretString::from(
+                "postgres://ethpayserver:hunter2@postgres/ethpayserver".to_string(),
+            ),
+            redis_url: Some(SecretString::from("redis://:r3dis@redis:6379".to_string())),
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            log_level: "info".to_string(),
+            enable_swagger: false,
+        };
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains("hunter2"),
+            "db password leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("r3dis"),
+            "redis password leaked: {rendered}"
+        );
+    }
 
     // ========================================================================
     // WebAuthn RP ID derivation

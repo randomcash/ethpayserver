@@ -86,6 +86,7 @@ lettre = { version = "0.11", default-features = false, features = ["tokio1-rustl
 
 # Database migrations
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "migrate"] }
+secrecy = "0.10.3"
 
 [dev-dependencies]
 tokio = { version = "1.42", features = ["test-util"] }
