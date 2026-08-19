@@ -290,6 +290,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      sha_tag: ${{ steps.tag.outputs.sha_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -305,9 +307,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tag
+      - name: Compute image tags
         id: tag
         run: |
+          # Two tags per build (RCS-190). The moving one (testnet-latest) is
+          # what humans pull; the per-commit one is never reused, so the
+          # previous build keeps a name after the next push and rolling back
+          # is a `compose up` instead of revert -> rebuild -> redeploy.
+          # 7 chars matches `git rev-parse --short`, i.e. the build_sha the
+          # server reports on /health — so a running container can be matched
+          # to the image it came from.
+          echo "sha_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
@@ -317,20 +327,26 @@ jobs:
       - name: Build & push server
         run: |
           docker build -f docker/ethpayserver.Dockerfile \
-            -t ${{ env.IMAGE_BASE }}:${{ steps.tag.outputs.tag }} .
+            -t ${{ env.IMAGE_BASE }}:${{ steps.tag.outputs.tag }} \
+            -t ${{ env.IMAGE_BASE }}:${{ steps.tag.outputs.sha_tag }} .
           docker push ${{ env.IMAGE_BASE }}:${{ steps.tag.outputs.tag }}
+          docker push ${{ env.IMAGE_BASE }}:${{ steps.tag.outputs.sha_tag }}
 
       - name: Build & push monitor
         run: |
           docker build -f docker/evmmonitor.Dockerfile \
-            -t ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.tag }} .
+            -t ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.tag }} \
+            -t ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.sha_tag }} .
           docker push ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.tag }}
+          docker push ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.sha_tag }}
 
       - name: Build & push client
         run: |
           docker build -f docker/client.Dockerfile \
-            -t ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.tag }} .
+            -t ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.tag }} \
+            -t ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.sha_tag }} .
           docker push ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.tag }}
+          docker push ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.sha_tag }}
 
   # staging (main) + production (tags) deploy via SSH push — see central-infrastructure/deploy.yml
   notify-deploy:
@@ -377,15 +393,50 @@ jobs:
       packages: read
     steps:
       - name: Deploy via local docker compose
+        env:
+          SHA_TAG: ${{ needs.docker.outputs.sha_tag }}
         run: |
           set -e
+          # Deploy the immutable per-commit tag, not the moving one (RCS-190).
+          # Pulling `testnet-latest` meant every deploy overwrote the only
+          # reference to the previous build, so `docker ps` could not say which
+          # commit was live and undoing a bad deploy needed a full rebuild.
+          [ -n "$SHA_TAG" ] || { echo "::error::docker job produced no sha tag"; exit 1; }
+
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           cd ~/deploy/ethpayserver/testnet
-          export SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:testnet-latest
-          export CLIENT_IMAGE=ghcr.io/randomcash/ethpayserver/client:testnet-latest
-          export MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:testnet-latest
+
+          export SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:$SHA_TAG
+          export CLIENT_IMAGE=ghcr.io/randomcash/ethpayserver/client:$SHA_TAG
+          export MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:$SHA_TAG
+
+          # Whatever is live right now becomes the rollback target, but only
+          # once this deploy has actually come up.
+          PREV="$(cat .deployed-sha 2>/dev/null || true)"
+
           docker compose pull
           docker compose up -d --remove-orphans
+          # Dangling layers only: the previous deploy's image still carries its
+          # own sha- tag locally, so a rollback does not have to re-pull.
           docker image prune -f
           docker compose ps
+
+          # One line each, next to the compose file, so recovery needs neither
+          # CI nor GitHub — just ssh and read the file.
+          if [ -n "$PREV" ] && [ "$PREV" != "$SHA_TAG" ]; then
+            printf '%s\n' "$PREV" > .previous-sha
+          fi
+          printf '%s\n' "$SHA_TAG" > .deployed-sha
+
+          echo "deployed $SHA_TAG (previous: ${PREV:-none})"
+          if [ -n "$PREV" ] && [ "$PREV" != "$SHA_TAG" ]; then
+            echo "roll back with:"
+            echo "  cd ~/deploy/ethpayserver/testnet \\"
+            echo "  && SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:$PREV \\"
+            echo "  CLIENT_IMAGE=ghcr.io/randomcash/ethpayserver/client:$PREV \\"
+            echo "  MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:$PREV \\"
+            echo "  docker compose up -d"
+            echo "(images only — migrations already applied stay applied)"
+          fi
+
           docker logout ghcr.io || true
