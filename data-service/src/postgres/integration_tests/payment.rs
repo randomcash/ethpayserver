@@ -3,7 +3,7 @@
 use chrono::Utc;
 use types::{InvoiceWriter, PaymentReader, PaymentWriter};
 
-use super::{create_test_service, test_invoice, test_payment};
+use super::{create_test_service, seeded_test_invoice, test_payment};
 
 #[tokio::test]
 #[ignore]
@@ -11,7 +11,7 @@ async fn integration_payment_crud() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice first (payments have FK to invoices)
-    let invoice = test_invoice();
+    let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
     // Create payment
@@ -46,7 +46,7 @@ async fn integration_payment_get_for_invoice() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice
-    let invoice = test_invoice();
+    let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
     // Create multiple payments for the same invoice
@@ -69,7 +69,7 @@ async fn integration_payment_get_awaiting_confirmation() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice
-    let invoice = test_invoice();
+    let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
     // Create unconfirmed payment (confirmed_at = None)
@@ -98,7 +98,7 @@ async fn integration_payment_upsert_update() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice
-    let invoice = test_invoice();
+    let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
     // Create payment with no block_number initially

@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use types::{InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter};
 
-use super::{create_test_service, test_invoice};
+use super::{assert_amount_eq, create_test_service, seeded_test_invoice};
 
 #[tokio::test]
 #[ignore]
@@ -11,7 +11,7 @@ async fn integration_invoice_crud() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice
-    let invoice = test_invoice();
+    let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
     // Get invoice
@@ -22,7 +22,11 @@ async fn integration_invoice_crud() {
     assert_eq!(fetched.id, invoice.id);
     assert_eq!(fetched.status, InvoiceStatus::Pending);
     assert_eq!(fetched.currency, "ETH");
-    assert_eq!(fetched.amount, invoice.amount);
+    assert_amount_eq(
+        &fetched.amount,
+        &invoice.amount,
+        "invoice amount round-trip",
+    );
 
     // Update status
     InvoiceWriter::update_status(&service, &invoice.id, InvoiceStatus::Processing)
@@ -42,7 +46,11 @@ async fn integration_invoice_crud() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fetched.amount_received, "500000000000000000");
+    assert_amount_eq(
+        &fetched.amount_received,
+        "500000000000000000",
+        "partial payment",
+    );
 
     // Upsert (update existing)
     let mut updated = fetched.clone();
@@ -55,7 +63,11 @@ async fn integration_invoice_crud() {
         .unwrap()
         .unwrap();
     assert_eq!(fetched.status, InvoiceStatus::Paid);
-    assert_eq!(fetched.amount_received, "1000000000000000000");
+    assert_amount_eq(
+        &fetched.amount_received,
+        "1000000000000000000",
+        "full payment",
+    );
 }
 
 #[tokio::test]
@@ -64,17 +76,17 @@ async fn integration_invoice_query() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create multiple invoices
-    let mut invoice1 = test_invoice();
+    let mut invoice1 = seeded_test_invoice(&service).await;
     invoice1.status = InvoiceStatus::Pending;
     invoice1.currency = "ETH".to_string();
     InvoiceWriter::upsert(&service, &invoice1).await.unwrap();
 
-    let mut invoice2 = test_invoice();
+    let mut invoice2 = seeded_test_invoice(&service).await;
     invoice2.status = InvoiceStatus::Paid;
     invoice2.currency = "ETH".to_string();
     InvoiceWriter::upsert(&service, &invoice2).await.unwrap();
 
-    let mut invoice3 = test_invoice();
+    let mut invoice3 = seeded_test_invoice(&service).await;
     invoice3.status = InvoiceStatus::Pending;
     invoice3.currency = "USDC".to_string();
     InvoiceWriter::upsert(&service, &invoice3).await.unwrap();
@@ -103,7 +115,7 @@ async fn integration_invoice_expired() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create an expired invoice
-    let mut expired_invoice = test_invoice();
+    let mut expired_invoice = seeded_test_invoice(&service).await;
     expired_invoice.expires_at = Utc::now() - Duration::hours(1);
     expired_invoice.status = InvoiceStatus::Pending;
     InvoiceWriter::upsert(&service, &expired_invoice)
@@ -111,7 +123,7 @@ async fn integration_invoice_expired() {
         .unwrap();
 
     // Create a non-expired invoice
-    let mut active_invoice = test_invoice();
+    let mut active_invoice = seeded_test_invoice(&service).await;
     active_invoice.expires_at = Utc::now() + Duration::hours(1);
     active_invoice.status = InvoiceStatus::Pending;
     InvoiceWriter::upsert(&service, &active_invoice)
@@ -132,7 +144,7 @@ async fn integration_invoice_expired() {
 async fn integration_invoice_with_metadata() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
-    let mut invoice = test_invoice();
+    let mut invoice = seeded_test_invoice(&service).await;
     invoice.metadata = Some(serde_json::json!({
         "order_id": "12345",
         "customer": "test@example.com"
