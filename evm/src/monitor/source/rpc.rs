@@ -118,6 +118,22 @@ pub struct RpcBlockSource {
     error_message: RwLock<Option<String>>,
 }
 
+impl RpcSourceConfig {
+    /// Render a provider error with this source's endpoints scrubbed out.
+    ///
+    /// Alloy/reqwest embed the endpoint they were given in transport errors, so
+    /// every provider error — not just the connect ones — can carry the API key.
+    /// Going through the config means a new call site cannot miss the WS URL.
+    fn scrub(&self, e: impl std::fmt::Display) -> String {
+        let mut rendered = redact_err(e, self.http_url.expose_secret());
+        if let Some(ws_url) = &self.ws_url {
+            let secret = ws_url.expose_secret();
+            rendered = rendered.replace(secret, &redact_url(secret));
+        }
+        rendered
+    }
+}
+
 impl RpcBlockSource {
     /// Create a new RPC block source.
     pub async fn new(config: RpcSourceConfig) -> EvmResult<Self> {
@@ -145,10 +161,9 @@ impl RpcBlockSource {
             })?;
 
         // Verify chain ID
-        let chain_id = http_provider
-            .get_chain_id()
-            .await
-            .map_err(|e| EvmError::Connection(format!("failed to get chain ID: {}", e)))?;
+        let chain_id = http_provider.get_chain_id().await.map_err(|e| {
+            EvmError::Connection(format!("failed to get chain ID: {}", config.scrub(e)))
+        })?;
 
         if chain_id != config.chain_id {
             return Err(EvmError::InvalidChainConfig(format!(
@@ -195,10 +210,12 @@ impl RpcBlockSource {
             })?;
 
         // Verify chain ID
-        let chain_id = ws_provider
-            .get_chain_id()
-            .await
-            .map_err(|e| EvmError::Connection(format!("failed to verify WS chain ID: {}", e)))?;
+        let chain_id = ws_provider.get_chain_id().await.map_err(|e| {
+            EvmError::Connection(format!(
+                "failed to verify WS chain ID: {}",
+                self.config.scrub(e)
+            ))
+        })?;
 
         if chain_id != self.config.chain_id {
             return Err(EvmError::InvalidChainConfig(format!(
@@ -215,10 +232,12 @@ impl RpcBlockSource {
         );
 
         // Subscribe to new blocks (returns headers)
-        let subscription = ws_provider
-            .subscribe_blocks()
-            .await
-            .map_err(|e| EvmError::Subscription(format!("block subscription failed: {}", e)))?;
+        let subscription = ws_provider.subscribe_blocks().await.map_err(|e| {
+            EvmError::Subscription(format!(
+                "block subscription failed: {}",
+                self.config.scrub(e)
+            ))
+        })?;
 
         let config_chain_id = self.config.chain_id;
 
@@ -246,19 +265,22 @@ impl RpcBlockSource {
 
     /// Create a polling-based block stream (fallback).
     fn create_polling_stream(&self) -> BlockStream {
-        let http_url = self.config.http_url.expose_secret().to_string();
+        let http_url = self.config.http_url.clone();
         let interval = self.config.polling_interval_ms;
         let chain_id = self.config.chain_id;
 
         let stream = async_stream::stream! {
             let provider = match ProviderBuilder::new()
                 .disable_recommended_fillers()
-                .connect(&http_url)
+                .connect(http_url.expose_secret())
                 .await
             {
                 Ok(p) => p,
                 Err(e) => {
-                    yield Err(EvmError::Connection(format!("polling connection failed: {}", e)));
+                    yield Err(EvmError::Connection(format!(
+                        "polling connection failed: {}",
+                        redact_err(e, http_url.expose_secret())
+                    )));
                     return;
                 }
             };
@@ -382,7 +404,7 @@ impl BlockSource for RpcBlockSource {
             self.http_provider
                 .get_logs(&alloy_filter)
                 .await
-                .map_err(|e| EvmError::Rpc(format!("get_logs failed: {}", e)))
+                .map_err(|e| EvmError::Rpc(format!("get_logs failed: {}", self.config.scrub(e))))
         })
         .await
     }
@@ -398,7 +420,7 @@ impl BlockSource for RpcBlockSource {
                 .get_balance(address)
                 .block_id(block_id.into())
                 .await
-                .map_err(|e| EvmError::Rpc(format!("get_balance failed: {}", e)))
+                .map_err(|e| EvmError::Rpc(format!("get_balance failed: {}", self.config.scrub(e))))
         })
         .await
     }
@@ -406,10 +428,9 @@ impl BlockSource for RpcBlockSource {
     async fn get_block_number(&self) -> EvmResult<u64> {
         let chain_id = self.config.chain_id;
         rpc_metrics::timed_rpc(chain_id, "get_block_number", async {
-            self.http_provider
-                .get_block_number()
-                .await
-                .map_err(|e| EvmError::Rpc(format!("get_block_number failed: {}", e)))
+            self.http_provider.get_block_number().await.map_err(|e| {
+                EvmError::Rpc(format!("get_block_number failed: {}", self.config.scrub(e)))
+            })
         })
         .await
     }
@@ -420,7 +441,7 @@ impl BlockSource for RpcBlockSource {
             self.http_provider
                 .get_block_by_number(BlockNumberOrTag::Number(number))
                 .await
-                .map_err(|e| EvmError::Rpc(format!("get_block failed: {}", e)))
+                .map_err(|e| EvmError::Rpc(format!("get_block failed: {}", self.config.scrub(e))))
         })
         .await
     }
@@ -444,7 +465,12 @@ impl BlockSource for RpcBlockSource {
                 .get_block_by_number(BlockNumberOrTag::Number(block_number))
                 .kind(BlockTransactionsKind::Full)
                 .await
-                .map_err(|e| EvmError::Rpc(format!("get_block_with_txs failed: {}", e)))
+                .map_err(|e| {
+                    EvmError::Rpc(format!(
+                        "get_block_with_txs failed: {}",
+                        self.config.scrub(e)
+                    ))
+                })
         })
         .await?;
 
@@ -553,6 +579,29 @@ mod tests {
     #[test]
     fn redact_url_handles_garbage() {
         assert_eq!(redact_url("not a url"), "<unparseable-url>");
+    }
+
+    #[test]
+    fn scrub_covers_both_endpoints_not_just_http() {
+        // A WS transport error names the WS URL; scrubbing only http_url would
+        // have let that one through.
+        let config = RpcSourceConfig::with_websocket(
+            "wss://eth-sepolia.g.alchemy.com/v2/alch_wskey",
+            "https://eth-sepolia.g.alchemy.com/v2/alch_httpkey",
+            11155111,
+        );
+        let rendered = config.scrub(
+            "error sending request for url \
+             (wss://eth-sepolia.g.alchemy.com/v2/alch_wskey)",
+        );
+        assert!(
+            !rendered.contains("alch_wskey"),
+            "ws key leaked: {rendered}"
+        );
+        assert!(
+            rendered.contains("eth-sepolia.g.alchemy.com"),
+            "host should survive: {rendered}"
+        );
     }
 
     #[test]
