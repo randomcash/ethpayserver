@@ -81,6 +81,7 @@ utoipa = { version = "5", features = ["axum_extras"], optional = true }
 types = { git = "https://github.com/randomcash/payserver-commons.git", optional = true }
 data-service = { path = "../data-service", optional = true }
 auth = { git = "https://github.com/randomcash/payserver-commons.git", optional = true }
+secrecy = { version = "0.10.3", features = ["serde"] }
 
 [lints.clippy]
 too_many_lines = { level = "deny", priority = -1 }

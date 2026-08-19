@@ -1,6 +1,7 @@
 //! CLI args and configuration-file parsing for evmmonitor.
 
 use clap::Parser;
+use secrecy::SecretString;
 use serde::Deserialize;
 use std::path::PathBuf;
 use tracing::warn;
@@ -66,8 +67,10 @@ pub(crate) struct BridgeConfigFile {
 #[derive(Debug, Deserialize, Clone)]
 pub(crate) struct ChainRpcConfig {
     pub chain_id: u64,
-    pub rpc_http: String,
-    pub rpc_ws: Option<String>,
+    /// Secret: provider URLs carry the API key, so the whole URL is sensitive.
+    /// `SecretString` keeps the derived `Debug` above from printing it.
+    pub rpc_http: SecretString,
+    pub rpc_ws: Option<SecretString>,
 }
 
 pub(crate) fn load_config(args: &Args) -> anyhow::Result<Config> {
@@ -110,8 +113,8 @@ pub(crate) fn get_chain_configs(
             if let Ok(rpc_http) = std::env::var(&http_key) {
                 configs.push(ChainRpcConfig {
                     chain_id,
-                    rpc_http,
-                    rpc_ws: std::env::var(&ws_key).ok(),
+                    rpc_http: SecretString::from(rpc_http),
+                    rpc_ws: std::env::var(&ws_key).ok().map(SecretString::from),
                 });
             } else {
                 warn!(
