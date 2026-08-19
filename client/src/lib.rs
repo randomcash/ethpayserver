@@ -142,15 +142,20 @@ fn render_wallet_actions(
     )
 }
 
-/// Initialize and mount the app (called when loaded as WASM module).
-#[wasm_bindgen(start)]
-pub fn init() {
+/// Mount the app into `#app`, clearing whatever placeholder is there first.
+///
+/// This is the single mounting implementation. Trunk builds the cdylib
+/// (`data-target-name="ethpayserver_client"` in index.html), so `init` below is
+/// the entry point that actually ships; `src/main.rs` exists for the standalone
+/// bin target. Both call this, so a fix to one cannot silently miss the other —
+/// which is exactly how the first-paint loader survived its own removal code.
+pub fn mount_app() {
     use leptos::mount::mount_to;
     use leptos::prelude::*;
     use wasm_bindgen::JsCast;
 
     console_error_panic_hook::set_once();
-    web_sys::console::log_1(&"EVM PayServer: Starting...".into());
+    web_sys::console::log_1(&"EVM PayServer: Starting app...".into());
 
     // Mount to the #app div
     let app_element = document()
@@ -158,14 +163,21 @@ pub fn init() {
         .expect("Could not find #app element")
         .unchecked_into::<web_sys::HtmlElement>();
 
-    web_sys::console::log_1(&"EVM PayServer: Mounting app...".into());
+    web_sys::console::log_1(&"EVM PayServer: Found #app element, mounting...".into());
+
+    // Remove the inline first-paint loader (#initial-loader in index.html).
+    // Leptos `mount_to` appends to #app rather than replacing its contents, so
+    // the placeholder must be cleared explicitly or it covers the mounted app
+    // forever (it is position:fixed; inset:0).
+    app_element.set_inner_html("");
 
     mount_to(app_element, App).forget();
 
-    web_sys::console::log_1(&"EVM PayServer: App mounted!".into());
+    web_sys::console::log_1(&"EVM PayServer: App mounted successfully".into());
 }
 
-/// Public init function that can be called manually.
-pub fn initialize() {
-    console_error_panic_hook::set_once();
+/// Initialize and mount the app (called when loaded as WASM module).
+#[wasm_bindgen(start)]
+pub fn init() {
+    mount_app();
 }
