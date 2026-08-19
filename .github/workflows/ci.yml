@@ -16,6 +16,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +35,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+        run: |
+          # apt on hosted runners hangs often enough to matter: a stuck
+          # `apt-get update` held the pipeline for 30+ minutes against a
+          # 3-hour job timeout. Bound each attempt and retry.
+          for attempt in 1 2 3; do
+            timeout 180 sudo apt-get update \
+              && timeout 180 sudo apt-get install -y mold \
+              && break
+            echo "::warning::apt attempt $attempt failed or timed out; retrying"
+            sleep 15
+            if [ "$attempt" = 3 ]; then echo "::error::apt failed 3 times"; exit 1; fi
+          done
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -45,6 +57,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     needs: [lint]
     services:
       postgres:
@@ -76,7 +89,17 @@ jobs:
 
       - name: Install mold + nextest
         run: |
-          sudo apt-get update && sudo apt-get install -y mold
+          # apt on hosted runners hangs often enough to matter: a stuck
+          # `apt-get update` held the pipeline for 30+ minutes against a
+          # 3-hour job timeout. Bound each attempt and retry.
+          for attempt in 1 2 3; do
+            timeout 180 sudo apt-get update \
+              && timeout 180 sudo apt-get install -y mold \
+              && break
+            echo "::warning::apt attempt $attempt failed or timed out; retrying"
+            sleep 15
+            if [ "$attempt" = 3 ]; then echo "::error::apt failed 3 times"; exit 1; fi
+          done
           curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
 
       - name: Unit tests
@@ -94,6 +117,7 @@ jobs:
   audit:
     name: Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [lint]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     env:
@@ -119,6 +143,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [lint, audit]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -139,7 +164,17 @@ jobs:
 
       - name: Install mold + trunk
         run: |
-          sudo apt-get update && sudo apt-get install -y mold
+          # apt on hosted runners hangs often enough to matter: a stuck
+          # `apt-get update` held the pipeline for 30+ minutes against a
+          # 3-hour job timeout. Bound each attempt and retry.
+          for attempt in 1 2 3; do
+            timeout 180 sudo apt-get update \
+              && timeout 180 sudo apt-get install -y mold \
+              && break
+            echo "::warning::apt attempt $attempt failed or timed out; retrying"
+            sleep 15
+            if [ "$attempt" = 3 ]; then echo "::error::apt failed 3 times"; exit 1; fi
+          done
           cargo install trunk --locked
 
       - name: Build server
@@ -169,6 +204,7 @@ jobs:
   e2e:
     name: E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [build]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     services:
@@ -247,6 +283,7 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [build]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -298,6 +335,7 @@ jobs:
   notify-deploy:
     name: Notify Deploy (staging / production)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [docker]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -330,6 +368,7 @@ jobs:
   deploy-testnet:
     name: Deploy testnet (self-hosted · debianbase)
     runs-on: [self-hosted, debianbase]
+    timeout-minutes: 20
     needs: [docker]
     if: github.ref == 'refs/heads/testnet'
     permissions:
