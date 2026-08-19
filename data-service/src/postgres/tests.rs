@@ -21,6 +21,103 @@ pub(super) async fn create_test_service() -> Option<PgDataService> {
     Some(PgDataService::new(pool))
 }
 
+/// Compare two decimal amount strings by value rather than by formatting.
+///
+/// Amount columns are `numeric(78,18)`, so Postgres returns `"60"` as
+/// `"60.000000000000000000"`. Comparing the raw strings makes a correct
+/// round-trip look like a failure (RCS-186). Values reach 37 significant
+/// digits (1e18 wei with 18 decimals), past what a fixed-width decimal type
+/// holds, so normalise the text instead of parsing.
+#[track_caller]
+pub(super) fn assert_amount_eq(actual: &str, expected: &str, context: &str) {
+    assert_eq!(
+        normalize_amount(actual),
+        normalize_amount(expected),
+        "{context} (actual {actual:?}, expected {expected:?})"
+    );
+}
+
+/// Strip the trailing zeros a fixed-scale `numeric` column pads onto a value.
+fn normalize_amount(raw: &str) -> String {
+    match raw.split_once('.') {
+        Some((int, frac)) => {
+            let frac = frac.trim_end_matches('0');
+            if frac.is_empty() {
+                int.to_string()
+            } else {
+                format!("{int}.{frac}")
+            }
+        }
+        None => raw.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod amount_tests {
+    use super::normalize_amount;
+
+    #[test]
+    fn normalises_fixed_scale_padding() {
+        assert_eq!(normalize_amount("60.000000000000000000"), "60");
+        assert_eq!(
+            normalize_amount("1000000000000000000.000000000000000000"),
+            "1000000000000000000"
+        );
+        assert_eq!(normalize_amount("0.050000000000000000"), "0.05");
+        assert_eq!(normalize_amount("100"), "100");
+        assert_eq!(
+            normalize_amount("0.000000000000000001"),
+            "0.000000000000000001"
+        );
+    }
+}
+
+/// Seed a real user + store and return the store id.
+///
+/// `invoices.store_id` is `REFERENCES stores(id)`, and `stores.owner_id` is
+/// `REFERENCES users(id)`, so any test that writes an invoice must seed both
+/// first. A bare `StoreId::new()` violates `invoices_store_id_fkey` — which is
+/// what silently killed every invoice/payment/watched_address/aggregation
+/// integration test (RCS-186).
+pub(super) async fn seed_store(service: &PgDataService) -> StoreId {
+    let user_id = Uuid::new_v4();
+    sqlx::query(
+        r"
+        INSERT INTO users (id, kdf_params, encrypted_symmetric_key, recovery_verification_hash)
+        VALUES ($1, '{}'::jsonb, '{}'::jsonb, 'test-hash')
+        ",
+    )
+    .bind(user_id)
+    .execute(service.pool())
+    .await
+    .expect("seed user");
+
+    let store_id = StoreId::new();
+    sqlx::query(
+        r"
+        INSERT INTO stores (id, name, owner_id)
+        VALUES ($1, $2, $3)
+        ",
+    )
+    .bind(store_id.0)
+    .bind(format!("test-store-{user_id}"))
+    .bind(user_id)
+    .execute(service.pool())
+    .await
+    .expect("seed store");
+
+    store_id
+}
+
+/// Build a test invoice bound to a freshly seeded store, so the FK holds.
+pub(super) async fn seeded_test_invoice(service: &PgDataService) -> InvoiceData {
+    let store_id = seed_store(service).await;
+    InvoiceData {
+        store_id,
+        ..test_invoice()
+    }
+}
+
 pub(super) fn test_invoice() -> InvoiceData {
     InvoiceData {
         id: InvoiceId::new(),

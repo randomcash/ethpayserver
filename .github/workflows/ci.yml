@@ -106,13 +106,14 @@ jobs:
         run: cargo nextest run --workspace --lib --no-fail-fast -j 2
 
       - name: Integration tests
+        # Gating (RCS-186). These were non-blocking and 18 of 27 had been failing
+        # unnoticed on an FK the fixtures never satisfied, so CI reported green
+        # over dead multi-chain and fractional-amount aggregation coverage.
         run: |
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
             cargo run --release --bin migrate_postgres
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
-            cargo nextest run -p data-service --no-fail-fast --run-ignored only -j 1 \
-            || echo "WARNING: integration tests had failures (non-blocking)"
-        continue-on-error: true
+            cargo nextest run -p data-service --no-fail-fast --run-ignored only -j 1
 
   audit:
     name: Audit

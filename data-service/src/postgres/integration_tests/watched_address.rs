@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use types::{InvoiceWriter, PaymentOptionWriter, WatchedAddressReader, WatchedAddressWriter};
 
-use super::{create_test_service, test_invoice, test_payment_option, unique_address};
+use super::{create_test_service, seeded_test_invoice, test_payment_option, unique_address};
 
 #[tokio::test]
 #[ignore]
@@ -11,7 +11,7 @@ async fn integration_watched_address_crud() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice first
-    let invoice = test_invoice();
+    let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
     // Create payment option (watched_addresses link to payment_options now)
@@ -58,7 +58,7 @@ async fn integration_watched_address_get_active() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice with future expiration
-    let mut invoice = test_invoice();
+    let mut invoice = seeded_test_invoice(&service).await;
     invoice.expires_at = Utc::now() + Duration::hours(2);
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
@@ -100,7 +100,7 @@ async fn integration_watched_address_different_chains() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice
-    let invoice = test_invoice();
+    let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
     // Create payment options for different chains
@@ -152,12 +152,14 @@ async fn integration_watched_address_upsert_replaces() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create invoice
-    let invoice = test_invoice();
+    let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
-    // Create two payment options
+    // Two DISTINCT payment options: `unique_payment_option` is
+    // (invoice_id, payment_method_id), and the method id is derived from the
+    // chain, so both on chain 1 collide before the test can assert anything.
     let po1 = test_payment_option(&invoice.id, 1);
-    let po2 = test_payment_option(&invoice.id, 1);
+    let po2 = test_payment_option(&invoice.id, 137);
     PaymentOptionWriter::create(&service, &po1).await.unwrap();
     PaymentOptionWriter::create(&service, &po2).await.unwrap();
 

@@ -10,7 +10,8 @@ use types::{
 };
 
 use super::{
-    create_test_service, test_invoice, test_payment_option_with_rate, test_payment_with_credit,
+    assert_amount_eq, create_test_service, seeded_test_invoice, test_payment_option_with_rate,
+    test_payment_with_credit,
 };
 
 /// E2E test: Multi-currency payment aggregation
@@ -29,7 +30,7 @@ async fn integration_multi_currency_payment_aggregation() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create a $100 USD invoice
-    let mut invoice = test_invoice();
+    let mut invoice = seeded_test_invoice(&service).await;
     invoice.currency = "USD".to_string();
     invoice.amount = "100".to_string();
     invoice.amount_received = "0".to_string();
@@ -82,9 +83,10 @@ async fn integration_multi_currency_payment_aggregation() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        fetched.amount_received, "60",
-        "After ETH payment, amount_received should be $60"
+    assert_amount_eq(
+        &fetched.amount_received,
+        "60",
+        "After ETH payment, amount_received should be $60",
     );
 
     // Payment 2: User pays $40 worth of USDC
@@ -108,9 +110,10 @@ async fn integration_multi_currency_payment_aggregation() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        fetched.amount_received, "100",
-        "After both payments, amount_received should be $100"
+    assert_amount_eq(
+        &fetched.amount_received,
+        "100",
+        "After both payments, amount_received should be $100",
     );
 
     // Verify invoice transitioned to processing (trigger sets this on first payment)
@@ -128,10 +131,24 @@ async fn integration_multi_currency_payment_aggregation() {
 
     // Verify each payment has correct credited_amount
     let eth_p = payments.iter().find(|p| p.asset_symbol == "ETH").unwrap();
-    assert_eq!(eth_p.credited_amount, Some("60".to_string()));
+    assert_amount_eq(
+        eth_p
+            .credited_amount
+            .as_deref()
+            .expect("ETH payment credited"),
+        "60",
+        "ETH payment credited_amount",
+    );
 
     let usdc_p = payments.iter().find(|p| p.asset_symbol == "USDC").unwrap();
-    assert_eq!(usdc_p.credited_amount, Some("40".to_string()));
+    assert_amount_eq(
+        usdc_p
+            .credited_amount
+            .as_deref()
+            .expect("USDC payment credited"),
+        "40",
+        "USDC payment credited_amount",
+    );
 }
 
 /// E2E test: Same-asset payment (no rate conversion)
@@ -146,7 +163,7 @@ async fn integration_same_asset_payment_no_conversion() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create a 1.5 ETH invoice
-    let mut invoice = test_invoice();
+    let mut invoice = seeded_test_invoice(&service).await;
     invoice.currency = "ETH".to_string();
     invoice.amount = "1.5".to_string();
     invoice.amount_received = "0".to_string();
@@ -184,9 +201,10 @@ async fn integration_same_asset_payment_no_conversion() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        fetched.amount_received, "1.5",
-        "amount_received should be 1.5 ETH"
+    assert_amount_eq(
+        &fetched.amount_received,
+        "1.5",
+        "amount_received should be 1.5 ETH",
     );
 }
 
@@ -202,7 +220,7 @@ async fn integration_payment_without_credit_not_counted() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create a $100 USD invoice
-    let mut invoice = test_invoice();
+    let mut invoice = seeded_test_invoice(&service).await;
     invoice.currency = "USD".to_string();
     invoice.amount = "100".to_string();
     invoice.amount_received = "0".to_string();
@@ -231,9 +249,10 @@ async fn integration_payment_without_credit_not_counted() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        fetched.amount_received, "0",
-        "Payment without credited_amount should not be counted"
+    assert_amount_eq(
+        &fetched.amount_received,
+        "0",
+        "Payment without credited_amount should not be counted",
     );
 
     // Invoice should still transition to processing (payment was detected)
@@ -253,7 +272,7 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create a $100 USD invoice
-    let mut invoice = test_invoice();
+    let mut invoice = seeded_test_invoice(&service).await;
     invoice.currency = "USD".to_string();
     invoice.amount = "100".to_string();
     invoice.amount_received = "0".to_string();
@@ -285,8 +304,13 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
     );
     PaymentWriter::upsert(&service, &payment1).await.unwrap();
 
-    // Payment 2: $50
-    let payment2 = test_payment_with_credit(
+    // Payment 2: $50, in an EARLIER block so the reorg below does not reach it.
+    // `mark_reorged` invalidates everything at `block_number >= fork_block`,
+    // which is the correct semantic — a reorg at block N cannot leave a payment
+    // from block N+1 standing. The fixture defaults both payments to the same
+    // block, so this scenario only means what it says if payment 2 predates the
+    // fork point.
+    let mut payment2 = test_payment_with_credit(
         &invoice.id,
         Some(eth_po.id.0),
         1,
@@ -295,6 +319,7 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
         Some("50".to_string()),
         Some("0.0005".to_string()),
     );
+    payment2.block_number = Some(payment1.block_number.expect("fixture sets a block") - 8);
     PaymentWriter::upsert(&service, &payment2).await.unwrap();
 
     // Verify total is $110
@@ -302,7 +327,7 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fetched.amount_received, "110");
+    assert_amount_eq(&fetched.amount_received, "110", "before reorg");
 
     // Reorg: payment1 gets invalidated
     PaymentWriter::mark_reorged(&service, &invoice.id, 1, payment1.block_number.unwrap())
@@ -314,9 +339,10 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        fetched.amount_received, "50",
-        "Reorged payment should not be counted"
+    assert_amount_eq(
+        &fetched.amount_received,
+        "50",
+        "Reorged payment should not be counted",
     );
 }
 
@@ -333,7 +359,7 @@ async fn integration_multi_chain_payment_aggregation() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create a $100 USD invoice
-    let mut invoice = test_invoice();
+    let mut invoice = seeded_test_invoice(&service).await;
     invoice.currency = "USD".to_string();
     invoice.amount = "100".to_string();
     invoice.amount_received = "0".to_string();
@@ -396,9 +422,10 @@ async fn integration_multi_chain_payment_aggregation() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        fetched.amount_received, "100",
-        "Multi-chain payments should aggregate correctly"
+    assert_amount_eq(
+        &fetched.amount_received,
+        "100",
+        "Multi-chain payments should aggregate correctly",
     );
 
     // Verify payments are on different chains
@@ -422,7 +449,7 @@ async fn integration_fractional_amounts_aggregate() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create a $100 USD invoice
-    let mut invoice = test_invoice();
+    let mut invoice = seeded_test_invoice(&service).await;
     invoice.currency = "USD".to_string();
     invoice.amount = "100".to_string();
     invoice.amount_received = "0".to_string();
@@ -461,8 +488,9 @@ async fn integration_fractional_amounts_aggregate() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        fetched.amount_received, "100.00",
-        "Fractional amounts should sum to exactly $100"
+    assert_amount_eq(
+        &fetched.amount_received,
+        "100.00",
+        "Fractional amounts should sum to exactly $100",
     );
 }

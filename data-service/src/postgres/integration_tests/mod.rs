@@ -17,7 +17,9 @@ mod watched_address;
 use chrono::Utc;
 use types::{PaymentMethodId, PaymentOptionData, PaymentOptionId};
 
-use super::tests::{create_test_service, test_invoice, test_payment, unique_address};
+use super::tests::{
+    assert_amount_eq, create_test_service, seeded_test_invoice, test_payment, unique_address,
+};
 
 // =============================================================================
 // Shared test helpers
