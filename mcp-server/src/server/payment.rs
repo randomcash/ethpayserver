@@ -40,7 +40,10 @@ impl EthpayMcpServer {
         Ok(serde_json::to_string_pretty(&result).unwrap())
     }
 
-    pub(super) async fn do_cancel_invoice(&self, args: CancelInvoiceArgs) -> Result<String, String> {
+    pub(super) async fn do_cancel_invoice(
+        &self,
+        args: CancelInvoiceArgs,
+    ) -> Result<String, String> {
         let id = InvoiceId::from_string(args.invoice_id);
         let invoice = self.authorize_invoice(&id).await?;
 
