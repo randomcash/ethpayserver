@@ -421,29 +421,19 @@ jobs:
           docker image prune -f
           docker compose ps
 
-          # One line each, next to the compose file, so recovery needs neither
-          # CI nor GitHub — just ssh and read the file.
-          if [ -n "$PREV" ] && [ "$PREV" != "$SHA_TAG" ]; then
-            printf '%s\n' "$PREV" > .previous-sha
-          fi
-          printf '%s\n' "$SHA_TAG" > .deployed-sha
-
-          echo "deployed $SHA_TAG (previous: ${PREV:-none})"
-          if [ -n "$PREV" ] && [ "$PREV" != "$SHA_TAG" ]; then
-            echo "roll back with:"
-            echo "  cd ~/deploy/ethpayserver/testnet \\"
-            echo "  && SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:$PREV \\"
-            echo "  CLIENT_IMAGE=ghcr.io/randomcash/ethpayserver/client:$PREV \\"
-            echo "  MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:$PREV \\"
-            echo "  docker compose up -d"
-            echo "(images only — migrations already applied stay applied)"
-          fi
+          # Bookkeeping deliberately deferred: a container that started is not
+          # a deploy that works, so .deployed-sha only advances once the
+          # verification step below has proved the stack came up configured.
+          echo "PREV=$PREV" >> "$GITHUB_ENV"
 
           docker logout ghcr.io || true
 
       - name: Verify deploy is actually configured (RCS-187)
+        env:
+          SHA_TAG: ${{ needs.docker.outputs.sha_tag }}
         run: |
           set -e
+          cd ~/deploy/ethpayserver/testnet
           # `docker compose up` succeeding proves the containers started, not
           # that they were configured. When the deploy user cannot read .env,
           # compose substitutes every variable as empty and the stack comes up
@@ -489,3 +479,22 @@ jobs:
           print(f"all {len(chains)} chain monitors connected")
           PY
           echo "::endgroup::"
+
+          # Only now is this SHA a deploy rather than a set of started
+          # containers. Recording it earlier would name a broken build as the
+          # rollback target for the next one.
+          if [ -n "${PREV:-}" ] && [ "$PREV" != "$SHA_TAG" ]; then
+            printf '%s\n' "$PREV" > .previous-sha
+          fi
+          printf '%s\n' "$SHA_TAG" > .deployed-sha
+
+          echo "verified $SHA_TAG (previous: ${PREV:-none})"
+          if [ -n "${PREV:-}" ] && [ "$PREV" != "$SHA_TAG" ]; then
+            echo "roll back with:"
+            echo "  cd ~/deploy/ethpayserver/testnet \\"
+            echo "  && SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:$PREV \\"
+            echo "  CLIENT_IMAGE=ghcr.io/randomcash/ethpayserver/client:$PREV \\"
+            echo "  MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:$PREV \\"
+            echo "  docker compose up -d"
+            echo "(images only — migrations already applied stay applied)"
+          fi
