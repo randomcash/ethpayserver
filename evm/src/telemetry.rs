@@ -36,10 +36,13 @@ fn rules() -> &'static [(Regex, &'static str)] {
             // `key=value` rule can see. Redact any path segment long enough to
             // be a credential and keep scheme/host, so reports still say which
             // provider failed. Query-string forms (`?api-key=`) are already
-            // covered by the `key: value` rule below.
+            // covered by the `key: value` rule below. The 16-char floor clears
+            // real path words (`market_chart`, `getting-started`) while still
+            // catching short provider keys — checked against live Alchemy,
+            // Infura, QuickNode, CoinGecko, Etherscan and Kraken URL shapes.
             (
                 build(
-                    r"((?:https?|wss?)://[A-Za-z0-9.\-]+(?::[0-9]+)?(?:/[A-Za-z0-9._\-]{1,19})*/)[A-Za-z0-9._\-]{20,}",
+                    r"((?:https?|wss?)://[A-Za-z0-9.\-]+(?::[0-9]+)?(?:/[A-Za-z0-9._\-]{1,15})*/)[A-Za-z0-9._\-]{16,}",
                 ),
                 "${1}[redacted-rpc-key]",
             ),
@@ -90,9 +93,52 @@ fn redact_value(value: &mut Value) {
     match value {
         Value::String(s) => *s = redact_secrets(s),
         Value::Array(items) => items.iter_mut().for_each(redact_value),
-        Value::Object(map) => map.values_mut().for_each(redact_value),
+        Value::Object(map) => redact_map(map.iter_mut()),
         _ => {}
     }
+}
+
+/// Redact a structured-data map, keyed.
+///
+/// The text rules need key and value in one string (`password = hunter2`). In a
+/// map they are separate, so a bare "hunter2" matches nothing — the key is the
+/// only signal there is. Every map on an event goes through here (`extra`,
+/// breadcrumb data, stack-frame vars), which is exactly where that shape shows
+/// up.
+fn redact_map<'a>(entries: impl IntoIterator<Item = (&'a String, &'a mut Value)>) {
+    for (key, value) in entries {
+        if is_sensitive_key(key) {
+            *value = Value::String("[redacted]".to_string());
+        } else {
+            redact_value(value);
+        }
+    }
+}
+
+/// Whether a structured-data key names something whose value is a secret.
+fn is_sensitive_key(key: &str) -> bool {
+    const SENSITIVE: &[&str] = &[
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "apikey",
+        "api_key",
+        "api-key",
+        "mnemonic",
+        "seed",
+        "privatekey",
+        "private_key",
+        "private-key",
+        "authorization",
+        "auth",
+        "dsn",
+        "credential",
+        "session",
+        "cookie",
+    ];
+    let key = key.to_ascii_lowercase();
+    SENSITIVE.iter().any(|needle| key.contains(needle))
 }
 
 /// Sentry `before_send` hook: strip PII/secrets before an event leaves the
@@ -123,19 +169,29 @@ pub fn scrub_event(mut event: Event<'static>) -> Option<Event<'static>> {
     }
     if let Some(logentry) = event.logentry.as_mut() {
         logentry.message = redact_secrets(&logentry.message);
+        // `message` is the template ("connecting to %s"); the values live in
+        // `params`, so scrubbing only the message leaves the secret shipping.
+        logentry.params.iter_mut().for_each(redact_value);
     }
     for exception in &mut event.exception.values {
         if let Some(value) = exception.value.as_mut() {
             *value = redact_secrets(value);
+        }
+        // Frame-local variables are captured verbatim where a backtrace
+        // integration fills them in.
+        if let Some(stacktrace) = exception.stacktrace.as_mut() {
+            for frame in &mut stacktrace.frames {
+                redact_map(frame.vars.iter_mut());
+            }
         }
     }
     for breadcrumb in &mut event.breadcrumbs.values {
         if let Some(message) = breadcrumb.message.as_mut() {
             *message = redact_secrets(message);
         }
-        breadcrumb.data.values_mut().for_each(redact_value);
+        redact_map(breadcrumb.data.iter_mut());
     }
-    event.extra.values_mut().for_each(redact_value);
+    redact_map(event.extra.iter_mut());
     for tag_value in event.tags.values_mut() {
         *tag_value = redact_secrets(tag_value);
     }
@@ -245,9 +301,54 @@ mod tests {
             "https://polygon-rpc.com/",
             "http://192.168.1.10:8545/",
             "https://api.coingecko.com/api/v3/simple/price",
+            "https://api.coingecko.com/api/v3/coins/ethereum/market_chart",
+            "https://api.kraken.com/0/public/Ticker",
         ] {
             assert_eq!(redact_secrets(url), url, "over-redacted: {url}");
         }
+    }
+
+    #[test]
+    fn scrub_event_redacts_logentry_params_and_frame_vars() {
+        use sentry::protocol::{Exception, Frame, LogEntry, Stacktrace};
+
+        let mut event = Event {
+            logentry: Some(LogEntry {
+                message: "connecting to %s".to_string(),
+                params: vec![Value::String(
+                    "https://eth-sepolia.g.alchemy.com/v2/alch_supersecretkey".to_string(),
+                )],
+            }),
+            ..Default::default()
+        };
+        let mut frame = Frame::default();
+        frame
+            .vars
+            .insert("password".to_string(), Value::String("hunter2".to_string()));
+        event.exception.values.push(Exception {
+            stacktrace: Some(Stacktrace {
+                frames: vec![frame],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let scrubbed = scrub_event(event).expect("event passes through");
+        let params = &scrubbed.logentry.as_ref().unwrap().params;
+        assert!(
+            !format!("{params:?}").contains("alch_supersecretkey"),
+            "logentry param leaked: {params:?}"
+        );
+        let vars = &scrubbed.exception.values[0]
+            .stacktrace
+            .as_ref()
+            .unwrap()
+            .frames[0]
+            .vars;
+        assert!(
+            !format!("{vars:?}").contains("hunter2"),
+            "frame var leaked: {vars:?}"
+        );
     }
 
     #[test]
