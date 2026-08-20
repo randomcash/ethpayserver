@@ -1,0 +1,154 @@
+/**
+ * Local webhook sink with a publicly-reachable URL.
+ *
+ * `PUT /stores/{id}/webhook` rejects anything that is not `https://` or
+ * `http://localhost` (`server/src/api/stores/webhooks.rs`), and the server runs
+ * in a container, so its `localhost` is not ours. To assert delivery against the
+ * live deployment the sink therefore needs a real HTTPS URL: by default we open
+ * a cloudflared quick tunnel (cloudflared is already on debianbase — it is what
+ * fronts testnet.random.cash), and `E2E_WEBHOOK_PUBLIC_URL` overrides it with a
+ * stable tunnel when one exists.
+ */
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
+export interface ReceivedWebhook {
+  headers: Record<string, string>;
+  /** Exact bytes as delivered — the HMAC is over this, not over a re-serialisation. */
+  raw: string;
+  body: Record<string, unknown>;
+}
+
+export class WebhookSink {
+  private constructor(
+    private readonly server: Server,
+    private readonly tunnel: ChildProcess | null,
+    readonly publicUrl: string,
+    readonly port: number,
+    readonly received: ReceivedWebhook[],
+  ) {}
+
+  /**
+   * Start the sink and resolve a public URL for it.
+   *
+   * @param path path the server should POST to, e.g. `/webhook`
+   */
+  static async start(path = '/webhook'): Promise<WebhookSink> {
+    const received: ReceivedWebhook[] = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        let body: Record<string, unknown> = {};
+        try {
+          body = JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          // Keep the raw bytes; the assertion will report the malformed body.
+        }
+        received.push({ headers: req.headers as Record<string, string>, raw, body });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+      });
+    });
+
+    const fixedPort = process.env.E2E_WEBHOOK_PORT ? Number(process.env.E2E_WEBHOOK_PORT) : 0;
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(fixedPort, '0.0.0.0', resolve);
+    });
+    const port = (server.address() as AddressInfo).port;
+
+    let tunnel: ChildProcess | null = null;
+    let publicUrl: string;
+    if (process.env.E2E_WEBHOOK_PUBLIC_URL) {
+      publicUrl = process.env.E2E_WEBHOOK_PUBLIC_URL.replace(/\/$/, '') + path;
+    } else {
+      const started = await startQuickTunnel(port).catch((err: Error) => {
+        server.close();
+        throw err;
+      });
+      tunnel = started.proc;
+      publicUrl = started.url + path;
+    }
+
+    return new WebhookSink(server, tunnel, publicUrl, port, received);
+  }
+
+  /** Wait for a webhook whose `event_type` matches, or reject on timeout. */
+  async waitFor(eventType: string, timeoutMs: number): Promise<ReceivedWebhook> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const hit = this.received.find((w) => w.body.event_type === eventType);
+      if (hit) return hit;
+      if (Date.now() >= deadline) {
+        const seen = this.received.map((w) => String(w.body.event_type)).join(', ') || 'none';
+        throw new Error(
+          `No '${eventType}' webhook within ${timeoutMs}ms at ${this.publicUrl} (received: ${seen})`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 1_000));
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.tunnel?.kill('SIGTERM');
+    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+}
+
+/**
+ * Verify the `X-Webhook-Signature` header against the store's webhook secret.
+ *
+ * Mirrors `WebhookService::sign_payload` — HMAC-SHA256 over the delivered body,
+ * hex-encoded, prefixed with `sha256=`.
+ */
+export function verifySignature(hook: ReceivedWebhook, secret: string): boolean {
+  const header = hook.headers['x-webhook-signature'];
+  if (!header) return false;
+  const expected = `sha256=${createHmac('sha256', secret).update(hook.raw).digest('hex')}`;
+  const a = Buffer.from(header);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** Spawn `cloudflared tunnel --url` and resolve the assigned trycloudflare host. */
+function startQuickTunnel(port: number): Promise<{ proc: ChildProcess; url: string }> {
+  const bin = process.env.E2E_CLOUDFLARED_BIN || 'cloudflared';
+  const proc = spawn(bin, ['tunnel', '--no-autoupdate', '--url', `http://localhost:${port}`], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  return new Promise((resolve, reject) => {
+    let output = '';
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error(`cloudflared did not report a URL within 60s. Output:\n${output}`));
+    }, 60_000);
+
+    const onChunk = (chunk: Buffer) => {
+      output += chunk.toString();
+      const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+      if (match) {
+        clearTimeout(timer);
+        proc.stdout?.off('data', onChunk);
+        proc.stderr?.off('data', onChunk);
+        resolve({ proc, url: match[0] });
+      }
+    };
+    proc.stdout?.on('data', onChunk);
+    proc.stderr?.on('data', onChunk);
+
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      reject(
+        new Error(
+          `Failed to spawn '${bin}': ${err.message}. Install cloudflared or set ` +
+            `E2E_WEBHOOK_PUBLIC_URL to a tunnel that already forwards to this runner.`,
+        ),
+      );
+    });
+  });
+}

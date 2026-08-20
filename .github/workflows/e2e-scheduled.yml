@@ -1,0 +1,180 @@
+name: Scheduled E2E (testnet)
+
+# Nothing else in the stack proves the deployed system works. Unit tests, the
+# integration gate (RCS-186) and the deploy health assertion (RCS-187) all stop
+# short of a browser and of an actual on-chain payment — the client loader
+# overlay (#38) broke the login page for seven weeks and no build could have
+# caught it. This runs the Playwright suite against https://testnet.random.cash
+# on a clock, and then sends a real Sepolia transaction through the money path.
+#
+# Runs on hosted runners on purpose. debianbase hosts the deployment *and* is
+# the self-hosted runner, so a job there cannot report on a box that is down —
+# the healthchecks.io dead-man's-switch below covers the "no run at all" case.
+
+on:
+  schedule:
+    # 06:00 UTC daily — an hour before the Monday audit, so a red testnet is
+    # already on the desk when the weekly retro starts.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  E2E_REMOTE: "true"
+  E2E_BASE_URL: https://testnet.random.cash
+  E2E_API_URL: https://testnet.random.cash
+
+jobs:
+  browser:
+    name: Playwright vs testnet
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testnet
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: npm ci && npx playwright install --with-deps chromium
+
+      - name: Run E2E suite
+        working-directory: e2e
+        run: npx playwright test
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-testnet
+          path: e2e/playwright-report/
+          retention-days: 14
+
+  synthetic-payment:
+    name: Synthetic payment (Sepolia)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Independent of `browser`: a broken checkout page must not hide a broken
+    # money path, and vice versa.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testnet
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: e2e
+        run: npm ci
+
+      # The store webhook URL must be HTTPS, and the server's own `localhost`
+      # is inside its container, so the sink needs a public tunnel.
+      - name: Install cloudflared
+        run: |
+          curl -fsSL -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+
+      - name: Invoice → on-chain tx → paid → webhook
+        working-directory: e2e
+        env:
+          E2E_SYNTHETIC_PAYMENT: "true"
+          E2E_TEST_MNEMONIC: ${{ secrets.E2E_TEST_MNEMONIC }}
+          E2E_API_TOKEN: ${{ secrets.E2E_API_TOKEN }}
+          E2E_SEPOLIA_RPC_URL: ${{ secrets.E2E_SEPOLIA_RPC_URL }}
+        run: npx playwright test tests/synthetic-payment.spec.ts
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-synthetic
+          path: e2e/playwright-report/
+          retention-days: 14
+
+  report:
+    name: Report
+    runs-on: ubuntu-latest
+    needs: [browser, synthetic-payment]
+    if: always()
+    steps:
+      # Dead-man's switch, same convention as automation/cockpit-health.sh: a
+      # success ping every green run, /fail on red. Silence — a box that never
+      # ran the workflow at all — is what actually alerts. No-op if the secret
+      # is unset, so a fork or a fresh clone does not fail here.
+      - name: Ping healthchecks.io
+        env:
+          HC_URL: ${{ secrets.HEALTHCHECK_E2E_URL }}
+          BROWSER: ${{ needs.browser.result }}
+          SYNTHETIC: ${{ needs.synthetic-payment.result }}
+        run: |
+          [ -n "$HC_URL" ] || { echo "HEALTHCHECK_E2E_URL unset — skipping ping"; exit 0; }
+          if [ "$BROWSER" = success ] && [ "$SYNTHETIC" = success ]; then
+            path=""
+          else
+            path="/fail"
+          fi
+          curl -fsS -m 10 --retry 3 -o /dev/null \
+            --data-raw "browser=$BROWSER synthetic=$SYNTHETIC ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "${HC_URL}${path}"
+
+      - name: File an issue on failure
+        if: needs.browser.result != 'success' || needs.synthetic-payment.result != 'success'
+        uses: actions/github-script@v7
+        env:
+          BROWSER: ${{ needs.browser.result }}
+          SYNTHETIC: ${{ needs.synthetic-payment.result }}
+        with:
+          script: |
+            const title = 'Scheduled E2E: testnet is failing';
+            const body = [
+              'The daily E2E run against https://testnet.random.cash failed.',
+              '',
+              `- Playwright suite: **${process.env.BROWSER}**`,
+              `- Synthetic payment: **${process.env.SYNTHETIC}**`,
+              '',
+              `Run (reports are attached as artifacts): ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'If the synthetic payment timed out waiting for `paid`, check the chain',
+              'monitors first — empty RPC URLs in the runner `.env` leave payment',
+              'detection dead (RCS-187):',
+              '',
+              '```',
+              'docker exec ethpayserver_testnet_redis redis-cli get evmmonitor:health',
+              '```',
+            ].join('\n');
+
+            // Reuse the open issue if there is one, so a testnet that stays red
+            // does not file a fresh issue every morning.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security',
+            });
+            const match = existing.data.find(i => i.title === title);
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['security'],
+              });
+            }

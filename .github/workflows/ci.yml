@@ -202,6 +202,11 @@ jobs:
             client/dist/
           retention-days: 1
 
+  # Gating since RCS-112. This job carried `continue-on-error: true`, so for its
+  # whole life it could not report a regression — which is how the client loader
+  # overlay (#38) survived seven weeks. The synthetic payment spec stays out of
+  # this job: it needs a funded wallet and a live chain, so it only runs where
+  # `E2E_SYNTHETIC_PAYMENT=true` is set (see e2e-scheduled.yml).
   e2e:
     name: E2E
     runs-on: ubuntu-latest
@@ -279,7 +284,6 @@ jobs:
           name: playwright-report
           path: e2e/playwright-report/
           retention-days: 7
-    continue-on-error: true
 
   docker:
     name: Docker
