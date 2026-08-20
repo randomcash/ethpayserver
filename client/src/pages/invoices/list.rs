@@ -143,8 +143,14 @@ pub fn InvoicesPage() -> impl IntoView {
         let _ = refresh.get();
 
         async move {
+            // `Ok(None)` rather than an error: having no store selected is the
+            // normal state of a brand-new account, and modelling it as
+            // `ApiError::Network` rendered it through the error path as
+            // "Network error: Please select a store first" — a transport
+            // failure, offering a Retry that cannot succeed because there is
+            // nothing to retry (RCS-195).
             let Some(sid) = store_id else {
-                return Err(ApiError::Network("Please select a store first".to_string()));
+                return Ok(None);
             };
             api.list_invoices(
                 &sid,
@@ -154,6 +160,7 @@ pub fn InvoicesPage() -> impl IntoView {
                 Some(offset),
             )
             .await
+            .map(Some)
         }
     });
 
@@ -281,7 +288,18 @@ pub fn InvoicesPage() -> impl IntoView {
                             </button>
                         </div>
                     }.into_any(),
-                    Ok(response) => {
+                    Ok(None) => view! {
+                        <div class="empty-state">
+                            <div class="empty-state-icon">
+                                <IconSearch />
+                            </div>
+                            <h3>"No store selected"</h3>
+                            <p>"Invoices belong to a store. Create one to start accepting payments."</p>
+                            <a class="btn btn-primary btn-sm" href="/evm/stores">"Go to stores"</a>
+                        </div>
+                    }
+                    .into_any(),
+                    Ok(Some(response)) => {
                         let total = response.total;
                         let mut invoices = response.invoices.clone();
                         let search = search_query.get();

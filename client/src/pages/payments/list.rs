@@ -82,11 +82,15 @@ pub fn PaymentsPage() -> impl IntoView {
         let _ = refresh.get();
 
         async move {
+            // `Ok(None)` rather than an error — see the same change in
+            // `pages/invoices/list.rs` (RCS-195): no store selected is a normal
+            // state for a new account, not a transport failure.
             let Some(sid) = store_id else {
-                return Err(ApiError::Network("Please select a store first".to_string()));
+                return Ok(None);
             };
             api.list_payments(&sid, status.as_deref(), Some(PAGE_SIZE), Some(offset))
                 .await
+                .map(Some)
         }
     });
 
@@ -171,7 +175,18 @@ pub fn PaymentsPage() -> impl IntoView {
                             </button>
                         </div>
                     }.into_any(),
-                    Ok(response) => {
+                    Ok(None) => view! {
+                        <div class="empty-state">
+                            <div class="empty-state-icon">
+                                <IconSearch />
+                            </div>
+                            <h3>"No store selected"</h3>
+                            <p>"Payments belong to a store. Create one to start accepting payments."</p>
+                            <a class="btn btn-primary btn-sm" href="/evm/stores">"Go to stores"</a>
+                        </div>
+                    }
+                    .into_any(),
+                    Ok(Some(response)) => {
                         let total = response.total;
                         let mut payments = response.payments.clone();
                         let search = search_query.get();
