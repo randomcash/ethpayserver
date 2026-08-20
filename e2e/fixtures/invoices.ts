@@ -49,6 +49,14 @@ export async function createInvoice(
   amount: string,
   currency = 'ETH',
 ): Promise<void> {
+  // The store list is fetched asynchronously and the sidebar only auto-selects
+  // once it lands. Opening the modal before then means `selected_store()` is
+  // None and submit short-circuits with "Please select a store first" — the
+  // modal simply stays open and the navigation wait below times out with no
+  // indication why. A full page load resets this, so waiting here rather than
+  // relying on an earlier `selectStore` is what makes it reliable.
+  await expect(page.locator('.store-selector-name')).not.toHaveText('All Stores');
+
   const modal = await openCreateInvoiceModal(page);
   // ETH rather than the form's USD default: a fiat invoice needs a live
   // exchange rate, and the server answers 503 `rate_stale` when its rate feed
