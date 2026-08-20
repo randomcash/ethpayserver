@@ -167,15 +167,21 @@ pub fn validate_rp_id(rp_id: &str, rp_origin: &str) -> bool {
         .is_some_and(|host| host.ends_with(rp_id))
 }
 
-/// Parse the CAPTCHA provider from environment variables.
+/// Parse the CAPTCHA provider from a variable lookup.
 /// Returns `Ok(None)` if CAPTCHA is disabled (no CAPTCHA_PROVIDER set).
-pub fn parse_captcha_env() -> anyhow::Result<Option<(String, String, String)>> {
-    match env::var("CAPTCHA_PROVIDER").ok().as_deref() {
+///
+/// The lookup is a parameter so the rules can be exercised without mutating
+/// process-global environment, which races when tests run in parallel threads.
+pub fn parse_captcha<F>(lookup: F) -> anyhow::Result<Option<(String, String, String)>>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match lookup("CAPTCHA_PROVIDER").as_deref() {
         Some(provider @ ("turnstile" | "cloudflare")) => {
-            let secret = env::var("CAPTCHA_SECRET_KEY").map_err(|_| {
+            let secret = lookup("CAPTCHA_SECRET_KEY").ok_or_else(|| {
                 anyhow::anyhow!("CAPTCHA_SECRET_KEY required when CAPTCHA_PROVIDER is set")
             })?;
-            let site_key = env::var("CAPTCHA_SITE_KEY").map_err(|_| {
+            let site_key = lookup("CAPTCHA_SITE_KEY").ok_or_else(|| {
                 anyhow::anyhow!("CAPTCHA_SITE_KEY required when CAPTCHA_PROVIDER is set")
             })?;
             Ok(Some((provider.to_string(), secret, site_key)))
@@ -185,6 +191,12 @@ pub fn parse_captcha_env() -> anyhow::Result<Option<(String, String, String)>> {
         }
         None => Ok(None),
     }
+}
+
+/// Parse the CAPTCHA provider from environment variables.
+/// Returns `Ok(None)` if CAPTCHA is disabled (no CAPTCHA_PROVIDER set).
+pub fn parse_captcha_env() -> anyhow::Result<Option<(String, String, String)>> {
+    parse_captcha(|key| env::var(key).ok())
 }
 
 #[cfg(test)]
@@ -283,25 +295,24 @@ mod tests {
     // CAPTCHA config parsing
     // ========================================================================
 
-    // SAFETY: these tests manipulate env vars which is unsafe in Rust 2024.
-    // They must run serially (cargo test runs them in separate threads by default,
-    // but env vars are process-global). Using --test-threads=1 for safety.
+    // These drive `parse_captcha` with an explicit lookup rather than mutating
+    // process-global env vars, so they are safe under parallel test threads.
+    fn lookup<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            vars.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
 
     #[test]
     fn captcha_disabled_when_no_env() {
-        unsafe { env::remove_var("CAPTCHA_PROVIDER") };
-        assert!(parse_captcha_env().unwrap().is_none());
+        assert!(parse_captcha(lookup(&[])).unwrap().is_none());
     }
 
     #[test]
     fn captcha_turnstile_requires_keys() {
-        unsafe {
-            env::set_var("CAPTCHA_PROVIDER", "turnstile");
-            env::remove_var("CAPTCHA_SECRET_KEY");
-            env::remove_var("CAPTCHA_SITE_KEY");
-        }
-
-        let result = parse_captcha_env();
+        let result = parse_captcha(lookup(&[("CAPTCHA_PROVIDER", "turnstile")]));
         assert!(result.is_err());
         assert!(
             result
@@ -309,55 +320,37 @@ mod tests {
                 .to_string()
                 .contains("CAPTCHA_SECRET_KEY")
         );
-
-        unsafe { env::remove_var("CAPTCHA_PROVIDER") };
     }
 
     #[test]
     fn captcha_turnstile_with_keys() {
-        unsafe {
-            env::set_var("CAPTCHA_PROVIDER", "turnstile");
-            env::set_var("CAPTCHA_SECRET_KEY", "secret123");
-            env::set_var("CAPTCHA_SITE_KEY", "site123");
-        }
-
-        let result = parse_captcha_env().unwrap();
+        let result = parse_captcha(lookup(&[
+            ("CAPTCHA_PROVIDER", "turnstile"),
+            ("CAPTCHA_SECRET_KEY", "secret123"),
+            ("CAPTCHA_SITE_KEY", "site123"),
+        ]))
+        .unwrap();
         assert!(result.is_some());
         let (provider, secret, site_key) = result.unwrap();
         assert_eq!(provider, "turnstile");
         assert_eq!(secret, "secret123");
         assert_eq!(site_key, "site123");
-
-        unsafe {
-            env::remove_var("CAPTCHA_PROVIDER");
-            env::remove_var("CAPTCHA_SECRET_KEY");
-            env::remove_var("CAPTCHA_SITE_KEY");
-        }
     }
 
     #[test]
     fn captcha_cloudflare_alias() {
-        unsafe {
-            env::set_var("CAPTCHA_PROVIDER", "cloudflare");
-            env::set_var("CAPTCHA_SECRET_KEY", "s");
-            env::set_var("CAPTCHA_SITE_KEY", "k");
-        }
-
-        let result = parse_captcha_env().unwrap();
+        let result = parse_captcha(lookup(&[
+            ("CAPTCHA_PROVIDER", "cloudflare"),
+            ("CAPTCHA_SECRET_KEY", "s"),
+            ("CAPTCHA_SITE_KEY", "k"),
+        ]))
+        .unwrap();
         assert_eq!(result.unwrap().0, "cloudflare");
-
-        unsafe {
-            env::remove_var("CAPTCHA_PROVIDER");
-            env::remove_var("CAPTCHA_SECRET_KEY");
-            env::remove_var("CAPTCHA_SITE_KEY");
-        }
     }
 
     #[test]
     fn captcha_unknown_provider() {
-        unsafe { env::set_var("CAPTCHA_PROVIDER", "recaptcha") };
-
-        let result = parse_captcha_env();
+        let result = parse_captcha(lookup(&[("CAPTCHA_PROVIDER", "recaptcha")]));
         assert!(result.is_err());
         assert!(
             result
@@ -365,7 +358,5 @@ mod tests {
                 .to_string()
                 .contains("Unknown CAPTCHA_PROVIDER")
         );
-
-        unsafe { env::remove_var("CAPTCHA_PROVIDER") };
     }
 }
