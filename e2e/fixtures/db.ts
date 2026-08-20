@@ -3,6 +3,11 @@ import { Client } from 'pg';
 const DATABASE_URL =
   process.env.E2E_DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/ethpayserver_e2e';
 
+// `payouts.store_id` and `refunds.store_id` reference `stores(id)` with no ON
+// DELETE action, so they must be cleared before the row-level `DELETE FROM
+// stores` below or it raises a foreign-key violation out of `beforeAll` and
+// errors the whole spec file. TRUNCATE ... CASCADE used to absorb that.
+//
 // `users`, `stores` and `store_roles` are deliberately absent — they are
 // cleared with row-level DELETEs below.
 //
@@ -18,6 +23,8 @@ const DATABASE_URL =
 // per-store roles and leaves the defaults.
 const TABLES_TO_TRUNCATE = [
   'api_keys',
+  'payouts',
+  'refunds',
   'payment_events',
   'payments',
   'watched_addresses',

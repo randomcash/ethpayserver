@@ -16,7 +16,9 @@
  * `/checkout/ws` straight through — so `wsUrl()` builds from the origin.
  */
 
-const REMOTE = !!process.env.E2E_REMOTE;
+// `=== 'true'`, not truthiness: `E2E_REMOTE=false` would otherwise select the
+// live host and the `/api` prefix, and every call 404s or hits the wrong box.
+const REMOTE = process.env.E2E_REMOTE === 'true';
 
 export const API_URL = (
   process.env.E2E_API_URL || (REMOTE ? 'https://testnet.random.cash' : 'http://localhost:3000')

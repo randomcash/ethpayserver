@@ -39,7 +39,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22, not 20: the synthetic spec waits on the checkout socket with a
+          # global `WebSocket`, which Node only exposes unflagged from v22.4.
+          # On 20 it is a ReferenceError thrown *after* the on-chain send.
+          node-version: 22
 
       - name: Install Playwright
         working-directory: e2e
@@ -70,7 +73,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22, not 20: the synthetic spec waits on the checkout socket with a
+          # global `WebSocket`, which Node only exposes unflagged from v22.4.
+          # On 20 it is a ReferenceError thrown *after* the on-chain send.
+          node-version: 22
 
       - name: Install dependencies
         working-directory: e2e
@@ -155,11 +161,16 @@ jobs:
 
             // Reuse the open issue if there is one, so a testnet that stays red
             // does not file a fresh issue every morning.
+            // per_page defaults to 30 and the listing includes pull requests,
+            // so without this the exact-title match silently misses once the
+            // repo has 30+ open security-labelled items and files a duplicate
+            // issue every morning.
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               labels: 'security',
+              per_page: 100,
             });
             const match = existing.data.find(i => i.title === title);
             if (match) {

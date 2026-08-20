@@ -95,7 +95,13 @@ export class WebhookSink {
 
   async stop(): Promise<void> {
     this.tunnel?.kill('SIGTERM');
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    // `close()` stops accepting but waits on live sockets, and cloudflared holds
+    // keep-alives — so without dropping them this can hang past the job timeout
+    // and turn an already-passing test into a failure (it runs in a `finally`).
+    await new Promise<void>((resolve) => {
+      this.server.close(() => resolve());
+      this.server.closeAllConnections();
+    });
   }
 }
 

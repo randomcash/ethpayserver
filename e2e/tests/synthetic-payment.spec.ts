@@ -21,7 +21,7 @@
  * index and is topped up from a faucet.
  */
 import { test, expect } from '@playwright/test';
-import { createPublicClient, createWalletClient, formatEther, http } from 'viem';
+import { createPublicClient, createWalletClient, formatEther, http, parseEther } from 'viem';
 import { HDKey, mnemonicToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import { mnemonicToSeedSync } from '@scure/bip39';
@@ -38,6 +38,8 @@ const MERCHANT_PATH = "m/44'/60'/0'";
 const SPENDER_ACCOUNT_INDEX = 9;
 /** Human units; Sepolia is 3 confirmations at ~12s blocks. */
 const INVOICE_AMOUNT_ETH = '0.0001';
+/** Headroom over the invoice amount for gas; a Sepolia transfer is well under this. */
+const GAS_MARGIN_ETH = '0.0005';
 const PAID_TIMEOUT_MS = 5 * 60_000;
 const WEBHOOK_TIMEOUT_MS = 2 * 60_000;
 
@@ -146,10 +148,15 @@ test.describe('Synthetic payment (live testnet)', () => {
 
     // Fail on an empty wallet with the address to refill, not with a stack
     // trace from deep inside viem when the transaction is rejected.
+    // Against the amount actually needed plus a gas margin — `> 0n` passes with
+    // 1 wei, which is exactly the near-drained wallet this guard exists for, and
+    // the run would then die inside viem with an insufficient-funds trace.
     const balance = await publicClient.getBalance({ address: spender.address });
+    const needed = parseEther(INVOICE_AMOUNT_ETH) + parseEther(GAS_MARGIN_ETH);
     expect(
-      balance > 0n,
-      `Test wallet ${spender.address} is empty on Sepolia. Refill it from a faucet.`,
+      balance >= needed,
+      `Test wallet ${spender.address} holds ${formatEther(balance)} SepoliaETH, ` +
+        `needs at least ${formatEther(needed)}. Refill it from a faucet.`,
     ).toBe(true);
     console.log(`spender ${spender.address} — ${formatEther(balance)} SepoliaETH`);
 
