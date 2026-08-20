@@ -43,6 +43,9 @@ web-sys = { version = "0.3", features = [
     "MessageEvent",
     "Event",
     "CloseEvent",
+    "ErrorEvent",
+    "EventTarget",
+    "PromiseRejectionEvent",
 ] }
 
 # Serialization
@@ -64,6 +67,12 @@ uuid = { version = "1.0", features = ["v4", "js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+# Native tests only (`evm` pulls in alloy/sqlx and does not build for wasm32).
+# Used by the scrubber parity test in src/telemetry/scrub.rs; dev-dependencies
+# are never built into the WASM bundle.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+evm = { path = "../evm", features = ["sentry-scrub"] }
 
 [features]
 default = ["standalone"]

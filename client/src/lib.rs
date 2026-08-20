@@ -15,6 +15,7 @@ pub mod app;
 pub mod components;
 pub mod pages;
 pub mod services;
+pub mod telemetry;
 pub mod util;
 
 pub use app::App;
@@ -155,6 +156,9 @@ pub fn mount_app() {
     use wasm_bindgen::JsCast;
 
     console_error_panic_hook::set_once();
+    // Forward panics / uncaught JS errors to errex. A no-op unless the
+    // `errex-dsn` meta tag in index.html is filled in — see `telemetry`.
+    telemetry::init();
     web_sys::console::log_1(&"EVM PayServer: Starting app...".into());
 
     // Mount to the #app div
