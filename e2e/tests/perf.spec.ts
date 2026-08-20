@@ -2,11 +2,19 @@ import { test, expect } from '@playwright/test';
 import { compareTiming, type Baseline } from '../fixtures/perf';
 
 test.describe('Performance timing infrastructure', () => {
-  test('captures non-zero test duration', async ({}, testInfo) => {
+  // `TestInfo` has no `startTime` — the previous version of this test read
+  // `testInfo.startTime.getTime()` and threw TypeError on every run, which was
+  // invisible while the E2E job carried `continue-on-error: true` (RCS-112).
+  // `testInfo.duration` is the field the perf reporter actually consumes, and
+  // it is documented as zero until the test finishes, so it is asserted from
+  // afterEach rather than from the test body.
+  test.afterEach(({}, testInfo) => {
+    expect(testInfo.duration).toBeGreaterThan(0);
+  });
+
+  test('captures non-zero test duration', async () => {
     // Deliberately wait to produce a measurable, non-zero duration
     await new Promise((r) => setTimeout(r, 50));
-    // testInfo.startTime is set by Playwright; verify it was recorded
-    expect(testInfo.startTime.getTime()).toBeGreaterThan(0);
   });
 });
 
