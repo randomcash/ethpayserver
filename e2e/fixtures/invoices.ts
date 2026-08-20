@@ -30,3 +30,48 @@ export async function openCreateInvoiceModal(page: Page): Promise<Locator> {
 export async function submitCreateInvoice(page: Page): Promise<void> {
   await createInvoiceModal(page).locator('.modal-footer button[type="submit"]').click();
 }
+
+/** Rows of the invoice list. `.invoices-cards` is the mobile-only twin. */
+export function invoiceRows(page: Page): Locator {
+  return page.locator('.invoices-table tbody tr');
+}
+
+/**
+ * Create an invoice for the currently-selected store.
+ *
+ * The modal has no store picker — it bills whatever the sidebar has selected —
+ * so callers must `selectStore` first. Fields are addressed by their ids
+ * (`#ci-amount`), not by type: the amount is `type="text"` with
+ * `inputmode="decimal"`, so the old `input[type="number"]` never matched it.
+ */
+export async function createInvoice(
+  page: Page,
+  amount: string,
+  currency = 'ETH',
+): Promise<void> {
+  const modal = await openCreateInvoiceModal(page);
+  // ETH rather than the form's USD default: a fiat invoice needs a live
+  // exchange rate, and the server answers 503 `rate_stale` when its rate feed
+  // is behind, which makes the test depend on Kraken/CoinGecko being reachable.
+  // Priced in the same asset it is paid in, the flow needs no rate at all.
+  await modal.locator('#ci-currency').selectOption(currency);
+  await modal.locator('#ci-amount').fill(amount);
+  await submitCreateInvoice(page);
+  // On success the modal closes and navigates to the new invoice's detail page
+  // — it does not return to the list, so that navigation is the completion
+  // signal. A modal that stays open is a rejected create; its error banner is
+  // in `.form-alert-error`.
+  await page.waitForURL(/\/evm\/invoices\/.+/);
+}
+
+/**
+ * Close the open Create Invoice modal via its header close button.
+ *
+ * The specs used to try `.modal-close, button[aria-label="Close"]` and silently
+ * fall back to clicking the overlay corner when that missed — the real control
+ * is the icon button in `.modal-header`.
+ */
+export async function closeCreateInvoiceModal(page: Page): Promise<void> {
+  await createInvoiceModal(page).locator('.modal-header .btn-icon').click();
+  await expect(createInvoiceModal(page)).not.toBeVisible();
+}

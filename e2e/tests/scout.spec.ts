@@ -58,7 +58,10 @@ test.describe('Unauthenticated', () => {
     await goto('/login');
 
     // Page should show sign-in form
-    const heading = scoutPage.getByText('Sign In');
+    // `.first()`: 'Sign In' matches both the heading and the submit button, and
+    // isVisible() on a multi-match locator throws a strict-mode violation that the
+    // catch below would record as a phantom issue.
+    const heading = scoutPage.getByText('Sign In').first();
     if (!await heading.isVisible({ timeout: 10_000 }).catch(() => false)) {
       issue('LOGIN', 'Sign In heading not visible');
     }
@@ -74,7 +77,7 @@ test.describe('Unauthenticated', () => {
     }
 
     // "Create one" link
-    const createLink = scoutPage.getByText('Create one');
+    const createLink = scoutPage.getByText('Create one').first();
     if (!await createLink.isVisible({ timeout: 3_000 }).catch(() => false)) {
       issue('LOGIN', '"Create one" registration link not visible');
     }
@@ -107,7 +110,7 @@ test.describe('Unauthenticated', () => {
     }
 
     // "Sign in" link
-    const signIn = scoutPage.getByText('Sign in');
+    const signIn = scoutPage.getByText('Sign in').first();
     if (!await signIn.isVisible({ timeout: 3_000 }).catch(() => false)) {
       issue('REGISTER', '"Sign in" link not visible');
     }
@@ -350,7 +353,9 @@ test.describe('Auth & Authenticated', () => {
     test.skip(!authenticated, 'Registration failed');
     await goto('/evm');
 
-    await scoutPage.locator('button', { hasText: /create invoice/i }).click();
+    // Scoped to the header: the modal's own submit button carries the same
+    // label, so an unscoped match is a strict-mode violation.
+    await scoutPage.locator('.main-header-actions button', { hasText: /create invoice/i }).click();
     if (!await scoutPage.locator('.modal-overlay').isVisible({ timeout: 3_000 }).catch(() => false)) {
       issue('CREATE_INVOICE', 'Modal did not open');
       return;
@@ -488,7 +493,7 @@ test.describe('Auth & Authenticated', () => {
       await store.click();
     }
 
-    const btn = scoutPage.locator('button', { hasText: /create invoice/i });
+    const btn = scoutPage.locator('.main-header-actions button', { hasText: /create invoice/i });
     const start = Date.now();
     await btn.click();
     const elapsed = Date.now() - start;

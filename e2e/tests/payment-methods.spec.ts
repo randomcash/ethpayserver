@@ -1,7 +1,10 @@
 import { test, expect } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
 import { createStoreAndOpen } from '../fixtures/stores';
-import type { Page } from '@playwright/test';
+import { addPaymentMethod, openPaymentMethodsTab } from '../fixtures/payment-methods';
+
+/** Sepolia USDC. Any well-formed address works; a real one keeps it readable. */
+const SEPOLIA_USDC = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238';
 
 test.describe('Payment Methods', () => {
   test.beforeAll(async () => {
@@ -10,97 +13,68 @@ test.describe('Payment Methods', () => {
 
   test('empty state shown for new store', async ({ registeredPage: page }) => {
     await createStoreAndOpen(page, 'Empty PM Store');
+    await openPaymentMethodsTab(page);
 
-    // Payment methods section should be visible but empty
-    const pmHeading = page.getByText(/payment method/i).first();
-    await expect(pmHeading).toBeVisible();
+    await expect(page.getByText('No payment methods configured')).toBeVisible();
+    await expect(page.locator('.payment-method-row')).toHaveCount(0);
   });
 
   test('add native payment method', async ({ registeredPage: page }) => {
     await createStoreAndOpen(page, 'Native PM Store');
+    await openPaymentMethodsTab(page);
 
-    await page.locator('button', { hasText: /add.*payment.*method/i }).click();
+    await addPaymentMethod(page, { symbol: 'ETH' });
 
-    // Select a chain from the dropdown
-    const chainSelect = page.locator('select').first();
-    if (await chainSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await chainSelect.selectOption({ index: 1 });
-    }
-
-    // Submit — native token has no separate token selector
-    await page.locator('button', { hasText: /add|save|create/i }).last().click();
-
-    // Verify the payment method is now listed
-    await expect(page.locator('[class*="payment-method"], .detail-card').last()).toBeVisible();
+    const row = page.locator('.payment-method-row');
+    await expect(row).toHaveCount(1);
+    await expect(row.locator('.payment-method-symbol')).toHaveText('ETH');
+    await expect(row.locator('.payment-method-type')).toHaveText('Native');
   });
 
   test('add ERC20 payment method', async ({ registeredPage: page }) => {
     await createStoreAndOpen(page, 'ERC20 PM Store');
+    await openPaymentMethodsTab(page);
 
-    await page.locator('button', { hasText: /add.*payment.*method/i }).click();
+    await addPaymentMethod(page, {
+      symbol: 'USDC',
+      tokenAddress: SEPOLIA_USDC,
+      decimals: '6',
+    });
 
-    // Select chain
-    const chainSelect = page.locator('select').first();
-    if (await chainSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await chainSelect.selectOption({ index: 1 });
-    }
-
-    // Select token (ERC20)
-    const tokenSelect = page.locator('select').nth(1);
-    if (await tokenSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await tokenSelect.selectOption({ index: 1 });
-    }
-
-    await page.locator('button', { hasText: /add|save|create/i }).last().click();
-
-    await expect(page.locator('[class*="payment-method"], .detail-card').last()).toBeVisible();
+    const row = page.locator('.payment-method-row');
+    await expect(row).toHaveCount(1);
+    await expect(row.locator('.payment-method-symbol')).toHaveText('USDC');
+    await expect(row.locator('.payment-method-type')).toHaveText('ERC20');
   });
 
   test('toggle payment method enabled/disabled', async ({ registeredPage: page }) => {
     await createStoreAndOpen(page, 'Toggle PM Store');
+    await openPaymentMethodsTab(page);
+    await addPaymentMethod(page);
 
-    // Add a payment method first
-    await page.locator('button', { hasText: /add.*payment.*method/i }).click();
-    const chainSelect = page.locator('select').first();
-    if (await chainSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await chainSelect.selectOption({ index: 1 });
-    }
-    await page.locator('button', { hasText: /add|save|create/i }).last().click();
+    // The status control is a button badge, not a checkbox — the old spec
+    // looked for `input[type="checkbox"]`, found nothing, and asserted nothing.
+    const status = page.locator('.payment-method-row .badge');
+    await expect(status).toHaveText('Enabled');
 
-    // Toggle the enabled state
-    const toggle = page.locator('input[type="checkbox"], [class*="toggle"], [class*="switch"]').first();
-    if (await toggle.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      const wasBefore = await toggle.isChecked().catch(() => null);
-      await toggle.click();
+    await status.click();
+    await expect(status).toHaveText('Disabled');
 
-      // Verify state changed after reload
-      await page.reload();
-      const isAfter = await toggle.isChecked().catch(() => null);
-      if (wasBefore !== null && isAfter !== null) {
-        expect(isAfter).not.toBe(wasBefore);
-      }
-    }
+    // and it survives a round trip to the server
+    await page.reload();
+    await openPaymentMethodsTab(page);
+    await expect(page.locator('.payment-method-row .badge')).toHaveText('Disabled');
   });
 
   test('delete payment method', async ({ registeredPage: page }) => {
     await createStoreAndOpen(page, 'Delete PM Store');
+    await openPaymentMethodsTab(page);
+    await addPaymentMethod(page);
+    await expect(page.locator('.payment-method-row')).toHaveCount(1);
 
-    // Add a payment method
-    await page.locator('button', { hasText: /add.*payment.*method/i }).click();
-    const chainSelect = page.locator('select').first();
-    if (await chainSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await chainSelect.selectOption({ index: 1 });
-    }
-    await page.locator('button', { hasText: /add|save|create/i }).last().click();
+    await page.locator('.payment-method-row button', { hasText: 'Delete' }).click();
 
-    // Delete it
-    await page.locator('button', { hasText: /delete|remove/i }).first().click();
-    const confirmBtn = page.locator('button', { hasText: /confirm|yes/i }).last();
-    if (await confirmBtn.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await confirmBtn.click();
-    }
-
-    // After deletion the payment method entry should be removed
-    await expect(page.locator('button', { hasText: /delete|remove/i }).first()).not.toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('.payment-method-row')).toHaveCount(0);
+    await expect(page.getByText('No payment methods configured')).toBeVisible();
   });
 });

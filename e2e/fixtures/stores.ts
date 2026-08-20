@@ -29,3 +29,21 @@ export async function createStoreAndOpen(page: Page, name: string): Promise<void
   await page.locator('.store-card', { hasText: name }).click();
   await page.waitForURL(/\/evm\/stores\/.+/);
 }
+
+/**
+ * Make `name` the store the app is scoped to.
+ *
+ * The layout auto-selects the first store, but only when the store list is
+ * fetched — creating a store from an already-loaded page leaves the selector on
+ * "All Stores", and the Create Invoice modal takes whatever is selected
+ * (RCS-172), so an invoice opened straight after `createStore` has no store.
+ */
+export async function selectStore(page: Page, name: string): Promise<void> {
+  const selector = page.locator('.store-selector');
+  if ((await selector.locator('.store-selector-name').innerText()) === name) {
+    return;
+  }
+  await selector.locator('.store-selector-btn').click();
+  await selector.locator('.store-dropdown-item', { hasText: name }).first().click();
+  await expect(selector.locator('.store-selector-name')).toHaveText(name);
+}
