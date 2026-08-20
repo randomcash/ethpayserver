@@ -1,5 +1,6 @@
 import { test, expect } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
+import { createStore } from '../fixtures/stores';
 
 test.describe('Stores', () => {
   test.beforeAll(async () => {
@@ -15,9 +16,7 @@ test.describe('Stores', () => {
     await page.goto('/evm/stores');
 
     // Open create-store form
-    await page.locator('button', { hasText: /create store/i }).click();
-    await page.locator('.form-input').fill('Test Store');
-    await page.locator('.form-actions .btn-primary').click();
+    await createStore(page, 'Test Store');
 
     // Store card should appear in the grid
     await expect(page.locator('.store-card-name', { hasText: 'Test Store' })).toBeVisible();
@@ -27,9 +26,7 @@ test.describe('Stores', () => {
     await page.goto('/evm/stores');
 
     // Create a store
-    await page.locator('button', { hasText: /create store/i }).click();
-    await page.locator('.form-input').fill('Original Name');
-    await page.locator('.form-actions .btn-primary').click();
+    await createStore(page, 'Original Name');
     await expect(page.locator('.store-card-name', { hasText: 'Original Name' })).toBeVisible();
 
     // Navigate to detail page
@@ -51,9 +48,7 @@ test.describe('Stores', () => {
     await page.goto('/evm/stores');
 
     // Create a store to delete
-    await page.locator('button', { hasText: /create store/i }).click();
-    await page.locator('.form-input').fill('Deletable Store');
-    await page.locator('.form-actions .btn-primary').click();
+    await createStore(page, 'Deletable Store');
     await expect(page.locator('.store-card-name', { hasText: 'Deletable Store' })).toBeVisible();
 
     // Navigate to detail and trigger delete
@@ -77,9 +72,7 @@ test.describe('Stores', () => {
 
     // Create two stores
     for (const name of ['Store Alpha', 'Store Beta']) {
-      await page.locator('button', { hasText: /create store/i }).click();
-      await page.locator('.form-input').fill(name);
-      await page.locator('.form-actions .btn-primary').click();
+      await createStore(page, name);
       await expect(page.locator('.store-card-name', { hasText: name })).toBeVisible();
     }
 

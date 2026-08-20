@@ -1,17 +1,7 @@
 import { test, expect } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
+import { createStoreAndOpen } from '../fixtures/stores';
 import type { Page } from '@playwright/test';
-
-async function createStoreAndNavigate(page: Page, name: string): Promise<void> {
-  await page.goto('/evm/stores');
-  await page.locator('button', { hasText: /create store/i }).click();
-  await page.locator('.form-input').fill(name);
-  await page.locator('.form-actions .btn-primary').click();
-  await expect(page.locator('.store-card-name', { hasText: name })).toBeVisible();
-
-  await page.locator('.store-card', { hasText: name }).click();
-  await page.waitForURL(/\/evm\/stores\/.+/);
-}
 
 test.describe('Webhooks', () => {
   test.beforeAll(async () => {
@@ -19,7 +9,7 @@ test.describe('Webhooks', () => {
   });
 
   test('configure webhook URL', async ({ registeredPage: page }) => {
-    await createStoreAndNavigate(page, 'Webhook Store');
+    await createStoreAndOpen(page, 'Webhook Store');
 
     // Find the webhook section and fill in the URL
     const webhookInput = page.locator('input[placeholder*="webhook" i], input[name="webhook_url"], input[type="url"]').first();
@@ -42,7 +32,7 @@ test.describe('Webhooks', () => {
   });
 
   test('toggle webhook enabled/disabled', async ({ registeredPage: page }) => {
-    await createStoreAndNavigate(page, 'Toggle Webhook Store');
+    await createStoreAndOpen(page, 'Toggle Webhook Store');
 
     // Configure a webhook first
     const webhookInput = page.locator('input[type="url"], input[placeholder*="webhook" i]').first();

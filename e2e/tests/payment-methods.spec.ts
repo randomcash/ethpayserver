@@ -1,18 +1,7 @@
 import { test, expect } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
+import { createStoreAndOpen } from '../fixtures/stores';
 import type { Page } from '@playwright/test';
-
-async function createStoreAndNavigate(page: Page, name: string): Promise<void> {
-  await page.goto('/evm/stores');
-  await page.locator('button', { hasText: /create store/i }).click();
-  await page.locator('.form-input').fill(name);
-  await page.locator('.form-actions .btn-primary').click();
-  await expect(page.locator('.store-card-name', { hasText: name })).toBeVisible();
-
-  // Navigate to store detail
-  await page.locator('.store-card', { hasText: name }).click();
-  await page.waitForURL(/\/evm\/stores\/.+/);
-}
 
 test.describe('Payment Methods', () => {
   test.beforeAll(async () => {
@@ -20,7 +9,7 @@ test.describe('Payment Methods', () => {
   });
 
   test('empty state shown for new store', async ({ registeredPage: page }) => {
-    await createStoreAndNavigate(page, 'Empty PM Store');
+    await createStoreAndOpen(page, 'Empty PM Store');
 
     // Payment methods section should be visible but empty
     const pmHeading = page.getByText(/payment method/i).first();
@@ -28,7 +17,7 @@ test.describe('Payment Methods', () => {
   });
 
   test('add native payment method', async ({ registeredPage: page }) => {
-    await createStoreAndNavigate(page, 'Native PM Store');
+    await createStoreAndOpen(page, 'Native PM Store');
 
     await page.locator('button', { hasText: /add.*payment.*method/i }).click();
 
@@ -46,7 +35,7 @@ test.describe('Payment Methods', () => {
   });
 
   test('add ERC20 payment method', async ({ registeredPage: page }) => {
-    await createStoreAndNavigate(page, 'ERC20 PM Store');
+    await createStoreAndOpen(page, 'ERC20 PM Store');
 
     await page.locator('button', { hasText: /add.*payment.*method/i }).click();
 
@@ -68,7 +57,7 @@ test.describe('Payment Methods', () => {
   });
 
   test('toggle payment method enabled/disabled', async ({ registeredPage: page }) => {
-    await createStoreAndNavigate(page, 'Toggle PM Store');
+    await createStoreAndOpen(page, 'Toggle PM Store');
 
     // Add a payment method first
     await page.locator('button', { hasText: /add.*payment.*method/i }).click();
@@ -94,7 +83,7 @@ test.describe('Payment Methods', () => {
   });
 
   test('delete payment method', async ({ registeredPage: page }) => {
-    await createStoreAndNavigate(page, 'Delete PM Store');
+    await createStoreAndOpen(page, 'Delete PM Store');
 
     // Add a payment method
     await page.locator('button', { hasText: /add.*payment.*method/i }).click();

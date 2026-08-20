@@ -1,14 +1,7 @@
 import { test, expect } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
+import { createStore } from '../fixtures/stores';
 import type { Page } from '@playwright/test';
-
-async function createStore(page: Page, name: string): Promise<void> {
-  await page.goto('/evm/stores');
-  await page.locator('button', { hasText: /create store/i }).click();
-  await page.locator('.form-input').fill(name);
-  await page.locator('.form-actions .btn-primary').click();
-  await expect(page.locator('.store-card-name', { hasText: name })).toBeVisible();
-}
 
 test.describe('Invoices', () => {
   test.beforeAll(async () => {
