@@ -58,6 +58,7 @@ use evm::error::EvmResult;
 use evm::monitor::bridge::{EventBridge, RedisBridge};
 use evm::monitor::{
     CoordinatorConfig, EventHandler, LoggingHandler, MonitorCoordinator, MonitorEvent,
+    RpcBlockSource,
 };
 use secrecy::ExposeSecret;
 use tokio::signal;
@@ -66,7 +67,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use chain::create_chain_monitor;
 use commands::{handle_commands, restore_watched_addresses};
-use config::{Args, get_chain_configs, load_config};
+use config::{Args, ChainRpcConfig, get_chain_configs, load_config};
 use health::publish_health_loop;
 
 /// Handler that publishes events to the Redis bridge.
@@ -175,21 +176,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Add chain monitors
     let monitored_chain_ids: Vec<u64> = chain_configs.iter().map(|c| c.chain_id).collect();
-    for chain_config in &chain_configs {
-        match create_chain_monitor(chain_config).await {
-            Ok(monitor) => {
-                coordinator.add_chain(monitor).await?;
-                info!(chain_id = chain_config.chain_id, "chain monitor started");
-            }
-            Err(e) => {
-                error!(
-                    chain_id = chain_config.chain_id,
-                    error = %e,
-                    "failed to create chain monitor"
-                );
-            }
-        }
-    }
+    start_chain_monitors(&coordinator, &chain_configs).await?;
 
     // Restore watched addresses from Redis persistence
     restore_watched_addresses(&coordinator, &persistence, &monitored_chain_ids).await;
@@ -234,6 +221,67 @@ async fn main() -> anyhow::Result<()> {
     // Graceful shutdown
     coordinator.stop().await?;
     info!("evmmonitor stopped");
+
+    Ok(())
+}
+
+/// Attach one chain's monitor. `Ok(false)` means this chain's RPC endpoint was
+/// unusable — logged and survivable, unlike a coordinator failure.
+async fn attach_chain_monitor(
+    coordinator: &Arc<MonitorCoordinator<RpcBlockSource>>,
+    chain_config: &ChainRpcConfig,
+) -> anyhow::Result<bool> {
+    match create_chain_monitor(chain_config).await {
+        Ok(monitor) => {
+            coordinator.add_chain(monitor).await?;
+            info!(chain_id = chain_config.chain_id, "chain monitor started");
+            Ok(true)
+        }
+        Err(e) => {
+            error!(
+                chain_id = chain_config.chain_id,
+                error = %e,
+                "failed to create chain monitor"
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Attach a monitor for every configured chain, tolerating partial failure.
+///
+/// A single chain whose RPC endpoint is down should not take the other chains
+/// with it — but zero chains means the monitor cannot detect a single payment,
+/// while it stays up publishing an empty health array and the container still
+/// looks alive (RCS-196). Fail in that case: a non-zero exit restarts the
+/// container and fails the deploy at the source instead of downstream.
+async fn start_chain_monitors(
+    coordinator: &Arc<MonitorCoordinator<RpcBlockSource>>,
+    chain_configs: &[ChainRpcConfig],
+) -> anyhow::Result<()> {
+    let mut started = 0usize;
+
+    for chain_config in chain_configs {
+        started += usize::from(attach_chain_monitor(coordinator, chain_config).await?);
+    }
+
+    if started == 0 {
+        let chain_ids: Vec<u64> = chain_configs.iter().map(|c| c.chain_id).collect();
+        anyhow::bail!(
+            "no chain monitor could be started for any of the {} configured chains {:?} \
+             — check EVMMONITOR_CHAIN_<id>_RPC_HTTP for each",
+            chain_configs.len(),
+            chain_ids
+        );
+    }
+
+    if started < chain_configs.len() {
+        error!(
+            started,
+            configured = chain_configs.len(),
+            "some chain monitors failed to start — those chains are unmonitored"
+        );
+    }
 
     Ok(())
 }

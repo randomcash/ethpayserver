@@ -105,6 +105,13 @@ jobs:
       - name: Unit tests
         run: cargo nextest run --workspace --lib --no-fail-fast -j 2
 
+      - name: Monitor binary tests
+        # `--workspace --lib` never reaches the evmmonitor binary: it is behind
+        # `required-features = ["monitor-bin"]`, so its config-merge tests — the
+        # ones that keep an empty RPC env var from reaching the RPC client
+        # (RCS-196) — only run when asked for by name.
+        run: cargo nextest run -p evm --bin evmmonitor --features monitor-bin --no-fail-fast -j 2
+
       - name: Integration tests
         # Gating (RCS-186). These were non-blocking and 18 of 27 had been failing
         # unnoticed on an FK the fixtures never satisfied, so CI reported green
