@@ -5,7 +5,7 @@ use leptos_router::hooks::use_navigate;
 
 use crate::api::{ApiError, EvmApiClient, Invoice};
 use crate::app::StoreContext;
-use crate::components::{CreateInvoiceSignal, PAGE_SIZE, Pagination};
+use crate::components::{CreateInvoiceSignal, NoStoreSelected, PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
 
 use super::helpers::IconExport;
@@ -16,6 +16,18 @@ use super::widgets::{IconPlus, IconSearch, InvoiceCard, InvoiceRow};
 pub fn InvoicesPage() -> impl IntoView {
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
     let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
+
+    // Inputs for the no-store-selected branch below: whether the store fetch
+    // has landed, whether it found anything, and a way to retry a failed one.
+    let store_status = store_ctx.stores_status;
+    let has_stores = Signal::derive({
+        let ctx = store_ctx.clone();
+        move || !ctx.stores.get().is_empty()
+    });
+    let retry_stores = Callback::new({
+        let ctx = store_ctx.clone();
+        move |()| ctx.refetch_stores()
+    });
 
     // Filter state
     let (active_filter, set_active_filter) = signal("all".to_string());
@@ -288,15 +300,16 @@ pub fn InvoicesPage() -> impl IntoView {
                             </button>
                         </div>
                     }.into_any(),
+                    // Not an inline empty state: "no store selected" also covers
+                    // stores still loading, a failed fetch, and a deliberate
+                    // "All Stores" choice. NoStoreSelected tells them apart.
                     Ok(None) => view! {
-                        <div class="empty-state">
-                            <div class="empty-state-icon">
-                                <IconSearch />
-                            </div>
-                            <h3>"No store selected"</h3>
-                            <p>"Invoices belong to a store. Create one to start accepting payments."</p>
-                            <a class="btn btn-primary btn-sm" href="/evm/stores">"Go to stores"</a>
-                        </div>
+                        <NoStoreSelected
+                            entity="Invoices"
+                            status=store_status
+                            has_stores=has_stores
+                            on_retry=retry_stores
+                        />
                     }
                     .into_any(),
                     Ok(Some(response)) => {

@@ -48,9 +48,18 @@ jobs:
         working-directory: e2e
         run: npm ci && npx playwright install --with-deps chromium
 
+      # Only the specs that can actually pass against a remote origin. The
+      # other five (stores, invoices, payment-methods, webhooks,
+      # ui-interactions) all build on the `registeredPage` fixture, and the
+      # WebAuthn virtual authenticator's RP ID is `localhost`, so passkey
+      # registration cannot succeed against testnet.random.cash (e2e/README.md).
+      # Running the full suite here would fail from the first scheduled run,
+      # ping healthchecks /fail every morning and file a testnet-is-failing
+      # issue daily — desensitising the dead-man's switch before it ever
+      # carries signal. Widen this list only as specs are made remote-capable.
       - name: Run E2E suite
         working-directory: e2e
-        run: npx playwright test
+        run: npx playwright test tests/scout.spec.ts tests/perf.spec.ts tests/synthetic-payment.spec.ts
 
       - name: Upload report
         if: always()
@@ -163,13 +172,13 @@ jobs:
             // does not file a fresh issue every morning.
             // per_page defaults to 30 and the listing includes pull requests,
             // so without this the exact-title match silently misses once the
-            // repo has 30+ open security-labelled items and files a duplicate
+            // repo has 30+ open e2e-labelled items and files a duplicate
             // issue every morning.
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
-              labels: 'security',
+              labels: 'e2e',
               per_page: 100,
             });
             const match = existing.data.find(i => i.title === title);
@@ -186,6 +195,9 @@ jobs:
                 repo: context.repo.repo,
                 title,
                 body,
-                labels: ['security'],
+                // `e2e`, not `security`: a nightly browser/chain failure is an
+                // availability signal, and filing it as `security` pushes
+                // routine flakes into the security triage queue.
+                labels: ['e2e'],
               });
             }

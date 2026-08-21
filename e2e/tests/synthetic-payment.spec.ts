@@ -42,6 +42,9 @@ const INVOICE_AMOUNT_ETH = '0.0001';
 const GAS_MARGIN_ETH = '0.0005';
 const PAID_TIMEOUT_MS = 5 * 60_000;
 const WEBHOOK_TIMEOUT_MS = 2 * 60_000;
+// Sepolia inclusion is the one step whose latency we do not control. It is
+// budgeted separately so the paid-detection window is not eaten by it.
+const RECEIPT_TIMEOUT_MS = 3 * 60_000;
 
 function requireEnv(name: string, why: string): string {
   const value = process.env[name];
@@ -132,7 +135,7 @@ test.describe('Synthetic payment (live testnet)', () => {
   );
 
   test('invoice → on-chain tx → paid → webhook', async () => {
-    test.setTimeout(PAID_TIMEOUT_MS + WEBHOOK_TIMEOUT_MS + 5 * 60_000);
+    test.setTimeout(RECEIPT_TIMEOUT_MS + PAID_TIMEOUT_MS + WEBHOOK_TIMEOUT_MS + 5 * 60_000);
 
     const mnemonic = requireEnv('E2E_TEST_MNEMONIC', 'BIP39 phrase for the merchant xpub + spender');
     const token = requireEnv('E2E_API_TOKEN', 'API key (ak_...) that may create stores and invoices');
@@ -216,7 +219,12 @@ test.describe('Synthetic payment (live testnet)', () => {
 
       // Subscribe before broadcasting: the socket only forwards live events, so
       // a fast confirmation must not land while we are still connecting.
-      const paidPromise = waitForPaid(invoice.id, PAID_TIMEOUT_MS);
+      // The budget covers inclusion as well as detection: this starts before
+      // the broadcast (deliberately — the socket only forwards live events),
+      // so a slow Sepolia block would otherwise spend most of PAID_TIMEOUT_MS
+      // before the monitors have anything to detect, and the failure would be
+      // reported as "chain monitors are probably not connected".
+      const paidPromise = waitForPaid(invoice.id, RECEIPT_TIMEOUT_MS + PAID_TIMEOUT_MS);
       // Mark it handled now: if an assertion below throws first, an unobserved
       // rejection here would take the worker down instead of reporting.
       paidPromise.catch(() => {});
@@ -226,7 +234,7 @@ test.describe('Synthetic payment (live testnet)', () => {
         value: BigInt(target.amount),
       });
       console.log(`sent https://sepolia.etherscan.io/tx/${hash}`);
-      const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 180_000 });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS });
       expect(receipt.status, `transaction ${hash} reverted`).toBe('success');
 
       const { via, seen } = await paidPromise;

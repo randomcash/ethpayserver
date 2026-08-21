@@ -44,7 +44,9 @@ const TABLES_TO_TRUNCATE = [
 ];
 
 export async function resetDatabase(): Promise<void> {
-  if (process.env.E2E_SKIP_DB_RESET || process.env.E2E_REMOTE) {
+  // E2E_SKIP_DB_RESET stays a presence flag (README documents it as set/unset);
+  // E2E_REMOTE is compared strictly so `E2E_REMOTE=false` cannot mean remote.
+  if (process.env.E2E_SKIP_DB_RESET || process.env.E2E_REMOTE === 'true') {
     return;
   }
   const client = new Client({ connectionString: DATABASE_URL });

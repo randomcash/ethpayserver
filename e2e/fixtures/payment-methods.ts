@@ -38,8 +38,13 @@ export async function openPaymentMethodsTab(page: Page): Promise<void> {
 export async function addPaymentMethod(page: Page, method: PaymentMethod = {}): Promise<void> {
   const { chainId = SEPOLIA, symbol = 'ETH', tokenAddress = '', decimals = '18' } = method;
 
-  await page.locator('.store-tab-payment-methods button', { hasText: /add method/i }).click();
+  // "Add method" *toggles* `show_create_form`, so clicking it blindly closes an
+  // already-open form (e.g. on a retry after a failed create) and the wait below
+  // then times out reporting "form not visible". Only click when it is shut.
   const form = page.locator('.detail-card', { hasText: 'Add Payment Method' });
+  if (!(await form.isVisible())) {
+    await page.locator('.store-tab-payment-methods button', { hasText: /add method/i }).click();
+  }
   await expect(form).toBeVisible();
 
   await form.locator('.form-select').selectOption(chainId);

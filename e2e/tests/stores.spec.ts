@@ -43,12 +43,19 @@ test.describe('Stores', () => {
     // immediately races the request, and the reload wins often enough that the
     // page comes back showing the original name.
     await Promise.all([
+      // Deliberately not filtering on `response.ok()`: a rejected PUT would
+      // then match nothing and surface as a bare "timeout waiting for
+      // response" instead of the status the server actually returned.
       page.waitForResponse(
         (response) =>
           /\/api\/stores\/[^/]+$/.test(new URL(response.url()).pathname) &&
-          response.request().method() === 'PUT' &&
-          response.ok(),
-      ),
+          response.request().method() === 'PUT',
+      ).then(async (response) => {
+        expect(response.ok(), `PUT ${new URL(response.url()).pathname} → ${response.status()}`).toBe(
+          true,
+        );
+        return response;
+      }),
       general.locator('.form-actions .btn-primary').click(),
     ]);
 
@@ -92,10 +99,14 @@ test.describe('Stores', () => {
     // Switch store via the sidebar selector. `getByText('Store Beta')` matched
     // both the dropdown entry and the store card, so this goes through the
     // scoped helper.
+    // `.store-selector-name`, not `.store-selector`: the latter also wraps
+    // `.store-dropdown`, which renders an entry for *every* store, so
+    // `toContainText('Store Beta')` there passes whichever store is selected.
+    // `.store-selector-name` holds only the current selection.
     await selectStore(page, 'Store Beta');
-    await expect(page.locator('.store-selector')).toContainText('Store Beta');
+    await expect(page.locator('.store-selector-name')).toHaveText('Store Beta');
 
     await selectStore(page, 'Store Alpha');
-    await expect(page.locator('.store-selector')).toContainText('Store Alpha');
+    await expect(page.locator('.store-selector-name')).toHaveText('Store Alpha');
   });
 });

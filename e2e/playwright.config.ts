@@ -1,6 +1,8 @@
 import { defineConfig } from '@playwright/test';
 
-const REMOTE = !!process.env.E2E_REMOTE;
+// `=== 'true'`, not truthiness: `E2E_REMOTE=false` would otherwise select the
+// remote origin. Must stay in step with fixtures/api.ts and fixtures/db.ts.
+const REMOTE = process.env.E2E_REMOTE === 'true';
 
 const API_URL = process.env.E2E_API_URL || (REMOTE ? 'https://testnet.random.cash' : 'http://localhost:3000');
 const BASE_URL = process.env.E2E_BASE_URL || (REMOTE ? 'https://testnet.random.cash' : 'http://localhost:8080');

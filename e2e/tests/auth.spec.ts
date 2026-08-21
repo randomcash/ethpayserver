@@ -3,7 +3,7 @@ import { resetDatabase } from '../fixtures/db';
 
 const SKIP_AUTH = process.env.E2E_SKIP_AUTH
   ? process.env.E2E_SKIP_AUTH === 'true'
-  : !!process.env.E2E_REMOTE;
+  : process.env.E2E_REMOTE === 'true';
 
 test.describe('Authentication', () => {
   test.skip(() => SKIP_AUTH, 'Skipped: passkey origin mismatch in remote mode (E2E_SKIP_AUTH)');

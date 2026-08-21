@@ -329,6 +329,11 @@ test.describe('Auth & Authenticated', () => {
     const before = await client.send('Runtime.evaluate', {
       expression: `(()=>{const l=getEventListeners(window);return l.click?l.click.length:0})()`,
       returnByValue: true,
+      // `getEventListeners` is a DevTools *console* helper, not a page global.
+      // Without this it is undefined, the expression throws, `result.value`
+      // comes back undefined, and the `leaked > 1` check below silently
+      // compares NaN — making the LISTENER_LEAK issue unreachable.
+      includeCommandLineAPI: true,
     });
     const baseline = before.result.value as number;
 
@@ -340,8 +345,17 @@ test.describe('Auth & Authenticated', () => {
     const after = await client.send('Runtime.evaluate', {
       expression: `(()=>{const l=getEventListeners(window);return l.click?l.click.length:0})()`,
       returnByValue: true,
+      // Console-helper API, as above.
+      includeCommandLineAPI: true,
     });
     await client.detach();
+
+    // A non-numeric result means the CDP expression failed rather than that
+    // nothing leaked; report it instead of comparing NaN and passing.
+    if (typeof baseline !== 'number' || typeof after.result.value !== 'number') {
+      issue('LISTENER_LEAK', 'getEventListeners did not return a count — check could not run');
+      return;
+    }
 
     const leaked = (after.result.value as number) - baseline;
     if (leaked > 1) {
