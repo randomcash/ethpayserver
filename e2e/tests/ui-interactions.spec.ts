@@ -1,14 +1,8 @@
 import { test, expect } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
+import { createStore } from '../fixtures/stores';
+import { closeCreateInvoiceModal, createInvoiceModal, createInvoiceTrigger } from '../fixtures/invoices';
 import type { Page } from '@playwright/test';
-
-async function createStore(page: Page, name: string): Promise<void> {
-  await page.goto('/evm/stores');
-  await page.locator('button', { hasText: /create store/i }).click();
-  await page.locator('.form-input').fill(name);
-  await page.locator('.form-actions .btn-primary').click();
-  await expect(page.locator('.store-card-name', { hasText: name })).toBeVisible();
-}
 
 /**
  * Count global click listeners attached to the window.
@@ -16,7 +10,7 @@ async function createStore(page: Page, name: string): Promise<void> {
  */
 async function countWindowClickListeners(page: Page): Promise<number> {
   const client = await page.context().newCDPSession(page);
-  const { result } = await client.send('Runtime.evaluate', {
+  const { result, exceptionDetails } = await client.send('Runtime.evaluate', {
     expression: `
       (() => {
         const listeners = getEventListeners(window);
@@ -24,9 +18,21 @@ async function countWindowClickListeners(page: Page): Promise<number> {
       })()
     `,
     returnByValue: true,
+    // `getEventListeners` is a DevTools *console* helper, not a page global.
+    // Without this it is simply undefined, the expression throws, and
+    // `result.value` comes back undefined — which made this test compare
+    // NaN <= 1 and fail with no hint as to why.
+    includeCommandLineAPI: true,
   });
   await client.detach();
-  return result.value as number;
+
+  if (exceptionDetails) {
+    throw new Error(`getEventListeners failed: ${exceptionDetails.text}`);
+  }
+  if (typeof result.value !== 'number') {
+    throw new Error(`expected a listener count, got ${JSON.stringify(result.value)}`);
+  }
+  return result.value;
 }
 
 test.describe('UI Interactions', () => {
@@ -74,18 +80,25 @@ test.describe('UI Interactions', () => {
       await page.goto('/evm');
 
       const trigger = page.locator('.user-menu-trigger');
-      const baselineCount = await countWindowClickListeners(page);
+      const cycle = async (times: number) => {
+        for (let i = 0; i < times; i++) {
+          await trigger.click();
+          await trigger.click();
+        }
+      };
 
-      // Cycle the menu 20 times
-      for (let i = 0; i < 20; i++) {
-        await trigger.click();
-        await trigger.click();
-      }
+      await cycle(20);
+      const after20 = await countWindowClickListeners(page);
+      await cycle(40);
+      const after60 = await countWindowClickListeners(page);
 
-      const afterCount = await countWindowClickListeners(page);
-      // Allow at most 1 new listener (the close-on-outside-click handler).
-      // Before the fix this would grow by 20.
-      expect(afterCount - baselineCount).toBeLessThanOrEqual(1);
+      // What matters is that the count does not grow with the number of cycles
+      // — before the fix it grew by one per open. The absolute number is not
+      // the property: the app registers a fixed set of outside-click handlers
+      // on first use and reuses them (measured: 2, flat across 20/40/60/80
+      // cycles), so the old `<= 1` bound was asserting the wrong thing and only
+      // ever passed because the helper was silently returning NaN.
+      expect(after60).toBe(after20);
     });
 
     test('buttons remain responsive after menu cycling', async ({ registeredPage: page }) => {
@@ -101,7 +114,7 @@ test.describe('UI Interactions', () => {
       }
 
       // Create Invoice button must still respond promptly
-      const createBtn = page.locator('button', { hasText: /create invoice/i });
+      const createBtn = createInvoiceTrigger(page);
       const start = Date.now();
       await createBtn.click();
       const elapsed = Date.now() - start;
@@ -111,7 +124,7 @@ test.describe('UI Interactions', () => {
       expect(elapsed).toBeLessThan(500);
 
       // Modal should have opened
-      await expect(page.locator('.modal-overlay, .create-invoice-modal')).toBeVisible({ timeout: 2_000 });
+      await expect(createInvoiceModal(page)).toBeVisible({ timeout: 2_000 });
     });
 
     test('Settings link navigates correctly after menu interactions', async ({ registeredPage: page }) => {
@@ -194,18 +207,13 @@ test.describe('UI Interactions', () => {
       await page.goto('/evm');
 
       // Open modal
-      await page.locator('button', { hasText: /create invoice/i }).click();
-      await expect(page.locator('.modal-overlay, .create-invoice-modal')).toBeVisible();
+      await createInvoiceTrigger(page).click();
+      await expect(createInvoiceModal(page)).toBeVisible();
 
       // Close modal (click overlay or close button)
-      const closeBtn = page.locator('.modal-close, button[aria-label="Close"]').first();
-      if (await closeBtn.isVisible({ timeout: 1_000 }).catch(() => false)) {
-        await closeBtn.click();
-      } else {
-        await page.locator('.modal-overlay').click({ position: { x: 5, y: 5 } });
-      }
+      await closeCreateInvoiceModal(page);
 
-      await expect(page.locator('.modal-overlay, .create-invoice-modal')).not.toBeVisible();
+      await expect(createInvoiceModal(page)).not.toBeVisible();
 
       // Other buttons should still work after modal closes
       const menuTrigger = page.locator('.user-menu-trigger');
@@ -217,21 +225,16 @@ test.describe('UI Interactions', () => {
       await createStore(page, 'Modal Cycle Store');
       await page.goto('/evm');
 
-      const createBtn = page.locator('button', { hasText: /create invoice/i });
+      const createBtn = createInvoiceTrigger(page);
 
       for (let i = 0; i < 5; i++) {
         await createBtn.click();
-        await expect(page.locator('.modal-overlay, .create-invoice-modal')).toBeVisible();
+        await expect(createInvoiceModal(page)).toBeVisible();
 
         // Close via overlay edge click
-        const closeBtn = page.locator('.modal-close, button[aria-label="Close"]').first();
-        if (await closeBtn.isVisible({ timeout: 1_000 }).catch(() => false)) {
-          await closeBtn.click();
-        } else {
-          await page.locator('.modal-overlay').click({ position: { x: 5, y: 5 } });
-        }
+        await closeCreateInvoiceModal(page);
 
-        await expect(page.locator('.modal-overlay, .create-invoice-modal')).not.toBeVisible();
+        await expect(createInvoiceModal(page)).not.toBeVisible();
       }
 
       // After cycling, navigation should still work
@@ -247,7 +250,7 @@ test.describe('UI Interactions', () => {
 
       const menuTrigger = page.locator('.user-menu-trigger');
       const selectorBtn = page.locator('.store-selector-btn');
-      const createBtn = page.locator('button', { hasText: /create invoice/i });
+      const createBtn = createInvoiceTrigger(page);
 
       // Interact with every component in sequence
       // 1. Toggle user menu
@@ -262,13 +265,8 @@ test.describe('UI Interactions', () => {
 
       // 3. Open/close invoice modal
       await createBtn.click();
-      await expect(page.locator('.modal-overlay, .create-invoice-modal')).toBeVisible();
-      const closeBtn = page.locator('.modal-close, button[aria-label="Close"]').first();
-      if (await closeBtn.isVisible({ timeout: 1_000 }).catch(() => false)) {
-        await closeBtn.click();
-      } else {
-        await page.locator('.modal-overlay').click({ position: { x: 5, y: 5 } });
-      }
+      await expect(createInvoiceModal(page)).toBeVisible();
+      await closeCreateInvoiceModal(page);
 
       // 4. Verify everything still works — open each again
       await menuTrigger.click();
@@ -280,7 +278,7 @@ test.describe('UI Interactions', () => {
       await selectorBtn.click();
 
       await createBtn.click();
-      await expect(page.locator('.modal-overlay, .create-invoice-modal')).toBeVisible();
+      await expect(createInvoiceModal(page)).toBeVisible();
     });
 
     test('rapid mixed interactions do not freeze the page', async ({ registeredPage: page }) => {
@@ -299,13 +297,13 @@ test.describe('UI Interactions', () => {
       }
 
       // Page should not be frozen — verify with a timed interaction
-      const createBtn = page.locator('button', { hasText: /create invoice/i });
+      const createBtn = createInvoiceTrigger(page);
       const start = Date.now();
       await createBtn.click();
       const elapsed = Date.now() - start;
 
       expect(elapsed).toBeLessThan(500);
-      await expect(page.locator('.modal-overlay, .create-invoice-modal')).toBeVisible({ timeout: 2_000 });
+      await expect(createInvoiceModal(page)).toBeVisible({ timeout: 2_000 });
     });
   });
 });

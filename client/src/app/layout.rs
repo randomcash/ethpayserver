@@ -20,7 +20,7 @@ use super::icons::{
     IconCheck, IconChevron, IconClose, IconDashboard, IconHelp, IconInvoice, IconLayers,
     IconPayment, IconSettings, IconStore, IconWallet,
 };
-use super::{SELECTED_STORE_KEY, StoreContext};
+use super::{SELECTED_STORE_KEY, StoreContext, StoresStatus};
 
 /// Protected layout with AuthGuard and app shell.
 ///
@@ -44,6 +44,7 @@ pub(super) fn ProtectedLayout() -> impl IntoView {
 
     // Store context: fetch stores, track selection, persist in localStorage.
     let (stores, set_stores) = signal(Vec::<Store>::new());
+    let (stores_status, set_stores_status) = signal(StoresStatus::Loading);
     let saved_id: Option<String> = get_local(SELECTED_STORE_KEY);
     let (selected_store_id, set_selected_store_id) = signal(saved_id);
     let refetch = ArcTrigger::new();
@@ -78,6 +79,7 @@ pub(super) fn ProtectedLayout() -> impl IntoView {
                         set_selected_store_id.set(Some(id));
                     }
                     set_stores.set(fetched);
+                    set_stores_status.set(StoresStatus::Loaded);
                 }
                 Err(e) => {
                     web_sys::console::error_1(&format!("Failed to fetch stores: {}", e).into());
@@ -85,6 +87,10 @@ pub(super) fn ProtectedLayout() -> impl IntoView {
                     if msg.contains("Unauthorized") || msg.contains("401") {
                         auth.logout();
                     }
+                    // Surface it: pages keyed only on "no store selected" would
+                    // otherwise render the onboarding empty state forever, with
+                    // no error text and no way to retry (RCS-195).
+                    set_stores_status.set(StoresStatus::Failed(msg));
                 }
             }
         });
@@ -92,6 +98,7 @@ pub(super) fn ProtectedLayout() -> impl IntoView {
 
     let store_ctx = StoreContext {
         stores,
+        stores_status,
         selected_store_id,
         set_selected: set_selected_store_id,
         refetch,

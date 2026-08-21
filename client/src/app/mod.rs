@@ -23,6 +23,23 @@ use layout::ProtectedLayout;
 /// localStorage key for persisted selected store ID.
 const SELECTED_STORE_KEY: &str = "eps_selected_store";
 
+/// Outcome of the store fetch that backs [`StoreContext::stores`].
+///
+/// Without this, `stores` being empty is ambiguous: it means "still loading",
+/// "the fetch failed" and "this account genuinely has no stores" all at once.
+/// Pages that render an onboarding empty state need to tell those apart, or a
+/// user with stores is told to create one while the list is still in flight,
+/// and a failed fetch is indistinguishable from a brand-new account (RCS-195).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoresStatus {
+    /// No fetch has completed yet; `stores` is not yet meaningful.
+    Loading,
+    /// The fetch succeeded; `stores` is authoritative.
+    Loaded,
+    /// The fetch failed; `stores` is empty but that means "unknown", not "none".
+    Failed(String),
+}
+
 /// Store context provided to all authenticated pages.
 ///
 /// Tracks available stores and the currently selected store,
@@ -31,6 +48,8 @@ const SELECTED_STORE_KEY: &str = "eps_selected_store";
 pub struct StoreContext {
     /// All stores the user has access to.
     pub stores: ReadSignal<Vec<Store>>,
+    /// Whether [`Self::stores`] has actually been fetched, and if not, why.
+    pub stores_status: ReadSignal<StoresStatus>,
     /// Currently selected store (None = "All Stores").
     pub selected_store_id: ReadSignal<Option<String>>,
     /// Set the selected store (pass None for "All Stores").

@@ -1,17 +1,9 @@
 import { test, expect } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
-import type { Page } from '@playwright/test';
+import { createStoreAndOpen } from '../fixtures/stores';
+import { configureWebhook, openWebhooksTab, webhookForm } from '../fixtures/webhooks';
 
-async function createStoreAndNavigate(page: Page, name: string): Promise<void> {
-  await page.goto('/evm/stores');
-  await page.locator('button', { hasText: /create store/i }).click();
-  await page.locator('.form-input').fill(name);
-  await page.locator('.form-actions .btn-primary').click();
-  await expect(page.locator('.store-card-name', { hasText: name })).toBeVisible();
-
-  await page.locator('.store-card', { hasText: name }).click();
-  await page.waitForURL(/\/evm\/stores\/.+/);
-}
+const WEBHOOK_URL = 'https://example.com/webhook';
 
 test.describe('Webhooks', () => {
   test.beforeAll(async () => {
@@ -19,45 +11,39 @@ test.describe('Webhooks', () => {
   });
 
   test('configure webhook URL', async ({ registeredPage: page }) => {
-    await createStoreAndNavigate(page, 'Webhook Store');
+    await createStoreAndOpen(page, 'Webhook Store');
+    await openWebhooksTab(page);
 
-    // Find the webhook section and fill in the URL
-    const webhookInput = page.locator('input[placeholder*="webhook" i], input[name="webhook_url"], input[type="url"]').first();
-    if (await webhookInput.isVisible({ timeout: 3_000 }).catch(() => false)) {
-      await webhookInput.fill('https://example.com/webhook');
-    } else {
-      // Fallback: look for a webhook configuration button first
-      const configureBtn = page.locator('button', { hasText: /webhook|configure/i }).first();
-      if (await configureBtn.isVisible({ timeout: 2_000 }).catch(() => false)) {
-        await configureBtn.click();
-      }
-      await page.locator('input[type="url"], input[type="text"]').last().fill('https://example.com/webhook');
-    }
+    await configureWebhook(page, WEBHOOK_URL);
 
-    await page.locator('button', { hasText: /save|update|configure/i }).click();
+    await expect(page.locator('.webhook-url')).toHaveText(WEBHOOK_URL);
 
-    // Reload and verify persistence
+    // and it survives a round trip to the server
     await page.reload();
-    await expect(page.getByText('example.com/webhook')).toBeVisible();
+    await openWebhooksTab(page);
+    await expect(page.locator('.webhook-url')).toHaveText(WEBHOOK_URL);
   });
 
   test('toggle webhook enabled/disabled', async ({ registeredPage: page }) => {
-    await createStoreAndNavigate(page, 'Toggle Webhook Store');
+    await createStoreAndOpen(page, 'Toggle Webhook Store');
+    await openWebhooksTab(page);
+    await configureWebhook(page, 'https://example.com/hook');
 
-    // Configure a webhook first
-    const webhookInput = page.locator('input[type="url"], input[placeholder*="webhook" i]').first();
-    if (await webhookInput.isVisible({ timeout: 3_000 }).catch(() => false)) {
-      await webhookInput.fill('https://example.com/hook');
-      await page.locator('button', { hasText: /save|update|configure/i }).click();
-    }
+    // The endpoint card's badge reads Active/Disabled (the checkbox in the form
+    // is the one labelled "Enabled").
+    const status = page.locator('.detail-card-header .badge').first();
+    await expect(status).toHaveText('Active');
 
-    // Toggle enabled/disabled
-    const toggle = page.locator('[class*="webhook"] input[type="checkbox"], [class*="webhook"] [class*="toggle"]').first();
-    if (await toggle.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await toggle.click();
+    // Re-open the form and clear the Enabled checkbox
+    await page.locator('button', { hasText: 'Edit endpoint' }).click();
+    const form = webhookForm(page);
+    await form.locator('input[type="checkbox"]').uncheck();
+    await form.locator('.btn-primary', { hasText: 'Save' }).click();
 
-      // Verify the change persisted
-      await page.reload();
-    }
+    await expect(status).toHaveText('Disabled');
+
+    await page.reload();
+    await openWebhooksTab(page);
+    await expect(page.locator('.detail-card-header .badge').first()).toHaveText('Disabled');
   });
 });

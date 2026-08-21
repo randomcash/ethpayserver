@@ -3,9 +3,9 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 
-use crate::api::{ApiError, EvmApiClient, Payment};
+use crate::api::{EvmApiClient, Payment};
 use crate::app::StoreContext;
-use crate::components::{PAGE_SIZE, Pagination};
+use crate::components::{NoStoreSelected, PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
 use crate::util::chain_name;
 
@@ -19,6 +19,18 @@ use super::icons::{IconChevronRight, IconExport, IconExternalLink, IconMore, Ico
 pub fn PaymentsPage() -> impl IntoView {
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
     let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
+
+    // Inputs for the no-store-selected branch below: whether the store fetch
+    // has landed, whether it found anything, and a way to retry a failed one.
+    let store_status = store_ctx.stores_status;
+    let has_stores = Signal::derive({
+        let ctx = store_ctx.clone();
+        move || !ctx.stores.get().is_empty()
+    });
+    let retry_stores = Callback::new({
+        let ctx = store_ctx.clone();
+        move |()| ctx.refetch_stores()
+    });
 
     // Filter state
     let (active_filter, set_active_filter) = signal("all".to_string());
@@ -82,11 +94,15 @@ pub fn PaymentsPage() -> impl IntoView {
         let _ = refresh.get();
 
         async move {
+            // `Ok(None)` rather than an error — see the same change in
+            // `pages/invoices/list.rs` (RCS-195): no store selected is a normal
+            // state for a new account, not a transport failure.
             let Some(sid) = store_id else {
-                return Err(ApiError::Network("Please select a store first".to_string()));
+                return Ok(None);
             };
             api.list_payments(&sid, status.as_deref(), Some(PAGE_SIZE), Some(offset))
                 .await
+                .map(Some)
         }
     });
 
@@ -171,7 +187,19 @@ pub fn PaymentsPage() -> impl IntoView {
                             </button>
                         </div>
                     }.into_any(),
-                    Ok(response) => {
+                    // Not an inline empty state: "no store selected" also covers
+                    // stores still loading, a failed fetch, and a deliberate
+                    // "All Stores" choice. NoStoreSelected tells them apart.
+                    Ok(None) => view! {
+                        <NoStoreSelected
+                            entity="Payments"
+                            status=store_status
+                            has_stores=has_stores
+                            on_retry=retry_stores
+                        />
+                    }
+                    .into_any(),
+                    Ok(Some(response)) => {
                         let total = response.total;
                         let mut payments = response.payments.clone();
                         let search = search_query.get();

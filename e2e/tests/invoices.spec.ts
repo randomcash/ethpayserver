@@ -1,14 +1,7 @@
 import { test, expect } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
-import type { Page } from '@playwright/test';
-
-async function createStore(page: Page, name: string): Promise<void> {
-  await page.goto('/evm/stores');
-  await page.locator('button', { hasText: /create store/i }).click();
-  await page.locator('.form-input').fill(name);
-  await page.locator('.form-actions .btn-primary').click();
-  await expect(page.locator('.store-card-name', { hasText: name })).toBeVisible();
-}
+import { createStoreReadyForInvoices } from '../fixtures/payment-methods';
+import { createInvoice, invoiceRows } from '../fixtures/invoices';
 
 test.describe('Invoices', () => {
   test.beforeAll(async () => {
@@ -16,67 +9,35 @@ test.describe('Invoices', () => {
   });
 
   test('create invoice for store', async ({ registeredPage: page }) => {
-    await createStore(page, 'Invoice Store');
-
-    // Navigate to invoices page
+    await createStoreReadyForInvoices(page, 'Invoice Store');
     await page.goto('/evm/invoices');
 
-    // Open create-invoice modal (button in header or page)
-    await page.locator('button', { hasText: /create.*invoice|new.*invoice/i }).click();
+    await createInvoice(page, '0.01');
 
-    // Fill the create-invoice form
-    const storeSelect = page.locator('select').first();
-    if (await storeSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await storeSelect.selectOption({ index: 1 });
-    }
-
-    const amountInput = page.locator('input[name="amount"], input[placeholder*="amount" i], input[type="number"]').first();
-    await amountInput.fill('0.01');
-
-    await page.locator('button', { hasText: /create|submit/i }).last().click();
-
-    // Invoice should appear in the list
-    await expect(page.locator('table tbody tr, [class*="invoice-row"], [class*="invoice-card"]').first()).toBeVisible();
+    // Creation lands on the invoice's own page; it reaches the list too
+    await expect(page).toHaveURL(/\/evm\/invoices\/.+/);
+    await page.goto('/evm/invoices');
+    await expect(invoiceRows(page).first()).toBeVisible();
   });
 
   test('invoice appears in list', async ({ registeredPage: page }) => {
-    await createStore(page, 'List Invoice Store');
+    await createStoreReadyForInvoices(page, 'List Invoice Store');
     await page.goto('/evm/invoices');
 
-    // Create an invoice
-    await page.locator('button', { hasText: /create.*invoice|new.*invoice/i }).click();
-    const storeSelect = page.locator('select').first();
-    if (await storeSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await storeSelect.selectOption({ index: 1 });
-    }
-    const amountInput = page.locator('input[name="amount"], input[placeholder*="amount" i], input[type="number"]').first();
-    await amountInput.fill('0.05');
-    await page.locator('button', { hasText: /create|submit/i }).last().click();
+    await createInvoice(page, '0.05');
 
-    // Reload the list and verify the invoice is still there
+    // Reload the list and verify the invoice survived the round trip
     await page.goto('/evm/invoices');
-    await expect(page.locator('table tbody tr, [class*="invoice-row"], [class*="invoice-card"]').first()).toBeVisible();
+    await expect(invoiceRows(page).first()).toBeVisible();
   });
 
   test('invoice detail shows correct data', async ({ registeredPage: page }) => {
-    await createStore(page, 'Detail Invoice Store');
+    await createStoreReadyForInvoices(page, 'Detail Invoice Store');
     await page.goto('/evm/invoices');
 
-    // Create an invoice
-    await page.locator('button', { hasText: /create.*invoice|new.*invoice/i }).click();
-    const storeSelect = page.locator('select').first();
-    if (await storeSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await storeSelect.selectOption({ index: 1 });
-    }
-    const amountInput = page.locator('input[name="amount"], input[placeholder*="amount" i], input[type="number"]').first();
-    await amountInput.fill('1.23');
-    await page.locator('button', { hasText: /create|submit/i }).last().click();
+    // createInvoice already leaves us on the detail page
+    await createInvoice(page, '1.23');
 
-    // Click into the invoice detail
-    await page.locator('table tbody tr, [class*="invoice-row"], [class*="invoice-card"]').first().click();
-    await page.waitForURL(/\/evm\/invoices\/.+/);
-
-    // Verify detail page shows the amount
-    await expect(page.getByText('1.23')).toBeVisible();
+    await expect(page.getByText('1.23').first()).toBeVisible();
   });
 });

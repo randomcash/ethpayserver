@@ -58,7 +58,10 @@ test.describe('Unauthenticated', () => {
     await goto('/login');
 
     // Page should show sign-in form
-    const heading = scoutPage.getByText('Sign In');
+    // `.first()`: 'Sign In' matches both the heading and the submit button, and
+    // isVisible() on a multi-match locator throws a strict-mode violation that the
+    // catch below would record as a phantom issue.
+    const heading = scoutPage.getByText('Sign In').first();
     if (!await heading.isVisible({ timeout: 10_000 }).catch(() => false)) {
       issue('LOGIN', 'Sign In heading not visible');
     }
@@ -74,7 +77,7 @@ test.describe('Unauthenticated', () => {
     }
 
     // "Create one" link
-    const createLink = scoutPage.getByText('Create one');
+    const createLink = scoutPage.getByText('Create one').first();
     if (!await createLink.isVisible({ timeout: 3_000 }).catch(() => false)) {
       issue('LOGIN', '"Create one" registration link not visible');
     }
@@ -107,7 +110,7 @@ test.describe('Unauthenticated', () => {
     }
 
     // "Sign in" link
-    const signIn = scoutPage.getByText('Sign in');
+    const signIn = scoutPage.getByText('Sign in').first();
     if (!await signIn.isVisible({ timeout: 3_000 }).catch(() => false)) {
       issue('REGISTER', '"Sign in" link not visible');
     }
@@ -326,6 +329,11 @@ test.describe('Auth & Authenticated', () => {
     const before = await client.send('Runtime.evaluate', {
       expression: `(()=>{const l=getEventListeners(window);return l.click?l.click.length:0})()`,
       returnByValue: true,
+      // `getEventListeners` is a DevTools *console* helper, not a page global.
+      // Without this it is undefined, the expression throws, `result.value`
+      // comes back undefined, and the `leaked > 1` check below silently
+      // compares NaN — making the LISTENER_LEAK issue unreachable.
+      includeCommandLineAPI: true,
     });
     const baseline = before.result.value as number;
 
@@ -337,8 +345,17 @@ test.describe('Auth & Authenticated', () => {
     const after = await client.send('Runtime.evaluate', {
       expression: `(()=>{const l=getEventListeners(window);return l.click?l.click.length:0})()`,
       returnByValue: true,
+      // Console-helper API, as above.
+      includeCommandLineAPI: true,
     });
     await client.detach();
+
+    // A non-numeric result means the CDP expression failed rather than that
+    // nothing leaked; report it instead of comparing NaN and passing.
+    if (typeof baseline !== 'number' || typeof after.result.value !== 'number') {
+      issue('LISTENER_LEAK', 'getEventListeners did not return a count — check could not run');
+      return;
+    }
 
     const leaked = (after.result.value as number) - baseline;
     if (leaked > 1) {
@@ -350,7 +367,9 @@ test.describe('Auth & Authenticated', () => {
     test.skip(!authenticated, 'Registration failed');
     await goto('/evm');
 
-    await scoutPage.locator('button', { hasText: /create invoice/i }).click();
+    // Scoped to the header: the modal's own submit button carries the same
+    // label, so an unscoped match is a strict-mode violation.
+    await scoutPage.locator('.main-header-actions button', { hasText: /create invoice/i }).click();
     if (!await scoutPage.locator('.modal-overlay').isVisible({ timeout: 3_000 }).catch(() => false)) {
       issue('CREATE_INVOICE', 'Modal did not open');
       return;
@@ -488,7 +507,7 @@ test.describe('Auth & Authenticated', () => {
       await store.click();
     }
 
-    const btn = scoutPage.locator('button', { hasText: /create invoice/i });
+    const btn = scoutPage.locator('.main-header-actions button', { hasText: /create invoice/i });
     const start = Date.now();
     await btn.click();
     const elapsed = Date.now() - start;

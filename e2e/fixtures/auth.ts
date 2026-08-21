@@ -32,14 +32,23 @@ export async function register(page: Page): Promise<void> {
   // Trigger passkey creation — the virtual authenticator handles the prompt
   await page.locator('.ps-passkey-button').click();
 
-  // Handle the recovery step if shown (skip for tests)
+  // Registration pauses on the recovery-phrase step before it redirects. Wait
+  // for whichever of the two arrives first instead of giving that step a fixed
+  // budget: a cold server answers the passkey round trip in more than the 5s
+  // the previous version allowed, and the wait below then timed out against a
+  // page still sitting on the recovery screen.
   const skipButton = page.locator('.ps-button-ghost', { hasText: /skip/i });
-  if (await skipButton.isVisible({ timeout: 5_000 }).catch(() => false)) {
+  const settled = /\/(evm)?$/;
+  await Promise.race([
+    page.waitForURL(settled, { timeout: 30_000 }).catch(() => {}),
+    skipButton.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {}),
+  ]);
+  if (await skipButton.isVisible().catch(() => false)) {
     await skipButton.click();
   }
 
   // Wait for redirect to dashboard
-  await page.waitForURL(/\/(evm)?$/, { timeout: 15_000 });
+  await page.waitForURL(settled, { timeout: 15_000 });
 }
 
 export async function login(page: Page): Promise<void> {
