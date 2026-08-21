@@ -3,7 +3,7 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 
-use crate::api::{ApiError, EvmApiClient, Payment};
+use crate::api::{EvmApiClient, Payment};
 use crate::app::StoreContext;
 use crate::components::{PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
