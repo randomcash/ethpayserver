@@ -36,6 +36,7 @@ pub(super) fn test_user() -> User {
     User {
         id: UserId::new(),
         email: Some("test@example.com".to_string()),
+        kdf_salt_identifier: "test@example.com".to_string(),
         primary_wallet_address: None,
         kdf_params: test_kdf_params(),
         encrypted_symmetric_key: test_encrypted_blob(),

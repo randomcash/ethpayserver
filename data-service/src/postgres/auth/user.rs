@@ -22,15 +22,16 @@ impl UserRepository for PgDataService {
         sqlx::query(
             r#"
             INSERT INTO users (
-                id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                recovery_verification_hash, created_at, last_login_at,
-                failed_login_attempts, locked_until, role
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                encrypted_symmetric_key, recovery_verification_hash, created_at,
+                last_login_at, failed_login_attempts, locked_until, role
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(user.id.0)
         .bind(&user.email)
         .bind(&user.primary_wallet_address)
+        .bind(&user.kdf_salt_identifier)
         .bind(&kdf_params)
         .bind(&encrypted_key)
         .bind(&user.recovery_verification_hash)
@@ -49,9 +50,9 @@ impl UserRepository for PgDataService {
     async fn get_user(&self, id: UserId) -> Result<Option<User>> {
         let row = sqlx::query(
             r#"
-            SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                   recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until, role
+            SELECT id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                   encrypted_symmetric_key, recovery_verification_hash, created_at,
+                   last_login_at, failed_login_attempts, locked_until, role
             FROM users WHERE id = $1
             "#,
         )
@@ -66,9 +67,9 @@ impl UserRepository for PgDataService {
     async fn get_user_by_email(&self, email: &str) -> Result<Option<User>> {
         let row = sqlx::query(
             r#"
-            SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                   recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until, role
+            SELECT id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                   encrypted_symmetric_key, recovery_verification_hash, created_at,
+                   last_login_at, failed_login_attempts, locked_until, role
             FROM users WHERE LOWER(email) = LOWER($1)
             "#,
         )
@@ -83,9 +84,9 @@ impl UserRepository for PgDataService {
     async fn get_user_by_wallet_address(&self, address: &str) -> Result<Option<User>> {
         let row = sqlx::query(
             r#"
-            SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                   recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until, role
+            SELECT id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                   encrypted_symmetric_key, recovery_verification_hash, created_at,
+                   last_login_at, failed_login_attempts, locked_until, role
             FROM users WHERE primary_wallet_address = $1
             "#,
         )
@@ -105,7 +106,18 @@ impl UserRepository for PgDataService {
 
         let result = sqlx::query(
             r#"
+            -- kdf_salt_identifier is deliberately absent: it is pinned at
+            -- registration and the stored recovery_verification_hash was
+            -- derived from it. Updating it would make the account
+            -- unrecoverable, so this statement cannot (RCS-201).
             UPDATE users SET
+                -- COALESCE, not assignment: pins the value on first write for
+                -- rows the old binary inserted during a rolling deploy (which
+                -- the one-shot backfill cannot reach), while remaining
+                -- immutable for every row that already has one. Without this
+                -- those rows keep recompute-on-read semantics forever and the
+                -- promised follow-up SET NOT NULL would find NULLs (RCS-201).
+                kdf_salt_identifier = COALESCE(users.kdf_salt_identifier, $11),
                 email = $2, primary_wallet_address = $3, kdf_params = $4,
                 encrypted_symmetric_key = $5, recovery_verification_hash = $6,
                 last_login_at = $7, failed_login_attempts = $8, locked_until = $9,
@@ -123,6 +135,7 @@ impl UserRepository for PgDataService {
         .bind(user.failed_login_attempts as i32)
         .bind(user.locked_until)
         .bind(user.role.as_str())
+        .bind(&user.kdf_salt_identifier)
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;
@@ -207,9 +220,9 @@ impl UserRepository for PgDataService {
     async fn list_users(&self, offset: i64, limit: i64) -> Result<Vec<User>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                   recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until, role
+            SELECT id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                   encrypted_symmetric_key, recovery_verification_hash, created_at,
+                   last_login_at, failed_login_attempts, locked_until, role
             FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2
             "#,
         )
@@ -237,10 +250,26 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
     let failed_attempts: i32 = row.get("failed_login_attempts");
     let role_str: String = row.get("role");
 
+    let id: uuid::Uuid = row.get("id");
+    let email: Option<String> = row.get("email");
+    let primary_wallet_address: Option<String> = row.get("primary_wallet_address");
+
     Ok(User {
-        id: UserId(row.get("id")),
-        email: row.get("email"),
-        primary_wallet_address: row.get("primary_wallet_address"),
+        id: UserId(id),
+        email: email.clone(),
+        primary_wallet_address: primary_wallet_address.clone(),
+        // NULL means the row predates RCS-201's backfill (or was written by the
+        // old binary during a rolling deploy). Fall back to the computed value,
+        // which is what such a row was salted with anyway.
+        kdf_salt_identifier: row
+            .get::<Option<String>, _>("kdf_salt_identifier")
+            .unwrap_or_else(|| match (&email, &primary_wallet_address) {
+                (_, Some(w)) => format!("wallet:{w}"),
+                // Lowercased to agree with the backfill and User::new, which
+                // both pin the normalised form.
+                (Some(e), None) => e.to_lowercase(),
+                (None, None) => format!("passkey:{id}"),
+            }),
         kdf_params: serde_json::from_value(kdf_params_json)
             .map_err(|e| AuthError::Repository(e.to_string()))?,
         encrypted_symmetric_key: serde_json::from_value(encrypted_key_json)

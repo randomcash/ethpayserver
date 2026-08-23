@@ -83,8 +83,9 @@ pub(super) async fn seed_store(service: &PgDataService) -> StoreId {
     let user_id = Uuid::new_v4();
     sqlx::query(
         r"
-        INSERT INTO users (id, kdf_params, encrypted_symmetric_key, recovery_verification_hash)
-        VALUES ($1, '{}'::jsonb, '{}'::jsonb, 'test-hash')
+        INSERT INTO users (id, kdf_params, encrypted_symmetric_key, recovery_verification_hash,
+                           kdf_salt_identifier)
+        VALUES ($1, '{}'::jsonb, '{}'::jsonb, 'test-hash', 'passkey:' || $1::text)
         ",
     )
     .bind(user_id)
