@@ -96,10 +96,12 @@ async fn integration_user_wallet_address() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     // Create user with wallet address
+    let wallet = unique_wallet_address();
     let user = User {
         id: UserId::new(),
         email: None,
-        primary_wallet_address: Some(unique_wallet_address()),
+        kdf_salt_identifier: format!("wallet:{wallet}"),
+        primary_wallet_address: Some(wallet),
         kdf_params: test_kdf_params(),
         encrypted_symmetric_key: test_encrypted_blob(),
         recovery_verification_hash: "hash".to_string(),

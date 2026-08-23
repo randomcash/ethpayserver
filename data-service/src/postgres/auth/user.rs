@@ -22,15 +22,16 @@ impl UserRepository for PgDataService {
         sqlx::query(
             r#"
             INSERT INTO users (
-                id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                recovery_verification_hash, created_at, last_login_at,
-                failed_login_attempts, locked_until, role
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                encrypted_symmetric_key, recovery_verification_hash, created_at,
+                last_login_at, failed_login_attempts, locked_until, role
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(user.id.0)
         .bind(&user.email)
         .bind(&user.primary_wallet_address)
+        .bind(&user.kdf_salt_identifier)
         .bind(&kdf_params)
         .bind(&encrypted_key)
         .bind(&user.recovery_verification_hash)
@@ -49,9 +50,9 @@ impl UserRepository for PgDataService {
     async fn get_user(&self, id: UserId) -> Result<Option<User>> {
         let row = sqlx::query(
             r#"
-            SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                   recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until, role
+            SELECT id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                   encrypted_symmetric_key, recovery_verification_hash, created_at,
+                   last_login_at, failed_login_attempts, locked_until, role
             FROM users WHERE id = $1
             "#,
         )
@@ -66,9 +67,9 @@ impl UserRepository for PgDataService {
     async fn get_user_by_email(&self, email: &str) -> Result<Option<User>> {
         let row = sqlx::query(
             r#"
-            SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                   recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until, role
+            SELECT id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                   encrypted_symmetric_key, recovery_verification_hash, created_at,
+                   last_login_at, failed_login_attempts, locked_until, role
             FROM users WHERE LOWER(email) = LOWER($1)
             "#,
         )
@@ -83,9 +84,9 @@ impl UserRepository for PgDataService {
     async fn get_user_by_wallet_address(&self, address: &str) -> Result<Option<User>> {
         let row = sqlx::query(
             r#"
-            SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                   recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until, role
+            SELECT id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                   encrypted_symmetric_key, recovery_verification_hash, created_at,
+                   last_login_at, failed_login_attempts, locked_until, role
             FROM users WHERE primary_wallet_address = $1
             "#,
         )
@@ -105,6 +106,10 @@ impl UserRepository for PgDataService {
 
         let result = sqlx::query(
             r#"
+            -- kdf_salt_identifier is deliberately absent: it is pinned at
+            -- registration and the stored recovery_verification_hash was
+            -- derived from it. Updating it would make the account
+            -- unrecoverable, so this statement cannot (RCS-201).
             UPDATE users SET
                 email = $2, primary_wallet_address = $3, kdf_params = $4,
                 encrypted_symmetric_key = $5, recovery_verification_hash = $6,
@@ -207,9 +212,9 @@ impl UserRepository for PgDataService {
     async fn list_users(&self, offset: i64, limit: i64) -> Result<Vec<User>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, email, primary_wallet_address, kdf_params, encrypted_symmetric_key,
-                   recovery_verification_hash, created_at, last_login_at,
-                   failed_login_attempts, locked_until, role
+            SELECT id, email, primary_wallet_address, kdf_salt_identifier, kdf_params,
+                   encrypted_symmetric_key, recovery_verification_hash, created_at,
+                   last_login_at, failed_login_attempts, locked_until, role
             FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2
             "#,
         )
@@ -241,6 +246,7 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
         id: UserId(row.get("id")),
         email: row.get("email"),
         primary_wallet_address: row.get("primary_wallet_address"),
+        kdf_salt_identifier: row.get("kdf_salt_identifier"),
         kdf_params: serde_json::from_value(kdf_params_json)
             .map_err(|e| AuthError::Repository(e.to_string()))?,
         encrypted_symmetric_key: serde_json::from_value(encrypted_key_json)
