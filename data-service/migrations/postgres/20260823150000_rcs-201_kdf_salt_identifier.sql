@@ -1,4 +1,10 @@
+-- no-transaction
 -- RCS-201: pin the recovery KDF salt identifier at registration.
+--
+-- Runs outside a transaction (see the directive on line 1) so the ALTER commits
+-- and releases its ACCESS EXCLUSIVE lock before the backfill starts. In one
+-- transaction the lock would be held across the whole UPDATE, blocking every
+-- login and session read on `users` while the old server is still serving.
 --
 -- `recovery_verification_hash` is written once, from
 --   Argon2id(BIP39-seed(phrase), "payserver-recovery:{identifier}")

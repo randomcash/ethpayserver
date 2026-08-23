@@ -111,6 +111,13 @@ impl UserRepository for PgDataService {
             -- derived from it. Updating it would make the account
             -- unrecoverable, so this statement cannot (RCS-201).
             UPDATE users SET
+                -- COALESCE, not assignment: pins the value on first write for
+                -- rows the old binary inserted during a rolling deploy (which
+                -- the one-shot backfill cannot reach), while remaining
+                -- immutable for every row that already has one. Without this
+                -- those rows keep recompute-on-read semantics forever and the
+                -- promised follow-up SET NOT NULL would find NULLs (RCS-201).
+                kdf_salt_identifier = COALESCE(users.kdf_salt_identifier, $11),
                 email = $2, primary_wallet_address = $3, kdf_params = $4,
                 encrypted_symmetric_key = $5, recovery_verification_hash = $6,
                 last_login_at = $7, failed_login_attempts = $8, locked_until = $9,
@@ -128,6 +135,7 @@ impl UserRepository for PgDataService {
         .bind(user.failed_login_attempts as i32)
         .bind(user.locked_until)
         .bind(user.role.as_str())
+        .bind(&user.kdf_salt_identifier)
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;
