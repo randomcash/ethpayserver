@@ -479,10 +479,17 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::chain monitors"
-          # evmmonitor republishes health on a timer; give it a few cycles.
+          # Wait for every chain to actually reach a healthy state, not merely
+          # for the key to be non-empty. evmmonitor publishes health as soon as
+          # it starts, with status="connecting" and is_healthy=false, so
+          # breaking on non-empty raced a monitor this very job had just
+          # recreated — and the assertion below then failed a perfectly good
+          # deploy (run 32645968509). Connecting takes seconds; this allows 2m.
           for i in $(seq 1 24); do
             health=$(docker exec ethpayserver_testnet_redis redis-cli --raw get evmmonitor:health 2>/dev/null || true)
-            [ -n "$health" ] && [ "$health" != "[]" ] && break
+            if [ -n "$health" ] && [ "$health" != "[]" ] && ! printf '%s' "$health" | grep -q '"is_healthy":false'; then
+              break
+            fi
             sleep 5
           done
           echo "${health:-<empty>}"
