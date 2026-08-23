@@ -242,11 +242,24 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
     let failed_attempts: i32 = row.get("failed_login_attempts");
     let role_str: String = row.get("role");
 
+    let id: uuid::Uuid = row.get("id");
+    let email: Option<String> = row.get("email");
+    let primary_wallet_address: Option<String> = row.get("primary_wallet_address");
+
     Ok(User {
-        id: UserId(row.get("id")),
-        email: row.get("email"),
-        primary_wallet_address: row.get("primary_wallet_address"),
-        kdf_salt_identifier: row.get("kdf_salt_identifier"),
+        id: UserId(id),
+        email: email.clone(),
+        primary_wallet_address: primary_wallet_address.clone(),
+        // NULL means the row predates RCS-201's backfill (or was written by the
+        // old binary during a rolling deploy). Fall back to the computed value,
+        // which is what such a row was salted with anyway.
+        kdf_salt_identifier: row
+            .get::<Option<String>, _>("kdf_salt_identifier")
+            .unwrap_or_else(|| match (&email, &primary_wallet_address) {
+                (_, Some(w)) => format!("wallet:{w}"),
+                (Some(e), None) => e.clone(),
+                (None, None) => format!("passkey:{id}"),
+            }),
         kdf_params: serde_json::from_value(kdf_params_json)
             .map_err(|e| AuthError::Repository(e.to_string()))?,
         encrypted_symmetric_key: serde_json::from_value(encrypted_key_json)

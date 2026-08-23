@@ -12,24 +12,38 @@
 --
 -- Storing the identifier makes it immutable by construction.
 
+-- Nullable, and deliberately NOT tightened to NOT NULL here. The migrate
+-- container runs while the *previous* server is still serving: any registration
+-- committing between the backfill and a `SET NOT NULL` would insert a NULL row
+-- (the old binary's INSERT has no such column) and abort the whole migration,
+-- leaving the new server unable to start. The reader falls back to the computed
+-- value when this is NULL, so the rolling window is safe; a follow-up migration
+-- can tighten it once the new binary is the only writer.
 ALTER TABLE users
     ADD COLUMN kdf_salt_identifier VARCHAR(255);
 
--- Backfill with exactly what kdf_salt_identifier() would return today. This is
--- correct for every existing account: none can have changed identity yet
--- without already being broken, and this pins whatever they registered under.
+-- Backfill. Note the precedence is wallet-before-email, which is the REVERSE of
+-- User::kdf_salt_identifier().
+--
+-- That is deliberate. Registration has no email path — `User::new` has zero call
+-- sites, and the client only ever produces `wallet:{addr}` or `passkey:{id}`. So
+-- a row holding BOTH an email and a wallet is, by construction, an account that
+-- registered with a wallet and acquired an email afterwards: precisely the
+-- RCS-201 victim whose recovery is currently broken.
+--
+-- Pinning `email` for those rows would freeze the broken derivation forever.
+-- Pinning the wallet restores the value their recovery_verification_hash was
+-- actually built from, and makes them recoverable again.
 UPDATE users
 SET kdf_salt_identifier = CASE
+    WHEN primary_wallet_address IS NOT NULL THEN 'wallet:' || primary_wallet_address
     WHEN email IS NOT NULL                  THEN email
-    WHEN primary_wallet_address IS NOT NULL  THEN 'wallet:' || primary_wallet_address
     ELSE 'passkey:' || id::text
 END
 WHERE kdf_salt_identifier IS NULL;
 
-ALTER TABLE users
-    ALTER COLUMN kdf_salt_identifier SET NOT NULL;
-
 COMMENT ON COLUMN users.kdf_salt_identifier IS
     'Identifier the recovery KDF was salted with at registration. Immutable: '
     'changing it invalidates recovery_verification_hash and makes the account '
-    'unrecoverable (RCS-201).';
+    'unrecoverable. NULL means pre-RCS-201; readers fall back to the computed '
+    'value (RCS-201).';
