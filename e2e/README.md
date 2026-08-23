@@ -67,6 +67,27 @@ virtual authenticator's RP ID (`localhost`) does not match the remote
 domain. Set `E2E_SKIP_AUTH=false` to force-run them once the origin issue
 is resolved.
 
+## Test wallet maintenance (`scripts/`)
+
+Both scripts are operator tools — nothing in CI runs them.
+
+```bash
+# Mint a throwaway Sepolia wallet: prints the phrase, the spender address to
+# fund, and the merchant xpub. Store the phrase as the E2E_TEST_MNEMONIC secret.
+node scripts/new-test-wallet.mjs
+
+# Reclaim funds parked in derived receive addresses (RCS-202). Dry run by
+# default; pass --execute to broadcast.
+E2E_TEST_MNEMONIC="..." E2E_SEPOLIA_RPC_URL="https://..." \
+  node scripts/sweep-test-wallet.mjs --scan 50
+```
+
+Each nightly run moves `INVOICE_AMOUNT_ETH` (0.0001) from the spender to an
+address derived from the *same* seed, so the principal is parked rather than
+spent — only gas (~0.00002/run at 0.94 gwei) is actually consumed. At 0.05
+funded that is ~416 runs without sweeping, ~2,500 with. The spec emits a
+`::warning::` once fewer than 20 runs' worth remain.
+
 ## Synthetic payment (`tests/synthetic-payment.spec.ts`)
 
 The only test that exercises the money path for real: it creates an invoice over

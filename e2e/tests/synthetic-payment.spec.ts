@@ -20,6 +20,8 @@
  * spendable from the same mnemonic; the spender lives at a separate account
  * index and is topped up from a faucet.
  */
+import { appendFileSync } from 'node:fs';
+
 import { test, expect } from '@playwright/test';
 import { createPublicClient, createWalletClient, formatEther, http, parseEther } from 'viem';
 import { HDKey, mnemonicToAccount } from 'viem/accounts';
@@ -45,6 +47,14 @@ const WEBHOOK_TIMEOUT_MS = 2 * 60_000;
 // Sepolia inclusion is the one step whose latency we do not control. It is
 // budgeted separately so the paid-detection window is not eaten by it.
 const RECEIPT_TIMEOUT_MS = 3 * 60_000;
+/**
+ * Warn once the spender holds less than this many runs' worth (RCS-202).
+ *
+ * The hard guard below only trips when the wallet is already short for the
+ * *current* run — a cliff, not a warning, whose first notice is a red nightly.
+ * At ~0.00012 per run this gives weeks of notice instead.
+ */
+const LOW_BALANCE_RUNS = 20;
 
 function requireEnv(name: string, why: string): string {
   const value = process.env[name];
@@ -162,6 +172,23 @@ test.describe('Synthetic payment (live testnet)', () => {
         `needs at least ${formatEther(needed)}. Refill it from a faucet.`,
     ).toBe(true);
     console.log(`spender ${spender.address} — ${formatEther(balance)} SepoliaETH`);
+
+    // Advance warning, never a failure: the run is fine, the wallet just needs
+    // topping up before it isn't. Surfaces in the Actions summary so it is seen
+    // without anyone reading the log (RCS-202).
+    const lowWater = needed * BigInt(LOW_BALANCE_RUNS);
+    if (balance < lowWater) {
+      const runsLeft = Number(balance / needed);
+      const msg =
+        `Synthetic payment wallet is low: ${spender.address} holds ` +
+        `${formatEther(balance)} SepoliaETH, about ${runsLeft} run(s) left. ` +
+        `Top it up from a Sepolia faucet, or reclaim parked funds with ` +
+        `\`node scripts/sweep-test-wallet.mjs\`.`;
+      console.log(`::warning title=Synthetic payment wallet low::${msg}`);
+      if (process.env.GITHUB_STEP_SUMMARY) {
+        appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### \u26a0\ufe0f Wallet low\n\n${msg}\n`);
+      }
+    }
 
     const sink = await WebhookSink.start();
     try {
