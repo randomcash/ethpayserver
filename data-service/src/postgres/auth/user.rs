@@ -265,7 +265,9 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
             .get::<Option<String>, _>("kdf_salt_identifier")
             .unwrap_or_else(|| match (&email, &primary_wallet_address) {
                 (_, Some(w)) => format!("wallet:{w}"),
-                (Some(e), None) => e.clone(),
+                // Lowercased to agree with the backfill and User::new, which
+                // both pin the normalised form.
+                (Some(e), None) => e.to_lowercase(),
                 (None, None) => format!("passkey:{id}"),
             }),
         kdf_params: serde_json::from_value(kdf_params_json)

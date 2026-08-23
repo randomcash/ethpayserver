@@ -64,6 +64,24 @@ async fn integration_user_crud() {
     let fetched = service.get_user(user.id).await.unwrap().unwrap();
     assert_eq!(fetched.failed_login_attempts, 3);
 
+    // RCS-201: the pinned identifier must survive a round trip, and update_user
+    // must not be able to move it. Collapsing the COALESCE back to a plain
+    // assignment, or swapping two same-typed binds, previously kept CI green and
+    // would only surface when a user tried to recover.
+    assert_eq!(
+        fetched.kdf_salt_identifier, user.kdf_salt_identifier,
+        "create_user -> get_user must round-trip the pinned identifier"
+    );
+
+    let mut tampered = fetched.clone();
+    tampered.kdf_salt_identifier = "attacker-chosen".to_string();
+    service.update_user(&tampered).await.unwrap();
+    let after = service.get_user(user.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.kdf_salt_identifier, user.kdf_salt_identifier,
+        "update_user must not change the pinned identifier"
+    );
+
     // Increment failed logins
     let count = service.increment_failed_logins(user.id).await.unwrap();
     assert_eq!(count, 4);
