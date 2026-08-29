@@ -72,6 +72,8 @@ where
     let customer_email = extract_customer_email(&cancelled.metadata);
     let response = InvoiceResponse {
         id: cancelled.id.0,
+        store_id: cancelled.store_id.0.to_string(),
+        store_name: None,
         currency: cancelled.currency,
         status: cancelled.status.to_string(),
         amount: cancelled.amount,

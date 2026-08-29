@@ -74,6 +74,14 @@ impl From<PaymentOptionData> for PaymentOptionResponse {
 pub struct InvoiceResponse {
     /// Invoice ID.
     pub id: String,
+    /// Store this invoice belongs to.
+    pub store_id: String,
+    /// Store name, when the caller needs to tell stores apart (RCS-171).
+    ///
+    /// Only the list endpoints resolve this: a single-invoice response is
+    /// always read in a context that already knows the store, and looking the
+    /// name up there would be a query per request for a field nobody renders.
+    pub store_name: Option<String>,
     /// Invoice currency (e.g., "USD", "EUR", "ETH").
     pub currency: String,
     /// Status.
@@ -99,6 +107,10 @@ pub struct InvoiceResponse {
 pub struct PaymentResponse {
     /// Payment ID.
     pub id: String,
+    /// Store the payment's invoice belongs to (list endpoints only).
+    pub store_id: Option<String>,
+    /// Store name (list endpoints only) — see [`InvoiceResponse::store_name`].
+    pub store_name: Option<String>,
     /// Chain ID (EIP-155).
     pub chain_id: u64,
     /// Invoice ID this payment belongs to.
@@ -130,6 +142,10 @@ impl From<PaymentData> for PaymentResponse {
         let decimals = token_decimals(&p.asset_symbol, p.token_address.as_deref());
         Self {
             id: p.id.to_string(),
+            // Payments carry no store of their own; only the list endpoint,
+            // which already resolves the invoice, fills these in.
+            store_id: None,
+            store_name: None,
             chain_id: p.chain_id,
             invoice_id: p.invoice_id.0,
             tx_hash: p.tx_hash,

@@ -11,7 +11,7 @@ use data_service::PaymentOptionReader;
 
 use super::{
     InvoiceStatusResponse, ListPaymentsQuery, PaymentListResponse, PaymentResponse,
-    get_invoice_with_permission, verify_store_access_for_query,
+    get_invoice_with_permission, resolve_store_names, verify_store_access_for_query,
 };
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
@@ -111,10 +111,38 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(PaymentListResponse {
-        total,
-        payments: payments.into_iter().map(Into::into).collect(),
-    }))
+    // A payment has no store of its own — it inherits its invoice's. With no
+    // store filter this page can span stores, so resolve the owning store for
+    // each row so the client can label it (RCS-171). Deduplicated by invoice:
+    // several payments against one invoice cost a single lookup.
+    let mut store_of_invoice: std::collections::HashMap<String, ::types::StoreId> =
+        std::collections::HashMap::new();
+    for payment in &payments {
+        if store_of_invoice.contains_key(&payment.invoice_id.0) {
+            continue;
+        }
+        // A payment whose invoice cannot be read just goes unlabelled; that is
+        // not worth failing the whole list over.
+        if let Ok(Some(invoice)) =
+            InvoiceReader::get(&*state.data_service, &payment.invoice_id).await
+        {
+            store_of_invoice.insert(payment.invoice_id.0.clone(), invoice.store_id);
+        }
+    }
+    let store_names = resolve_store_names(&state, store_of_invoice.values().copied()).await;
+
+    let payments = payments
+        .into_iter()
+        .map(|p| {
+            let store_id = store_of_invoice.get(&p.invoice_id.0).copied();
+            let mut response: PaymentResponse = p.into();
+            response.store_name = store_id.and_then(|s| store_names.get(&s.0).cloned());
+            response.store_id = store_id.map(|s| s.0.to_string());
+            response
+        })
+        .collect();
+
+    Ok(Json(PaymentListResponse { total, payments }))
 }
 
 /// Get a single payment by ID.

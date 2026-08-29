@@ -9,6 +9,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
     pub id: String,
+    /// Store the payment's invoice belongs to (list endpoints only).
+    #[serde(default)]
+    pub store_id: Option<String>,
+    /// Store name, populated by the list endpoint so an "All Stores" view can
+    /// label each row (RCS-171).
+    #[serde(default)]
+    pub store_name: Option<String>,
     /// Chain ID (EIP-155).
     pub chain_id: u64,
     /// Invoice ID this payment belongs to.

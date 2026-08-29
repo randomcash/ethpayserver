@@ -53,6 +53,13 @@ fn default_invoice_status() -> InvoiceStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invoice {
     pub id: String,
+    /// Store this invoice belongs to.
+    #[serde(default)]
+    pub store_id: String,
+    /// Store name, populated by the list endpoints so an "All Stores" view can
+    /// label each row (RCS-171). `None` on single-invoice responses.
+    #[serde(default)]
+    pub store_name: Option<String>,
     /// Invoice currency (e.g., "USD", "EUR", "ETH").
     pub currency: String,
     /// Invoice status.

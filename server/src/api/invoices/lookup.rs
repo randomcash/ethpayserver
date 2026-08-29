@@ -127,6 +127,8 @@ where
     let response = TxHashLookupResponse {
         invoice: InvoiceResponse {
             id: invoice.id.0,
+            store_id: invoice.store_id.0.to_string(),
+            store_name: None,
             currency: invoice.currency,
             status: invoice.status.to_string(),
             amount: invoice.amount,

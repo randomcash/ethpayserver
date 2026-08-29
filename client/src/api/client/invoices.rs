@@ -9,32 +9,35 @@ use crate::api::{
 impl EvmApiClient {
     /// List invoices with filters and pagination.
     ///
-    /// `store_id` is required for non-admin users.
+    /// `store_id` of `None` means "All Stores": the server then returns
+    /// invoices across every store, which it only allows for server admins —
+    /// any other caller gets `400 Bad Request` (RCS-171).
     pub async fn list_invoices(
         &self,
-        store_id: &str,
+        store_id: Option<&str>,
         status: Option<&str>,
         currency: Option<&str>,
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<InvoiceListResponse, ApiError> {
-        let mut query = format!(
-            "/api/invoices?store_id={}",
-            js_sys::encode_uri_component(store_id)
-        );
+        let mut params = Vec::new();
+        if let Some(sid) = store_id {
+            params.push(format!("store_id={}", js_sys::encode_uri_component(sid)));
+        }
         if let Some(s) = status {
-            query.push_str(&format!("&status={}", js_sys::encode_uri_component(s)));
+            params.push(format!("status={}", js_sys::encode_uri_component(s)));
         }
         if let Some(c) = currency {
-            query.push_str(&format!("&currency={}", js_sys::encode_uri_component(c)));
+            params.push(format!("currency={}", js_sys::encode_uri_component(c)));
         }
         if let Some(l) = limit {
-            query.push_str(&format!("&limit={}", l));
+            params.push(format!("limit={}", l));
         }
         if let Some(o) = offset {
-            query.push_str(&format!("&offset={}", o));
+            params.push(format!("offset={}", o));
         }
-        self.get(&query).await
+        self.get(&format!("/api/invoices?{}", params.join("&")))
+            .await
     }
 
     /// Get an invoice by ID.
@@ -75,16 +78,23 @@ impl EvmApiClient {
     }
 
     /// Export invoices as CSV text.
+    ///
+    /// `store_id` of `None` exports across all stores (admins only) — see
+    /// [`Self::list_invoices`].
     pub async fn export_invoices_csv(
         &self,
-        store_id: &str,
+        store_id: Option<&str>,
         status: Option<&str>,
     ) -> Result<String, ApiError> {
-        let mut query = format!("/api/invoices/export.csv?store_id={}", store_id);
-        if let Some(s) = status {
-            query.push_str(&format!("&status={}", s));
+        let mut params = Vec::new();
+        if let Some(sid) = store_id {
+            params.push(format!("store_id={}", js_sys::encode_uri_component(sid)));
         }
-        self.get_text(&query).await
+        if let Some(s) = status {
+            params.push(format!("status={}", js_sys::encode_uri_component(s)));
+        }
+        self.get_text(&format!("/api/invoices/export.csv?{}", params.join("&")))
+            .await
     }
 
     /// Look up an invoice by transaction hash.

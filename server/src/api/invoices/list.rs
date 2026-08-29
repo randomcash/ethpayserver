@@ -13,7 +13,7 @@ use crate::state::PgAppState;
 
 use super::{
     InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, extract_customer_email,
-    verify_store_access_for_query,
+    resolve_store_names, verify_store_access_for_query,
 };
 
 /// List invoices with optional filters.
@@ -75,6 +75,10 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Name every row's store: with no store filter this page can span stores,
+    // and the client has no other way to label them (RCS-171).
+    let store_names = resolve_store_names(&state, invoices.iter().map(|i| i.store_id)).await;
+
     // Get payment options for each invoice
     let mut responses = Vec::with_capacity(invoices.len());
     for invoice in invoices {
@@ -85,6 +89,8 @@ where
         let customer_email = extract_customer_email(&invoice.metadata);
         responses.push(InvoiceResponse {
             id: invoice.id.0,
+            store_id: invoice.store_id.0.to_string(),
+            store_name: store_names.get(&invoice.store_id.0).cloned(),
             currency: invoice.currency,
             status: invoice.status.to_string(),
             amount: invoice.amount,
@@ -157,6 +163,8 @@ where
     let customer_email = extract_customer_email(&invoice.metadata);
     let response = InvoiceResponse {
         id: invoice.id.0,
+        store_id: invoice.store_id.0.to_string(),
+        store_name: None,
         currency: invoice.currency,
         status: invoice.status.to_string(),
         amount: invoice.amount,

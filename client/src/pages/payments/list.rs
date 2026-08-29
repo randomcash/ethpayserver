@@ -3,11 +3,11 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 
-use crate::api::{EvmApiClient, Payment};
-use crate::app::StoreContext;
+use crate::api::{ApiError, EvmApiClient, Payment};
+use crate::app::{StoreContext, StoresStatus};
 use crate::components::{NoStoreSelected, PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
-use crate::util::chain_name;
+use crate::util::{chain_name, short_store_id};
 
 use super::format::{
     format_crypto_amount, format_date, payment_status, payment_status_class, truncate_hash,
@@ -89,22 +89,37 @@ pub fn PaymentsPage() -> impl IntoView {
     let payments_resource = LocalResource::new(move || {
         let api = api.get();
         let store_id = store_ctx.selected_store_id.get();
+        let stores_loaded = matches!(store_status.get(), StoresStatus::Loaded);
         let status = status_param.get();
         let offset = current_offset.get();
         let _ = refresh.get();
 
         async move {
-            // `Ok(None)` rather than an error — see the same change in
-            // `pages/invoices/list.rs` (RCS-195): no store selected is a normal
-            // state for a new account, not a transport failure.
-            let Some(sid) = store_id else {
+            // Mirrors `pages/invoices/list.rs` — see the reasoning there
+            // (RCS-171): "All Stores" is a real query, but only once the store
+            // list has landed, and a non-admin's 400 is a "pick a store" state
+            // rather than an error to render raw.
+            if store_id.is_none() && !stores_loaded {
                 return Ok(None);
-            };
-            api.list_payments(&sid, status.as_deref(), Some(PAGE_SIZE), Some(offset))
+            }
+            match api
+                .list_payments(
+                    store_id.as_deref(),
+                    status.as_deref(),
+                    Some(PAGE_SIZE),
+                    Some(offset),
+                )
                 .await
-                .map(Some)
+            {
+                Ok(response) => Ok(Some(response)),
+                Err(ApiError::Http { status: 400, .. }) if store_id.is_none() => Ok(None),
+                Err(e) => Err(e),
+            }
         }
     });
+
+    // Only worth a column when rows can come from different stores.
+    let show_store = Signal::derive(move || store_ctx.selected_store_id.get().is_none());
 
     let filters = vec![
         ("all", "All"),
@@ -126,8 +141,7 @@ pub fn PaymentsPage() -> impl IntoView {
                         let store_id = store_ctx.selected_store_id.get();
                         let status = status_param.get();
                         wasm_bindgen_futures::spawn_local(async move {
-                            let Some(sid) = store_id else { return };
-                            match api.export_payments_csv(&sid, status.as_deref()).await {
+                            match api.export_payments_csv(store_id.as_deref(), status.as_deref()).await {
                                 Ok(csv) => crate::pages::trigger_csv_download(&csv, "payments.csv"),
                                 Err(e) => {
                                     web_sys::console::error_1(
@@ -266,6 +280,7 @@ pub fn PaymentsPage() -> impl IntoView {
                                         <thead>
                                             <tr>
                                                 <th>"Transaction"</th>
+                                                {show_store.get().then(|| view! { <th>"Store"</th> })}
                                                 <th>"Amount"</th>
                                                 <th>"Network"</th>
                                                 <th>"Invoice"</th>
@@ -276,7 +291,7 @@ pub fn PaymentsPage() -> impl IntoView {
                                         </thead>
                                         <tbody>
                                             {filtered.clone().into_iter().map(|payment| {
-                                                view! { <PaymentRow payment=payment /> }
+                                                view! { <PaymentRow payment=payment show_store=show_store.get() /> }
                                             }).collect_view()}
                                         </tbody>
                                     </table>
@@ -285,7 +300,7 @@ pub fn PaymentsPage() -> impl IntoView {
                                 // Payment Cards (Mobile)
                                 <div class="payments-cards mobile-only">
                                     {filtered.into_iter().map(|payment| {
-                                        view! { <PaymentCard payment=payment /> }
+                                        view! { <PaymentCard payment=payment show_store=show_store.get() /> }
                                     }).collect_view()}
                                 </div>
 
@@ -306,9 +321,24 @@ pub fn PaymentsPage() -> impl IntoView {
     }
 }
 
+/// Label for the store a payment belongs to.
+///
+/// Falls back to a shortened store ID when the server could not resolve a name,
+/// so the "All Stores" view never leaves a row unattributed.
+fn store_label(payment: &Payment) -> String {
+    match payment.store_name.as_deref() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => short_store_id(payment.store_id.as_deref().unwrap_or_default()),
+    }
+}
+
 /// Payment table row.
+///
+/// `show_store` adds the store column, which the list page turns on only for
+/// the "All Stores" view — see above (RCS-171).
 #[component]
-fn PaymentRow(payment: Payment) -> impl IntoView {
+fn PaymentRow(payment: Payment, show_store: bool) -> impl IntoView {
+    let store_display = show_store.then(|| store_label(&payment));
     let tx_display = truncate_hash(&payment.tx_hash, 10, 8);
     let network = chain_name(payment.chain_id);
     let status = payment_status(&payment);
@@ -333,6 +363,11 @@ fn PaymentRow(payment: Payment) -> impl IntoView {
                     </button>
                 </div>
             </td>
+            {store_display.map(|name| view! {
+                <td>
+                    <span class="payment-store">{name}</span>
+                </td>
+            })}
             <td>
                 <span class="payment-amount">{amount_display}</span>
             </td>
@@ -360,8 +395,11 @@ fn PaymentRow(payment: Payment) -> impl IntoView {
 }
 
 /// Mobile payment card component.
+///
+/// `show_store` behaves as on [`PaymentRow`].
 #[component]
-fn PaymentCard(payment: Payment) -> impl IntoView {
+fn PaymentCard(payment: Payment, show_store: bool) -> impl IntoView {
+    let store_display = show_store.then(|| store_label(&payment));
     let tx_display = truncate_hash(&payment.tx_hash, 8, 6);
     let network = chain_name(payment.chain_id);
     let status = payment_status(&payment);
@@ -404,11 +442,68 @@ fn PaymentCard(payment: Payment) -> impl IntoView {
 
             <div class="payment-card-footer">
                 <span class="payment-card-date">{date_display}</span>
+                {store_display.map(|name| view! {
+                    <span class="payment-card-store">{name}</span>
+                })}
                 <A href=format!("/evm/payments/{}", payment_link) attr:class="btn btn-ghost btn-xs">
                     "Details"
                     <IconChevronRight />
                 </A>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::store_label;
+    use crate::api::Payment;
+
+    fn payment(store_id: Option<&str>, store_name: Option<&str>) -> Payment {
+        Payment {
+            id: "pay-1".to_string(),
+            store_id: store_id.map(str::to_string),
+            store_name: store_name.map(str::to_string),
+            chain_id: 1,
+            invoice_id: "inv-1".to_string(),
+            tx_hash: "0xabc".to_string(),
+            amount: "1".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            block_number: None,
+            from_address: None,
+            detected_at: "2024-01-01T00:00:00Z".to_string(),
+            confirmed_at: None,
+            reorged: false,
+            decimals: 18,
+        }
+    }
+
+    #[test]
+    fn prefers_the_store_name() {
+        assert_eq!(
+            store_label(&payment(
+                Some("11111111-2222-3333-4444-555555555555"),
+                Some("Acme")
+            )),
+            "Acme"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_a_shortened_id() {
+        assert_eq!(
+            store_label(&payment(Some("11111111-2222-3333-4444-555555555555"), None)),
+            "11111111\u{2026}"
+        );
+        assert_eq!(store_label(&payment(Some("short"), None)), "short");
+    }
+
+    #[test]
+    fn unattributed_payments_still_get_a_label() {
+        // `store_id` is None on every non-list endpoint, and on a list row whose
+        // invoice could not be read. Neither should render a blank cell.
+        assert_eq!(store_label(&payment(None, None)), "Unknown store");
+        assert_eq!(store_label(&payment(Some(""), Some(""))), "Unknown store");
     }
 }

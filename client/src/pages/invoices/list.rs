@@ -4,7 +4,7 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 
 use crate::api::{ApiError, EvmApiClient, Invoice};
-use crate::app::StoreContext;
+use crate::app::{StoreContext, StoresStatus};
 use crate::components::{CreateInvoiceSignal, NoStoreSelected, PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
 
@@ -149,32 +149,45 @@ pub fn InvoicesPage() -> impl IntoView {
     let invoices_resource = LocalResource::new(move || {
         let api = api.get();
         let store_id = store_ctx.selected_store_id.get();
+        let stores_loaded = matches!(store_status.get(), StoresStatus::Loaded);
         let status = status_param.get();
         let currency = currency_param.get();
         let offset = current_offset.get();
         let _ = refresh.get();
 
         async move {
-            // `Ok(None)` rather than an error: having no store selected is the
-            // normal state of a brand-new account, and modelling it as
-            // `ApiError::Network` rendered it through the error path as
-            // "Network error: Please select a store first" — a transport
-            // failure, offering a Retry that cannot succeed because there is
-            // nothing to retry (RCS-195).
-            let Some(sid) = store_id else {
+            // No store selected is "All Stores", not an error. Before the store
+            // list lands, though, it is merely "not known yet" — the layout
+            // auto-selects the first store once the fetch returns — so hold off
+            // rather than firing an all-stores query that a moment later is
+            // replaced by a store-scoped one.
+            if store_id.is_none() && !stores_loaded {
                 return Ok(None);
-            };
-            api.list_invoices(
-                &sid,
-                status.as_deref(),
-                currency.as_deref(),
-                Some(PAGE_SIZE),
-                Some(offset),
-            )
-            .await
-            .map(Some)
+            }
+            match api
+                .list_invoices(
+                    store_id.as_deref(),
+                    status.as_deref(),
+                    currency.as_deref(),
+                    Some(PAGE_SIZE),
+                    Some(offset),
+                )
+                .await
+            {
+                Ok(response) => Ok(Some(response)),
+                // The all-stores view is admin-only server-side; everyone else
+                // gets a 400. That is a "pick a store" situation, not a failure
+                // to show as a raw error with a Retry that cannot work — fall
+                // through to NoStoreSelected, which says exactly that (RCS-171).
+                Err(ApiError::Http { status: 400, .. }) if store_id.is_none() => Ok(None),
+                Err(e) => Err(e),
+            }
         }
     });
+
+    // The store column only earns its width when rows can come from different
+    // stores; with one store selected every row would repeat the same name.
+    let show_store = Signal::derive(move || store_ctx.selected_store_id.get().is_none());
 
     view! {
         <div class="invoices-page">
@@ -190,8 +203,7 @@ pub fn InvoicesPage() -> impl IntoView {
                         let store_id = store_ctx.selected_store_id.get();
                         let status = status_param.get();
                         wasm_bindgen_futures::spawn_local(async move {
-                            let Some(sid) = store_id else { return };
-                            match api.export_invoices_csv(&sid, status.as_deref()).await {
+                            match api.export_invoices_csv(store_id.as_deref(), status.as_deref()).await {
                                 Ok(csv) => crate::pages::trigger_csv_download(&csv, "invoices.csv"),
                                 Err(e) => {
                                     web_sys::console::error_1(
@@ -366,6 +378,7 @@ pub fn InvoicesPage() -> impl IntoView {
                                         <thead>
                                             <tr>
                                                 <th>"Invoice"</th>
+                                                {show_store.get().then(|| view! { <th>"Store"</th> })}
                                                 <th>"Amount"</th>
                                                 <th>"Received"</th>
                                                 <th>"Status"</th>
@@ -375,7 +388,7 @@ pub fn InvoicesPage() -> impl IntoView {
                                         </thead>
                                         <tbody>
                                             {filtered.clone().into_iter().map(|invoice| {
-                                                view! { <InvoiceRow invoice=invoice /> }
+                                                view! { <InvoiceRow invoice=invoice show_store=show_store.get() /> }
                                             }).collect_view()}
                                         </tbody>
                                     </table>
@@ -384,7 +397,7 @@ pub fn InvoicesPage() -> impl IntoView {
                                 // Invoice Cards (Mobile)
                                 <div class="invoices-cards mobile-only">
                                     {filtered.into_iter().map(|invoice| {
-                                        view! { <InvoiceCard invoice=invoice /> }
+                                        view! { <InvoiceCard invoice=invoice show_store=show_store.get() /> }
                                     }).collect_view()}
                                 </div>
 
