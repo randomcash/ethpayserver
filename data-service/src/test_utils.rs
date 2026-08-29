@@ -10,8 +10,9 @@ use types::{
     CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
     InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentMethodId, PaymentOptionData,
     PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentQueryParams, PaymentReader,
-    PaymentWriter, PendingWatchInfo, RepositoryResult, StoreId, StoreSettings, StoreSettingsReader,
-    StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams, TokenReader, TokenWriter,
+    PaymentWriter, PendingWatchInfo, RefundData, RefundReader, RefundStatus, RefundWriter,
+    RepositoryResult, StoreId, StoreSettings, StoreSettingsReader, StoreWebhook,
+    StoreWebhookReader, TokenData, TokenQueryParams, TokenReader, TokenWriter,
     WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
@@ -27,6 +28,7 @@ pub struct InMemoryDataService {
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
+    refunds: RwLock<HashMap<Uuid, RefundData>>,
 }
 
 impl InMemoryDataService {
@@ -884,5 +886,116 @@ pub fn create_test_payment(
         credited_amount: Some("0.05".to_string()), // 0.05 ETH
         rate_used: None,
         rate_applied_at: None,
+    }
+}
+
+// ============================================================================
+// Refunds
+//
+// Mirrors the Postgres repository's observable behaviour so the refund flow
+// can be exercised without a database: `update_refund_status` leaves a field
+// untouched when passed `None` (the SQL uses COALESCE), and `get_active_*`
+// reports only pending/broadcasting rows.
+// ============================================================================
+
+#[async_trait]
+impl RefundReader for InMemoryDataService {
+    async fn get_refund(&self, id: Uuid) -> RepositoryResult<Option<RefundData>> {
+        Ok(self.refunds.read().unwrap().get(&id).cloned())
+    }
+
+    async fn get_refunds_for_invoice(
+        &self,
+        invoice_id: &InvoiceId,
+    ) -> RepositoryResult<Vec<RefundData>> {
+        let refunds = self.refunds.read().unwrap();
+        let mut found: Vec<RefundData> = refunds
+            .values()
+            .filter(|r| &r.invoice_id == invoice_id)
+            .cloned()
+            .collect();
+        // Postgres orders newest first.
+        found.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(found)
+    }
+
+    async fn get_refunds_for_store(
+        &self,
+        store_id: StoreId,
+        limit: i64,
+        offset: i64,
+    ) -> RepositoryResult<(i64, Vec<RefundData>)> {
+        let refunds = self.refunds.read().unwrap();
+        let mut found: Vec<RefundData> = refunds
+            .values()
+            .filter(|r| r.store_id == store_id)
+            .cloned()
+            .collect();
+        found.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let total = found.len() as i64;
+        let page = found
+            .into_iter()
+            .skip(offset.max(0) as usize)
+            .take(limit.max(0) as usize)
+            .collect();
+        Ok((total, page))
+    }
+
+    async fn get_active_refunds(&self) -> RepositoryResult<Vec<RefundData>> {
+        let refunds = self.refunds.read().unwrap();
+        let mut active: Vec<RefundData> = refunds
+            .values()
+            .filter(|r| matches!(r.status, RefundStatus::Pending | RefundStatus::Broadcasting))
+            .cloned()
+            .collect();
+        // Postgres orders oldest first, so the broadcaster drains a FIFO queue.
+        active.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(active)
+    }
+}
+
+#[async_trait]
+impl RefundWriter for InMemoryDataService {
+    async fn create_refund(&self, refund: &RefundData) -> RepositoryResult<()> {
+        self.refunds
+            .write()
+            .unwrap()
+            .insert(refund.id, refund.clone());
+        Ok(())
+    }
+
+    async fn update_refund_status(
+        &self,
+        id: Uuid,
+        status: RefundStatus,
+        tx_hash: Option<&str>,
+        fee_amount: Option<&str>,
+        error_message: Option<&str>,
+    ) -> RepositoryResult<()> {
+        let mut refunds = self.refunds.write().unwrap();
+        if let Some(refund) = refunds.get_mut(&id) {
+            refund.status = status;
+            // COALESCE semantics: `None` keeps whatever is already stored.
+            if let Some(tx_hash) = tx_hash {
+                refund.tx_hash = Some(tx_hash.to_string());
+            }
+            if let Some(fee_amount) = fee_amount {
+                refund.fee_amount = Some(fee_amount.to_string());
+            }
+            if let Some(error_message) = error_message {
+                refund.error_message = Some(error_message.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    async fn confirm_refund(&self, id: Uuid) -> RepositoryResult<()> {
+        let mut refunds = self.refunds.write().unwrap();
+        if let Some(refund) = refunds.get_mut(&id) {
+            refund.status = RefundStatus::Confirmed;
+            refund.confirmed_at = Some(Utc::now());
+        }
+        Ok(())
     }
 }

@@ -16,7 +16,7 @@ use uuid::Uuid;
 use alloy_primitives::U256;
 use auth::{SessionService, UserStoreRepository};
 use data_service::{PaymentReader, PayoutReader, PayoutWriter};
-use types::{PayoutData, PayoutStatus, StoreId};
+use types::{PaymentData, PayoutData, PayoutStatus, StoreId};
 
 use super::extractors::AuthenticatedUser;
 use crate::metrics;
@@ -85,6 +85,65 @@ pub struct PayoutListResponse {
     pub payouts: Vec<PayoutResponse>,
 }
 
+// ============================================================================
+// Payout decision logic
+//
+// Extracted from `create_payout` so the validation and amount-aggregation
+// rules can be unit tested without a live `PgAppState` (which is bound to a
+// real Postgres pool). The handler stays the only place that emits logs /
+// touches the DB.
+// ============================================================================
+
+/// Validate the parts of a payout request that need no database access.
+///
+/// A payout with no destination has nowhere to send funds, and one with no
+/// invoices has nothing to sweep — both are client errors.
+pub(crate) fn validate_payout_request(body: &CreatePayoutRequest) -> Result<(), StatusCode> {
+    if body.destination_address.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    if body.invoice_ids.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    Ok(())
+}
+
+/// Asset type recorded for a payout: an ERC20 payout carries a token contract,
+/// a native one does not.
+pub(crate) fn payout_asset_type(token_address: Option<&str>) -> &'static str {
+    if token_address.is_some() {
+        "erc20"
+    } else {
+        "native"
+    }
+}
+
+/// Total the payments that this payout is allowed to sweep.
+///
+/// Counts only confirmed, non-reorged payments on the requested chain and
+/// asset. An unparseable amount is skipped rather than failing the payout,
+/// matching the handler's original `if let Ok(..)` behaviour.
+pub(crate) fn sum_sweepable_payments(
+    payments: &[PaymentData],
+    chain_id: u64,
+    asset_symbol: &str,
+) -> U256 {
+    let mut total = U256::ZERO;
+    for payment in payments {
+        if payment.confirmed_at.is_some()
+            && !payment.reorged
+            && payment.chain_id == chain_id
+            && payment.asset_symbol == asset_symbol
+            && let Ok(amt) = payment.amount.parse::<U256>()
+        {
+            total += amt;
+        }
+    }
+    total
+}
+
 /// Initiate a payout — sweep funds from derived addresses to merchant wallet.
 ///
 /// Creates a payout record. The actual transaction signing and broadcasting
@@ -112,22 +171,9 @@ where
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Validate destination address is not empty
-    if body.destination_address.trim().is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    validate_payout_request(&body)?;
 
-    // Validate invoice_ids are not empty
-    if body.invoice_ids.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Determine asset type from token_address
-    let asset_type = if body.token_address.is_some() {
-        "erc20".to_string()
-    } else {
-        "native".to_string()
-    };
+    let asset_type = payout_asset_type(body.token_address.as_deref()).to_string();
 
     // Calculate total amount from confirmed payments for the specified invoices
     let mut total_amount = U256::ZERO;
@@ -137,16 +183,7 @@ where
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        for payment in payments {
-            if payment.confirmed_at.is_some()
-                && !payment.reorged
-                && payment.chain_id == body.chain_id
-                && payment.asset_symbol == body.asset_symbol
-                && let Ok(amt) = payment.amount.parse::<U256>()
-            {
-                total_amount += amt;
-            }
-        }
+        total_amount += sum_sweepable_payments(&payments, body.chain_id, &body.asset_symbol);
     }
 
     if total_amount.is_zero() {
@@ -256,4 +293,339 @@ where
         .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(payout.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    use types::{AssetType, InvoiceId};
+
+    const TEST_CHAIN_ID: u64 = 11155111;
+    const MERCHANT_WALLET: &str = "0x1111111111111111111111111111111111111111";
+    const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+
+    fn payout_request(invoice_ids: Vec<String>) -> CreatePayoutRequest {
+        CreatePayoutRequest {
+            invoice_ids,
+            destination_address: MERCHANT_WALLET.to_string(),
+            chain_id: TEST_CHAIN_ID,
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+        }
+    }
+
+    /// A confirmed, non-reorged ETH payment on the sweep chain — the
+    /// sweepable baseline that individual tests mutate one field at a time.
+    fn sweepable_payment(invoice_id: &InvoiceId, amount: &str) -> PaymentData {
+        PaymentData {
+            id: Uuid::new_v4(),
+            invoice_id: invoice_id.clone(),
+            payment_option_id: None,
+            chain_id: TEST_CHAIN_ID,
+            asset_type: AssetType::Native,
+            amount: amount.to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            tx_hash: format!("0x{:064x}", Uuid::new_v4().as_u128()),
+            block_number: Some(12_345_678),
+            detected_at: Utc::now(),
+            confirmed_at: Some(Utc::now()),
+            from_address: Some("0xabcdef1234567890abcdef1234567890abcdef12".to_string()),
+            reorged: false,
+            extra: None,
+            credited_amount: None,
+            rate_used: None,
+            rate_applied_at: None,
+        }
+    }
+
+    fn test_payout(status: PayoutStatus) -> PayoutData {
+        PayoutData {
+            id: Uuid::new_v4(),
+            store_id: StoreId::new(),
+            invoice_ids: vec!["inv_1".to_string(), "inv_2".to_string()],
+            destination_address: MERCHANT_WALLET.to_string(),
+            chain_id: TEST_CHAIN_ID,
+            asset_type: "native".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            amount: "3000000000000000000".to_string(),
+            tx_hash: None,
+            status,
+            fee_amount: None,
+            error_message: None,
+            created_at: Utc::now(),
+            confirmed_at: None,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Payout validation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn accepts_a_well_formed_payout_request() {
+        let body = payout_request(vec!["inv_1".to_string()]);
+        assert!(validate_payout_request(&body).is_ok());
+    }
+
+    /// Without a destination the sweep has nowhere to send funds.
+    #[test]
+    fn rejects_an_empty_destination_address() {
+        let mut body = payout_request(vec!["inv_1".to_string()]);
+        body.destination_address = String::new();
+
+        assert_eq!(
+            validate_payout_request(&body).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// A whitespace-only destination is just as unusable as an empty one, and
+    /// would otherwise be stored verbatim as the payout target.
+    #[test]
+    fn rejects_a_whitespace_only_destination_address() {
+        let mut body = payout_request(vec!["inv_1".to_string()]);
+        body.destination_address = "   \t ".to_string();
+
+        assert_eq!(
+            validate_payout_request(&body).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// The doc comment on `invoice_ids` advertises "sweep everything" on an
+    /// empty list, but the handler rejects it. Pin the implemented behaviour.
+    #[test]
+    fn rejects_an_empty_invoice_id_list() {
+        let body = payout_request(vec![]);
+
+        assert_eq!(
+            validate_payout_request(&body).unwrap_err(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn asset_type_follows_the_token_address() {
+        assert_eq!(payout_asset_type(None), "native");
+        assert_eq!(payout_asset_type(Some(USDC)), "erc20");
+    }
+
+    // ------------------------------------------------------------------
+    // Payout amount aggregation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn sums_confirmed_payments_on_the_requested_chain_and_asset() {
+        let invoice_id = InvoiceId::new();
+        let payments = vec![
+            sweepable_payment(&invoice_id, "1000000000000000000"),
+            sweepable_payment(&invoice_id, "2000000000000000000"),
+        ];
+
+        let total = sum_sweepable_payments(&payments, TEST_CHAIN_ID, "ETH");
+        assert_eq!(total.to_string(), "3000000000000000000");
+    }
+
+    #[test]
+    fn no_payments_sums_to_zero() {
+        let total = sum_sweepable_payments(&[], TEST_CHAIN_ID, "ETH");
+        assert!(total.is_zero());
+    }
+
+    /// Sweeping unconfirmed funds would pay out money the merchant may never
+    /// receive if the transaction never lands.
+    #[test]
+    fn excludes_unconfirmed_payments() {
+        let invoice_id = InvoiceId::new();
+        let mut payment = sweepable_payment(&invoice_id, "1000000000000000000");
+        payment.confirmed_at = None;
+
+        assert!(sum_sweepable_payments(&[payment], TEST_CHAIN_ID, "ETH").is_zero());
+    }
+
+    /// A reorged payment was rolled back on-chain; the funds are not there.
+    #[test]
+    fn excludes_reorged_payments() {
+        let invoice_id = InvoiceId::new();
+        let mut payment = sweepable_payment(&invoice_id, "1000000000000000000");
+        payment.reorged = true;
+
+        assert!(sum_sweepable_payments(&[payment], TEST_CHAIN_ID, "ETH").is_zero());
+    }
+
+    /// Funds on a different chain cannot be swept by this payout — mixing them
+    /// into the total would create a payout for more than the chain holds.
+    #[test]
+    fn excludes_payments_on_another_chain() {
+        let invoice_id = InvoiceId::new();
+        let mut other_chain = sweepable_payment(&invoice_id, "5000000000000000000");
+        other_chain.chain_id = 1;
+
+        let payments = vec![
+            sweepable_payment(&invoice_id, "1000000000000000000"),
+            other_chain,
+        ];
+
+        let total = sum_sweepable_payments(&payments, TEST_CHAIN_ID, "ETH");
+        assert_eq!(total.to_string(), "1000000000000000000");
+    }
+
+    /// Smallest units are asset-specific: adding USDC (6 decimals) into an ETH
+    /// (18 decimals) sweep total would be meaningless arithmetic.
+    #[test]
+    fn excludes_payments_in_another_asset() {
+        let invoice_id = InvoiceId::new();
+        let mut usdc = sweepable_payment(&invoice_id, "5000000");
+        usdc.asset_symbol = "USDC".to_string();
+        usdc.asset_type = AssetType::ERC20;
+        usdc.token_address = Some(USDC.to_string());
+
+        let payments = vec![sweepable_payment(&invoice_id, "1000000000000000000"), usdc];
+
+        let total = sum_sweepable_payments(&payments, TEST_CHAIN_ID, "ETH");
+        assert_eq!(total.to_string(), "1000000000000000000");
+    }
+
+    /// An amount the database cannot parse as a U256 is skipped rather than
+    /// aborting the sweep — pins the handler's original `if let Ok(..)` branch.
+    #[test]
+    fn skips_unparseable_amounts_without_failing_the_sweep() {
+        let invoice_id = InvoiceId::new();
+        let mut broken = sweepable_payment(&invoice_id, "not-a-number");
+        broken.id = Uuid::new_v4();
+
+        let payments = vec![broken, sweepable_payment(&invoice_id, "1000000000000000000")];
+
+        let total = sum_sweepable_payments(&payments, TEST_CHAIN_ID, "ETH");
+        assert_eq!(total.to_string(), "1000000000000000000");
+    }
+
+    /// A payout whose sweepable total is zero is rejected by the handler; this
+    /// pins the condition that decision reads.
+    #[test]
+    fn only_ineligible_payments_sum_to_zero() {
+        let invoice_id = InvoiceId::new();
+        let mut unconfirmed = sweepable_payment(&invoice_id, "1000000000000000000");
+        unconfirmed.confirmed_at = None;
+        let mut reorged = sweepable_payment(&invoice_id, "2000000000000000000");
+        reorged.reorged = true;
+
+        let total = sum_sweepable_payments(&[unconfirmed, reorged], TEST_CHAIN_ID, "ETH");
+        assert!(total.is_zero());
+    }
+
+    // ------------------------------------------------------------------
+    // Payout status transitions, as seen through the API response
+    // ------------------------------------------------------------------
+
+    /// The wire format must stay snake_case: merchant integrations match on
+    /// these exact strings.
+    #[test]
+    fn response_serialises_each_payout_status() {
+        for (status, expected) in [
+            (PayoutStatus::Pending, "pending"),
+            (PayoutStatus::Broadcasting, "broadcasting"),
+            (PayoutStatus::Confirmed, "confirmed"),
+            (PayoutStatus::Failed, "failed"),
+        ] {
+            let response = PayoutResponse::from(test_payout(status));
+            assert_eq!(response.status, expected);
+        }
+    }
+
+    #[test]
+    fn pending_and_broadcasting_are_not_final_but_confirmed_and_failed_are() {
+        assert!(!PayoutStatus::Pending.is_final());
+        assert!(!PayoutStatus::Broadcasting.is_final());
+        assert!(PayoutStatus::Confirmed.is_final());
+        assert!(PayoutStatus::Failed.is_final());
+    }
+
+    /// The lifecycle a payout walks: created pending, broadcast, then settled.
+    #[test]
+    fn payout_lifecycle_reaches_a_final_status() {
+        let lifecycle = [
+            PayoutStatus::Pending,
+            PayoutStatus::Broadcasting,
+            PayoutStatus::Confirmed,
+        ];
+
+        let (last, leading) = lifecycle.split_last().unwrap();
+        for status in leading {
+            assert!(!status.is_final(), "{status} is mid-flight");
+        }
+        assert!(last.is_final(), "the lifecycle ends in a final status");
+    }
+
+    #[test]
+    fn payout_status_round_trips_through_its_wire_string() {
+        for status in [
+            PayoutStatus::Pending,
+            PayoutStatus::Broadcasting,
+            PayoutStatus::Confirmed,
+            PayoutStatus::Failed,
+        ] {
+            let parsed: PayoutStatus = status.as_str().parse().unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Response mapping
+    // ------------------------------------------------------------------
+
+    /// A freshly created payout is pending with no transaction yet — the
+    /// broadcasting service fills `tx_hash`/`fee_amount`/`confirmed_at` later.
+    #[test]
+    fn newly_created_payout_maps_to_a_pending_response() {
+        let payout = test_payout(PayoutStatus::Pending);
+        let expected_store = payout.store_id.0;
+
+        let response = PayoutResponse::from(payout.clone());
+
+        assert_eq!(response.id, payout.id);
+        assert_eq!(response.store_id, expected_store);
+        assert_eq!(response.invoice_ids, vec!["inv_1", "inv_2"]);
+        assert_eq!(response.destination_address, MERCHANT_WALLET);
+        assert_eq!(response.chain_id, TEST_CHAIN_ID);
+        assert_eq!(response.asset_type, "native");
+        assert_eq!(response.amount, "3000000000000000000");
+        assert_eq!(response.status, "pending");
+        assert!(response.tx_hash.is_none());
+        assert!(response.confirmed_at.is_none());
+    }
+
+    #[test]
+    fn failed_payout_response_carries_the_error_message() {
+        let mut payout = test_payout(PayoutStatus::Failed);
+        payout.error_message = Some("gas estimation failed".to_string());
+
+        let response = PayoutResponse::from(payout);
+
+        assert_eq!(response.status, "failed");
+        assert_eq!(
+            response.error_message.as_deref(),
+            Some("gas estimation failed")
+        );
+    }
+
+    #[test]
+    fn list_response_reports_the_total_alongside_the_page() {
+        let listed = PayoutListResponse {
+            total: 2,
+            payouts: vec![
+                PayoutResponse::from(test_payout(PayoutStatus::Confirmed)),
+                PayoutResponse::from(test_payout(PayoutStatus::Pending)),
+            ],
+        };
+
+        assert_eq!(listed.total, 2);
+        assert_eq!(listed.payouts.len(), 2);
+        assert_eq!(listed.payouts[0].status, "confirmed");
+        assert_eq!(listed.payouts[1].status, "pending");
+    }
 }

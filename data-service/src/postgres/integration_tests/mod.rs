@@ -8,17 +8,22 @@
 //! - `payment`: Payment CRUD and confirmation tests
 //! - `watched_address`: Watched address management tests
 //! - `aggregation`: Multi-currency payment aggregation E2E tests
+//! - `refund`: Refund CRUD and status transition tests
+//! - `payout`: Payout CRUD and status transition tests
 
 mod aggregation;
 mod invoice;
 mod payment;
+mod payout;
+mod refund;
 mod watched_address;
 
 use chrono::Utc;
 use types::{PaymentMethodId, PaymentOptionData, PaymentOptionId};
 
 use super::tests::{
-    assert_amount_eq, create_test_service, seeded_test_invoice, test_payment, unique_address,
+    assert_amount_eq, create_test_service, seed_store, seeded_test_invoice, test_payment,
+    unique_address,
 };
 
 // =============================================================================

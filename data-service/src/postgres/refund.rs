@@ -177,3 +177,43 @@ impl RefundWriter for PgDataService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::db_to_refund_status;
+    use types::RefundStatus;
+
+    #[test]
+    fn maps_every_stored_status_string() {
+        assert_eq!(db_to_refund_status("pending"), RefundStatus::Pending);
+        assert_eq!(
+            db_to_refund_status("broadcasting"),
+            RefundStatus::Broadcasting
+        );
+        assert_eq!(db_to_refund_status("confirmed"), RefundStatus::Confirmed);
+        assert_eq!(db_to_refund_status("failed"), RefundStatus::Failed);
+    }
+
+    /// An unrecognised status must not be read as an in-flight refund: falling
+    /// back to `Failed` keeps `get_active_refunds` from re-broadcasting a row
+    /// the code cannot interpret.
+    #[test]
+    fn unknown_status_falls_back_to_failed() {
+        assert_eq!(db_to_refund_status("something-else"), RefundStatus::Failed);
+        assert_eq!(db_to_refund_status(""), RefundStatus::Failed);
+    }
+
+    /// `create_refund` writes `status.as_str()`, so what the writer stores has
+    /// to be exactly what the reader maps back.
+    #[test]
+    fn write_then_read_round_trips_each_status() {
+        for status in [
+            RefundStatus::Pending,
+            RefundStatus::Broadcasting,
+            RefundStatus::Confirmed,
+            RefundStatus::Failed,
+        ] {
+            assert_eq!(db_to_refund_status(status.as_str()), status);
+        }
+    }
+}

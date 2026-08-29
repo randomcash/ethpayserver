@@ -164,3 +164,43 @@ impl PayoutWriter for PgDataService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::db_to_payout_status;
+    use types::PayoutStatus;
+
+    #[test]
+    fn maps_every_stored_status_string() {
+        assert_eq!(db_to_payout_status("pending"), PayoutStatus::Pending);
+        assert_eq!(
+            db_to_payout_status("broadcasting"),
+            PayoutStatus::Broadcasting
+        );
+        assert_eq!(db_to_payout_status("confirmed"), PayoutStatus::Confirmed);
+        assert_eq!(db_to_payout_status("failed"), PayoutStatus::Failed);
+    }
+
+    /// An unrecognised status must not be read as an in-flight payout: falling
+    /// back to `Failed` keeps `get_active_payouts` from re-broadcasting a row
+    /// the code cannot interpret.
+    #[test]
+    fn unknown_status_falls_back_to_failed() {
+        assert_eq!(db_to_payout_status("something-else"), PayoutStatus::Failed);
+        assert_eq!(db_to_payout_status(""), PayoutStatus::Failed);
+    }
+
+    /// `create_payout` writes `status.as_str()`, so what the writer stores has
+    /// to be exactly what the reader maps back.
+    #[test]
+    fn write_then_read_round_trips_each_status() {
+        for status in [
+            PayoutStatus::Pending,
+            PayoutStatus::Broadcasting,
+            PayoutStatus::Confirmed,
+            PayoutStatus::Failed,
+        ] {
+            assert_eq!(db_to_payout_status(status.as_str()), status);
+        }
+    }
+}
