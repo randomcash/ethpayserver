@@ -10,7 +10,7 @@ use leptos_router::hooks::use_navigate;
 use types::currency::{EXPIRATION_PRESETS, INVOICE_CURRENCY_OPTIONS};
 
 use crate::api::{CreateInvoiceRequest, EvmApiClient};
-use crate::app::StoreContext;
+use crate::app::{StoreContext, StoresStatus};
 
 /// Shared signal that any component can use to open the create-invoice modal.
 #[derive(Clone, Copy)]
@@ -37,9 +37,19 @@ pub fn CreateInvoiceModal() -> impl IntoView {
     let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
     let navigate = use_navigate();
 
+    // Signals off StoreContext are Copy, so grab them once instead of
+    // cloning the whole context into every closure below.
+    let stores = store_ctx.stores;
+    let stores_status = store_ctx.stores_status;
+    let selected_store_id = store_ctx.selected_store_id;
+
     // Form fields
     let default_currency = INVOICE_CURRENCY_OPTIONS[0].0.to_string();
     let default_expiration = EXPIRATION_PRESETS[0].0.to_string();
+    // Store to invoice against. Empty = nothing picked yet; the modal owns this
+    // rather than reading the global selection at submit time, so an invoice can
+    // be created while the header sits on "All Stores" (RCS-172).
+    let (store_id, set_store_id) = signal(String::new());
     let (amount, set_amount) = signal(String::new());
     let (currency, set_currency) = signal(default_currency.clone());
     let (expiration_minutes, set_expiration_minutes) = signal(default_expiration.clone());
@@ -53,9 +63,16 @@ pub fn CreateInvoiceModal() -> impl IntoView {
     let (submitting, set_submitting) = signal(false);
     let (show_advanced, set_show_advanced) = signal(false);
 
-    // Reset form when modal closes
+    // Seed the store picker on open, reset the form on close.
     Effect::new(move || {
-        if !modal_signal.show.get() {
+        if modal_signal.show.get() {
+            // Pre-fill with the globally selected store; on "All Stores" this
+            // stays empty and the picker shows its placeholder. Read untracked
+            // so switching the header store mid-edit doesn't clobber a choice
+            // the user already made in the modal.
+            set_store_id.set(selected_store_id.get_untracked().unwrap_or_default());
+        } else {
+            set_store_id.set(String::new());
             set_amount.set(String::new());
             set_currency.set(default_currency.clone());
             set_expiration_minutes.set(default_expiration.clone());
@@ -73,7 +90,7 @@ pub fn CreateInvoiceModal() -> impl IntoView {
     let on_submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         let api = api.get();
-        let store_id = store_ctx.selected_store_id.get();
+        let store_id_val = store_id.get();
         let amount_val = amount.get().trim().to_string();
         let currency_val = currency.get();
         let exp_min = expiration_minutes.get();
@@ -86,10 +103,10 @@ pub fn CreateInvoiceModal() -> impl IntoView {
         set_error.set(None);
 
         // --- Client-side validation ---
-        let Some(store_id) = store_id else {
-            set_error.set(Some("Please select a store first".to_string()));
+        if store_id_val.is_empty() {
+            set_error.set(Some("Please select a store".to_string()));
             return;
-        };
+        }
 
         if amount_val.is_empty() {
             set_error.set(Some("Amount is required".to_string()));
@@ -127,7 +144,7 @@ pub fn CreateInvoiceModal() -> impl IntoView {
         let exp_seconds = exp_min.parse::<u64>().ok().map(|m| m * 60);
 
         let request = CreateInvoiceRequest {
-            store_id,
+            store_id: store_id_val,
             currency: currency_val,
             amount: amount_val,
             expiration_seconds: exp_seconds,
@@ -165,15 +182,12 @@ pub fn CreateInvoiceModal() -> impl IntoView {
         });
     };
 
-    // Selected store name for display
-    let store_name = {
-        let store_ctx = store_ctx.clone();
-        move || {
-            store_ctx
-                .selected_store()
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| "No store selected".to_string())
-        }
+    // Placeholder doubles as the stores-fetch status line, so a slow or
+    // failed fetch doesn't read as "this account has no stores" (RCS-195).
+    let store_placeholder = move || match stores_status.get() {
+        StoresStatus::Loading => "Loading stores...",
+        StoresStatus::Failed(_) => "Could not load stores",
+        StoresStatus::Loaded => "Select a store",
     };
 
     view! {
@@ -196,10 +210,27 @@ pub fn CreateInvoiceModal() -> impl IntoView {
                             <div class="form-alert form-alert-error">{e}</div>
                         })}
 
-                        // Store info
-                        <div class="form-store-info">
-                            <IconStore />
-                            <span>{store_name}</span>
+                        // Store picker
+                        <div class="form-group">
+                            <label class="form-label" for="ci-store">"Store"</label>
+                            <select
+                                id="ci-store"
+                                class="form-input"
+                                prop:value=move || store_id.get()
+                                on:change=move |ev| set_store_id.set(event_target_value(&ev))
+                                required
+                            >
+                                <option value="" disabled selected=move || store_id.get().is_empty()>
+                                    {store_placeholder}
+                                </option>
+                                // Re-rendered whenever the store list changes, so a
+                                // store seeded before the fetch landed still ends up
+                                // selected once its option exists.
+                                {move || stores.get().into_iter().map(|store| {
+                                    let selected = store_id.get_untracked() == store.id;
+                                    view! { <option value=store.id selected=selected>{store.name}</option> }
+                                }).collect_view()}
+                            </select>
                         </div>
 
                         // Amount + Currency (side by side)
@@ -326,7 +357,7 @@ pub fn CreateInvoiceModal() -> impl IntoView {
                         <button
                             type="submit"
                             class="btn btn-primary btn-sm"
-                            disabled=move || submitting.get()
+                            disabled=move || submitting.get() || store_id.get().is_empty()
                         >
                             {move || if submitting.get() { "Creating..." } else { "Create Invoice" }}
                         </button>
@@ -373,16 +404,6 @@ fn IconClose() -> impl IntoView {
         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
-        </svg>
-    }
-}
-
-#[component]
-fn IconStore() -> impl IntoView {
-    view! {
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-            <polyline points="9 22 9 12 15 12 15 22"></polyline>
         </svg>
     }
 }
