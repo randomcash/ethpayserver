@@ -437,7 +437,8 @@ sqlx migrate revert --source data-service/migrations/postgres
 
 ### What's Remaining
 
-- [ ] Load test CI integration and regression tracking
+- [ ] Load test: first live run, pending `LOADTEST_API_KEY` / `LOADTEST_STORE_ID` secrets
+      (CI job and automated regression comparison already exist)
 - [ ] Security audit (pre-mainnet)
 - [ ] Public /rates API endpoint for frontends
 
