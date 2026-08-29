@@ -3,6 +3,12 @@
 //! Shared modal that can be triggered from the header button or
 //! the invoices page. Posts to `POST /invoices` and navigates
 //! to the created invoice on success.
+//!
+//! The form-field helpers live in [`helpers`] and the inline SVGs in
+//! [`icons`]; this module holds the modal component itself.
+
+mod helpers;
+mod icons;
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -11,6 +17,9 @@ use types::currency::{EXPIRATION_PRESETS, INVOICE_CURRENCY_OPTIONS};
 
 use crate::api::{CreateInvoiceRequest, EvmApiClient};
 use crate::app::StoreContext;
+
+use helpers::{build_metadata, is_valid_url};
+use icons::{IconChevron, IconClose, IconStore};
 
 /// Shared signal that any component can use to open the create-invoice modal.
 #[derive(Clone, Copy)]
@@ -334,146 +343,5 @@ pub fn CreateInvoiceModal() -> impl IntoView {
                 </form>
             </div>
         </div>
-    }
-}
-
-/// Build metadata JSON from optional order_id and buyer_email fields.
-fn build_metadata(order_id: &str, buyer_email: &str) -> Option<serde_json::Value> {
-    if order_id.is_empty() && buyer_email.is_empty() {
-        return None;
-    }
-    let mut map = serde_json::Map::new();
-    if !order_id.is_empty() {
-        map.insert(
-            "order_id".to_string(),
-            serde_json::Value::String(order_id.to_string()),
-        );
-    }
-    if !buyer_email.is_empty() {
-        map.insert(
-            "buyer_email".to_string(),
-            serde_json::Value::String(buyer_email.to_string()),
-        );
-    }
-    Some(serde_json::Value::Object(map))
-}
-
-/// Basic URL validation: must start with http:// or https:// followed by content.
-fn is_valid_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    (lower.starts_with("http://") && url.len() > "http://".len())
-        || (lower.starts_with("https://") && url.len() > "https://".len())
-}
-
-// ===== Icons (local to this component) =====
-
-#[component]
-fn IconClose() -> impl IntoView {
-    view! {
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18"></line>
-            <line x1="6" y1="6" x2="18" y2="18"></line>
-        </svg>
-    }
-}
-
-#[component]
-fn IconStore() -> impl IntoView {
-    view! {
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-            <polyline points="9 22 9 12 15 12 15 22"></polyline>
-        </svg>
-    }
-}
-
-#[component]
-fn IconChevron(expanded: ReadSignal<bool>) -> impl IntoView {
-    view! {
-        <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            style=move || if expanded.get() { "transform: rotate(180deg); transition: transform 0.15s" } else { "transition: transform 0.15s" }
-        >
-            <polyline points="6 9 12 15 18 9"></polyline>
-        </svg>
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_build_metadata_both_fields() {
-        let meta = build_metadata("ORD-123", "buyer@example.com");
-        let meta = meta.expect("should be Some");
-        assert_eq!(meta["order_id"], "ORD-123");
-        assert_eq!(meta["buyer_email"], "buyer@example.com");
-    }
-
-    #[test]
-    fn test_build_metadata_order_id_only() {
-        let meta = build_metadata("ORD-456", "");
-        let meta = meta.expect("should be Some");
-        assert_eq!(meta["order_id"], "ORD-456");
-        assert!(meta.get("buyer_email").is_none());
-    }
-
-    #[test]
-    fn test_build_metadata_email_only() {
-        let meta = build_metadata("", "test@example.com");
-        let meta = meta.expect("should be Some");
-        assert!(meta.get("order_id").is_none());
-        assert_eq!(meta["buyer_email"], "test@example.com");
-    }
-
-    #[test]
-    fn test_build_metadata_empty() {
-        assert!(build_metadata("", "").is_none());
-    }
-
-    #[test]
-    fn test_is_valid_url_accepts_http_and_https() {
-        assert!(is_valid_url("https://example.com/webhook"));
-        assert!(is_valid_url("http://localhost:3000/callback"));
-        assert!(is_valid_url("https://api.example.com/v1/notify?token=abc"));
-        assert!(is_valid_url("http://192.168.1.1:8080/hook"));
-        assert!(is_valid_url(
-            "https://example.com/path/to/resource#fragment"
-        ));
-    }
-
-    #[test]
-    fn test_is_valid_url_rejects_non_http_schemes() {
-        assert!(!is_valid_url("ftp://files.example.com"));
-        assert!(!is_valid_url("ws://example.com/ws"));
-        assert!(!is_valid_url("wss://example.com/ws"));
-        assert!(!is_valid_url("javascript:alert(1)"));
-        assert!(!is_valid_url("data:text/html,<h1>hi</h1>"));
-        assert!(!is_valid_url("file:///etc/passwd"));
-    }
-
-    #[test]
-    fn test_is_valid_url_rejects_invalid_input() {
-        assert!(!is_valid_url(""));
-        assert!(!is_valid_url("not-a-url"));
-        assert!(!is_valid_url("example.com"));
-        assert!(!is_valid_url(" https://example.com"));
-        assert!(!is_valid_url("http://"));
-        assert!(!is_valid_url("https://"));
-    }
-
-    #[test]
-    fn test_is_valid_url_accepts_case_insensitive_scheme() {
-        assert!(is_valid_url("HTTP://EXAMPLE.COM"));
-        assert!(is_valid_url("Https://Example.Com/path"));
     }
 }
