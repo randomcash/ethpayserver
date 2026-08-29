@@ -1,0 +1,122 @@
+name: Autonomous worker
+
+# Replaces the debianbase cron worker: agent-tick.sh, run-agent.sh, the
+# handled-ledger, the flock, tick.log, and the ~/automation copy that drifts
+# from homeserver/automation.
+#
+# Those failed silently for months. The ledger burned every ticket on its first
+# attempt, so the tick logged "idle" hourly while real work sat in the queue
+# (RCS-189), and the worker shared a checkout with the interactive session,
+# which destroyed uncommitted work (RCS-208).
+#
+# Here there is no cron on one box, no local state, and no shared checkout.
+# Every run is visible in the Actions tab with logs retained. Auth is
+# CLAUDE_CODE_OAUTH_TOKEN, which draws on the Claude subscription rather than
+# metered API tokens.
+#
+# The ticket's Linear state is the lock: Todo = available, In Progress = taken.
+# That is RCS-189's own conclusion and it deletes the ledger class of bug
+# instead of patching it.
+
+on:
+  schedule:
+    # 02:00 and 14:00 UTC. Deliberately not hourly — the queue is small, and
+    # subscription quota spent overnight is quota unavailable during the day.
+    - cron: "0 2,14 * * *"
+  workflow_dispatch:
+    inputs:
+      ticket:
+        description: "RCS ticket to work (e.g. RCS-145). Blank picks the next Todo."
+        required: false
+        type: string
+
+concurrency:
+  # Two agents on one repo race the same ticket and produce conflicting
+  # branches. Queue instead of cancelling: a cancelled run leaves a ticket
+  # claimed with nothing to show for it.
+  group: agent-worker
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  pick:
+    name: Pick a ticket
+    runs-on: ubuntu-latest
+    outputs:
+      ticket: ${{ steps.pick.outputs.ticket }}
+      title: ${{ steps.pick.outputs.title }}
+      body: ${{ steps.pick.outputs.body }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testnet
+      - name: Resolve and claim
+        id: pick
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+        run: ./scripts/agent-pick-ticket.sh "${{ inputs.ticket }}"
+
+  work:
+    name: Implement
+    needs: pick
+    if: needs.pick.outputs.ticket != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testnet
+          fetch-depth: 0
+
+      # ethpayserver builds against payserver-commons as a sibling directory.
+      - name: Clone payserver-commons (sibling)
+        run: cd .. && git clone --depth 1 https://github.com/randomcash/payserver-commons.git
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Work the ticket
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the random.cash autonomous engineering agent, running in
+            GitHub Actions on a Rust crypto payment processor. Default to caution.
+
+            ## TICKET ${{ needs.pick.outputs.ticket }} — ${{ needs.pick.outputs.title }}
+
+            ${{ needs.pick.outputs.body }}
+
+            ## Rules
+
+            - Branch from `testnet`. NEVER touch `main`.
+            - Smallest change that resolves the ticket. Do not refactor
+              unrelated code. Match the surrounding style.
+            - Gate before opening anything:
+                cargo clippy --workspace --all-targets -- -D warnings
+                cargo test --workspace --exclude client
+              The client is wasm32 and builds separately; only touch it if the
+              ticket requires it.
+            - Open a DRAFT pull request into `testnet`. Never merge.
+            - If the ticket's premise is wrong, say so in the PR body and do what
+              is actually correct. A previous run rightly refused to document
+              something as pending when it already existed. That is expected.
+
+            ## Sensitive — state this prominently in the PR body
+
+            auth, crypto, `evm/`, wallet or key derivation, DB migrations,
+            `server/src/api/invoices*`, `server/src/api/payments*`, anything
+            touching secrets or the movement of funds. Human-reviewed without
+            exception. Still open the PR; just label it clearly.
+
+            ## Stop rather than guess
+
+            If the ticket is ambiguous, needs a product decision, or the gate
+            fails in a way you cannot safely fix: open a draft PR with what you
+            have and explain what blocked you. Never force a green build by
+            weakening a test or adding continue-on-error.
