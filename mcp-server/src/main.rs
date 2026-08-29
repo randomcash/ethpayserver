@@ -18,20 +18,21 @@
 //! DATABASE_URL="postgres://..." ETHPAY_API_KEY="ak_live_..." ethpay-mcp
 //! ```
 
+mod api_key;
 mod server;
+#[cfg(test)]
+mod testkit;
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
+use anyhow::{Context, Result};
 use tracing_subscriber::{self, EnvFilter};
 
-use auth::{ApiKeyRepository, StoreRepository, UserId};
 use data_service::PgDataService;
 use rates::RateProviderConfig;
 use rmcp::{ServiceExt, transport::stdio};
-use types::StoreId;
 
+use crate::api_key::validate_api_key;
 use crate::server::EthpayMcpServer;
 
 #[tokio::main]
@@ -56,7 +57,7 @@ async fn main() -> Result<()> {
     // Required: API key
     let api_key_raw =
         std::env::var("ETHPAY_API_KEY").context("ETHPAY_API_KEY environment variable required")?;
-    let (user_id, store_ids) = validate_api_key(&data_service, &api_key_raw).await?;
+    let (user_id, store_ids) = validate_api_key(&*data_service, &api_key_raw).await?;
     tracing::info!(
         user_id = %user_id.0,
         stores = store_ids.len(),
@@ -72,7 +73,7 @@ async fn main() -> Result<()> {
         Ok(redis_url) => match server::create_evm_monitor(&redis_url).await {
             Ok(monitor) => {
                 tracing::info!("EVM monitor connected via Redis");
-                Some(Arc::new(monitor))
+                Some(monitor)
             }
             Err(e) => {
                 tracing::warn!(
@@ -97,46 +98,4 @@ async fn main() -> Result<()> {
 
     service.waiting().await?;
     Ok(())
-}
-
-/// Validate an API key and return the owning user ID and their accessible store IDs.
-async fn validate_api_key(
-    data_service: &PgDataService,
-    raw_key: &str,
-) -> Result<(UserId, Vec<StoreId>)> {
-    // Hash the key (same as auth crate: SHA-256 hex)
-    let mut hasher = Sha256::new();
-    hasher.update(raw_key.as_bytes());
-    let key_hash = hex::encode(hasher.finalize());
-
-    // Look up the key
-    let api_key = data_service
-        .get_api_key_by_hash(&key_hash)
-        .await
-        .context("Database error looking up API key")?
-        .context("Invalid API key")?;
-
-    if !api_key.is_active {
-        bail!("API key is deactivated");
-    }
-
-    if let Some(expires_at) = api_key.expires_at
-        && expires_at < chrono::Utc::now()
-    {
-        bail!("API key has expired");
-    }
-
-    // Update last_used timestamp
-    let _ = data_service.update_last_used(api_key.id).await;
-
-    let user_id = api_key.user_id;
-
-    // Get all stores the user has access to
-    let stores = data_service
-        .get_stores_for_user(user_id)
-        .await
-        .context("Failed to fetch user stores")?;
-    let store_ids: Vec<StoreId> = stores.into_iter().map(|s| s.id).collect();
-
-    Ok((user_id, store_ids))
 }

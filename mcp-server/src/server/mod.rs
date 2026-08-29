@@ -4,6 +4,8 @@ mod args;
 mod convert;
 mod invoice;
 mod payment;
+#[cfg(test)]
+mod tests;
 
 use std::sync::Arc;
 
@@ -11,34 +13,70 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 use auth::UserId;
-use data_service::PgDataService;
-use evm::monitor::bridge::{COMMANDS_CHANNEL, EVENTS_CHANNEL, RedisBridge};
+use evm::monitor::bridge::{COMMANDS_CHANNEL, EVENTS_CHANNEL, EventBridge, RedisBridge};
 use rates::RateProvider;
-use types::{InvoiceId, InvoiceReader, StoreId};
+use types::{
+    InvoiceId, InvoiceReader, InvoiceWriter, PaymentOptionReader, PaymentOptionWriter,
+    PaymentReader, StoreId, StorePaymentMethodReader, StorePaymentMethodWriter,
+    WatchedAddressWriter,
+};
 
 pub use args::{
     CancelInvoiceArgs, CreateInvoiceArgs, GetInvoiceArgs, GetInvoicePaymentsArgs,
     GetPaymentStatusArgs, ListInvoicesArgs,
 };
 
-/// EVM monitor type (reuse the same Redis-backed monitor from the server crate).
-pub type EvmMonitor = evm::monitor::bridge::RedisBridge;
+/// EVM monitor bridge used to tell the monitor which addresses to watch.
+///
+/// Held as a trait object so tests can substitute the in-process
+/// `MemoryBridge` for the Redis-backed bridge used in production.
+pub type EvmMonitor = dyn EventBridge;
 
 /// Create an EVM monitor bridge from a Redis URL.
-pub async fn create_evm_monitor(redis_url: &str) -> anyhow::Result<EvmMonitor> {
+pub async fn create_evm_monitor(redis_url: &str) -> anyhow::Result<Arc<EvmMonitor>> {
     let events_channel =
         std::env::var("REDIS_EVENTS_CHANNEL").unwrap_or_else(|_| EVENTS_CHANNEL.to_string());
     let commands_channel =
         std::env::var("REDIS_COMMANDS_CHANNEL").unwrap_or_else(|_| COMMANDS_CHANNEL.to_string());
     let bridge = RedisBridge::new(redis_url, &events_channel, &commands_channel).await?;
-    Ok(bridge)
+    Ok(Arc::new(bridge))
+}
+
+/// The repository capabilities the MCP tools need from a data service.
+///
+/// Expressed as a supertrait bundle rather than naming a concrete data service
+/// so the tool handlers can be driven against an in-memory one in tests.
+pub trait McpDataService:
+    InvoiceReader
+    + InvoiceWriter
+    + PaymentReader
+    + PaymentOptionReader
+    + PaymentOptionWriter
+    + WatchedAddressWriter
+    + StorePaymentMethodReader
+    + StorePaymentMethodWriter
+{
+}
+
+/// Blanket implementation: any type implementing every repository trait above
+/// can back the MCP server.
+impl<T> McpDataService for T where
+    T: InvoiceReader
+        + InvoiceWriter
+        + PaymentReader
+        + PaymentOptionReader
+        + PaymentOptionWriter
+        + WatchedAddressWriter
+        + StorePaymentMethodReader
+        + StorePaymentMethodWriter
+{
 }
 
 // ---------- Server ----------
 
 #[derive(Clone)]
 pub struct EthpayMcpServer {
-    data_service: Arc<PgDataService>,
+    data_service: Arc<dyn McpDataService>,
     #[allow(dead_code)]
     user_id: UserId,
     store_ids: Vec<StoreId>,
@@ -48,7 +86,7 @@ pub struct EthpayMcpServer {
 
 impl EthpayMcpServer {
     pub fn new(
-        data_service: Arc<PgDataService>,
+        data_service: Arc<dyn McpDataService>,
         user_id: UserId,
         store_ids: Vec<StoreId>,
         rate_provider: Arc<dyn RateProvider>,

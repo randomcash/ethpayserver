@@ -1,5 +1,7 @@
 //! Test utilities for data service.
 
+mod store_payment_method;
+
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -10,9 +12,9 @@ use types::{
     CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
     InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentMethodId, PaymentOptionData,
     PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentQueryParams, PaymentReader,
-    PaymentWriter, PendingWatchInfo, RepositoryResult, StoreId, StoreSettings, StoreSettingsReader,
-    StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams, TokenReader, TokenWriter,
-    WatchedAddressReader, WatchedAddressWriter,
+    PaymentWriter, PendingWatchInfo, RepositoryResult, StoreId, StorePaymentMethod, StoreSettings,
+    StoreSettingsReader, StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams,
+    TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
 
@@ -27,6 +29,8 @@ pub struct InMemoryDataService {
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
+    // Kept as a Vec so `get_enabled_payment_methods` returns a stable order.
+    payment_methods: RwLock<Vec<StorePaymentMethod>>,
 }
 
 impl InMemoryDataService {
