@@ -440,7 +440,7 @@ fn test_create_payment_method_request() {
         token_address: None,
         asset_symbol: "ETH".to_string(),
         decimals: 18,
-        xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz".to_string(),
+        xpub: "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string(),
     };
     let json = serde_json::to_value(&req).unwrap();
     assert_eq!(json["chain_id"], 1);

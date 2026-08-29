@@ -408,10 +408,10 @@ jobs:
             https://api.github.com/repos/randomcash/central-infrastructure/dispatches \
             -d '{"event_type": "deploy", "client_payload": {"service": "ethpayserver", "environment": "${{ steps.resolve.outputs.environment }}", "sha": "${{ github.sha }}", "tag": "${{ steps.resolve.outputs.tag }}"}}'
 
-  # testnet deploys via a self-hosted runner on debianbase (tailnet-only, no inbound) —
+  # testnet deploys via a self-hosted runner (tailnet-only, no inbound) —
   # reverse/pull CD: the runner is already on the box and runs docker compose locally.
   deploy-testnet:
-    name: Deploy testnet (self-hosted · debianbase)
+    name: Deploy testnet (self-hosted)
     runs-on: [self-hosted, debianbase]
     timeout-minutes: 20
     needs: [docker]

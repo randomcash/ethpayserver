@@ -7,7 +7,7 @@ import { createStoreAndOpen, selectStore } from './stores';
  * receive addresses and cannot spend.
  */
 export const TEST_XPUB =
-  'xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz';
+  'xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt';
 
 /** Sepolia — the chain the add-method form defaults to. */
 export const SEPOLIA = '11155111';
