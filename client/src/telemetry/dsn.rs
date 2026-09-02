@@ -63,18 +63,19 @@ mod tests {
 
     #[test]
     fn parses_the_errex_dsn_shape() {
-        let dsn =
-            Dsn::parse("https://3cea6a76b6d34e5faa493eac665407e0@errex.homeboy.cloud/random.cash")
-                .expect("valid DSN");
+        let dsn = Dsn::parse(
+            "https://00000000000000000000000000000000@errex.example.internal/random.cash",
+        )
+        .expect("valid DSN");
         assert!(
             dsn.ingest_url
-                .starts_with("https://errex.homeboy.cloud/api/random.cash/envelope/?"),
+                .starts_with("https://errex.example.internal/api/random.cash/envelope/?"),
             "{}",
             dsn.ingest_url
         );
         assert!(
             dsn.ingest_url
-                .contains("sentry_key=3cea6a76b6d34e5faa493eac665407e0"),
+                .contains("sentry_key=00000000000000000000000000000000"),
             "{}",
             dsn.ingest_url
         );

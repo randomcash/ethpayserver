@@ -3,7 +3,7 @@
 //!
 //! # Reachability (read before enabling)
 //!
-//! errex lives at `errex.homeboy.cloud`, which is **tailnet-only**: an
+//! errex is tailnet-only (its host is supplied at build time): an
 //! end-user browser cannot reach it, and there is deliberately no public
 //! ingress in front of errex ingest from this repo's side. Client capture is
 //! therefore **off unless explicitly configured**, and is meant to be turned on

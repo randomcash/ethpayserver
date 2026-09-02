@@ -11,11 +11,11 @@ use uuid::Uuid;
 
 #[test]
 fn test_mask_xpub_normal() {
-    let xpub = "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz";
+    let xpub = "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
     let masked = mask_xpub(xpub);
-    assert!(masked.starts_with("xpub6CUG"));
+    assert!(masked.starts_with("xpub6DCo"));
     assert!(masked.contains("..."));
-    assert!(masked.ends_with("3fDVmz"));
+    assert!(masked.ends_with("PwnATt"));
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn test_payment_method_response_native() {
         token_address: None,
         asset_symbol: "ETH".to_string(),
         decimals: 18,
-        xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz".to_string(),
+        xpub: "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string(),
         derivation_index: 5,
         enabled: true,
         created_at: Utc::now(),
@@ -126,7 +126,7 @@ fn test_payment_method_response_erc20() {
         token_address: Some(token_addr.clone()),
         asset_symbol: "USDC".to_string(),
         decimals: 6,
-        xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz".to_string(),
+        xpub: "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string(),
         derivation_index: 0,
         enabled: false,
         created_at: Utc::now(),
@@ -324,7 +324,7 @@ fn test_list_wallets_response_serialization() {
             id: Uuid::nil(),
             store_id: Uuid::nil(),
             xpub_masked: mask_xpub(
-                "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz",
+                "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt",
             ),
             derivation_index: 0,
             name: Some("ETH Wallet".to_string()),
@@ -365,7 +365,7 @@ fn test_list_wallets_empty_response() {
 
 #[test]
 fn test_wallet_by_id_response_masks_xpub() {
-    let xpub = "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz";
+    let xpub = "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
     let response = WalletResponse {
         id: Uuid::new_v4(),
         store_id: Uuid::new_v4(),
@@ -421,7 +421,7 @@ fn test_wallet_by_id_response_contains_store_id() {
 
 #[test]
 fn test_xpub_export_response_contains_full_xpub() {
-    let xpub = "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz";
+    let xpub = "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
     let response = WalletXpubResponse {
         id: Uuid::new_v4(),
         store_id: Uuid::new_v4(),
@@ -623,7 +623,7 @@ fn test_update_settings_request_partial() {
 
 #[test]
 fn test_rotate_wallet_request_deserialization() {
-    let json = r#"{"xpub": "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz", "reason": "key compromise"}"#;
+    let json = r#"{"xpub": "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt", "reason": "key compromise"}"#;
     let req: RotateWalletRequest = serde_json::from_str(json).unwrap();
     assert!(req.xpub.starts_with("xpub"));
     assert_eq!(req.reason, Some("key compromise".to_string()));
@@ -631,7 +631,7 @@ fn test_rotate_wallet_request_deserialization() {
 
 #[test]
 fn test_rotate_wallet_request_without_reason() {
-    let json = r#"{"xpub": "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz"}"#;
+    let json = r#"{"xpub": "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt"}"#;
     let req: RotateWalletRequest = serde_json::from_str(json).unwrap();
     assert!(req.xpub.starts_with("xpub"));
     assert!(req.reason.is_none());

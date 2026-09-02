@@ -7,8 +7,8 @@ name: Scheduled E2E (testnet)
 # caught it. This runs the Playwright suite against https://testnet.random.cash
 # on a clock, and then sends a real Sepolia transaction through the money path.
 #
-# Runs on hosted runners on purpose. debianbase hosts the deployment *and* is
-# the self-hosted runner, so a job there cannot report on a box that is down —
+# Runs on hosted runners on purpose. The deploy host is also the self-hosted
+# runner, so a job there cannot report on a box that is down —
 # the healthchecks.io dead-man's-switch below covers the "no run at all" case.
 
 on:
