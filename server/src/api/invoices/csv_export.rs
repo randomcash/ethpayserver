@@ -11,12 +11,11 @@ use std::sync::Arc;
 use ::types::{
     InvoiceQueryParams, InvoiceReader, InvoiceStatus, PaymentQueryParams, PaymentReader, StoreId,
 };
-use auth::{SessionService, repository::UserStoreRepository};
+use auth::SessionService;
 
-use super::{ListInvoicesQuery, ListPaymentsQuery};
+use super::{ListInvoicesQuery, ListPaymentsQuery, verify_store_access_for_query};
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
-use uuid::Uuid;
 
 /// Maximum number of rows allowed in a CSV export.
 const MAX_EXPORT_ROWS: i64 = 50_000;
@@ -53,35 +52,6 @@ pub(crate) fn csv_row(fields: &[&str]) -> String {
     }
     row.push_str("\r\n");
     row
-}
-
-/// Verify store access for list/export operations.
-/// Returns `Some(StoreId)` for store-scoped queries, `None` for admin-wide.
-async fn verify_store_access_for_query<A: SessionService>(
-    state: &PgAppState<A>,
-    user: &auth::UserInfo,
-    store_id: Option<Uuid>,
-) -> Result<Option<StoreId>, StatusCode> {
-    match store_id {
-        Some(id) => {
-            let is_member = state
-                .data_service
-                .get_user_store(user.id, StoreId(id))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .is_some();
-            if !is_member && user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::FORBIDDEN);
-            }
-            Ok(Some(StoreId(id)))
-        }
-        None => {
-            if user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            Ok(None)
-        }
-    }
 }
 
 /// Build invoice query params from filter fields (shared by list and export).
@@ -136,7 +106,8 @@ pub async fn export_invoices_csv<A>(
 where
     A: SessionService + 'static,
 {
-    let store_id = verify_store_access_for_query(&state, &user, query.store_id).await?;
+    let store_id =
+        verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
     let base_params =
         build_invoice_filter_params(store_id, query.status.as_deref(), query.currency.as_deref())?;
 
@@ -264,7 +235,8 @@ pub async fn export_payments_csv<A>(
 where
     A: SessionService + 'static,
 {
-    let store_id = verify_store_access_for_query(&state, &user, query.store_id).await?;
+    let store_id =
+        verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
     let base_params = build_payment_filter_params(store_id, query.status.as_deref())?;
 
     let count_params = base_params.clone().with_limit(1).with_offset(0);

@@ -4,14 +4,17 @@ use axum::{
     http::StatusCode,
 };
 
-use ::types::{InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, StoreId};
+use ::types::{InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus};
 use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
-use super::{InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, extract_customer_email};
+use super::{
+    InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, extract_customer_email,
+    verify_store_access_for_query,
+};
 
 /// List invoices with optional filters.
 ///
@@ -38,32 +41,11 @@ pub async fn list_invoices<A>(
 where
     A: SessionService + 'static,
 {
-    // For non-admins, store_id is required
-    let store_id = match query.store_id {
-        Some(id) => id,
-        None => {
-            // Admins can list all invoices, non-admins need store_id
-            if user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            // For admins without store_id, we'll query all
-            uuid::Uuid::nil()
-        }
-    };
-
-    // Check user has access to the store (unless admin or no store filter)
-    if store_id != uuid::Uuid::nil() {
-        let is_member = state
-            .data_service
-            .get_user_store(user.id, StoreId(store_id))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .is_some();
-
-        if !is_member && user.role != auth::Role::ServerAdmin {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
+    // Resolve the store scope once. `Some` is membership-checked, `None` means
+    // every store and is admin-only. See verify_store_access_for_query - the
+    // Option is load-bearing, a nil-UUID sentinel here was RCS-211.
+    let store_id =
+        verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
 
     let mut params = InvoiceQueryParams::new();
 
@@ -84,9 +66,9 @@ where
         params = params.with_offset(offset);
     }
 
-    // Add store_id filter if provided (nil means admin querying all)
-    if store_id != uuid::Uuid::nil() {
-        params = params.with_store_id(StoreId(store_id));
+    // `None` is an admin querying every store, so no store filter is applied.
+    if let Some(store_id) = store_id {
+        params = params.with_store_id(store_id);
     }
 
     let (total, invoices) = InvoiceReader::query(&*state.data_service, &params)

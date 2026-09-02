@@ -31,7 +31,7 @@ pub(crate) use lookup::is_valid_tx_hash;
 
 use axum::{Json, http::StatusCode};
 
-use ::types::{InvoiceId, InvoiceReader, traits::InvoiceData};
+use ::types::{InvoiceId, InvoiceReader, StoreId, traits::InvoiceData};
 use auth::{SessionService, repository::UserStoreRepository};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -195,6 +195,47 @@ pub(crate) async fn get_invoice_with_permission<A: SessionService>(
     }
 
     Ok(invoice)
+}
+
+/// Resolve the store scope for a list/export query, verifying access.
+///
+/// `Some(id)` is membership-checked and returned as a filter; `None` means
+/// "every store" and is permitted for server admins only.
+///
+/// The scope is deliberately an `Option` rather than a nil-UUID sentinel. A
+/// sentinel is a value a caller can also supply, and when it was one, passing
+/// `store_id=00000000-0000-0000-0000-000000000000` took the `Some` arm, skipped
+/// the admin check *and* the membership check, and then dropped the `WHERE
+/// store_id` clause - handing any authenticated user every invoice and payment
+/// in the deployment (RCS-211). Keep the two cases in the type; do not
+/// reintroduce an in-band marker.
+pub(crate) async fn verify_store_access_for_query<D>(
+    data_service: &D,
+    user: &auth::UserInfo,
+    store_id: Option<uuid::Uuid>,
+) -> Result<Option<StoreId>, StatusCode>
+where
+    D: UserStoreRepository + ?Sized,
+{
+    match store_id {
+        Some(id) => {
+            let is_member = data_service
+                .get_user_store(user.id, StoreId(id))
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .is_some();
+            if !is_member && user.role != auth::Role::ServerAdmin {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            Ok(Some(StoreId(id)))
+        }
+        None => {
+            if user.role != auth::Role::ServerAdmin {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            Ok(None)
+        }
+    }
 }
 
 /// Apply token policy filter to payment methods.
