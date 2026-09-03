@@ -5,15 +5,13 @@ use axum::{
 };
 use uuid::Uuid;
 
-use ::types::{
-    InvoiceId, InvoiceReader, InvoiceStatus, PaymentQueryParams, PaymentReader, StoreId,
-};
+use ::types::{InvoiceId, InvoiceReader, InvoiceStatus, PaymentQueryParams, PaymentReader};
 use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
 use super::{
     InvoiceStatusResponse, ListPaymentsQuery, PaymentListResponse, PaymentResponse,
-    get_invoice_with_permission,
+    get_invoice_with_permission, verify_store_access_for_query,
 };
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
@@ -80,30 +78,11 @@ pub async fn list_payments<A>(
 where
     A: SessionService + 'static,
 {
-    // For non-admins, store_id is required
-    let store_id = match query.store_id {
-        Some(id) => id,
-        None => {
-            if user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            uuid::Uuid::nil()
-        }
-    };
-
-    // Check user has access to the store (unless admin or no store filter)
-    if store_id != uuid::Uuid::nil() {
-        let is_member = state
-            .data_service
-            .get_user_store(user.id, StoreId(store_id))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .is_some();
-
-        if !is_member && user.role != auth::Role::ServerAdmin {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
+    // Resolve the store scope once. `Some` is membership-checked, `None` means
+    // every store and is admin-only. See verify_store_access_for_query - the
+    // Option is load-bearing, a nil-UUID sentinel here was RCS-211.
+    let store_id =
+        verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
 
     let mut params = PaymentQueryParams::new();
 
@@ -123,8 +102,9 @@ where
         params = params.with_offset(offset);
     }
 
-    if store_id != uuid::Uuid::nil() {
-        params = params.with_store_id(StoreId(store_id));
+    // `None` is an admin querying every store, so no store filter is applied.
+    if let Some(store_id) = store_id {
+        params = params.with_store_id(store_id);
     }
 
     let (total, payments) = PaymentReader::query(&*state.data_service, &params)
