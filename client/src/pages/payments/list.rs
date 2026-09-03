@@ -127,6 +127,16 @@ pub fn PaymentsPage() -> impl IntoView {
         ("confirmed", "Confirmed"),
     ];
 
+    // The CSV export hits the same server gate as the list: with no store
+    // selected it is admin-only, and a non-admin's request comes back 400. The
+    // list already resolves to `None` in exactly that case - that is what puts
+    // NoStoreSelected on screen - so the same signal says whether an export can
+    // succeed. Offering the button there fired a request that could only fail,
+    // and the failure was console-only, so to the user the button did nothing
+    // at all. RCS-171 asks for non-admin behaviour to be handled gracefully
+    // with no raw error; a button that silently does nothing is not that.
+    let export_available = move || matches!(payments_resource.get().as_deref(), Some(Ok(Some(_))));
+
     view! {
         <div class="payments-page">
             // Page Header
@@ -136,7 +146,10 @@ pub fn PaymentsPage() -> impl IntoView {
                     <p class="page-description">"View all received payments across networks"</p>
                 </div>
                 <div class="page-actions">
-                    <button class="btn btn-secondary btn-sm" on:click=move |_| {
+                    <button
+                        class="btn btn-secondary btn-sm"
+                        disabled=move || !export_available()
+                        on:click=move |_| {
                         let api = api.get();
                         let store_id = store_ctx.selected_store_id.get();
                         let status = status_param.get();

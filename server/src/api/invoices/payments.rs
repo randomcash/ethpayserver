@@ -115,20 +115,54 @@ where
     // store filter this page can span stores, so resolve the owning store for
     // each row so the client can label it (RCS-171). Deduplicated by invoice:
     // several payments against one invoice cost a single lookup.
-    let mut store_of_invoice: std::collections::HashMap<String, ::types::StoreId> =
-        std::collections::HashMap::new();
-    for payment in &payments {
-        if store_of_invoice.contains_key(&payment.invoice_id.0) {
-            continue;
+    // Map each payment to its store.
+    //
+    // A scoped query needs no lookups at all: the WHERE clause already
+    // guaranteed every row belongs to the store the caller named, so asking the
+    // database to rediscover it costs up to `limit` round trips for an answer we
+    // were handed. Only the admin all-stores page genuinely has to ask - and it
+    // asks for every distinct invoice concurrently rather than one after
+    // another, so the cost is one round trip of latency instead of N.
+    let store_of_invoice: std::collections::HashMap<String, ::types::StoreId> = match store_id {
+        Some(scope) => payments
+            .iter()
+            .map(|payment| (payment.invoice_id.0.clone(), scope))
+            .collect(),
+        None => {
+            let unique: std::collections::BTreeSet<&str> = payments
+                .iter()
+                .map(|payment| payment.invoice_id.0.as_str())
+                .collect();
+
+            let lookups = unique.into_iter().map(|id| {
+                let invoice_id = ::types::InvoiceId(id.to_string());
+                let data_service = &state.data_service;
+                async move {
+                    // A payment whose invoice cannot be read just goes
+                    // unlabelled; that is not worth failing the whole list over.
+                    match InvoiceReader::get(&**data_service, &invoice_id).await {
+                        Ok(Some(invoice)) => Some((invoice_id.0, invoice.store_id)),
+                        Ok(None) => None,
+                        Err(e) => {
+                            tracing::warn!(
+                                invoice_id = %invoice_id.0,
+                                error = %e,
+                                "could not read invoice while labelling payments; \
+                                 row will show a bare store id"
+                            );
+                            None
+                        }
+                    }
+                }
+            });
+
+            futures::future::join_all(lookups)
+                .await
+                .into_iter()
+                .flatten()
+                .collect()
         }
-        // A payment whose invoice cannot be read just goes unlabelled; that is
-        // not worth failing the whole list over.
-        if let Ok(Some(invoice)) =
-            InvoiceReader::get(&*state.data_service, &payment.invoice_id).await
-        {
-            store_of_invoice.insert(payment.invoice_id.0.clone(), invoice.store_id);
-        }
-    }
+    };
     let store_names = resolve_store_names(&state, store_of_invoice.values().copied()).await;
 
     let payments = payments

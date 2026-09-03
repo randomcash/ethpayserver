@@ -260,10 +260,21 @@ pub(crate) async fn resolve_store_names<A: SessionService>(
 
     let mut names = std::collections::HashMap::with_capacity(unique.len());
     for id in unique {
-        if let Ok(Some(store)) =
-            StoreRepository::get_store(&*state.data_service, ::types::StoreId(id)).await
-        {
-            names.insert(id, store.name);
+        match StoreRepository::get_store(&*state.data_service, ::types::StoreId(id)).await {
+            Ok(Some(store)) => {
+                names.insert(id, store.name);
+            }
+            // A store row that is genuinely absent is not an error worth logging
+            // - the column simply falls back to the id.
+            Ok(None) => {}
+            // A repository error is. Degrading every row on the page to a bare
+            // UUID while staying silent gives an operator nothing to go on when
+            // someone reports "the store column stopped working".
+            Err(e) => tracing::warn!(
+                store_id = %id,
+                error = %e,
+                "could not resolve store name; rows will show a bare store id"
+            ),
         }
     }
     names
