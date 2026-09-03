@@ -1053,18 +1053,6 @@ a:hover {
     flex: 0 0 180px;
 }
 
-.form-store-info {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    background: var(--bg-secondary);
-    border-radius: var(--border-radius-md);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-    margin-bottom: var(--space-4);
-}
-
 .form-advanced-toggle {
     margin-top: var(--space-2);
     margin-bottom: var(--space-2);

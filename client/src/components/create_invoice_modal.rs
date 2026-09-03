@@ -85,6 +85,21 @@ pub fn CreateInvoiceModal() -> impl IntoView {
         }
     });
 
+    // A selection is valid only if it names a store actually in the fetched
+    // list - non-emptiness is not enough. The seed above comes from persisted
+    // state and is applied before the fetch resolves, so the signal can hold an
+    // id the picker has no <option> for: the select renders blank while the
+    // button stays enabled. That window is not just transient - on
+    // StoresStatus::Failed the stale selection is never cleared (app/layout.rs
+    // clears it only on the success path), so a failed store fetch leaves the
+    // form submittable against a store the user cannot see and did not choose
+    // this session. The server rejects it (crud.rs checks store permission
+    // first), but the user gets an opaque 403 instead of a disabled button.
+    let store_selection_valid = move || {
+        let id = store_id.get();
+        !id.is_empty() && stores.get().iter().any(|store| store.id == id)
+    };
+
     let close = move || modal_signal.set_show.set(false);
 
     let on_submit = move |ev: leptos::ev::SubmitEvent| {
@@ -103,7 +118,7 @@ pub fn CreateInvoiceModal() -> impl IntoView {
         set_error.set(None);
 
         // --- Client-side validation ---
-        if store_id_val.is_empty() {
+        if !store_selection_valid() {
             set_error.set(Some("Please select a store".to_string()));
             return;
         }
@@ -357,7 +372,7 @@ pub fn CreateInvoiceModal() -> impl IntoView {
                         <button
                             type="submit"
                             class="btn btn-primary btn-sm"
-                            disabled=move || submitting.get() || store_id.get().is_empty()
+                            disabled=move || submitting.get() || !store_selection_valid()
                         >
                             {move || if submitting.get() { "Creating..." } else { "Create Invoice" }}
                         </button>
