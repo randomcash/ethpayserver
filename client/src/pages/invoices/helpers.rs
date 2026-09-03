@@ -166,6 +166,8 @@ mod tests {
     fn test_payment_status_confirmed() {
         let p = Payment {
             id: "p1".into(),
+            store_id: None,
+            store_name: None,
             chain_id: 1,
             invoice_id: "inv-1".into(),
             amount: "100".into(),
@@ -187,6 +189,8 @@ mod tests {
     fn test_payment_status_confirming() {
         let p = Payment {
             id: "p2".into(),
+            store_id: None,
+            store_name: None,
             chain_id: 1,
             invoice_id: "inv-1".into(),
             amount: "100".into(),
@@ -208,6 +212,8 @@ mod tests {
     fn test_payment_status_reorged() {
         let p = Payment {
             id: "p3".into(),
+            store_id: None,
+            store_name: None,
             chain_id: 1,
             invoice_id: "inv-1".into(),
             amount: "100".into(),
@@ -229,6 +235,8 @@ mod tests {
     fn test_get_metadata_field() {
         let invoice = Invoice {
             id: "inv-1".into(),
+            store_id: "store-001".to_string(),
+            store_name: None,
             currency: "USD".into(),
             status: InvoiceStatus::Pending,
             amount: "100".into(),
@@ -253,6 +261,8 @@ mod tests {
     fn test_get_metadata_field_no_metadata() {
         let invoice = Invoice {
             id: "inv-2".into(),
+            store_id: "store-001".to_string(),
+            store_name: None,
             currency: "USD".into(),
             status: InvoiceStatus::Pending,
             amount: "50".into(),
@@ -279,6 +289,8 @@ mod tests {
         let payments = vec![
             Payment {
                 id: "p1".into(),
+                store_id: None,
+                store_name: None,
                 chain_id: 1,
                 invoice_id: "inv-1".into(),
                 amount: "100".into(),
@@ -294,6 +306,8 @@ mod tests {
             },
             Payment {
                 id: "p2".into(),
+                store_id: None,
+                store_name: None,
                 chain_id: 1,
                 invoice_id: "inv-1".into(),
                 amount: "50".into(),
@@ -309,6 +323,8 @@ mod tests {
             },
             Payment {
                 id: "p3".into(),
+                store_id: None,
+                store_name: None,
                 chain_id: 1,
                 invoice_id: "inv-1".into(),
                 amount: "75".into(),

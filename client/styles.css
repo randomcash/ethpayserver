@@ -2144,6 +2144,12 @@ a:hover {
     color: var(--text-muted);
 }
 
+/* Store attribution, shown only in the "All Stores" view (RCS-171). */
+.invoice-store,
+.payment-store {
+    color: var(--text-secondary);
+}
+
 .invoice-amount-cell {
     display: flex;
     flex-direction: column;
@@ -2775,6 +2781,12 @@ a:hover {
 }
 
 .invoice-card-date {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+}
+
+.invoice-card-store,
+.payment-card-store {
     font-size: var(--text-xs);
     color: var(--text-muted);
 }

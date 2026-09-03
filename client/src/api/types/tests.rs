@@ -12,6 +12,8 @@ fn test_invoice_status() {
 fn test_invoice_serialization() {
     let invoice = Invoice {
         id: "inv_001".to_string(),
+        store_id: "store-001".to_string(),
+        store_name: None,
         amount: "100.00".to_string(),
         currency: "USD".to_string(),
         status: InvoiceStatus::Pending,
@@ -33,6 +35,8 @@ fn test_invoice_serialization() {
 fn test_payment_serialization() {
     let payment = Payment {
         id: "pay_001".to_string(),
+        store_id: None,
+        store_name: None,
         chain_id: 1,
         invoice_id: "inv_001".to_string(),
         amount: "50000000000000000".to_string(),
@@ -737,6 +741,8 @@ fn test_invoice_list_response_roundtrip() {
         total: 1,
         invoices: vec![Invoice {
             id: "inv-rt".to_string(),
+            store_id: "store-001".to_string(),
+            store_name: None,
             currency: "USD".to_string(),
             status: InvoiceStatus::Paid,
             amount: "25.00".to_string(),

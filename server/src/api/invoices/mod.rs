@@ -238,6 +238,48 @@ where
     }
 }
 
+/// Resolve store names for a page of list results.
+///
+/// The "All Stores" invoice/payment views mix rows from stores the caller may
+/// not have in their sidebar (`GET /stores` only returns the caller's own
+/// memberships, even for admins), so the name has to come from the server or
+/// the row can only show a bare UUID (RCS-171).
+///
+/// Deduplicates first: a page is at most `limit` rows but usually spans only a
+/// handful of stores, so this is a few lookups rather than one per row. A store
+/// that fails to load is simply absent from the map — a missing name degrades
+/// the column to the store ID, which is not worth failing the whole list over.
+pub(crate) async fn resolve_store_names<A: SessionService>(
+    state: &PgAppState<A>,
+    store_ids: impl IntoIterator<Item = ::types::StoreId>,
+) -> std::collections::HashMap<uuid::Uuid, String> {
+    use auth::repository::StoreRepository;
+
+    let unique: std::collections::BTreeSet<uuid::Uuid> =
+        store_ids.into_iter().map(|id| id.0).collect();
+
+    let mut names = std::collections::HashMap::with_capacity(unique.len());
+    for id in unique {
+        match StoreRepository::get_store(&*state.data_service, ::types::StoreId(id)).await {
+            Ok(Some(store)) => {
+                names.insert(id, store.name);
+            }
+            // A store row that is genuinely absent is not an error worth logging
+            // - the column simply falls back to the id.
+            Ok(None) => {}
+            // A repository error is. Degrading every row on the page to a bare
+            // UUID while staying silent gives an operator nothing to go on when
+            // someone reports "the store column stopped working".
+            Err(e) => tracing::warn!(
+                store_id = %id,
+                error = %e,
+                "could not resolve store name; rows will show a bare store id"
+            ),
+        }
+    }
+    names
+}
+
 /// Apply token policy filter to payment methods.
 ///
 /// If the policy mode is `Allowlist`, only payment methods matching an entry are kept.
