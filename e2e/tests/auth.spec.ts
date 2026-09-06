@@ -1,15 +1,29 @@
 import { test, expect, register, login } from '../fixtures/auth';
-import { resetDatabase } from '../fixtures/db';
 
-const SKIP_AUTH = process.env.E2E_SKIP_AUTH
-  ? process.env.E2E_SKIP_AUTH === 'true'
-  : process.env.E2E_REMOTE === 'true';
+// Opt-out only. This used to default to ON whenever E2E_REMOTE was set, for a
+// reason that does not hold up: the README said the virtual authenticator's RP
+// ID ("localhost") could not match a remote domain, but
+// `WebAuthn.addVirtualAuthenticator` has no RP ID parameter at all. It takes
+// protocol, transport, hasResidentKey, hasUserVerification and isUserVerified.
+// The RP ID comes from the page's origin when navigator.credentials.create()
+// runs, so an authenticator on testnet.random.cash gets that RP ID by
+// construction. The deployed server agrees - it logs
+// `rp_id=testnet.random.cash rp_origin=https://testnet.random.cash` at startup.
+//
+// The genuine blocker was below: this spec reset the database.
+const SKIP_AUTH = process.env.E2E_SKIP_AUTH === 'true';
 
 test.describe('Authentication', () => {
-  test.skip(() => SKIP_AUTH, 'Skipped: passkey origin mismatch in remote mode (E2E_SKIP_AUTH)');
-  test.beforeAll(async () => {
-    await resetDatabase();
-  });
+  test.skip(() => SKIP_AUTH, 'Skipped explicitly via E2E_SKIP_AUTH=true');
+
+  // Deliberately no resetDatabase(). Every test here creates its own account
+  // through register(), which mints a unique username, so none of them needs an
+  // empty database - the reset was hygiene, and hygiene that made the whole
+  // spec unusable against any shared environment. Deleting rows from a live
+  // testnet to run a login test is not a trade worth making.
+  //
+  // Six other specs (invoices, stores, payment-methods, ui-interactions,
+  // webhooks and formerly this one) still reset and remain local-only.
 
   test('register new account with passkey', async ({ withAuthenticator: page }) => {
     await register(page);

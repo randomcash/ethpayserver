@@ -32,7 +32,7 @@ This sets sane defaults:
 | `E2E_BASE_URL`      | `https://testnet.random.cash`        | Frontend URL for Playwright `baseURL`      |
 | `E2E_API_URL`       | `https://testnet.random.cash`        | API base URL                               |
 | `E2E_SKIP_DB_RESET` | `true` (implicit in remote mode)     | Skips `TRUNCATE` in `fixtures/db.ts`       |
-| `E2E_SKIP_AUTH`     | `true` (default-on in remote mode)   | Skips auth tests (passkey origin mismatch) |
+| `E2E_SKIP_AUTH`     | _(unset)_                            | Set `true` to skip the auth spec           |
 
 All defaults can be overridden explicitly:
 
@@ -52,7 +52,7 @@ E2E_SKIP_AUTH=false \
 | `E2E_API_URL`       | `http://localhost:3000`                  | API base URL                                       |
 | `E2E_DATABASE_URL`  | `postgres://postgres:postgres@localhost:5432/ethpayserver_e2e` | Database connection string      |
 | `E2E_SKIP_DB_RESET` | _(unset)_                                | Skip database truncate-and-seed in `beforeAll`     |
-| `E2E_SKIP_AUTH`     | _(unset; true when E2E_REMOTE is set)_   | Skip auth spec (passkey origin issues remotely)    |
+| `E2E_SKIP_AUTH`     | _(unset)_                                | Set `true` to skip the auth spec                   |
 
 ### Running against testnet from a local machine
 
@@ -62,10 +62,28 @@ npm install
 E2E_REMOTE=true E2E_BASE_URL=https://testnet.random.cash npx playwright test
 ```
 
-Auth tests are skipped by default in remote mode because the WebAuthn
-virtual authenticator's RP ID (`localhost`) does not match the remote
-domain. Set `E2E_SKIP_AUTH=false` to force-run them once the origin issue
-is resolved.
+Auth tests run in remote mode. They used to be skipped by default, on the
+grounds that the virtual authenticator's RP ID (`localhost`) could not match
+the remote domain — that explanation was wrong. `WebAuthn.addVirtualAuthenticator`
+has no RP ID parameter; the RP ID comes from the page's origin when
+`navigator.credentials.create()` runs. The deployed server logs
+`rp_id=testnet.random.cash rp_origin=https://testnet.random.cash` at startup,
+so there is nothing to mismatch.
+
+What actually made the spec unusable remotely was its `resetDatabase()` call,
+now removed — every test there creates its own uniquely-named account and never
+needed an empty database.
+
+`E2E_SKIP_AUTH=true` still skips them explicitly.
+
+**Still local-only:** `invoices`, `stores`, `payment-methods`, `ui-interactions`
+and `webhooks` all call `resetDatabase()`. Never point those at a shared
+environment — `E2E_DATABASE_URL` defaults to localhost, so they fail closed
+rather than deleting live data, but that is luck rather than design.
+
+Note separately that `scout.spec.ts` was seen failing to establish a session
+after passkey registration against testnet (#56). That is a real, open gap and
+unrelated to the RP ID story above.
 
 ## Test wallet maintenance (`scripts/`)
 

@@ -208,13 +208,34 @@ test.describe('Auth & Authenticated', () => {
       issue('REGISTER', `Error after passkey creation: ${errorTexts.join(' | ')}`);
     }
 
-    // Handle recovery step. Accepts both shapes: "Skip for Now" where it still
-    // exists, and the confirm path that replaces it (RCS-214).
+    // Handle the recovery step, which registration now REQUIRES (RCS-214) -
+    // "Skip for Now" is gone from the default flow, so the confirm path is the
+    // only way through.
+    //
+    // The 5s budget this used was the actual cause of the remote failure in #56,
+    // reported there as "passkey registration does not establish a session".
+    // Registration succeeds; it parks on the recovery screen, and against a
+    // remote server the passkey round trip takes longer than 5s to get there.
+    // Both isVisible checks then returned false, the step was silently skipped,
+    // registration never completed, and the run ended on Sign In - which reads
+    // exactly like a failed login. fixtures/auth.ts already carries a comment
+    // about this same 5s trap; scout kept it.
+    //
+    // Verified against live testnet on 2026-09-06: with a proper wait, start ->
+    // complete -> /auth/me all return 200 and the session is established.
     const skipButton = scoutPage.locator('.ps-button-ghost, button', { hasText: /skip/i });
     const savedButton = scoutPage.locator('.ps-button-primary', { hasText: /written it down/i });
-    if (await skipButton.isVisible({ timeout: 5_000 }).catch(() => false)) {
+    const settledUrl = /\/(evm)?$/;
+
+    await Promise.race([
+      scoutPage.waitForURL(settledUrl, { timeout: 30_000 }).catch(() => {}),
+      skipButton.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {}),
+      savedButton.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {}),
+    ]);
+
+    if (await skipButton.isVisible().catch(() => false)) {
       await skipButton.click();
-    } else if (await savedButton.isVisible({ timeout: 5_000 }).catch(() => false)) {
+    } else if (await savedButton.isVisible().catch(() => false)) {
       await savedButton.click();
       await scoutPage.locator('.ps-checkbox').check();
       await scoutPage.locator('.ps-button-primary', { hasText: /complete setup/i }).click();
