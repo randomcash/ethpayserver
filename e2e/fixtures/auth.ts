@@ -17,7 +17,22 @@ export async function setupVirtualAuthenticator(
   return { cdpSession: client, authenticatorId };
 }
 
-export async function register(page: Page): Promise<void> {
+/**
+ * What registration hands the user, and the only things that can recover the
+ * account later (RCS-205).
+ *
+ * A passkey-only account has no email and no wallet address, so `accountId` is
+ * the sole identifier it can present at recovery — the phrase alone is not
+ * enough. Both are shown once, on the same screen, and never again.
+ */
+export interface RecoveryCredentials {
+  /** The 24 BIP39 words, in order. */
+  mnemonic: string[];
+  /** Shown only for passkey-only accounts, which have no other handle. */
+  accountId: string | null;
+}
+
+export async function register(page: Page): Promise<RecoveryCredentials> {
   await page.goto('/register');
 
   // Select the passkey tab
@@ -52,11 +67,39 @@ export async function register(page: Page): Promise<void> {
     savedButton.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {}),
   ]);
 
+  // Capture the recovery material BEFORE dismissing the screen. It is displayed
+  // exactly once and is unrecoverable afterwards by design, so a test that needs
+  // it has this one opportunity. Reading it here rather than in each test also
+  // means the selectors live in one place.
+  const credentials: RecoveryCredentials = { mnemonic: [], accountId: null };
+
+  if (await page.locator('.ps-mnemonic-word').first().isVisible().catch(() => false)) {
+    // Read in DOM order, which the component renders in phrase order. The
+    // displayed index is asserted rather than trusted: a reordering bug would
+    // otherwise yield a plausible-looking but wrong phrase, and the resulting
+    // failure at recovery is indistinguishable from a wrong phrase.
+    const words = await page.locator('.ps-mnemonic-word').all();
+    for (const [i, word] of words.entries()) {
+      const index = (await word.locator('.ps-mnemonic-index').textContent())?.trim();
+      const text = (await word.locator('.ps-mnemonic-text').textContent())?.trim();
+      if (index !== String(i + 1)) {
+        throw new Error(`recovery phrase out of order: slot ${i + 1} is labelled ${index}`);
+      }
+      if (!text) throw new Error(`recovery phrase word ${i + 1} is empty`);
+      credentials.mnemonic.push(text);
+    }
+
+    const accountId = page.locator('.ps-recovery-account-id-value');
+    if (await accountId.isVisible().catch(() => false)) {
+      credentials.accountId = ((await accountId.textContent()) ?? '').trim() || null;
+    }
+  }
+
   if (await skipButton.isVisible().catch(() => false)) {
     await skipButton.click();
   } else if (await savedButton.isVisible().catch(() => false)) {
     // Confirm path: acknowledge the phrase, tick the attestation, complete.
-    // There is no word re-entry, so the fixture does not need the mnemonic.
+    // There is no word re-entry, so the fixture does not need to type it back.
     await savedButton.click();
     await page.locator('.ps-checkbox').check();
     await page.locator('.ps-button-primary', { hasText: /complete setup/i }).click();
@@ -64,6 +107,8 @@ export async function register(page: Page): Promise<void> {
 
   // Wait for redirect to dashboard
   await page.waitForURL(settled, { timeout: 15_000 });
+
+  return credentials;
 }
 
 export async function login(page: Page): Promise<void> {

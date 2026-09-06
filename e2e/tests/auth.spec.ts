@@ -18,6 +18,30 @@ test.describe('Authentication', () => {
     await expect(page.locator('.ps-auth-page')).not.toBeVisible();
   });
 
+  test('registration surfaces the recovery phrase and account id', async ({
+    withAuthenticator: page,
+  }) => {
+    const credentials = await register(page);
+
+    // 24 words, and the fixture already asserted they are in displayed order.
+    // A phrase that is short, empty or reordered still looks plausible on
+    // screen; it only fails much later, at recovery, as an error identical to
+    // "wrong phrase" (RCS-205).
+    expect(credentials.mnemonic).toHaveLength(24);
+    for (const [i, word] of credentials.mnemonic.entries()) {
+      expect(word, `word ${i + 1} should be a BIP39 word`).toMatch(/^[a-z]+$/);
+    }
+
+    // A passkey-only account has no email and no wallet, so the account id is
+    // the ONLY identifier it can present at recovery. Losing it means the phrase
+    // alone cannot recover the account, so its presence is load-bearing rather
+    // than cosmetic.
+    expect(credentials.accountId, 'passkey-only accounts must be shown an account id').toBeTruthy();
+    expect(credentials.accountId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+  });
+
   test('login with existing passkey', async ({ withAuthenticator: page }) => {
     // Register first so the virtual authenticator holds a credential
     await register(page);
