@@ -12,7 +12,7 @@ use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
 use super::{
-    InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, extract_customer_email,
+    InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, customer_email_of,
     resolve_store_names, verify_store_access_for_query,
 };
 
@@ -86,7 +86,7 @@ where
             .await
             .unwrap_or_default();
 
-        let customer_email = extract_customer_email(&invoice.metadata);
+        let customer_email = customer_email_of(&invoice);
         responses.push(InvoiceResponse {
             id: invoice.id.0,
             store_id: invoice.store_id.0.to_string(),
@@ -160,7 +160,7 @@ where
         .await
         .unwrap_or_default();
 
-    let customer_email = extract_customer_email(&invoice.metadata);
+    let customer_email = customer_email_of(&invoice);
     let response = InvoiceResponse {
         id: invoice.id.0,
         store_id: invoice.store_id.0.to_string(),

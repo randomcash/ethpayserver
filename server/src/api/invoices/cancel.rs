@@ -11,7 +11,7 @@ use data_service::{PaymentOptionReader, PaymentOptionWriter};
 use crate::api::extractors::AdminAuth;
 use crate::state::PgAppState;
 
-use super::{InvoiceResponse, extract_customer_email};
+use super::{InvoiceResponse, customer_email_of};
 
 /// Cancel an invoice (admin only).
 ///
@@ -69,7 +69,7 @@ where
         .await
         .unwrap_or_default();
 
-    let customer_email = extract_customer_email(&cancelled.metadata);
+    let customer_email = customer_email_of(&cancelled);
     let response = InvoiceResponse {
         id: cancelled.id.0,
         store_id: cancelled.store_id.0.to_string(),

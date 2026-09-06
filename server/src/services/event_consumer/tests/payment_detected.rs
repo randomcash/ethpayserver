@@ -82,6 +82,7 @@ async fn test_handle_payment_detected_unknown_chain() {
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::hours(1),
         metadata: None,
+        customer_email: None,
         extra: None,
     };
     InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();

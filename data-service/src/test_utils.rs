@@ -837,6 +837,7 @@ pub fn create_test_invoice() -> InvoiceData {
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::hours(1),
         metadata: None,
+        customer_email: None,
         extra: None,
     }
 }

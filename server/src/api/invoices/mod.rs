@@ -301,6 +301,25 @@ pub(crate) fn apply_token_policy_filter(
     });
 }
 
+/// The address receipts go to, for one invoice.
+///
+/// Prefers the dedicated column and falls back to `metadata` (RCS-215). The
+/// fallback is for rows written before the migration: those still carry the
+/// address inside the blob, and dropping it would silently stop their receipts.
+/// New writes populate the column, so the fallback ages out on its own.
+pub(crate) fn customer_email_of(invoice: &InvoiceData) -> Option<String> {
+    invoice
+        .customer_email
+        .clone()
+        .or_else(|| extract_customer_email(&invoice.metadata))
+}
+
+/// Legacy path: read the address out of the metadata blob.
+///
+/// Only for invoices created before `customer_email` became a column. Do not
+/// call this directly on new code paths - use [`customer_email_of`], which
+/// prefers the column. Once metadata is encrypted (RCS-216) this can only ever
+/// return `None` for rows written after that point, which is correct.
 pub(crate) fn extract_customer_email(metadata: &Option<serde_json::Value>) -> Option<String> {
     metadata
         .as_ref()

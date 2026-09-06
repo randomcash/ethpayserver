@@ -14,7 +14,7 @@ use rates::{RateError, is_fiat_currency};
 
 use super::{
     CreateInvoiceRequest, InvoiceResponse, apply_token_policy_filter,
-    convert_human_to_smallest_unit, convert_to_crypto_smallest_unit, extract_customer_email,
+    convert_human_to_smallest_unit, convert_to_crypto_smallest_unit, customer_email_of,
     invoice_error, rate_stale_reject_secs, rate_stale_warn_secs,
 };
 
@@ -293,18 +293,26 @@ where
         .unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
     let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
-    // Merge customer_email into metadata so the generated DB column picks it up.
-    let metadata = match (req.customer_email, req.metadata) {
-        (Some(email), Some(mut meta)) => {
-            if let Some(obj) = meta.as_object_mut() {
-                obj.entry("customer_email")
-                    .or_insert_with(|| serde_json::Value::String(email));
-            }
-            Some(meta)
-        }
-        (Some(email), None) => Some(serde_json::json!({ "customer_email": email })),
-        (None, meta) => meta,
-    };
+    // customer_email is stored in its own column, not folded into metadata
+    // (RCS-215). It used to be merged in so a generated Postgres column could
+    // derive it back out - which would have silently returned NULL, and stopped
+    // customer receipts, the moment metadata became ciphertext (RCS-216).
+    //
+    // Accept `buyer_email` from metadata as an inbound alias, since integrations
+    // already send it that way and the old generated column COALESCEd both. It
+    // is lifted out rather than left behind: contact data should live in exactly
+    // one place, and metadata is the half that stops being readable.
+    let mut metadata = req.metadata;
+    let customer_email = req.customer_email.or_else(|| {
+        metadata
+            .as_mut()
+            .and_then(|m| m.as_object_mut())
+            .and_then(|obj| {
+                obj.remove("customer_email")
+                    .or_else(|| obj.remove("buyer_email"))
+                    .and_then(|v| v.as_str().map(str::to_string))
+            })
+    });
 
     // Create invoice (network-agnostic) - only after validating payment methods
     let invoice = InvoiceData {
@@ -317,6 +325,7 @@ where
         created_at: Utc::now(),
         expires_at,
         metadata,
+        customer_email,
         extra: None,
     };
 
@@ -348,7 +357,7 @@ where
     // Record metrics
     metrics::record_invoice_created(&invoice.currency);
 
-    let customer_email = extract_customer_email(&invoice.metadata);
+    let customer_email = customer_email_of(&invoice);
     let response = InvoiceResponse {
         id: invoice.id.0,
         store_id: invoice.store_id.0.to_string(),

@@ -94,17 +94,20 @@ impl EthpayMcpServer {
             .unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
         let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
-        let metadata = match (args.customer_email, args.metadata) {
-            (Some(email), Some(mut meta)) => {
-                if let Some(obj) = meta.as_object_mut() {
-                    obj.entry("customer_email")
-                        .or_insert_with(|| serde_json::Value::String(email));
-                }
-                Some(meta)
-            }
-            (Some(email), None) => Some(serde_json::json!({ "customer_email": email })),
-            (None, meta) => meta,
-        };
+        // Same treatment as the HTTP create path (RCS-215): customer_email goes
+        // in its own column, and a `buyer_email` sent inside metadata is lifted
+        // out rather than left in a blob that becomes ciphertext (RCS-216).
+        let mut metadata = args.metadata;
+        let customer_email = args.customer_email.or_else(|| {
+            metadata
+                .as_mut()
+                .and_then(|m| m.as_object_mut())
+                .and_then(|obj| {
+                    obj.remove("customer_email")
+                        .or_else(|| obj.remove("buyer_email"))
+                        .and_then(|v| v.as_str().map(str::to_string))
+                })
+        });
 
         let invoice = InvoiceData {
             id: InvoiceId::new(),
@@ -116,6 +119,7 @@ impl EthpayMcpServer {
             created_at: Utc::now(),
             expires_at,
             metadata,
+            customer_email,
             extra: None,
         };
 
