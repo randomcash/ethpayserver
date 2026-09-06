@@ -208,10 +208,16 @@ test.describe('Auth & Authenticated', () => {
       issue('REGISTER', `Error after passkey creation: ${errorTexts.join(' | ')}`);
     }
 
-    // Handle recovery step
+    // Handle recovery step. Accepts both shapes: "Skip for Now" where it still
+    // exists, and the confirm path that replaces it (RCS-214).
     const skipButton = scoutPage.locator('.ps-button-ghost, button', { hasText: /skip/i });
+    const savedButton = scoutPage.locator('.ps-button-primary', { hasText: /written it down/i });
     if (await skipButton.isVisible({ timeout: 5_000 }).catch(() => false)) {
       await skipButton.click();
+    } else if (await savedButton.isVisible({ timeout: 5_000 }).catch(() => false)) {
+      await savedButton.click();
+      await scoutPage.locator('.ps-checkbox').check();
+      await scoutPage.locator('.ps-button-primary', { hasText: /complete setup/i }).click();
     }
 
     // Take screenshot after
