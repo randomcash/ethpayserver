@@ -1,6 +1,6 @@
 import { test as base, expect, type Page, type CDPSession } from '@playwright/test';
 import { validateMnemonic } from '@scure/bip39';
-import { wordlist } from '@scure/bip39/wordlists/english';
+import { wordlist } from '@scure/bip39/wordlists/english.js';
 
 export async function setupVirtualAuthenticator(
   page: Page,
