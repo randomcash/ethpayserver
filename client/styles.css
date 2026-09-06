@@ -5636,6 +5636,44 @@ a:hover {
     line-height: 1.5;
 }
 
+/* Account id shown beside the recovery phrase for passkey-only accounts.
+   Recovery needs an identifier as well as the phrase, and a passkey-only
+   account has no email or wallet to fall back on (RCS-201/205). Styled as a
+   sibling of the mnemonic grid so it reads as part of what must be saved,
+   not as an aside. */
+.ps-recovery-account-id {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-6);
+    text-align: left;
+}
+
+.ps-recovery-account-id-label {
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.ps-recovery-account-id-value {
+    font-family: var(--font-mono, monospace);
+    font-size: var(--font-size-sm);
+    word-break: break-all;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
+}
+
+.ps-recovery-account-id-hint {
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+}
+
 .ps-recovery-warning {
     display: flex;
     align-items: flex-start;
