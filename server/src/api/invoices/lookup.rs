@@ -9,7 +9,7 @@ use ::types::InvoiceReader;
 use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
-use super::{InvoiceResponse, TxHashLookupResponse, extract_customer_email};
+use super::{InvoiceResponse, TxHashLookupResponse, customer_email_of};
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
@@ -123,7 +123,7 @@ where
         .await
         .unwrap_or_default();
 
-    let customer_email = extract_customer_email(&invoice.metadata);
+    let customer_email = customer_email_of(&invoice);
     let response = TxHashLookupResponse {
         invoice: InvoiceResponse {
             id: invoice.id.0,

@@ -248,12 +248,21 @@ impl<
     }
 
     /// Extract customer email from invoice metadata.
+    /// The address a receipt goes to.
+    ///
+    /// Prefers the dedicated column, falling back to `metadata` for invoices
+    /// created before it existed (RCS-215). The fallback is not decoration: new
+    /// writes populate the column and no longer put the address in metadata, so
+    /// reading metadata alone would have stopped receipts for every new invoice
+    /// - silently, since a missing address is a normal, unlogged case here.
     pub(super) fn extract_customer_email(invoice: &InvoiceData) -> Option<&str> {
-        invoice
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("customer_email").or_else(|| m.get("buyer_email")))
-            .and_then(|v| v.as_str())
+        invoice.customer_email.as_deref().or_else(|| {
+            invoice
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("customer_email").or_else(|| m.get("buyer_email")))
+                .and_then(|v| v.as_str())
+        })
     }
 
     /// Check if customer receipts are disabled for the given store.

@@ -96,6 +96,7 @@ pub async fn create_test_invoice(
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::hours(1),
         metadata: None,
+        customer_email: None,
         extra: None,
     };
     InvoiceWriter::upsert(ds, &invoice).await.unwrap();

@@ -23,7 +23,7 @@ impl InvoiceReader for PgDataService {
             r#"
             SELECT
                 id, store_id, currency, status::text, amount::text,
-                amount_received::text, created_at, expires_at, metadata, extra
+                amount_received::text, created_at, expires_at, metadata, customer_email, extra
             FROM invoices
             WHERE id = $1
             "#,
@@ -83,7 +83,7 @@ impl InvoiceReader for PgDataService {
             r#"
             SELECT
                 id, store_id, currency, status::text, amount::text,
-                amount_received::text, created_at, expires_at, metadata, extra
+                amount_received::text, created_at, expires_at, metadata, customer_email, extra
             FROM invoices
             {}
             ORDER BY created_at DESC
@@ -152,7 +152,7 @@ impl InvoiceReader for PgDataService {
             r#"
             SELECT
                 id, store_id, currency, status::text, amount::text,
-                amount_received::text, created_at, expires_at, metadata, extra
+                amount_received::text, created_at, expires_at, metadata, customer_email, extra
             FROM invoices
             WHERE status IN ('pending', 'processing', 'partially_paid')
               AND expires_at < NOW()
@@ -195,10 +195,10 @@ impl InvoiceWriter for PgDataService {
             r#"
             INSERT INTO invoices (
                 id, store_id, currency, status, amount, amount_received,
-                created_at, expires_at, metadata, extra
+                created_at, expires_at, metadata, customer_email, extra
             ) VALUES (
                 $1, $2, $3, $4::invoice_status, $5::numeric, $6::numeric,
-                $7, $8, $9, $10
+                $7, $8, $9, $10, $11
             )
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
@@ -206,6 +206,7 @@ impl InvoiceWriter for PgDataService {
                 amount_received = EXCLUDED.amount_received,
                 expires_at = EXCLUDED.expires_at,
                 metadata = EXCLUDED.metadata,
+                customer_email = EXCLUDED.customer_email,
                 extra = EXCLUDED.extra
             "#,
         )
@@ -218,6 +219,7 @@ impl InvoiceWriter for PgDataService {
         .bind(invoice.created_at)
         .bind(invoice.expires_at)
         .bind(&invoice.metadata)
+        .bind(&invoice.customer_email)
         .bind(&invoice.extra)
         .execute(&self.pool)
         .await
@@ -293,6 +295,7 @@ fn try_row_to_invoice(row: &sqlx::postgres::PgRow) -> RepositoryResult<InvoiceDa
         created_at: row.get("created_at"),
         expires_at: row.get("expires_at"),
         metadata: row.get("metadata"),
+        customer_email: row.get("customer_email"),
         extra: row.get("extra"),
     })
 }

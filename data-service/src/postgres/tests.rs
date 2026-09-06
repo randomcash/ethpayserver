@@ -130,6 +130,7 @@ pub(super) fn test_invoice() -> InvoiceData {
         created_at: Utc::now(),
         expires_at: Utc::now() + Duration::hours(1),
         metadata: None,
+        customer_email: None,
         extra: None,
     }
 }

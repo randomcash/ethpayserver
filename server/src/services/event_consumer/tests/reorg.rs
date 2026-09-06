@@ -34,6 +34,7 @@ async fn test_handle_reorg_detected() {
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::hours(1),
         metadata: None,
+        customer_email: None,
         extra: None,
     };
     InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
@@ -99,18 +100,7 @@ async fn test_handle_reorg_with_remaining_valid_payments() {
     let store_id = StoreId::new();
 
     // Create invoice in processing state
-    let invoice = InvoiceData {
-        id: invoice_id.clone(),
-        store_id,
-        currency: "ETH".to_string(),
-        status: InvoiceStatus::Processing,
-        amount: "1000000000000000000".to_string(),
-        amount_received: "1000000000000000000".to_string(),
-        created_at: Utc::now(),
-        expires_at: Utc::now() + chrono::Duration::hours(1),
-        metadata: None,
-        extra: None,
-    };
+    let invoice = fully_paid_invoice(&invoice_id, store_id);
     InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
 
     // Create first payment at block 50 (will NOT be reorged)
@@ -186,4 +176,28 @@ async fn test_handle_reorg_with_remaining_valid_payments() {
         .unwrap()
         .unwrap();
     assert_eq!(invoice.status, InvoiceStatus::Processing);
+}
+
+/// A Processing invoice with its full amount already received.
+///
+/// Extracted from the reorg test rather than inlined: the literal is long
+/// enough that adding a field to InvoiceData pushed the test over clippy's
+/// 80-line limit, which is a signal the setup belonged in a helper anyway.
+/// `helpers::create_test_invoice` cannot be reused here - it builds a Pending
+/// invoice with nothing received, which is the opposite of what a reorg test
+/// needs.
+fn fully_paid_invoice(invoice_id: &InvoiceId, store_id: StoreId) -> InvoiceData {
+    InvoiceData {
+        id: invoice_id.clone(),
+        store_id,
+        currency: "ETH".to_string(),
+        status: InvoiceStatus::Processing,
+        amount: "1000000000000000000".to_string(),
+        amount_received: "1000000000000000000".to_string(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        metadata: None,
+        customer_email: None,
+        extra: None,
+    }
 }
