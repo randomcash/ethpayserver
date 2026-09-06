@@ -1,4 +1,6 @@
 import { test as base, expect, type Page, type CDPSession } from '@playwright/test';
+import { validateMnemonic } from '@scure/bip39';
+import { wordlist } from '@scure/bip39/wordlists/english';
 
 export async function setupVirtualAuthenticator(
   page: Page,
@@ -73,26 +75,50 @@ export async function register(page: Page): Promise<RecoveryCredentials> {
   // means the selectors live in one place.
   const credentials: RecoveryCredentials = { mnemonic: [], accountId: null };
 
-  if (await page.locator('.ps-mnemonic-word').first().isVisible().catch(() => false)) {
-    // Read in DOM order, which the component renders in phrase order. The
-    // displayed index is asserted rather than trusted: a reordering bug would
-    // otherwise yield a plausible-looking but wrong phrase, and the resulting
-    // failure at recovery is indistinguishable from a wrong phrase.
-    const words = await page.locator('.ps-mnemonic-word').all();
-    for (const [i, word] of words.entries()) {
-      const index = (await word.locator('.ps-mnemonic-index').textContent())?.trim();
-      const text = (await word.locator('.ps-mnemonic-text').textContent())?.trim();
-      if (index !== String(i + 1)) {
-        throw new Error(`recovery phrase out of order: slot ${i + 1} is labelled ${index}`);
-      }
-      if (!text) throw new Error(`recovery phrase word ${i + 1} is empty`);
-      credentials.mnemonic.push(text);
-    }
+  // `require_recovery` defaults to true (RCS-214), so reaching this screen is
+  // not optional and neither is capturing it. A conditional capture would
+  // return an empty phrase on any markup change and let a later recovery test
+  // run against nothing - passing silently as coverage, which is the outcome
+  // this work exists to avoid. So: throw rather than skip.
+  const wordLocator = page.locator('.ps-mnemonic-word');
+  await wordLocator.first().waitFor({ state: 'visible', timeout: 10_000 });
 
-    const accountId = page.locator('.ps-recovery-account-id-value');
-    if (await accountId.isVisible().catch(() => false)) {
-      credentials.accountId = ((await accountId.textContent()) ?? '').trim() || null;
-    }
+  const words = await wordLocator.all();
+  for (const [i, word] of words.entries()) {
+    // Explicit short timeout: if these inner selectors are renamed in ui-kit
+    // while .ps-mnemonic-word survives, fail with a legible selector error
+    // rather than hanging until the 30s per-test budget expires.
+    const text = (await word.locator('.ps-mnemonic-text').textContent({ timeout: 2_000 }))?.trim();
+    if (!text) throw new Error(`recovery phrase word ${i + 1} is empty`);
+    credentials.mnemonic.push(text);
+  }
+
+  // BIP39 checksum, not a shape check.
+  //
+  // This replaces an earlier assertion that each word's displayed index matched
+  // its position. That check could never fail: RecoverySetup renders the index
+  // from `enumerate()`, so it was derived from the same DOM order it was being
+  // compared against. A shuffled phrase would have rendered 1..24 against the
+  // shuffled words and passed.
+  //
+  // The checksum is the real check. BIP39 encodes a checksum over the entropy in
+  // the final word, so reordering, substituting or dropping a word fails here -
+  // at registration, loudly - instead of at recovery, where it is
+  // indistinguishable from a merchant typing the wrong phrase.
+  //
+  // The phrase is deliberately not in the message: it would land in CI logs and
+  // the uploaded playwright-report artifact.
+  if (!validateMnemonic(credentials.mnemonic.join(' '), wordlist)) {
+    throw new Error(
+      `registration produced a phrase failing BIP39 validation ` +
+        `(${credentials.mnemonic.length} words); value withheld from logs`,
+    );
+  }
+
+  const accountId = page.locator('.ps-recovery-account-id-value');
+  if (await accountId.isVisible().catch(() => false)) {
+    credentials.accountId =
+      ((await accountId.textContent({ timeout: 2_000 })) ?? '').trim() || null;
   }
 
   if (await skipButton.isVisible().catch(() => false)) {

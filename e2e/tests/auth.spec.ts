@@ -23,14 +23,15 @@ test.describe('Authentication', () => {
   }) => {
     const credentials = await register(page);
 
-    // 24 words, and the fixture already asserted they are in displayed order.
-    // A phrase that is short, empty or reordered still looks plausible on
-    // screen; it only fails much later, at recovery, as an error identical to
-    // "wrong phrase" (RCS-205).
-    expect(credentials.mnemonic).toHaveLength(24);
-    for (const [i, word] of credentials.mnemonic.entries()) {
-      expect(word, `word ${i + 1} should be a BIP39 word`).toMatch(/^[a-z]+$/);
-    }
+    // Assert on the count, never on the array: a failing `toHaveLength` prints
+    // the received value, which would put real recovery material into CI logs
+    // and the uploaded playwright-report artifact. register_page.rs withholds
+    // Debug from mnemonic_words for the same reason (RCS-193).
+    //
+    // Word validity is not re-checked here - the fixture already validates the
+    // BIP39 checksum and refuses to return a phrase that fails, which catches
+    // reordering and substitution that a per-word regex cannot.
+    expect(credentials.mnemonic.length, 'phrase should be 24 words').toBe(24);
 
     // A passkey-only account has no email and no wallet, so the account id is
     // the ONLY identifier it can present at recovery. Losing it means the phrase
