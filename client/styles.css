@@ -3776,6 +3776,25 @@ a:hover {
     margin-top: var(--space-4);
 }
 
+/* Not inside a .form-row. Groups there are flex items with the row's own `gap`,
+   so this stacked-form sibling margin is not just redundant, it pushes every
+   second field 16px below the first - which is why Amount and Currency in the
+   create-invoice modal did not line up.
+   .form-row > .form-group already says `margin-top: 0`, but that rule and the
+   one above have identical specificity (0,2,0) and it loses on source order.
+   The child+sibling selector here is 0,3,0, so it wins wherever it sits. */
+.form-row > .form-group + .form-group {
+    margin-top: 0;
+}
+
+/* An <input> and a <select> carrying the same class rendered 34px and 36px:
+   identical padding, border and box-sizing, but a select's intrinsic content
+   box is taller. Side by side that reads as one control sagging. Pin the height
+   so anything styled .form-input is the same height as everything else. */
+.form-input {
+    min-height: 36px;
+}
+
 .form-label {
     font-size: var(--text-sm);
     font-weight: 500;
