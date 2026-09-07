@@ -64,7 +64,13 @@ pub fn WalletsPage() -> impl IntoView {
                     <p class="page-description">"Manage HD wallets for receiving payments"</p>
                 </div>
                 <div class="page-actions">
-                    <button class="btn btn-primary btn-sm">
+                    // The wallets API is read-only, so nothing on this page can act
+                    // yet (RCS-226, RCS-230).
+                    <button
+                        class="btn btn-primary btn-sm"
+                        disabled=true
+                        title="Adding a wallet is not implemented yet"
+                    >
                         <IconPlus />
                         "Add wallet"
                     </button>
@@ -107,7 +113,13 @@ fn WalletsEmpty() -> impl IntoView {
             <IconWalletLarge />
             <h3>"No wallets configured"</h3>
             <p>"Add an HD wallet to start receiving cryptocurrency payments"</p>
-            <button class="btn btn-primary btn-sm">"Add your first wallet"</button>
+            <button
+                class="btn btn-primary btn-sm"
+                disabled=true
+                title="Adding a wallet is not implemented yet"
+            >
+                "Add your first wallet"
+            </button>
         </div>
     }
 }
@@ -206,7 +218,11 @@ pub fn WalletDetailPage() -> impl IntoView {
                                                 </p>
                                             </div>
                                             <div class="wallet-detail-actions">
-                                                <button class="btn btn-secondary btn-sm">
+                                                <button
+                                                    class="btn btn-secondary btn-sm"
+                                                    disabled=true
+                                                    title="Wallet export is not implemented yet"
+                                                >
                                                     <IconDownload />
                                                     "Export"
                                                 </button>
@@ -279,7 +295,11 @@ fn GeneralTab(wallet: Wallet) -> impl IntoView {
                         <label class="form-label">"Extended Public Key"</label>
                         <div class="form-static">
                             <code class="wallet-address-full">{wallet.xpub_masked.clone()}</code>
-                            <button class="btn btn-ghost btn-sm btn-icon" title="Copy">
+                            <button
+                                class="btn btn-ghost btn-sm btn-icon"
+                                disabled=true
+                                title="Copy is not implemented yet"
+                            >
                                 <IconCopy />
                             </button>
                         </div>
@@ -295,7 +315,13 @@ fn GeneralTab(wallet: Wallet) -> impl IntoView {
                     </div>
 
                     <div class="form-actions">
-                        <button class="btn btn-primary btn-sm">"Save changes"</button>
+                        <button
+                            class="btn btn-primary btn-sm"
+                            disabled=true
+                            title="Wallets are read-only - saving is not implemented yet"
+                        >
+                            "Save changes"
+                        </button>
                     </div>
                 </div>
             </div>
@@ -310,7 +336,13 @@ fn GeneralTab(wallet: Wallet) -> impl IntoView {
                             <span class="danger-action-title">"Delete this wallet"</span>
                             <span class="danger-action-desc">"Remove this wallet configuration. This will not affect any funds."</span>
                         </div>
-                        <button class="btn btn-danger btn-sm">"Delete wallet"</button>
+                        <button
+                            class="btn btn-danger btn-sm"
+                            disabled=true
+                            title="Wallets are read-only - deleting is not implemented yet"
+                        >
+                            "Delete wallet"
+                        </button>
                     </div>
                 </div>
             </div>

@@ -72,7 +72,12 @@ where
 
                 <div class="main-header-actions">
                     <ConnectionIndicator state=ws_state />
-                    <button class="btn btn-ghost btn-sm">
+                    // No notification centre behind the bell yet (RCS-230).
+                    <button
+                        class="btn btn-ghost btn-sm"
+                        disabled=true
+                        title="Notifications are not implemented yet"
+                    >
                         <IconBell />
                     </button>
                     <button class="btn btn-primary btn-sm" on:click=move |_| create_invoice.open()>

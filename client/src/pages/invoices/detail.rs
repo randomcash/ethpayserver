@@ -103,11 +103,20 @@ fn InvoiceDetailContent(invoice: Invoice, payments: Vec<Payment>) -> impl IntoVi
                 })}
             </div>
             <div class="invoice-detail-actions">
-                <button class="btn btn-secondary btn-sm">
+                // Neither action is wired up; both would silently no-op (RCS-230).
+                <button
+                    class="btn btn-secondary btn-sm"
+                    disabled=true
+                    title="Copy link is not implemented yet"
+                >
                     <IconCopy />
                     "Copy link"
                 </button>
-                <button class="btn btn-secondary btn-sm">
+                <button
+                    class="btn btn-secondary btn-sm"
+                    disabled=true
+                    title="Download is not implemented yet"
+                >
                     <IconExport />
                     "Download"
                 </button>
@@ -193,7 +202,11 @@ fn InvoiceDetailContent(invoice: Invoice, payments: Vec<Payment>) -> impl IntoVi
                                                         <td>
                                                             <div class="payment-tx-cell">
                                                                 <code class="tx-hash">{tx_display}</code>
-                                                                <button class="btn-icon-xs">
+                                                                <button
+                                                                    class="btn-icon-xs"
+                                                                    disabled=true
+                                                                    title="Explorer link is not implemented yet"
+                                                                >
                                                                     <IconExternalLink />
                                                                 </button>
                                                             </div>

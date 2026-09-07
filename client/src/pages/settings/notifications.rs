@@ -80,7 +80,15 @@ pub fn NotificationsTab() -> impl IntoView {
                     </div>
 
                     <div class="form-actions">
-                        <button class="btn btn-primary btn-sm">"Save notification settings"</button>
+                        // Nothing persists these toggles yet, so the button would throw
+                        // the edits away without saying so (RCS-228, RCS-230).
+                        <button
+                            class="btn btn-primary btn-sm"
+                            disabled=true
+                            title="Saving notification settings is not implemented yet"
+                        >
+                            "Save notification settings"
+                        </button>
                     </div>
                 </div>
             </div>

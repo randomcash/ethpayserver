@@ -65,7 +65,12 @@ pub(super) fn InvoiceRow(invoice: Invoice, show_store: bool) -> impl IntoView {
                 <span class="invoice-date">{created_display}</span>
             </td>
             <td>
-                <button class="btn btn-ghost btn-sm btn-icon">
+                // The overflow menu has no items behind it yet (RCS-230).
+                <button
+                    class="btn btn-ghost btn-sm btn-icon"
+                    disabled=true
+                    title="Row actions are not implemented yet"
+                >
                     <IconMore />
                 </button>
             </td>
