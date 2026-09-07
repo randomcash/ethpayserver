@@ -1839,6 +1839,26 @@ a:hover {
     }
 }
 
+/* The same class is used for two different things, and only one of them is a
+ * flex list. The dashboard's recent-payments panel renders each row as
+ * <a class="payment-row"> and wants the flex layout above. The payments table
+ * and the invoice detail table render <tr class="payment-row">, and there
+ * `display: flex` takes the row out of table layout entirely: its cells stop
+ * being table cells, so they no longer share the column widths the <thead>
+ * computed.
+ *
+ * The result is a header row laid out independently of its data. Measured on
+ * the payments table: the "Transaction" header spans 883px above a 146px cell,
+ * and every later header sits 600-700px right of the column it names.
+ *
+ * `tr.payment-row` is specificity (0,1,1) against the flex rule's (0,1,0), so
+ * it wins wherever it sits in the file rather than depending on order - which
+ * matters in a stylesheet where that has already gone wrong three times.
+ */
+tr.payment-row {
+    display: table-row;
+}
+
 .payment-row:last-child {
     border-bottom: none;
 }

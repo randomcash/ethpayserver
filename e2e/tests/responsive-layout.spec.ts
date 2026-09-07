@@ -137,3 +137,61 @@ test.describe('form field alignment', () => {
     expect(Math.round(s!.height - i!.height), 'select must not sag beside an input').toBe(0);
   });
 });
+
+/**
+ * `.payment-row` is used for two different things: the dashboard renders each
+ * recent payment as `<a class="payment-row">` and wants the flex list layout,
+ * while the payments and invoice-detail tables use `<tr class="payment-row">`.
+ * `display: flex` on a table row removes it from table layout, so its cells stop
+ * sharing the widths the <thead> computed and every header drifts off its
+ * column - measured at 600-700px of drift before this was fixed.
+ */
+test.describe('table column alignment', () => {
+  const TABLE = `
+    <div class="payments-table-container desktop-only">
+      <table class="payments-table">
+        <thead><tr>
+          <th>Transaction</th><th>Store</th><th>Amount</th><th>Network</th>
+          <th>Invoice</th><th>Status</th><th>Date</th><th></th>
+        </tr></thead>
+        <tbody>
+          <tr class="payment-row">
+            <td><div class="payment-tx-cell"><code class="tx-hash">0x1a2b…3c4d</code></div></td>
+            <td><span class="payment-store">Acme Store</span></td>
+            <td><span class="payment-amount">0.5 ETH</span></td>
+            <td><span class="payment-network">Sepolia</span></td>
+            <td><a class="payment-invoice-link">inv_123</a></td>
+            <td><span class="status-badge status-confirmed">Confirmed</span></td>
+            <td><span class="payment-date">Sep 7, 2026</span></td>
+            <td><a class="btn btn-ghost btn-sm btn-icon">⋯</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>`;
+
+  test('every header sits exactly over its column', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.setContent(`<style>${CSS}</style><div style="padding:24px">${TABLE}</div>`);
+
+    const cols = await page.evaluate(() => {
+      const ths = [...document.querySelectorAll('.payments-table thead th')];
+      const tds = [...document.querySelectorAll('.payments-table tbody td')];
+      return ths.map((th, i) => ({
+        col: (th.textContent || 'actions').trim() || 'actions',
+        dx: Math.round(tds[i].getBoundingClientRect().left - th.getBoundingClientRect().left),
+      }));
+    });
+
+    expect(cols.length, 'header and body must have the same number of cells').toBe(8);
+    for (const { col, dx } of cols) {
+      expect(dx, `"${col}" header must sit over its column`).toBe(0);
+    }
+  });
+
+  test('a table row stays a table row', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.setContent(`<style>${CSS}</style>${TABLE}`);
+    const display = await page.locator('.payments-table tbody tr').evaluate((el) => getComputedStyle(el).display);
+    expect(display, 'flex here silently destroys column alignment').toBe('table-row');
+  });
+});
