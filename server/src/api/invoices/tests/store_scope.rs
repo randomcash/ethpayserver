@@ -11,7 +11,7 @@
 //! The scope is now an `Option` with no in-band marker. These tests pin that:
 //! the nil UUID must be treated as an ordinary store id, never as "all".
 
-use super::super::verify_store_access_for_query;
+use super::super::{StoreScope, verify_store_access_for_query};
 use ::types::StoreId;
 use async_trait::async_trait;
 use auth::store::{UserStore, UserStoreInfo};
@@ -20,11 +20,11 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use uuid::Uuid;
 
-/// Membership repository stub. `member_of` is the one store the user belongs
-/// to; every other store returns "not a member". Only `get_user_store` is
-/// exercised by the code under test.
+/// Membership repository stub. `member_of` is every store the user belongs to;
+/// anything else returns "not a member". Both `get_user_store` (single-store
+/// gate) and `get_user_stores` (membership scoping, RCS-222) are exercised.
 struct StubStores {
-    member_of: Option<Uuid>,
+    member_of: Vec<Uuid>,
 }
 
 #[async_trait]
@@ -34,21 +34,27 @@ impl UserStoreRepository for StubStores {
         user_id: UserId,
         store_id: StoreId,
     ) -> Result<Option<UserStore>> {
-        Ok(match self.member_of {
-            Some(id) if id == store_id.0 => Some(UserStore::new(
-                user_id,
-                store_id,
-                auth::store::StoreRoleId(Uuid::new_v4()),
-            )),
-            _ => None,
-        })
+        Ok(self
+            .member_of
+            .contains(&store_id.0)
+            .then(|| UserStore::new(user_id, store_id, auth::store::StoreRoleId(Uuid::new_v4()))))
     }
 
     async fn add_user_to_store(&self, _: &UserStore) -> Result<()> {
         unimplemented!("not exercised by the store-scope gate")
     }
-    async fn get_user_stores(&self, _: UserId) -> Result<Vec<UserStore>> {
-        unimplemented!("not exercised by the store-scope gate")
+    async fn get_user_stores(&self, user_id: UserId) -> Result<Vec<UserStore>> {
+        Ok(self
+            .member_of
+            .iter()
+            .map(|id| {
+                UserStore::new(
+                    user_id,
+                    StoreId(*id),
+                    auth::store::StoreRoleId(Uuid::new_v4()),
+                )
+            })
+            .collect())
     }
     async fn get_store_users(&self, _: StoreId) -> Result<Vec<UserStore>> {
         unimplemented!("not exercised by the store-scope gate")
@@ -92,7 +98,7 @@ fn user_with_role(role: Role) -> UserInfo {
 async fn non_admin_passing_nil_store_id_is_forbidden_not_granted_all_stores() {
     let own_store = Uuid::new_v4();
     let repo = StubStores {
-        member_of: Some(own_store),
+        member_of: vec![own_store],
     };
     let user = user_with_role(Role::User);
 
@@ -111,7 +117,7 @@ async fn non_admin_passing_nil_store_id_is_forbidden_not_granted_all_stores() {
 #[tokio::test]
 async fn nil_store_id_is_returned_as_an_ordinary_scoped_filter() {
     let repo = StubStores {
-        member_of: Some(Uuid::nil()),
+        member_of: vec![Uuid::nil()],
     };
     let user = user_with_role(Role::User);
 
@@ -121,7 +127,7 @@ async fn nil_store_id_is_returned_as_an_ordinary_scoped_filter() {
 
     assert_eq!(
         scope,
-        Some(StoreId(Uuid::nil())),
+        StoreScope::One(StoreId(Uuid::nil())),
         "nil must round-trip as a filter, never collapse to the unfiltered case"
     );
 }
@@ -130,22 +136,55 @@ async fn nil_store_id_is_returned_as_an_ordinary_scoped_filter() {
 // The surrounding boundary, so the gate can't be loosened unnoticed
 // =========================================================================
 
+/// This used to assert a 400, which is what made "All Stores" a dead end for
+/// every merchant (RCS-222). Omitting `store_id` now means "everything I can
+/// see", and for a non-admin that is their own memberships - the same
+/// authorisation decision the single-store arm makes, applied to a set.
 #[tokio::test]
-async fn non_admin_without_store_id_is_rejected() {
+async fn non_admin_without_store_id_is_scoped_to_their_memberships() {
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
     let repo = StubStores {
-        member_of: Some(Uuid::new_v4()),
+        member_of: vec![a, b],
     };
     let user = user_with_role(Role::User);
 
-    let result = verify_store_access_for_query(&repo, &user, None).await;
+    let scope = verify_store_access_for_query(&repo, &user, None)
+        .await
+        .expect("a merchant may list across their own stores");
 
-    assert_eq!(result.unwrap_err(), StatusCode::BAD_REQUEST);
+    match scope {
+        StoreScope::Membership(ids) => {
+            assert_eq!(ids, vec![StoreId(a), StoreId(b)]);
+        }
+        other => panic!("expected Membership, got {other:?}"),
+    }
+}
+
+/// The trap in the membership arm: an empty list must stay a filter that
+/// matches nothing. If it ever degrades to "no filter", a user who belongs to
+/// no store reads every store on the server - RCS-211 by another route.
+#[tokio::test]
+async fn non_admin_with_no_stores_is_scoped_to_nothing_not_everything() {
+    let repo = StubStores { member_of: vec![] };
+    let user = user_with_role(Role::User);
+
+    let scope = verify_store_access_for_query(&repo, &user, None)
+        .await
+        .expect("a user with no stores gets an empty scope, not an error");
+
+    assert_eq!(
+        scope,
+        StoreScope::Membership(vec![]),
+        "no memberships must mean no rows, never the unfiltered case"
+    );
+    assert_ne!(scope, StoreScope::All, "a non-admin can never reach All");
 }
 
 #[tokio::test]
 async fn non_admin_querying_a_store_they_do_not_belong_to_is_forbidden() {
     let repo = StubStores {
-        member_of: Some(Uuid::new_v4()),
+        member_of: vec![Uuid::new_v4()],
     };
     let user = user_with_role(Role::User);
 
@@ -158,7 +197,7 @@ async fn non_admin_querying_a_store_they_do_not_belong_to_is_forbidden() {
 async fn non_admin_querying_their_own_store_is_scoped_to_it() {
     let own_store = Uuid::new_v4();
     let repo = StubStores {
-        member_of: Some(own_store),
+        member_of: vec![own_store],
     };
     let user = user_with_role(Role::User);
 
@@ -166,21 +205,25 @@ async fn non_admin_querying_their_own_store_is_scoped_to_it() {
         .await
         .expect("member may query their own store");
 
-    assert_eq!(scope, Some(StoreId(own_store)));
+    assert_eq!(scope, StoreScope::One(StoreId(own_store)));
 }
 
 /// The intended all-stores path, per the RCS-171 scope decision: admins only,
 /// and only by omitting `store_id` entirely.
 #[tokio::test]
 async fn admin_without_store_id_queries_every_store() {
-    let repo = StubStores { member_of: None };
+    let repo = StubStores { member_of: vec![] };
     let user = user_with_role(Role::ServerAdmin);
 
     let scope = verify_store_access_for_query(&repo, &user, None)
         .await
         .expect("admin may query all stores");
 
-    assert!(scope.is_none(), "admin all-stores query must be unfiltered");
+    assert_eq!(
+        scope,
+        StoreScope::All,
+        "admin all-stores query must be unfiltered"
+    );
 }
 
 /// An admin naming a store they are not a member of is still scoped to that
@@ -188,14 +231,14 @@ async fn admin_without_store_id_queries_every_store() {
 #[tokio::test]
 async fn admin_with_store_id_stays_scoped_to_that_store() {
     let other_store = Uuid::new_v4();
-    let repo = StubStores { member_of: None };
+    let repo = StubStores { member_of: vec![] };
     let user = user_with_role(Role::ServerAdmin);
 
     let scope = verify_store_access_for_query(&repo, &user, Some(other_store))
         .await
         .expect("admin may query any store");
 
-    assert_eq!(scope, Some(StoreId(other_store)));
+    assert_eq!(scope, StoreScope::One(StoreId(other_store)));
 }
 
 // =========================================================================
