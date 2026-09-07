@@ -206,6 +206,38 @@ where
     }
 }
 
+/// Admin-ness without requiring it.
+///
+/// `AdminAuth` rejects a non-admin, which is right for an admin-only route and
+/// wrong for one that answers everyone but says more to an admin. This never
+/// rejects: no session, an expired session or a non-admin all resolve to
+/// `false`, so the caller decides what to withhold rather than whether to
+/// answer at all.
+///
+/// Used by `/health/chains`, where whether a chain is up is public and the
+/// block heights behind that answer are not.
+#[derive(Debug, Clone, Copy)]
+pub struct MaybeAdmin(pub bool);
+
+impl<A> FromRequestParts<PgAppState<A>> for MaybeAdmin
+where
+    A: SessionService + 'static,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &PgAppState<A>,
+    ) -> Result<Self, Self::Rejection> {
+        // A failed lookup is "not an admin", never an error: an anonymous
+        // caller is the expected case on a public route.
+        let is_admin = validate_session(parts, state)
+            .await
+            .is_ok_and(|user| user.role == Role::ServerAdmin);
+        Ok(MaybeAdmin(is_admin))
+    }
+}
+
 impl<A> FromRequestParts<PgAppState<A>> for AdminAuth
 where
     A: SessionService + 'static,

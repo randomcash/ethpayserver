@@ -147,7 +147,7 @@ fn chain_health_connected_conversion() {
     let info: ChainHealthInfo = health.into();
     assert_eq!(info.status, "connected");
     assert!(info.is_healthy);
-    assert_eq!(info.watched_addresses, 42);
+    assert_eq!(info.watched_addresses, Some(42));
 }
 
 #[test]
@@ -216,4 +216,82 @@ fn rpc_health_last_block_omitted_when_none() {
     let json = serde_json::to_value(&rpc).unwrap();
     assert!(json.get("last_block").is_none());
     assert_eq!(json["error"], "timeout");
+}
+
+// ===========================================================================
+// /health/chains disclosure boundary
+//
+// Whether a chain is up is public; how far behind it is, and why it failed,
+// is not. These pin that line, because the failure mode is silent: adding a
+// field to ChainHealthInfo and forgetting to redact it leaks operational
+// detail to anonymous callers and nothing goes red.
+// ===========================================================================
+
+fn detailed() -> ChainHealthInfo {
+    ChainHealthInfo {
+        chain_id: 11155111,
+        chain_name: "Sepolia".to_string(),
+        status: "failed: https://eth-sepolia.example.com/v2/SECRET-KEY timed out".to_string(),
+        current_block: Some(9_100_200),
+        last_processed_block: Some(9_100_150),
+        watched_addresses: Some(42),
+        is_healthy: false,
+    }
+}
+
+#[test]
+fn redacted_chain_health_keeps_the_on_off_answer() {
+    let public = detailed().redact();
+
+    // The whole point of showing this to a merchant.
+    assert_eq!(public.chain_id, 11155111);
+    assert_eq!(public.chain_name, "Sepolia");
+    assert!(!public.is_healthy);
+    assert_eq!(public.status, "failed");
+}
+
+#[test]
+fn redacted_chain_health_drops_operational_detail() {
+    let public = detailed().redact();
+
+    assert_eq!(public.current_block, None, "block height is admin-only");
+    assert_eq!(
+        public.last_processed_block, None,
+        "monitor lag is admin-only"
+    );
+    assert_eq!(
+        public.watched_addresses, None,
+        "watched address count is admin-only"
+    );
+}
+
+/// The reason string is the one that actually matters: an RPC failure routinely
+/// carries the provider host and an API key, so it must not survive redaction.
+#[test]
+fn redaction_strips_the_failure_reason_not_just_the_detail_fields() {
+    let public = detailed().redact();
+
+    assert!(
+        !public.status.contains("SECRET-KEY"),
+        "redacted status must not leak the endpoint: {}",
+        public.status
+    );
+    assert!(
+        !public.status.contains("example.com"),
+        "redacted status must not leak the provider: {}",
+        public.status
+    );
+}
+
+#[test]
+fn redaction_leaves_a_healthy_chain_readable() {
+    let healthy = ChainHealthInfo {
+        status: "connected".to_string(),
+        is_healthy: true,
+        ..detailed()
+    };
+    let public = healthy.redact();
+
+    assert_eq!(public.status, "connected");
+    assert!(public.is_healthy);
 }
