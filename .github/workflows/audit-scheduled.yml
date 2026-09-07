@@ -31,12 +31,6 @@ jobs:
         with:
           ref: testnet
 
-      - name: Clone payserver-commons (sibling)
-        run: |
-          cd ..
-          git clone --depth 1 -b testnet https://github.com/randomcash/payserver-commons.git 2>/dev/null \
-            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
-
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install audit tools

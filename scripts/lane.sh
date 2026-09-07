@@ -74,12 +74,17 @@ git -C "$repo_root" worktree add -q -b "$branch" "$dir/$(basename "$repo_root")"
 git -C "$commons" fetch -q origin
 git -C "$commons" worktree add -q --detach "$dir/payserver-commons" origin/main
 
+# Point the lane at its own commons. The manifest stays pinned; this writes the
+# lane's uncommitted .cargo/config.toml so work here builds against the lane's
+# checkout rather than the pinned revision.
+"$dir/$(basename "$repo_root")/scripts/commons.sh" link "$dir/payserver-commons" >/dev/null
+
 cat <<EOF
 lane '$name' ready
 
   work in : $dir/$(basename "$repo_root")
   branch  : $branch  (from origin/$base)
-  commons : $dir/payserver-commons  (detached at origin/main)
+  commons : $dir/payserver-commons  (detached at origin/main, linked)
 
 If this lane changes commons, give it the same branch name so CI builds both:
   git -C "$dir/payserver-commons" switch -c "$branch"
