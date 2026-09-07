@@ -5,3 +5,8 @@
 .env.*
 !.env.*.example
 .claude/
+
+# Local payserver-commons override written by scripts/commons.sh link.
+# Committing it would silently point everyone's build at one person's disk and
+# undo the revision pin in Cargo.toml.
+.cargo/config.toml

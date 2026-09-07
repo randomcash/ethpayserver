@@ -20,13 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone payserver-commons (sibling)
-        run: |
-          BRANCH="${{ github.head_ref || github.ref_name }}"
-          cd ..
-          git clone --depth 1 -b "$BRANCH" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
-            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
-          echo "Cloned payserver-commons"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -47,6 +40,34 @@ jobs:
             sleep 15
             if [ "$attempt" = 3 ]; then echo "::error::apt failed 3 times"; exit 1; fi
           done
+
+      # A committed Cargo.lock that does not carry the pinned revision means
+      # someone ran `scripts/commons.sh link` and committed the result. That
+      # silently un-pins commons for everyone and restores exactly the
+      # non-reproducible builds RCS-218 removed - and it looks like nothing.
+      - name: Commons pin matches the lock file
+        run: |
+          REV="$(grep -m1 -oP 'rev = "\K[0-9a-f]{40}' Cargo.toml)"
+          if [ -z "$REV" ]; then
+            echo "::error::no payserver-commons rev pinned in Cargo.toml"
+            exit 1
+          fi
+          # Per crate, and the crate name has to be in the match. Grepping only
+          # for the revision proves that SOME entry is pinned, which a partial
+          # un-pin passes: `types` pinned, `ui-kit` left as a path entry, green.
+          for CRATE in types auth crypto rates ui-kit; do
+            if ! awk -v c="$CRATE" -v r="$REV" '
+                 /^\[\[package\]\]/ { name=""; src="" }
+                 /^name = / { gsub(/[",]/,""); name=$3 }
+                 /^source = / { src=$0 }
+                 name == c && src ~ r { found=1 }
+                 END { exit !found }' Cargo.lock; then
+              echo "::error::Cargo.lock does not pin $CRATE at $REV."
+              echo "Run 'scripts/commons.sh unlink' and commit the regenerated Cargo.lock."
+              exit 1
+            fi
+          done
+          echo "commons pinned at $REV in both Cargo.toml and Cargo.lock"
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -76,12 +97,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone payserver-commons (sibling)
-        run: |
-          BRANCH="${{ github.head_ref || github.ref_name }}"
-          cd ..
-          git clone --depth 1 -b "$BRANCH" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
-            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -126,12 +141,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone payserver-commons (sibling)
-        run: |
-          BRANCH="${{ github.ref_name }}"
-          cd ..
-          git clone --depth 1 -b "$BRANCH" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
-            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
 
       - uses: dtolnay/rust-toolchain@stable
       - name: Install audit tools
@@ -150,12 +159,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone payserver-commons (sibling)
-        run: |
-          BRANCH="${{ github.ref_name }}"
-          cd ..
-          git clone --depth 1 -b "$BRANCH" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
-            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
 
       - uses: dtolnay/rust-toolchain@stable
 

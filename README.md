@@ -237,13 +237,73 @@ ethpayserver/
 
 ### External Dependencies (payserver-commons)
 
-Shared libraries from [payserver-commons](https://gitlab.com/random.cash/payserver-commons):
+Shared libraries from [payserver-commons](https://github.com/randomcash/payserver-commons):
 
-| Crate | Description | README |
-|-------|-------------|--------|
-| `types` | Common types: `Network`, `InvoiceData`, `PaymentData`, repository traits | [types/README.md](https://gitlab.com/random.cash/payserver-commons/-/blob/main/types/README.md) |
-| `auth` | User authentication: passkeys, Ethereum wallets, BIP39 recovery | [auth/README.md](https://gitlab.com/random.cash/payserver-commons/-/blob/main/auth/README.md) |
-| `crypto` | Cryptographic primitives: Argon2id, AES-256, X25519, Ed25519 | [crypto/README.md](https://gitlab.com/random.cash/payserver-commons/-/blob/main/crypto/README.md) |
+| Crate | Description |
+|-------|-------------|
+| `types` | Common types: `Network`, `InvoiceData`, `PaymentData`, repository traits |
+| `auth` | User authentication: passkeys, Ethereum wallets, BIP39 recovery |
+| `crypto` | Cryptographic primitives: Argon2id, AES-256, X25519, Ed25519 |
+| `rates` | Fiat/crypto exchange rate providers |
+| `ui-kit` | Shared Leptos components, including the auth pages |
+
+#### Which version you build against
+
+**One revision, pinned in the root `Cargo.toml` under `[workspace.dependencies]`,
+and recorded in `Cargo.lock`.** Every crate here inherits it with
+`{ workspace = true }`; nothing declares its own git URL.
+
+That pin is the whole contract: a build is reproducible from this repo alone, and
+checking out an old commit builds the commons it was written against.
+
+It did not always work that way. The workspace used to `[patch]` the crates to a
+sibling directory, so the lock file recorded **no commons revision at all** —
+which version you got was decided by CI shell logic (`git clone -b "$BRANCH" ||
+git clone`) and by whatever `main` happened to be at that minute. Rebuilding last
+week's commit silently picked up this week's commons, and a breaking change to a
+shared crate broke `testnet` the moment it merged (RCS-215, 2026-09-06). It also
+meant a commons fix only reached testnet when something unrelated pushed here.
+
+**Working on both repos at once**
+
+Do not edit the pin for this. Link a local checkout:
+
+```bash
+scripts/commons.sh link            # sibling ../payserver-commons
+scripts/commons.sh link /some/path # or anywhere
+scripts/commons.sh status          # what is pinned, and whether a link is active
+scripts/commons.sh unlink          # back to the pinned revision
+```
+
+`link` writes an **uncommitted** `.cargo/config.toml` — Cargo honours `[patch]`
+in config files, so the committed manifest stays pinned while your working copy
+builds against your checkout. It is gitignored; committing it would point
+everyone's build at one person's disk.
+
+**Landing a commons change**
+
+1. Merge it in `payserver-commons` and note the SHA.
+2. Here: `scripts/commons.sh pin <sha>` then
+   `cargo update -p types -p auth -p crypto -p rates -p ui-kit`.
+3. Commit `Cargo.toml` and `Cargo.lock` in the PR that needs it.
+
+The bump is the same PR as the code that depends on it, so a breaking change to a
+shared crate is reviewed and merged as one unit rather than racing across two
+repositories. This is also how a commons fix reaches an environment: bump the
+pin, which is a push here, so a deploy actually happens.
+
+**Working on several things at once**
+
+```bash
+scripts/lane.sh <name>     # worktree of this repo + its own commons, linked
+scripts/lane.sh --list
+scripts/lane.sh --remove <name>
+```
+
+A lane is only needed when you want to **edit** commons in parallel: every
+worktree otherwise shares the one `../payserver-commons` on one branch. A lane
+that just builds the pinned revision needs nothing special — plain
+`git worktree add` works now that nothing depends on directory layout.
 
 ## API Endpoints
 

@@ -2,17 +2,15 @@
 # Create an isolated "lane" for parallel work: a git worktree of this repo with
 # a matching worktree of payserver-commons sitting beside it.
 #
-# The pairing is the whole point. The root Cargo.toml patches the commons crates
-# by RELATIVE path:
+# A worktree of this repo builds anywhere now - commons is pinned by revision
+# (RCS-218), so nothing depends on directory layout any more. What a lane adds is
+# an isolated commons to EDIT.
 #
-#     [patch."https://github.com/randomcash/payserver-commons.git"]
-#     types = { path = "../payserver-commons/types" }
-#
-# so a checkout only builds when payserver-commons is its immediate sibling. A
-# worktree created anywhere else - `.claude/worktrees/`, /tmp, a subdirectory -
-# resolves `../payserver-commons` to nothing and the build dies before it starts.
-# Pairing them per lane also means two lanes can sit on different commons
-# branches, which a single shared checkout cannot do.
+# Without it, every worktree links to the one shared ../payserver-commons on one
+# branch, so two lanes touching commons overwrite each other. Each lane gets its
+# own checkout and its own `.cargo/config.toml` pointing at it, so the lanes
+# cannot interfere - and a lane that never touches commons simply builds the
+# pinned revision.
 #
 # Usage:
 #   scripts/lane.sh <lane-name> [base-branch]     create (default base: testnet)
@@ -61,9 +59,8 @@ dir="$lanes/$name"
 [ -e "$dir" ] && die "lane '$name' already exists at $dir"
 mkdir -p "$dir"
 
-# One branch name across both repos. CI clones commons by branch name and falls
-# back to its default, so matching names are what make a paired change build
-# together on the runner as well as locally.
+# The lane's branch in this repo. Commons no longer needs a matching name: CI
+# does not clone it by branch any more, it builds the revision Cargo.toml pins.
 branch="lane/$name"
 
 git -C "$repo_root" fetch -q origin
@@ -74,15 +71,25 @@ git -C "$repo_root" worktree add -q -b "$branch" "$dir/$(basename "$repo_root")"
 git -C "$commons" fetch -q origin
 git -C "$commons" worktree add -q --detach "$dir/payserver-commons" origin/main
 
+# Point the lane at its own commons. The manifest stays pinned; this writes the
+# lane's uncommitted .cargo/config.toml so work here builds against the lane's
+# checkout rather than the pinned revision.
+"$dir/$(basename "$repo_root")/scripts/commons.sh" link "$dir/payserver-commons" >/dev/null
+
 cat <<EOF
 lane '$name' ready
 
   work in : $dir/$(basename "$repo_root")
   branch  : $branch  (from origin/$base)
-  commons : $dir/payserver-commons  (detached at origin/main)
+  commons : $dir/payserver-commons  (detached at origin/main, linked)
 
-If this lane changes commons, give it the same branch name so CI builds both:
-  git -C "$dir/payserver-commons" switch -c "$branch"
+If this lane changes commons, matching branch names are NOT enough any more -
+CI builds the pinned revision, so a commons branch it never fetches would look
+green while compiling none of your change. Land it and move the pin:
+
+  git -C "$dir/payserver-commons" switch -c "$branch"   # work on it
+  # merge that in payserver-commons, then, in this lane:
+  scripts/commons.sh pin <sha>                          # commit Cargo.toml + Cargo.lock
 
 When done:
   scripts/lane.sh --remove $name

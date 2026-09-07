@@ -34,14 +34,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone payserver-commons (sibling)
-        env:
-          BRANCH_HINT: ${{ github.head_ref || github.ref_name }}
-        run: |
-          cd ..
-          git clone --depth 1 -b "$BRANCH_HINT" https://github.com/randomcash/payserver-commons.git 2>/dev/null \
-            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
-
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
