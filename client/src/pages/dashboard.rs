@@ -39,7 +39,13 @@ fn DashboardHeader() -> impl IntoView {
                 <p class="dashboard-subtitle">"Overview of your payment activity"</p>
             </div>
             <div class="dashboard-actions">
-                <button class="btn btn-secondary btn-sm">
+                // Nothing exports yet; disabled beats a click that looks like
+                // a download that failed (RCS-230).
+                <button
+                    class="btn btn-secondary btn-sm"
+                    disabled=true
+                    title="Export is not implemented yet"
+                >
                     <IconDownload />
                     "Export"
                 </button>

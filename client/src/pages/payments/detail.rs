@@ -128,7 +128,11 @@ fn PaymentDetailView(payment: Payment) -> impl IntoView {
                                 <span class="detail-label">"Transaction Hash"</span>
                                 <div class="detail-value detail-value-mono">
                                     <span class="tx-hash-full">{payment.tx_hash.clone()}</span>
-                                    <button class="btn-icon-xs" title="Copy">
+                                    <button
+                                        class="btn-icon-xs"
+                                        disabled=true
+                                        title="Copy is not implemented yet"
+                                    >
                                         <IconCopy />
                                     </button>
                                 </div>
@@ -147,7 +151,11 @@ fn PaymentDetailView(payment: Payment) -> impl IntoView {
                                     <a href=address_explorer_url target="_blank" class="address-link">
                                         {truncate_hash(&from_address, 10, 8)}
                                     </a>
-                                    <button class="btn-icon-xs" title="Copy">
+                                    <button
+                                        class="btn-icon-xs"
+                                        disabled=true
+                                        title="Copy is not implemented yet"
+                                    >
                                         <IconCopy />
                                     </button>
                                 </div>
@@ -170,7 +178,11 @@ fn PaymentDetailView(payment: Payment) -> impl IntoView {
                                     <span class="detail-label">"Token Contract"</span>
                                     <div class="detail-value detail-value-mono">
                                         <span>{truncate_hash(&addr, 10, 8)}</span>
-                                        <button class="btn-icon-xs" title="Copy">
+                                        <button
+                                            class="btn-icon-xs"
+                                            disabled=true
+                                            title="Copy is not implemented yet"
+                                        >
                                             <IconCopy />
                                         </button>
                                     </div>

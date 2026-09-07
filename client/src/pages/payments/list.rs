@@ -393,7 +393,11 @@ fn PaymentRow(payment: Payment, show_store: bool) -> impl IntoView {
             <td>
                 <div class="payment-tx-cell">
                     <code class="tx-hash">{tx_display}</code>
-                    <button class="btn-icon-xs" title="View on explorer">
+                    <button
+                        class="btn-icon-xs"
+                        disabled=true
+                        title="Explorer link is not implemented yet"
+                    >
                         <IconExternalLink />
                     </button>
                 </div>

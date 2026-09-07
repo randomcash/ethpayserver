@@ -96,7 +96,7 @@ unrelated to the RP ID story above.
 
 ## Test wallet maintenance (`scripts/`)
 
-Both scripts are operator tools — nothing in CI runs them.
+These are operator tools — nothing in CI runs them.
 
 ```bash
 # Mint a throwaway Sepolia wallet: prints the phrase, the spender address to
@@ -114,6 +114,31 @@ address derived from the *same* seed, so the principal is parked rather than
 spent — only gas (~0.00002/run at 0.94 gwei) is actually consumed. At 0.05
 funded that is ~416 runs without sweeping, ~2,500 with. The spec emits a
 `::warning::` once fewer than 20 runs' worth remain.
+
+## Leftover synthetic-payment stores (`scripts/sweep-e2e-stores.mjs`)
+
+The synthetic-payment spec creates a store per run and now removes it again in
+an `afterEach` (RCS-233). This script clears the ones that accumulated before
+that landed, and anything a run abandoned by dying outright.
+
+```bash
+E2E_API_URL=https://testnet.random.cash E2E_REMOTE=true E2E_API_TOKEN=ak_... \
+  node scripts/sweep-e2e-stores.mjs          # lists only
+E2E_API_URL=... E2E_REMOTE=true E2E_API_TOKEN=ak_... \
+  node scripts/sweep-e2e-stores.mjs --execute
+```
+
+It only ever touches names matching the exact stamp the spec generates
+(`e2e-synthetic-2026-08-27T17-29-33-596Z`), and `GET /stores` only returns the
+token's own stores, so it cannot reach another account. Names that start with
+`e2e-synthetic-` but do not match the full shape are listed and left alone.
+
+Note that `DELETE /stores/{id}` **archives** — it is
+`UPDATE stores SET archived = true`, not a row delete. The store leaves the UI's
+store list (archived is hidden behind a checkbox) but `GET /stores` still
+returns it, its payment method, webhook and invoices all remain, and a second
+sweep reports it as already archived rather than deleting it again. Removing the
+rows themselves needs database access.
 
 ## Synthetic payment (`tests/synthetic-payment.spec.ts`)
 
