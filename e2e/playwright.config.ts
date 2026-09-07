@@ -13,8 +13,13 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   workers: 1,
+  // `list` first in CI too. The html reporter writes a file and prints nothing
+  // until the run ends, so a job killed at its timeout-minutes cap produced 30
+  // minutes of total silence and no way to tell which test was hanging - the
+  // log had not one line of Playwright output. `github` adds failure
+  // annotations on the diff.
   reporter: process.env.CI
-    ? [['html', { open: 'never' }], ['./perf-reporter.ts']]
+    ? [['list'], ['github'], ['html', { open: 'never' }], ['./perf-reporter.ts']]
     : [['list'], ['./perf-reporter.ts']],
   timeout: REMOTE ? 60_000 : 30_000,
   use: {
