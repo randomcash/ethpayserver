@@ -4,6 +4,7 @@ use auth::SessionService;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 
 use crate::api::AdminAuth;
+use crate::api::extractors::MaybeAdmin;
 use crate::metrics;
 use crate::services::EVMMonitor;
 use crate::state::PgAppState;
@@ -161,15 +162,15 @@ where
     path = "/health/chains",
     tag = "health",
     responses(
-        (status = 200, description = "Chain health information", body = ChainsHealthResponse),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Admin access required"),
+        (status = 200, description = "Chain health information. Block heights, \
+            watched-address counts and failure reasons are included only for \
+            server admins; everyone else gets chain identity and up/down.",
+            body = ChainsHealthResponse),
         (status = 503, description = "Health data unavailable"),
-    ),
-    security(("bearer_auth" = []))
+    )
 )]
 pub async fn chains_health<A>(
-    _admin: AdminAuth,
+    MaybeAdmin(is_admin): MaybeAdmin,
     State(state): State<PgAppState<A>>,
 ) -> (StatusCode, Json<ChainsHealthResponse>)
 where
@@ -197,7 +198,13 @@ where
                 metrics::set_watched_addresses(chain.chain_id, chain.watched_addresses);
             }
 
-            let chain_infos: Vec<ChainHealthInfo> = chains.into_iter().map(Into::into).collect();
+            // Everyone may know a chain is down; only an admin may know how far
+            // behind it is or which endpoint failed.
+            let chain_infos: Vec<ChainHealthInfo> = chains
+                .into_iter()
+                .map(ChainHealthInfo::from)
+                .map(|info| if is_admin { info } else { info.redact() })
+                .collect();
 
             (
                 StatusCode::OK,

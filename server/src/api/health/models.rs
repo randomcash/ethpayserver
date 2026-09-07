@@ -91,24 +91,53 @@ pub struct DeepHealthResponse {
 }
 
 /// Chain health information for a single chain.
+///
+/// Two audiences, one shape. Whether a chain is up is something every merchant
+/// needs - a dashboard that cannot say "payments are not being detected right
+/// now" is worse than no dashboard. How far behind the monitor is, and why a
+/// connection failed, is operational detail that belongs to admins.
+///
+/// So the detail fields are `Option` and simply absent for everyone else,
+/// rather than there being two response types to keep in step. See
+/// [`Self::redact`].
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ChainHealthInfo {
     /// Chain ID (EIP-155).
     pub chain_id: u64,
     /// Human-readable chain name.
     pub chain_name: String,
-    /// Connection status (connected, connecting, disconnected, failed).
+    /// Connection status. Public form is one of `connected`, `connecting`,
+    /// `disconnected`, `failed`; admins additionally get `failed: {reason}`.
     pub status: String,
-    /// Current block number on chain.
+    /// Current block number on chain. Admin only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_block: Option<u64>,
-    /// Last block processed by the monitor.
+    /// Last block processed by the monitor. Admin only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_processed_block: Option<u64>,
-    /// Number of addresses being watched.
-    pub watched_addresses: usize,
+    /// Number of addresses being watched. Admin only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watched_addresses: Option<usize>,
     /// Overall health status.
     pub is_healthy: bool,
+}
+
+impl ChainHealthInfo {
+    /// Strip everything a non-admin should not see.
+    ///
+    /// `is_healthy`, `status` and the chain's identity stay: that is the "on or
+    /// off" answer the dashboard exists to show. Block heights, the watched
+    /// address count and the failure reason go - the reason especially, since
+    /// an RPC error string routinely carries the provider and the endpoint.
+    pub fn redact(mut self) -> Self {
+        self.current_block = None;
+        self.last_processed_block = None;
+        self.watched_addresses = None;
+        if let Some(bare) = self.status.split(':').next() {
+            self.status = bare.trim().to_string();
+        }
+        self
+    }
 }
 
 impl From<ChainHealth> for ChainHealthInfo {
@@ -124,7 +153,7 @@ impl From<ChainHealth> for ChainHealthInfo {
             },
             current_block: h.current_block,
             last_processed_block: h.last_processed_block,
-            watched_addresses: h.watched_addresses,
+            watched_addresses: Some(h.watched_addresses),
             is_healthy: h.is_healthy,
         }
     }
