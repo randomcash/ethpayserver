@@ -62,24 +62,33 @@ npm install
 E2E_REMOTE=true E2E_BASE_URL=https://testnet.random.cash npx playwright test
 ```
 
-Auth tests run in remote mode. They used to be skipped by default, on the
-grounds that the virtual authenticator's RP ID (`localhost`) could not match
-the remote domain — that explanation was wrong. `WebAuthn.addVirtualAuthenticator`
-has no RP ID parameter; the RP ID comes from the page's origin when
+Auth tests are skipped in remote mode, and the reason has been wrong twice.
+
+It is **not** the RP ID. The old note claimed the virtual authenticator's RP ID
+(`localhost`) could not match a remote domain, but `WebAuthn.addVirtualAuthenticator`
+has no RP ID parameter — it comes from the page's origin when
 `navigator.credentials.create()` runs. The deployed server logs
-`rp_id=testnet.random.cash rp_origin=https://testnet.random.cash` at startup,
-so there is nothing to mismatch.
+`rp_id=testnet.random.cash rp_origin=https://testnet.random.cash`, and a single
+registration against live testnet completes end to end.
 
-What actually made the spec unusable remotely was its `resetDatabase()` call,
-now removed — every test there creates its own uniquely-named account and never
-needed an empty database.
+It is **not** `resetDatabase()`. `fixtures/db.ts` returns early when `E2E_REMOTE`
+is `true`, so it is already a no-op remotely.
 
-`E2E_SKIP_AUTH=true` still skips them explicitly.
+The real blocker is **rate limiting**: the auth tier allows 5 requests per minute
+per IP (`RATE_LIMIT_AUTH`), and this spec performs five registrations plus a login
+well inside a minute. Remotely it returns `HTTP 429: Too many requests` and three
+of five tests fail. `scout.spec.ts` registers once, which is why it passes
+remotely and this does not.
 
-**Still local-only:** `invoices`, `stores`, `payment-methods`, `ui-interactions`
-and `webhooks` all call `resetDatabase()`. Never point those at a shared
-environment — `E2E_DATABASE_URL` defaults to localhost, so they fail closed
-rather than deleting live data, but that is luck rather than design.
+`E2E_SKIP_AUTH=false` force-runs them; expect 429s until either the spec paces
+itself under the limit or test traffic gets a higher one.
+
+**Still local-only for a different reason:** `invoices`, `stores`,
+`payment-methods`, `ui-interactions` and `webhooks` all call `resetDatabase()`.
+The guard that protects a shared database is `E2E_REMOTE=true` in
+`fixtures/db.ts` — *not* the `E2E_DATABASE_URL` localhost default. So with
+`E2E_REMOTE` unset and `E2E_DATABASE_URL` pointed at a shared database, those
+specs will truncate it.
 
 Note separately that `scout.spec.ts` was seen failing to establish a session
 after passkey registration against testnet (#56). That is a real, open gap and
