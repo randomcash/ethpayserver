@@ -172,7 +172,63 @@ export interface AuthFixtures {
   registeredPage: Page;
 }
 
+/**
+ * A Rust panic in the WASM client, from either channel it can arrive on.
+ *
+ * A release build compiles `panic!` to a bare `unreachable` trap, so the
+ * pageerror is the single word "unreachable" with no message; a debug build
+ * also logs "panicked at <location>" through console_error_panic_hook. Match
+ * both, and nothing else - ordinary console errors are common and noisy here
+ * (404s, WebSocket handshake failures), and failing on those would make this
+ * check worthless within a week.
+ */
+export function isClientPanic(text: string): boolean {
+  return (
+    text.includes('panicked at') ||
+    text.includes('RuntimeError: unreachable') ||
+    text.trim() === 'unreachable'
+  );
+}
+
 export const test = base.extend<AuthFixtures>({
+  /**
+   * Fail any test whose client panicked.
+   *
+   * Nothing in this suite asserted on client panics, and RCS-220 is what that
+   * cost: the deployed client panicked TWICE on every single registration for
+   * months while these tests passed, because a panic is invisible unless
+   * something reads the console. scout collected console errors and only
+   * printed them, which is not the same as failing.
+   *
+   * Checked at teardown rather than inline so the panic is attributed to the
+   * test that caused it, and skipped when the test has already failed - a
+   * panic is usually the consequence of that failure, and replacing the real
+   * error with this one loses the cause.
+   */
+  page: async ({ page }, use, testInfo) => {
+    const panics: string[] = [];
+    const record = (text: string) => {
+      if (isClientPanic(text)) panics.push(text.split('\n')[0].trim());
+    };
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') record(msg.text());
+    });
+    page.on('pageerror', (err: Error) => record(err.message));
+
+    await use(page);
+
+    if (panics.length > 0 && testInfo.status === testInfo.expectedStatus) {
+      const unique = [...new Set(panics)];
+      throw new Error(
+        `the WASM client panicked ${panics.length} time(s) during this test:\n` +
+          unique.map((p) => `  ${p}`).join('\n') +
+          `\n\nA release build strips the panic message, so "unreachable" on its own is ` +
+          `all there is. Build the client locally (debug_assertions, or ` +
+          `--cfg leptos_debuginfo) to get the signal's definition and read sites.`,
+      );
+    }
+  },
+
   withAuthenticator: async ({ page }, use) => {
     await setupVirtualAuthenticator(page);
     await use(page);
