@@ -35,6 +35,19 @@ export default defineConfig({
     : [['list'], ['./perf-reporter.ts']],
   timeout: REMOTE ? 60_000 : 30_000,
   use: {
+    // Bound every locator action. Playwright's default is no timeout at all, so
+    // a click on an element that is missing - or, as in the invoice modal, one
+    // that stays disabled - waits until the TEST times out. The failure then
+    // names the test rather than the action, and in a serial file it takes the
+    // rest of the file down with it. That pattern cost this suite the whole
+    // 30-minute job cap more than once.
+    //
+    // 15s is far above any legitimate action here (registration measures 3.6s
+    // locally, 5.3s at 6x CPU throttle) and well under the 30s test budget, so
+    // a stuck action fails as itself with its own call log. Anything genuinely
+    // slower passes an explicit timeout. Note this covers actions only:
+    // waitFor, waitForURL and expect() carry their own timeouts.
+    actionTimeout: 15_000,
     baseURL: BASE_URL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',

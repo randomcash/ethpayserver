@@ -450,16 +450,28 @@ test.describe('Auth & Authenticated', () => {
       }
     }
 
-    // Submit empty — should stay open
+    // Submit empty. The modal now DISABLES the submit button while the amount
+    // is empty, which is the validation working - and is stricter than what
+    // this test was written to check. click() waits for the element to become
+    // enabled, so clicking it anyway just burned the full 30s test budget and
+    // was the last failure in the suite.
     await scoutPage.locator('#ci-amount').fill('');
-    await scoutPage.locator('.modal .btn-primary').click();
-    await scoutPage.waitForTimeout(500);
-    if (!await scoutPage.locator('.modal-overlay').isVisible().catch(() => false)) {
-      issue('CREATE_INVOICE', 'Modal closed with empty amount — no validation');
+    const submit = scoutPage.locator('.modal .btn-primary');
+    if (!await submit.isDisabled({ timeout: 2_000 }).catch(() => false)) {
+      // Not disabled, so the guard has to be on submit instead: click and
+      // confirm the modal stays open.
+      await submit.click({ timeout: 5_000 }).catch(() => {});
+      await scoutPage.waitForTimeout(500);
+      if (!await scoutPage.locator('.modal-overlay').isVisible().catch(() => false)) {
+        issue('CREATE_INVOICE', 'Modal closed with empty amount — no validation');
+      }
     }
 
     // Close
-    await scoutPage.locator('.modal-overlay').click({ position: { x: 5, y: 5 } });
+    await scoutPage
+      .locator('.modal-overlay')
+      .click({ position: { x: 5, y: 5 }, timeout: 5_000 })
+      .catch(() => issue('CREATE_INVOICE', 'Modal did not close on overlay click'));
   });
 
   test('stores page', async () => {
