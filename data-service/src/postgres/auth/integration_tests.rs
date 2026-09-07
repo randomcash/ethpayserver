@@ -73,9 +73,16 @@ async fn integration_user_crud() {
         "create_user -> get_user must round-trip the pinned identifier"
     );
 
+    // RCS-203: this used to return Ok(()) and discard the change, which reads
+    // exactly like a successful write. Rejecting it is the point - a caller
+    // that assigns this field should find out, not be told it worked.
     let mut tampered = fetched.clone();
     tampered.kdf_salt_identifier = "attacker-chosen".to_string();
-    service.update_user(&tampered).await.unwrap();
+    let err = service.update_user(&tampered).await.unwrap_err();
+    assert!(
+        matches!(&err, AuthError::ImmutableField(f) if f == "kdf_salt_identifier"),
+        "expected ImmutableField, got {err:?}"
+    );
     let after = service.get_user(user.id).await.unwrap().unwrap();
     assert_eq!(
         after.kdf_salt_identifier, user.kdf_salt_identifier,
