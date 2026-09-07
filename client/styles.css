@@ -3776,14 +3776,23 @@ a:hover {
     margin-top: var(--space-4);
 }
 
-/* Not inside a .form-row. Groups there are flex items with the row's own `gap`,
-   so this stacked-form sibling margin is not just redundant, it pushes every
-   second field 16px below the first - which is why Amount and Currency in the
-   create-invoice modal did not line up.
-   .form-row > .form-group already says `margin-top: 0`, but that rule and the
-   one above have identical specificity (0,2,0) and it loses on source order.
-   The child+sibling selector here is 0,3,0, so it wins wherever it sits. */
-.form-row > .form-group + .form-group {
+/* Not inside a layout container that already provides its own `gap`. There the
+   stacked-form margin above is not merely redundant, it pushes every second
+   field 16px below the first:
+
+     .form-row      Amount vs Currency in the create-invoice modal
+     .settings-grid Account Created vs Last Login in Settings > Account
+
+   Both were reported as "slightly down", and both are this one rule.
+   `.form-row > .form-group` already says `margin-top: 0`, but that rule and the
+   one above have identical specificity (0,2,0), so it loses on source order and
+   has never applied. These are child+sibling (0,3,0) and win wherever they sit,
+   rather than depending on where the next rule gets added.
+
+   Extend this list when a new gap-based container starts holding .form-groups;
+   CSS cannot ask whether a parent set a gap. */
+.form-row > .form-group + .form-group,
+.settings-grid > .form-group + .form-group {
     margin-top: 0;
 }
 
