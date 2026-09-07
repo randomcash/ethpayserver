@@ -5,6 +5,7 @@
 mod admin;
 mod api_key;
 mod common;
+mod health;
 mod invoice;
 mod payment;
 mod store;
@@ -14,6 +15,7 @@ mod wallet;
 pub use admin::*;
 pub use api_key::*;
 pub use common::*;
+pub use health::*;
 pub use invoice::*;
 pub use payment::*;
 pub use store::*;
