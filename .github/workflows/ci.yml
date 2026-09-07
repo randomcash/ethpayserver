@@ -291,17 +291,21 @@ jobs:
       # only the upstream address and listen port are rewritten.
       - name: Serve frontend
         run: |
+          # Dual-stack on purpose. The suite browses http://localhost:8080 so
+          # the WebAuthn origin matches the server's rp_origin, and `localhost`
+          # can resolve to ::1 before 127.0.0.1; a v4-only listener turns that
+          # into a connection refused.
           sed -e 's|http://server:3000|http://127.0.0.1:3000|g' \
-              -e 's|listen 80;|listen 8080;|' \
+              -e 's|listen 80;|listen 8080;\n    listen [::]:8080;|' \
               docker/client-nginx.conf > /tmp/ci-client-nginx.conf
           docker run -d --name e2e-frontend --network host \
             -v "$PWD/client/dist:/usr/share/nginx/html:ro" \
             -v /tmp/ci-client-nginx.conf:/etc/nginx/conf.d/default.conf:ro \
             nginx:alpine
           for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8080/ >/dev/null && break || sleep 1
+            curl -sf http://localhost:8080/ >/dev/null && break || sleep 1
           done
-          curl -sf http://127.0.0.1:8080/api/health/live \
+          curl -sf http://localhost:8080/api/health/live \
             || { echo "::error::frontend proxy is not reaching the API"; docker logs e2e-frontend; exit 1; }
 
       - name: Install Playwright
@@ -314,8 +318,15 @@ jobs:
       - name: Run E2E tests
         working-directory: e2e
         env:
-          E2E_API_URL: http://127.0.0.1:3000
-          E2E_BASE_URL: http://127.0.0.1:8080
+          # localhost, NOT 127.0.0.1. The browser sends its own origin in the
+          # WebAuthn ceremony and the server checks it against rp_origin, which
+          # defaults to http://localhost:8080 (the CI log says so:
+          # "WebAuthn configured rp_id=localhost rp_origin=http://localhost:8080").
+          # Browsing 127.0.0.1 made every passkey registration fail that check.
+          # Fixing it the other way round is not possible: an IP address is not
+          # a valid RP ID, so the server cannot be pointed at 127.0.0.1 either.
+          E2E_API_URL: http://localhost:3000
+          E2E_BASE_URL: http://localhost:8080
           E2E_DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
           PLAYWRIGHT_LIST_PRINT_STEPS: "1"
         run: npx playwright test
