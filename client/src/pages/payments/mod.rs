@@ -3,7 +3,7 @@
 //! Uses types from `crate::api::types` which mirror the backend.
 
 mod detail;
-mod format;
+pub(crate) mod format;
 mod icons;
 mod list;
 

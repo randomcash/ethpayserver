@@ -1826,6 +1826,10 @@ a:hover {
     border-bottom: 1px solid var(--border-color);
     transition: background var(--transition-fast);
     gap: var(--space-3);
+    /* The dashboard panel renders each row as a link to the payment; without
+       this the whole row picks up the default anchor colour and underline. */
+    color: inherit;
+    text-decoration: none;
 }
 
 @media (max-width: 600px) {
@@ -1884,9 +1888,21 @@ a:hover {
     color: var(--text-primary);
 }
 
-.payment-usd {
+.payment-chain {
     font-size: var(--text-xs);
     color: var(--text-muted);
+}
+
+/* Panel-level message: loading, empty, or "we cannot tell you". Sized for an
+   activity card, unlike the full-page .empty-state. */
+.activity-note {
+    padding: var(--space-5);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+}
+
+.activity-note-error {
+    color: var(--color-error);
 }
 
 /* Network Status List */
@@ -1924,8 +1940,18 @@ a:hover {
     box-shadow: 0 0 0 3px var(--color-success-light);
 }
 
+.network-dot-degraded {
+    background: var(--color-warning);
+    box-shadow: 0 0 0 3px var(--color-warning-light);
+}
+
 .network-dot-offline {
     background: var(--color-gray-400);
+}
+
+.network-dot-error {
+    background: var(--color-error);
+    box-shadow: 0 0 0 3px var(--color-error-light);
 }
 
 .network-name {
@@ -1934,9 +1960,10 @@ a:hover {
     color: var(--text-primary);
 }
 
-.network-confirmations {
+.network-detail {
     font-size: var(--text-sm);
     color: var(--text-muted);
+    text-align: right;
 }
 
 /* Badge variants */
