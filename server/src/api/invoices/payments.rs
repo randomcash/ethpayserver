@@ -5,13 +5,14 @@ use axum::{
 };
 use uuid::Uuid;
 
-use ::types::{InvoiceId, InvoiceReader, InvoiceStatus, PaymentQueryParams, PaymentReader};
+use ::types::{InvoiceId, InvoiceReader, InvoiceStatus, PaymentReader};
 use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
 use super::{
     InvoiceStatusResponse, ListPaymentsQuery, PaymentListResponse, PaymentResponse, StoreScope,
-    get_invoice_with_permission, resolve_store_names, verify_store_access_for_query,
+    build_payment_filter_params, get_invoice_with_permission, resolve_store_names,
+    verify_store_access_for_query,
 };
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
@@ -83,15 +84,13 @@ where
     // load-bearing - a nil-UUID sentinel here was RCS-211.
     let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
 
-    let mut params = PaymentQueryParams::new();
-
-    if let Some(status) = query.status {
-        match status.as_str() {
-            "confirmed" => params = params.with_confirmed(true),
-            "pending" => params = params.with_confirmed(false),
-            _ => return Err(StatusCode::BAD_REQUEST),
-        }
-    }
+    // The same builder the CSV export uses, so the two cannot answer different
+    // questions - an export that ignores a filter the list applied downloads
+    // something other than what is on screen (RCS-231). It applies the store
+    // scope first and ANDs every filter onto it; only StoreScope::All leaves
+    // the query unfiltered, and only an admin gets it.
+    let mut params =
+        build_payment_filter_params(&scope, query.status.as_deref(), query.search.as_deref())?;
 
     if let Some(limit) = query.limit {
         params = params.with_limit(limit);
@@ -100,11 +99,6 @@ where
     if let Some(offset) = query.offset {
         params = params.with_offset(offset);
     }
-
-    // `None` is an admin querying every store, so no store filter is applied.
-    // Only StoreScope::All leaves the query unfiltered, and only an admin gets
-    // it. A merchant with no store_id is filtered to their own memberships.
-    params = scope.apply_payment(params);
 
     let (total, payments) = PaymentReader::query(&*state.data_service, &params)
         .await

@@ -54,11 +54,16 @@ pub(crate) fn csv_row(fields: &[&str]) -> String {
     row
 }
 
-/// Build invoice query params from filter fields (shared by list and export).
-fn build_invoice_filter_params(
+/// Build invoice query params from filter fields.
+///
+/// Shared by `list_invoices` and the export so the button downloads what is on
+/// screen. The store scope goes on first and every filter is ANDed onto it -
+/// no filter here may ever replace it (RCS-211, RCS-222).
+pub(crate) fn build_invoice_filter_params(
     scope: &StoreScope,
     status: Option<&str>,
     currency: Option<&str>,
+    search: Option<&str>,
 ) -> Result<InvoiceQueryParams, StatusCode> {
     let mut params = scope.apply_invoice(InvoiceQueryParams::new());
     if let Some(s) = status {
@@ -68,13 +73,20 @@ fn build_invoice_filter_params(
     if let Some(c) = currency {
         params = params.with_currency(c.to_string());
     }
+    if let Some(q) = search {
+        params = params.with_search(q);
+    }
     Ok(params)
 }
 
-/// Build payment query params from filter fields (shared by list and export).
-fn build_payment_filter_params(
+/// Build payment query params from filter fields.
+///
+/// Shared by `list_payments` and the export, for the same reason as its invoice
+/// twin above.
+pub(crate) fn build_payment_filter_params(
     scope: &StoreScope,
     status: Option<&str>,
+    search: Option<&str>,
 ) -> Result<PaymentQueryParams, StatusCode> {
     let mut params = scope.apply_payment(PaymentQueryParams::new());
     if let Some(s) = status {
@@ -83,6 +95,9 @@ fn build_payment_filter_params(
             "pending" => params = params.with_confirmed(false),
             _ => return Err(StatusCode::BAD_REQUEST),
         }
+    }
+    if let Some(q) = search {
+        params = params.with_search(q);
     }
     Ok(params)
 }
@@ -101,8 +116,12 @@ where
     A: SessionService + 'static,
 {
     let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
-    let base_params =
-        build_invoice_filter_params(&scope, query.status.as_deref(), query.currency.as_deref())?;
+    let base_params = build_invoice_filter_params(
+        &scope,
+        query.status.as_deref(),
+        query.currency.as_deref(),
+        query.search.as_deref(),
+    )?;
 
     // Count total matching rows.
     let count_params = base_params.clone().with_limit(1).with_offset(0);
@@ -232,7 +251,8 @@ where
     A: SessionService + 'static,
 {
     let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
-    let base_params = build_payment_filter_params(&scope, query.status.as_deref())?;
+    let base_params =
+        build_payment_filter_params(&scope, query.status.as_deref(), query.search.as_deref())?;
 
     let count_params = base_params.clone().with_limit(1).with_offset(0);
     let (total, _) = PaymentReader::query(&*state.data_service, &count_params)

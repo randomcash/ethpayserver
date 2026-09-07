@@ -13,8 +13,8 @@ use crate::{
 };
 use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
 
-use super::PgDataService;
 use super::conversions::{status_to_db, try_db_to_status};
+use super::{PgDataService, search_contains_pattern, search_prefix_pattern};
 
 #[async_trait]
 impl InvoiceReader for PgDataService {
@@ -69,6 +69,35 @@ impl InvoiceReader for PgDataService {
             conditions.push(format!("currency = ${}", bind_idx));
             bind_idx += 1;
         }
+        // Free-text search (RCS-231). Two binds, each reused by every column
+        // that wants that shape: `${bind_idx}` is the anchored `term%` pattern,
+        // `${bind_idx + 1}` the `%term%` one.
+        //
+        // Anchored on `id` because it is what a merchant pastes whole, and
+        // because only an anchored pattern can ever be index-served: `%...%`
+        // forecloses it for good. Nothing serves it today - the primary key
+        // index is on the raw column, not `LOWER(...)` - but this is the shape
+        // an `invoices(LOWER(id) varchar_pattern_ops)` index would satisfy when
+        // it gets hot. Substring on `currency` and `amount` because both are
+        // short, neither has an index a prefix could use, and a partial match
+        // is what the box is for. `amount` is `numeric(78,18)`, matched on the
+        // same text rendering the API returns, so what the user sees is what
+        // they can search.
+        let search = params.search_term();
+        if search.is_some() {
+            let matches = [
+                format!("LOWER(id) LIKE ${}", bind_idx),
+                format!("LOWER(currency) LIKE ${}", bind_idx + 1),
+                format!("amount::text LIKE ${}", bind_idx + 1),
+                // RCS-216 encrypts metadata client-side. Delete this one line
+                // when it lands: the server will hold ciphertext, and matching
+                // that is worse than not offering it, because it returns
+                // nothing rather than saying it cannot look.
+                format!("LOWER(metadata::text) LIKE ${}", bind_idx + 1),
+            ];
+            conditions.push(format!("({})", matches.join(" OR ")));
+            bind_idx += 2;
+        }
         if params.created_after.is_some() {
             conditions.push(format!("created_at >= ${}", bind_idx));
             bind_idx += 1;
@@ -117,6 +146,14 @@ impl InvoiceReader for PgDataService {
         if let Some(ref currency) = params.currency {
             count_query = count_query.bind(currency);
         }
+        // Same order as the conditions above; the binds are positional, so a
+        // filter added here out of order applies the wrong value to the wrong
+        // column and still returns rows (RCS-231).
+        if let Some(term) = search {
+            count_query = count_query
+                .bind(search_prefix_pattern(term))
+                .bind(search_contains_pattern(term));
+        }
         if let Some(after) = params.created_after {
             count_query = count_query.bind(after);
         }
@@ -143,6 +180,14 @@ impl InvoiceReader for PgDataService {
         }
         if let Some(ref currency) = params.currency {
             data_query = data_query.bind(currency);
+        }
+        // Same order as the conditions above; the binds are positional, so a
+        // filter added here out of order applies the wrong value to the wrong
+        // column and still returns rows (RCS-231).
+        if let Some(term) = search {
+            data_query = data_query
+                .bind(search_prefix_pattern(term))
+                .bind(search_contains_pattern(term));
         }
         if let Some(after) = params.created_after {
             data_query = data_query.bind(after);

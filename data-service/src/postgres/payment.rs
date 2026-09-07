@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{PaymentReader, PaymentWriter, RepositoryError, RepositoryResult, sqlx_to_repo_error};
 use types::{AssetType, InvoiceId, PaymentData, PaymentQueryParams};
 
-use super::PgDataService;
+use super::{PgDataService, search_contains_pattern, search_prefix_pattern};
 
 /// Bind the payment filter values in exactly the order the WHERE clause names
 /// them.
@@ -30,6 +30,13 @@ fn bind_payment_filters<'q>(
     }
     if let Some(ref invoice_id) = params.invoice_id {
         query = query.bind(invoice_id.as_str());
+    }
+    // Free-text search, in the same position the WHERE clause gives it: the
+    // anchored pattern first, then the substring one (RCS-231).
+    if let Some(term) = params.search_term() {
+        query = query
+            .bind(search_prefix_pattern(term))
+            .bind(search_contains_pattern(term));
     }
     query
 }
@@ -160,6 +167,34 @@ impl PaymentReader for PgDataService {
         if params.invoice_id.is_some() {
             conditions.push(format!("p.invoice_id = ${}", bind_idx));
             bind_idx += 1;
+        }
+        // Free-text search (RCS-231). Two binds, each reused by every column
+        // that wants that shape: `${bind_idx}` is the anchored `term%` pattern,
+        // `${bind_idx + 1}` the `%term%` one.
+        //
+        // Anchored on `tx_hash` and `invoice_id` because both are identifiers
+        // a merchant pastes whole, and because only an anchored pattern can
+        // ever be index-served: `%...%` forecloses it for good. Nothing serves
+        // it today - `idx_payments_tx_hash` is on the raw column, not
+        // `LOWER(...)` - but the query shape is the one a
+        // `payments(LOWER(tx_hash) varchar_pattern_ops)` index would satisfy
+        // when this gets hot. Substring on `asset_symbol` and `from_address`
+        // because neither is indexed at all, so anchoring buys nothing, and a
+        // partial match is what someone typing "usd" or a fragment of an
+        // address means.
+        //
+        // Note this touches only `payments` columns, so it needs no join and
+        // cannot widen the store scope: the scope conditions above stay ANDed
+        // on top (RCS-211, RCS-222).
+        if params.search_term().is_some() {
+            let matches = [
+                format!("LOWER(p.tx_hash) LIKE ${}", bind_idx),
+                format!("LOWER(p.invoice_id) LIKE ${}", bind_idx),
+                format!("LOWER(p.asset_symbol) LIKE ${}", bind_idx + 1),
+                format!("LOWER(p.from_address) LIKE ${}", bind_idx + 1),
+            ];
+            conditions.push(format!("({})", matches.join(" OR ")));
+            bind_idx += 2;
         }
         if let Some(confirmed) = params.confirmed {
             if confirmed {
