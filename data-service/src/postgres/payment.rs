@@ -401,3 +401,75 @@ impl PaymentEventWriter for PgDataService {
         Ok(row.get("id"))
     }
 }
+
+// =============================================================================
+// Payment Analytics (RCS-225)
+// =============================================================================
+
+use crate::analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
+
+#[async_trait]
+impl PaymentAnalyticsReader for PgDataService {
+    async fn payment_volume_by_day(
+        &self,
+        query: &PaymentVolumeQuery,
+    ) -> RepositoryResult<Vec<PaymentVolumeBucket>> {
+        // `= ANY('{}')` is already false for every row, but short-circuiting
+        // keeps the "no stores means no rows" rule visible in both this
+        // implementation and the in-memory double rather than resting on a
+        // Postgres detail (RCS-203).
+        if query.store_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let store_ids: Vec<Uuid> = query.store_ids.iter().map(|s| s.0).collect();
+
+        // `payment_options` is LEFT joined because the FK is ON DELETE SET
+        // NULL: a payment outlives the option it was made against, and
+        // dropping those rows would understate a merchant's volume. 18 is the
+        // same fallback the payment list uses for an unknown asset.
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                (p.detected_at AT TIME ZONE 'UTC')::date AS day,
+                p.asset_symbol AS asset_symbol,
+                COALESCE(po.decimals, 18)::smallint AS decimals,
+                SUM(p.amount)::text AS raw_amount,
+                COUNT(*) AS payment_count
+            FROM payments p
+            JOIN invoices i ON i.id = p.invoice_id
+            LEFT JOIN payment_options po ON po.id = p.payment_option_id
+            WHERE i.store_id = ANY($1)
+              AND p.reorged = FALSE
+              AND p.detected_at >= $2
+              AND p.detected_at < $3
+            GROUP BY 1, 2, 3
+            ORDER BY 1, 2, 3
+            "#,
+        )
+        .bind(&store_ids)
+        .bind(query.since)
+        .bind(query.until)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        rows.iter()
+            .map(|row| {
+                let raw_decimals: i16 = row.get("decimals");
+                let decimals = u8::try_from(raw_decimals).map_err(|_| {
+                    RepositoryError::Database(format!("negative token decimals: {raw_decimals}"))
+                })?;
+                Ok(PaymentVolumeBucket {
+                    day: row.get("day"),
+                    asset_symbol: row.get("asset_symbol"),
+                    decimals,
+                    raw_amount: row
+                        .get::<Option<String>, _>("raw_amount")
+                        .unwrap_or_default(),
+                    payment_count: row.get("payment_count"),
+                })
+            })
+            .collect()
+    }
+}

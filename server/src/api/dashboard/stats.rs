@@ -10,7 +10,7 @@ use auth::{SessionService, repository::StoreRepository};
 use data_service::{InvoiceQueryParams, InvoiceReader, PaymentQueryParams, PaymentReader};
 use types::InvoiceStatus;
 
-use super::extractors::AuthenticatedUser;
+use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
 /// Dashboard statistics response.

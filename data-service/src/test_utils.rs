@@ -1,20 +1,22 @@
 //! Test utilities for data service.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use futures::stream::{self, BoxStream, StreamExt};
 use types::{
     CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
     InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentMethodId, PaymentOptionData,
     PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentQueryParams, PaymentReader,
-    PaymentWriter, PendingWatchInfo, RepositoryResult, StoreId, StoreSettings, StoreSettingsReader,
-    StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams, TokenReader, TokenWriter,
-    WatchedAddressReader, WatchedAddressWriter,
+    PaymentWriter, PendingWatchInfo, RepositoryError, RepositoryResult, StoreId, StoreSettings,
+    StoreSettingsReader, StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams,
+    TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
+
+use crate::analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
 
 /// In-memory implementation of all repository traits for testing.
 #[derive(Default)]
@@ -885,5 +887,85 @@ pub fn create_test_payment(
         credited_amount: Some("0.05".to_string()), // 0.05 ETH
         rate_used: None,
         rate_applied_at: None,
+    }
+}
+
+// =============================================================================
+// Payment Analytics (RCS-225)
+// =============================================================================
+
+/// Mirrors the Postgres `payment_volume_by_day` query.
+///
+/// Every rule the SQL enforces is restated here on purpose — empty store list
+/// matches nothing, reorged payments are excluded, the window is
+/// `[since, until)`, decimals fall back to 18 when the payment option is gone,
+/// and `decimals` is part of the group key. A double that quietly disagrees
+/// with the real store about one of those is the RCS-203 failure mode.
+#[async_trait]
+impl PaymentAnalyticsReader for InMemoryDataService {
+    async fn payment_volume_by_day(
+        &self,
+        query: &PaymentVolumeQuery,
+    ) -> RepositoryResult<Vec<PaymentVolumeBucket>> {
+        if query.store_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let payments = self.payments.read().unwrap();
+        let invoices = self.invoices.read().unwrap();
+        let options = self.payment_options.read().unwrap();
+
+        // Key: (day, asset_symbol, decimals) -> (raw sum, count)
+        let mut groups: BTreeMap<(NaiveDate, String, u8), (u128, i64)> = BTreeMap::new();
+
+        for payment in payments.values() {
+            if payment.reorged {
+                continue;
+            }
+            if payment.detected_at < query.since || payment.detected_at >= query.until {
+                continue;
+            }
+            let Some(invoice) = invoices.get(&payment.invoice_id.0) else {
+                continue;
+            };
+            if !query.store_ids.contains(&invoice.store_id) {
+                continue;
+            }
+
+            let decimals = payment
+                .payment_option_id
+                .and_then(|id| options.get(&id))
+                .map_or(18, |po| po.decimals);
+
+            let amount: u128 = payment.amount.parse().map_err(|_| {
+                RepositoryError::Database(format!(
+                    "payment {} has a non-integer amount: {}",
+                    payment.id, payment.amount
+                ))
+            })?;
+
+            let entry = groups
+                .entry((
+                    payment.detected_at.date_naive(),
+                    payment.asset_symbol.clone(),
+                    decimals,
+                ))
+                .or_insert((0, 0));
+            entry.0 = entry.0.saturating_add(amount);
+            entry.1 += 1;
+        }
+
+        Ok(groups
+            .into_iter()
+            .map(
+                |((day, asset_symbol, decimals), (raw, count))| PaymentVolumeBucket {
+                    day,
+                    asset_symbol,
+                    decimals,
+                    raw_amount: raw.to_string(),
+                    payment_count: count,
+                },
+            )
+            .collect())
     }
 }

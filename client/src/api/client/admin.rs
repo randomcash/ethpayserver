@@ -2,8 +2,8 @@
 
 use super::{ApiError, EvmApiClient};
 use crate::api::{
-    ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload, DashboardStats,
-    RotateApiKeyResponse, ServerSettingsResponse, UpdateServerSettingsRequest,
+    ApiKeyListResponse, CreateApiKeyRequest, CreateApiKeyResponsePayload, DashboardAnalytics,
+    DashboardStats, RotateApiKeyResponse, ServerSettingsResponse, UpdateServerSettingsRequest,
     UpdateUserRoleRequest, UserInfo, UserListResponse,
 };
 
@@ -51,6 +51,15 @@ impl EvmApiClient {
     /// Get dashboard statistics.
     pub async fn get_dashboard_stats(&self) -> Result<DashboardStats, ApiError> {
         self.get("/api/dashboard/stats").await
+    }
+
+    /// Get per-day, per-asset payment volume for the dashboard charts.
+    ///
+    /// `days` is the window size; the server rejects anything outside 1..=90
+    /// rather than aggregating unbounded history (RCS-225).
+    pub async fn get_dashboard_analytics(&self, days: u32) -> Result<DashboardAnalytics, ApiError> {
+        self.get(&format!("/api/dashboard/analytics?days={days}"))
+            .await
     }
 
     // =========================================================================

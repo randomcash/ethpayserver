@@ -89,6 +89,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::get_payment,
         // Dashboard
         dashboard::get_stats,
+        dashboard::get_analytics,
         // Rates
         rates::get_rate,
         // Users
@@ -141,6 +142,9 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         invoices::PaymentOptionResponse,
         invoices::InvoiceStatusResponse,
         dashboard::DashboardStats,
+        dashboard::DashboardAnalytics,
+        dashboard::AssetVolume,
+        dashboard::DailyVolume,
         rates::RateResponse,
         users::ApiKeyListResponse,
         users::ApiKeyInfoResponse,
@@ -162,7 +166,7 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         (name = "tokens", description = "Token management (from EVM API)"),
         (name = "networks", description = "Network information (from EVM API)"),
         (name = "auth", description = "Authentication (from Auth API)"),
-        (name = "dashboard", description = "Dashboard statistics"),
+        (name = "dashboard", description = "Dashboard statistics and analytics"),
         (name = "rates", description = "Exchange rates"),
         (name = "users", description = "User management (API keys)"),
         (name = "admin", description = "Server administration"),
@@ -303,6 +307,7 @@ where
     // Dashboard endpoint
     let dashboard_routes = Router::new()
         .route("/stats", get(dashboard::get_stats::<A>))
+        .route("/analytics", get(dashboard::get_analytics::<A>))
         .with_state(state.clone());
 
     // User endpoints (API keys)
