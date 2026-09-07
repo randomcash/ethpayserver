@@ -202,14 +202,22 @@ jobs:
             client/dist/
           retention-days: 1
 
-  # NOT gating yet — see RCS-192. This job carried `continue-on-error: true` for
-  # its whole life, so it could never report a regression, and under that cover
-  # the suite rotted: with the proxy and reset defects here fixed it goes from
-  # 7/62 to 34/62 passing, and the remaining failures are selector drift against
-  # a UI that moved on (one of them is the open bug RCS-172). Dropping the flag
-  # today would only turn a silent red into a permanent red on every `testnet`
-  # push. RCS-192 repairs the rest and removes the flag in the same commit, so
-  # the flag disappears exactly when the suite can hold the line.
+  # Gating as of RCS-192. This job carried `continue-on-error: true` for its
+  # whole life, so it could never report a regression, and under that cover the
+  # suite rotted: 7/62, then 34/62 once the proxy and reset defects were fixed.
+  # The rest was read as selector drift against a UI that moved on. Most of it
+  # was not: the job browsed 127.0.0.1 while the server's WebAuthn rp_origin is
+  # http://localhost:8080, so every passkey registration failed that check and
+  # every test needing a session timed out behind it (#78). It now runs 62
+  # passed / 1 skipped in 2.1 minutes, against 30-minute cap timeouts before.
+  #
+  # Removing the flag blocks nothing: deploy-testnet needs [docker], not this
+  # job, and this job is skipped on pull_request (it is gated on refs/heads/*),
+  # so a red E2E cannot hold up a deploy or a merge. What it does is make a
+  # regression show as a red run instead of a green one - which is the whole
+  # point, and was impossible while the flag was set.
+  #
+  # The skip is the synthetic payment spec, which needs a funded wallet.
   #
   # The synthetic payment spec stays out of this job regardless: it needs a
   # funded wallet and a live chain, so it only runs where
@@ -338,7 +346,6 @@ jobs:
           name: playwright-report
           path: e2e/playwright-report/
           retention-days: 7
-    continue-on-error: true # removed by RCS-192, once the suite is green
 
   docker:
     name: Docker
