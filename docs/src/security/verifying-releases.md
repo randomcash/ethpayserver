@@ -74,7 +74,7 @@ at the repository root for the maintainer key fingerprint.
 | Layer | Mechanism |
 |-------|-----------|
 | Source | GPG-signed git tags |
-| Build | Reproducible Nix builds (RCS-94, in progress) |
+| Build | Per-commit immutable image tags (RCS-190) |
 | Container images | cosign keyless via GitLab OIDC |
 | Binary tarballs | cosign sign-blob keyless via GitLab OIDC |
 | Transparency | Sigstore Rekor public log |
