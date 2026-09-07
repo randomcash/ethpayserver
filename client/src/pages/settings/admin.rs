@@ -304,7 +304,16 @@ pub fn AdminTab() -> impl IntoView {
                                 <span class="admin-action-title">"Clear cache"</span>
                                 <span class="admin-action-desc">"Clear all cached data including exchange rates"</span>
                             </div>
-                            <button class="btn btn-secondary btn-sm">"Clear cache"</button>
+                            // None of the three maintenance actions call the server. Left
+                            // enabled, an admin has no way to tell a no-op from a restart
+                            // that happened (RCS-230).
+                            <button
+                                class="btn btn-secondary btn-sm"
+                                disabled=true
+                                title="Clear cache is not implemented yet"
+                            >
+                                "Clear cache"
+                            </button>
                         </div>
 
                         <div class="admin-action">
@@ -312,7 +321,13 @@ pub fn AdminTab() -> impl IntoView {
                                 <span class="admin-action-title">"Restart monitor"</span>
                                 <span class="admin-action-desc">"Restart the EVM chain monitor service"</span>
                             </div>
-                            <button class="btn btn-secondary btn-sm">"Restart"</button>
+                            <button
+                                class="btn btn-secondary btn-sm"
+                                disabled=true
+                                title="Restarting the monitor is not implemented yet"
+                            >
+                                "Restart"
+                            </button>
                         </div>
 
                         <div class="admin-action">
@@ -320,7 +335,13 @@ pub fn AdminTab() -> impl IntoView {
                                 <span class="admin-action-title">"Export data"</span>
                                 <span class="admin-action-desc">"Export all server data as JSON backup"</span>
                             </div>
-                            <button class="btn btn-secondary btn-sm">"Export"</button>
+                            <button
+                                class="btn btn-secondary btn-sm"
+                                disabled=true
+                                title="Export is not implemented yet"
+                            >
+                                "Export"
+                            </button>
                         </div>
                     </div>
                 </div>

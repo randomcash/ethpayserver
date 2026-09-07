@@ -85,7 +85,15 @@ pub fn PreferencesTab() -> impl IntoView {
                     </div>
 
                     <div class="form-actions">
-                        <button class="btn btn-primary btn-sm">"Save preferences"</button>
+                        // Same as Notifications: no persistence behind the form, so
+                        // saving would discard the edits silently (RCS-230).
+                        <button
+                            class="btn btn-primary btn-sm"
+                            disabled=true
+                            title="Saving preferences is not implemented yet"
+                        >
+                            "Save preferences"
+                        </button>
                     </div>
                 </div>
             </div>
