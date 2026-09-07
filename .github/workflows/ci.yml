@@ -263,6 +263,22 @@ jobs:
         env:
           DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
           REDIS_URL: redis://127.0.0.1:6379
+          # The limiter is per IP, and the entire suite is one IP (127.0.0.1)
+          # driven by a single worker. On the defaults - auth 5/min, write
+          # 10/min, ws 5/min - the sixth registration of the run starts getting
+          # 429s and every later spec fails on a fixture it never reaches. With
+          # `retries: 1` each of those costs its timeout twice, which is how this
+          # job spent 30 minutes and hit its own timeout on push after push.
+          #
+          # Raised, not disabled: the middleware still runs, so a change that
+          # breaks it outright still shows up here. Its actual thresholds are
+          # covered by unit tests in server/src/api/rate_limit.rs, which is the
+          # right place for them - a shared-IP test suite is precisely the
+          # traffic shape the production limits exist to stop.
+          RATE_LIMIT_AUTH: "10000"
+          RATE_LIMIT_WRITE: "10000"
+          RATE_LIMIT_READ: "10000"
+          RATE_LIMIT_WS: "10000"
         run: |
           ./target/release/ethpayserver &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:3000/health/live && break || sleep 1; done
