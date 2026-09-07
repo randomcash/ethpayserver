@@ -72,6 +72,14 @@ impl InvoiceReader for InMemoryDataService {
                 {
                     return false;
                 }
+                // Membership scoping must behave here exactly as it does in
+                // Postgres, empty list included - a mock that disagrees with
+                // the real store about a scoping rule is how RCS-203 happened.
+                if let Some(ref store_ids) = params.store_ids
+                    && !store_ids.contains(&inv.store_id)
+                {
+                    return false;
+                }
                 if let Some(status) = params.status
                     && inv.status != status
                 {
@@ -218,6 +226,15 @@ impl PaymentReader for InMemoryDataService {
                     let invoice_store_id = invoices.get(&p.invoice_id.0).map(|i| i.store_id);
                     if invoice_store_id != Some(store_id) {
                         return false;
+                    }
+                }
+                // Same rule as Postgres, empty list included (RCS-222). A
+                // payment whose invoice is missing belongs to no store the
+                // caller can see, so it is filtered out rather than let through.
+                if let Some(ref store_ids) = params.store_ids {
+                    match invoices.get(&p.invoice_id.0).map(|i| i.store_id) {
+                        Some(sid) if store_ids.contains(&sid) => {}
+                        _ => return false,
                     }
                 }
                 if let Some(confirmed) = params.confirmed {

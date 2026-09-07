@@ -41,11 +41,10 @@ pub async fn list_invoices<A>(
 where
     A: SessionService + 'static,
 {
-    // Resolve the store scope once. `Some` is membership-checked, `None` means
-    // every store and is admin-only. See verify_store_access_for_query - the
-    // Option is load-bearing, a nil-UUID sentinel here was RCS-211.
-    let store_id =
-        verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    // Resolve the store scope once: one store (membership-checked), the
+    // caller's own stores, or the whole server for an admin. The distinction is
+    // load-bearing - a nil-UUID sentinel here was RCS-211.
+    let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
 
     let mut params = InvoiceQueryParams::new();
 
@@ -66,10 +65,9 @@ where
         params = params.with_offset(offset);
     }
 
-    // `None` is an admin querying every store, so no store filter is applied.
-    if let Some(store_id) = store_id {
-        params = params.with_store_id(store_id);
-    }
+    // Only StoreScope::All leaves the query unfiltered, and only an admin gets
+    // it. A merchant with no store_id is filtered to their own memberships.
+    params = scope.apply_invoice(params);
 
     let (total, invoices) = InvoiceReader::query(&*state.data_service, &params)
         .await

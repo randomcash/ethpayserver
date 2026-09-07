@@ -31,7 +31,9 @@ pub(crate) use lookup::is_valid_tx_hash;
 
 use axum::{Json, http::StatusCode};
 
-use ::types::{InvoiceId, InvoiceReader, StoreId, traits::InvoiceData};
+use ::types::{
+    InvoiceId, InvoiceQueryParams, InvoiceReader, PaymentQueryParams, StoreId, traits::InvoiceData,
+};
 use auth::{SessionService, repository::UserStoreRepository};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -209,11 +211,48 @@ pub(crate) async fn get_invoice_with_permission<A: SessionService>(
 /// store_id` clause - handing any authenticated user every invoice and payment
 /// in the deployment (RCS-211). Keep the two cases in the type; do not
 /// reintroduce an in-band marker.
+/// Which stores a listing query may read.
+///
+/// An enum rather than `Option<StoreId>` because there are three answers, and
+/// the two that mean "more than one store" are not interchangeable. Conflating
+/// them is the entire bug class here: a nil-UUID sentinel that meant "all" was
+/// RCS-211, and an empty membership list silently meaning "no filter" would be
+/// the same leak wearing different clothes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoreScope {
+    /// One store, membership already checked.
+    One(StoreId),
+    /// Every store the caller belongs to. May be empty, which matches nothing.
+    Membership(Vec<StoreId>),
+    /// Every store on the server. `ServerAdmin` only.
+    All,
+}
+
+impl StoreScope {
+    /// Apply this scope to invoice query params.
+    pub(crate) fn apply_invoice(&self, params: InvoiceQueryParams) -> InvoiceQueryParams {
+        match self {
+            StoreScope::One(id) => params.with_store_id(*id),
+            StoreScope::Membership(ids) => params.with_store_ids(ids.clone()),
+            StoreScope::All => params,
+        }
+    }
+
+    /// Apply this scope to payment query params.
+    pub(crate) fn apply_payment(&self, params: PaymentQueryParams) -> PaymentQueryParams {
+        match self {
+            StoreScope::One(id) => params.with_store_id(*id),
+            StoreScope::Membership(ids) => params.with_store_ids(ids.clone()),
+            StoreScope::All => params,
+        }
+    }
+}
+
 pub(crate) async fn verify_store_access_for_query<D>(
     data_service: &D,
     user: &auth::UserInfo,
     store_id: Option<uuid::Uuid>,
-) -> Result<Option<StoreId>, StatusCode>
+) -> Result<StoreScope, StatusCode>
 where
     D: UserStoreRepository + ?Sized,
 {
@@ -227,13 +266,29 @@ where
             if !is_member && user.role != auth::Role::ServerAdmin {
                 return Err(StatusCode::FORBIDDEN);
             }
-            Ok(Some(StoreId(id)))
+            Ok(StoreScope::One(StoreId(id)))
         }
+        // No store_id means "everything I can see". For an admin that is the
+        // whole server; for anyone else it is their own memberships.
+        //
+        // This used to be a flat 400 for non-admins, which made the "All Stores"
+        // sidebar option a dead end on Invoices and Payments - the client asked,
+        // the server refused, and the UI reported it as "pick a store"
+        // (RCS-222). Answering with the caller's own stores is the same
+        // authorisation decision the `Some` arm makes, applied to a set.
         None => {
-            if user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::BAD_REQUEST);
+            if user.role == auth::Role::ServerAdmin {
+                return Ok(StoreScope::All);
             }
-            Ok(None)
+            let memberships = data_service
+                .get_user_stores(user.id)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            // Deliberately still a filter when empty: a user who belongs to no
+            // store sees nothing, not everything.
+            Ok(StoreScope::Membership(
+                memberships.into_iter().map(|m| m.store_id).collect(),
+            ))
         }
     }
 }
