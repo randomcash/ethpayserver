@@ -5,6 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 mod admin;
+mod health;
 mod invoices;
 mod payments;
 mod stores;
