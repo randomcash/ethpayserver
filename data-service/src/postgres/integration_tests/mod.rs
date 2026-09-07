@@ -8,8 +8,10 @@
 //! - `payment`: Payment CRUD and confirmation tests
 //! - `watched_address`: Watched address management tests
 //! - `aggregation`: Multi-currency payment aggregation E2E tests
+//! - `analytics`: Dashboard payment-volume aggregation (RCS-225)
 
 mod aggregation;
+mod analytics;
 mod invoice;
 mod payment;
 mod watched_address;

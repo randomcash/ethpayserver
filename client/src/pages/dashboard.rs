@@ -7,8 +7,9 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use send_wrapper::SendWrapper;
 
-use crate::api::{ApiError, ChainHealthInfo, EvmApiClient};
+use crate::api::{ApiError, ChainHealthInfo, DashboardAnalytics, EvmApiClient};
 use crate::app::{StoreContext, StoresStatus};
+use crate::components::EmptyState;
 use crate::pages::payments::format::{
     format_crypto_amount, payment_status, payment_status_class, truncate_hash,
 };
@@ -175,103 +176,308 @@ fn MetricCard(
     }
 }
 
-/// Charts section.
+/// Charts section — one `/dashboard/analytics` fetch feeding both panels.
+///
+/// The volume chart and the methods breakdown are the same aggregation read
+/// two ways, so they share a resource rather than each hitting the API.
+/// Re-fetches on the same WebSocket messages as the metric cards.
 #[component]
 fn DashboardCharts() -> impl IntoView {
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let ws_update = use_context::<ReadSignal<Option<StatusUpdate>>>();
+
+    let (ws_version, set_ws_version) = signal(0u32);
+    if let Some(ws_update) = ws_update {
+        Effect::new(move || {
+            if let Some(StatusUpdate::InvoiceStatus { .. } | StatusUpdate::PaymentUpdate { .. }) =
+                ws_update.get()
+            {
+                set_ws_version.update(|n| *n = n.wrapping_add(1));
+            }
+        });
+    }
+
+    // The 7D/30D/90D buttons used to be decorative. They now drive the window,
+    // and the server rejects anything outside 1..=90.
+    let (days, set_days) = signal(30u32);
+    // None = follow the busiest asset the account actually uses; a click pins
+    // one. Cleared whenever the window changes, since the busiest asset in a
+    // different window may not be the pinned one.
+    let (pinned_asset, set_pinned_asset) = signal(None::<String>);
+
+    let analytics = LocalResource::new(move || {
+        let client = api.get();
+        let days = days.get();
+        let _ = ws_version.get();
+        async move { client.get_dashboard_analytics(days).await.ok() }
+    });
+
     view! {
         <div class="charts-section">
             <div class="chart-card chart-card-main">
                 <div class="chart-header">
                     <div>
                         <h3 class="chart-title">"Payment volume"</h3>
-                        <p class="chart-subtitle">"Daily payment volume over the last 30 days"</p>
+                        <p class="chart-subtitle">
+                            {move || format!("Daily volume over the last {} days", days.get())}
+                        </p>
                     </div>
                     <div class="chart-controls">
-                        <button class="btn btn-ghost btn-xs active">"7D"</button>
-                        <button class="btn btn-ghost btn-xs">"30D"</button>
-                        <button class="btn btn-ghost btn-xs">"90D"</button>
+                        {[7_u32, 30, 90].into_iter().map(|window| {
+                            view! {
+                                <button
+                                    class=move || if days.get() == window {
+                                        "btn btn-ghost btn-xs active"
+                                    } else {
+                                        "btn btn-ghost btn-xs"
+                                    }
+                                    on:click=move |_| {
+                                        set_days.set(window);
+                                        set_pinned_asset.set(None);
+                                    }
+                                >
+                                    {format!("{window}D")}
+                                </button>
+                            }
+                        }).collect_view()}
                     </div>
                 </div>
                 <div class="chart-body">
-                    <VolumeChart />
+                    <Suspense fallback=move || view! {
+                        <p class="chart-subtitle">"Loading volume…"</p>
+                    }>
+                        {move || Suspend::new(async move {
+                            match analytics.await {
+                                Some(data) => view! {
+                                    <VolumeChart
+                                        data=data
+                                        pinned_asset=pinned_asset
+                                        set_pinned_asset=set_pinned_asset
+                                    />
+                                }.into_any(),
+                                None => view! {
+                                    <p class="chart-subtitle">
+                                        "Volume is unavailable right now."
+                                    </p>
+                                }.into_any(),
+                            }
+                        })}
+                    </Suspense>
                 </div>
             </div>
 
             <div class="chart-card">
                 <div class="chart-header">
-                    <h3 class="chart-title">"Payment methods"</h3>
+                    <div>
+                        <h3 class="chart-title">"Payment methods"</h3>
+                        <p class="chart-subtitle">"Share of payments received"</p>
+                    </div>
                 </div>
                 <div class="chart-body">
-                    <PaymentMethodsBreakdown />
+                    <Suspense fallback=move || view! {
+                        <p class="chart-subtitle">"Loading breakdown…"</p>
+                    }>
+                        {move || Suspend::new(async move {
+                            match analytics.await {
+                                Some(data) => view! {
+                                    <PaymentMethodsBreakdown data=data />
+                                }.into_any(),
+                                None => view! {
+                                    <p class="chart-subtitle">
+                                        "Breakdown is unavailable right now."
+                                    </p>
+                                }.into_any(),
+                            }
+                        })}
+                    </Suspense>
                 </div>
             </div>
         </div>
     }
 }
 
-/// Simple volume chart visualization.
-#[component]
-fn VolumeChart() -> impl IntoView {
-    // Mock data for chart bars
-    let data = vec![
-        35, 42, 28, 55, 48, 62, 45, 72, 58, 65, 78, 52, 88, 75, 92, 68, 85, 72, 95, 82, 78, 88, 92,
-        85, 98, 75, 82, 90, 95, 100,
-    ];
-    let max = 100.0_f64;
+/// Brand colour for the assets we ship payment methods for.
+///
+/// Anything else gets a neutral accent rather than a colour invented for it.
+fn asset_color(symbol: &str) -> &'static str {
+    match symbol {
+        "ETH" | "WETH" => "#627eea",
+        "USDC" => "#2775ca",
+        "USDT" => "#26a17b",
+        "DAI" | "xDAI" => "#f5ac37",
+        "POL" | "MATIC" => "#8247e5",
+        "WBTC" => "#f7931a",
+        _ => "#6b7280",
+    }
+}
 
-    view! {
-        <div class="volume-chart">
-            <div class="volume-chart-bars">
-                {data.into_iter().enumerate().map(|(i, val)| {
-                    let height = (val as f64 / max * 100.0) as u32;
-                    let is_today = i == 29;
+/// Parse a decimal amount string for bar scaling only.
+///
+/// The displayed figures always come from the server's exact strings; this is
+/// used solely to work out how tall a bar is, where f64 is plenty.
+fn amount_for_scale(amount: &str) -> f64 {
+    amount.parse::<f64>().unwrap_or(0.0)
+}
+
+/// Daily volume for one asset.
+///
+/// Bars are per asset because volume is not summable across assets — 1 ETH
+/// plus 1 USDC is not 2 of anything (RCS-225). The selected asset's symbol is
+/// on the axis label so the numbers mean something.
+#[component]
+fn VolumeChart(
+    data: DashboardAnalytics,
+    pinned_asset: ReadSignal<Option<String>>,
+    set_pinned_asset: WriteSignal<Option<String>>,
+) -> impl IntoView {
+    if data.assets.is_empty() {
+        // An account with no payments gets an honest blank, not a flat line
+        // and not the invented upward trend this panel used to draw.
+        return view! {
+            <EmptyState
+                title="No payments yet"
+                description="Volume will appear here once your first payment is received."
+            />
+        }
+        .into_any();
+    }
+
+    let assets = StoredValue::new(data.assets);
+    let selector = (assets.with_value(Vec::len) > 1).then(|| {
+        let symbols: Vec<String> = assets.with_value(|a| {
+            a.iter().map(|asset| asset.asset_symbol.clone()).collect()
+        });
+        view! {
+            <div class="chart-controls">
+                {symbols.into_iter().map(|symbol| {
+                    let selected = symbol.clone();
+                    let label = symbol.clone();
                     view! {
-                        <div
-                            class=if is_today { "volume-bar volume-bar-today" } else { "volume-bar" }
-                            style=format!("height: {}%", height)
-                        ></div>
+                        <button
+                            class=move || {
+                                let active = pinned_asset.get().as_deref() == Some(symbol.as_str());
+                                if active { "btn btn-ghost btn-xs active" } else { "btn btn-ghost btn-xs" }
+                            }
+                            on:click=move |_| set_pinned_asset.set(Some(selected.clone()))
+                        >
+                            {label}
+                        </button>
                     }
                 }).collect_view()}
             </div>
-            <div class="volume-chart-labels">
-                <span>"30 days ago"</span>
-                <span>"Today"</span>
-            </div>
+        }
+    });
+
+    view! {
+        <div class="volume-chart">
+            {selector}
+            {move || {
+                let pinned = pinned_asset.get();
+                let asset = assets.with_value(|list| {
+                    pinned
+                        .as_deref()
+                        .and_then(|want| list.iter().find(|a| a.asset_symbol == want))
+                        .or_else(|| list.first())
+                        .cloned()
+                });
+                asset.map(|asset| {
+                    // Scale to the busiest day so a quiet window still reads;
+                    // a zero max would divide by zero, so it floors at 1.
+                    let max = asset
+                        .daily
+                        .iter()
+                        .map(|d| amount_for_scale(&d.amount))
+                        .fold(0.0_f64, f64::max)
+                        .max(f64::MIN_POSITIVE);
+                    let color = asset_color(&asset.asset_symbol);
+                    let last = asset.daily.len().saturating_sub(1);
+                    let first_label = asset.daily.first().map(|d| d.date.clone()).unwrap_or_default();
+                    let last_label = asset.daily.last().map(|d| d.date.clone()).unwrap_or_default();
+                    let footer = format!(
+                        "{} {} from {} payments",
+                        asset.total_amount, asset.asset_symbol, asset.payment_count,
+                    );
+                    view! {
+                        <div class="volume-chart-bars">
+                            {asset.daily.iter().enumerate().map(|(i, point)| {
+                                let height = (amount_for_scale(&point.amount) / max * 100.0)
+                                    .clamp(0.0, 100.0);
+                                let title = format!(
+                                    "{}: {} {} ({} payments)",
+                                    point.date, point.amount, asset.asset_symbol,
+                                    point.payment_count,
+                                );
+                                let style = if i == last {
+                                    format!("height: {height}%; background: {color}")
+                                } else {
+                                    format!("height: {height}%")
+                                };
+                                view! {
+                                    <div
+                                        class=if i == last { "volume-bar volume-bar-today" } else { "volume-bar" }
+                                        style=style
+                                        title=title
+                                    ></div>
+                                }
+                            }).collect_view()}
+                        </div>
+                        <div class="volume-chart-labels">
+                            <span>{first_label}</span>
+                            <span>{footer}</span>
+                            <span>{last_label}</span>
+                        </div>
+                    }
+                })
+            }}
         </div>
     }
+    .into_any()
 }
 
 /// Payment methods breakdown.
+///
+/// Percentages are each asset's share of the *payment count* over the window.
+/// Sharing by value would mean adding ETH to USDC, which is not a number.
 #[component]
-fn PaymentMethodsBreakdown() -> impl IntoView {
-    let methods = vec![
-        ("ETH", 45, "#627eea"),
-        ("USDC", 32, "#2775ca"),
-        ("USDT", 18, "#26a17b"),
-        ("DAI", 5, "#f5ac37"),
-    ];
+fn PaymentMethodsBreakdown(data: DashboardAnalytics) -> impl IntoView {
+    if data.assets.is_empty() {
+        return view! {
+            <EmptyState
+                title="No payments yet"
+                description="The assets your customers pay with will appear here."
+            />
+        }
+        .into_any();
+    }
 
     view! {
         <div class="payment-methods">
-            {methods.into_iter().map(|(name, pct, color)| {
+            {data.assets.into_iter().map(|asset| {
+                let color = asset_color(&asset.asset_symbol);
+                let width = asset.share_percent.clamp(0.0, 100.0);
+                let title = format!(
+                    "{} payments totalling {} {}",
+                    asset.payment_count, asset.total_amount, asset.asset_symbol,
+                );
                 view! {
-                    <div class="payment-method-row">
+                    <div class="payment-method-row" title=title>
                         <div class="payment-method-info">
-                            <span class="payment-method-dot" style=format!("background: {}", color)></span>
-                            <span class="payment-method-name">{name}</span>
+                            <span class="payment-method-dot" style=format!("background: {color}")></span>
+                            <span class="payment-method-name">{asset.asset_symbol}</span>
                         </div>
                         <div class="payment-method-bar-container">
                             <div
                                 class="payment-method-bar"
-                                style=format!("width: {}%; background: {}", pct, color)
+                                style=format!("width: {width}%; background: {color}")
                             ></div>
                         </div>
-                        <span class="payment-method-pct">{pct}"%"</span>
+                        <span class="payment-method-pct">{format!("{:.0}", asset.share_percent)}"%"</span>
                     </div>
                 }
             }).collect_view()}
         </div>
     }
+    .into_any()
 }
 
 /// Recent activity section.

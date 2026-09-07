@@ -147,6 +147,74 @@ fn test_dashboard_stats_roundtrip() {
 }
 
 // =========================================================================
+// Dashboard analytics (RCS-225)
+// =========================================================================
+
+#[test]
+fn test_dashboard_analytics_deserialize_from_backend() {
+    // Shape produced by `server::api::dashboard::analytics`.
+    let json = serde_json::json!({
+        "days": 30,
+        "start_date": "2026-08-09",
+        "end_date": "2026-09-07",
+        "total_payments": 4,
+        "assets": [
+            {
+                "asset_symbol": "USDC",
+                "total_amount": "3",
+                "payment_count": 3,
+                "share_percent": 75.0,
+                "daily": [{"date": "2026-09-07", "amount": "3", "payment_count": 3}]
+            },
+            {
+                "asset_symbol": "ETH",
+                "total_amount": "1.5",
+                "payment_count": 1,
+                "share_percent": 25.0,
+                "daily": [{"date": "2026-09-07", "amount": "1.5", "payment_count": 1}]
+            }
+        ]
+    });
+    let analytics: DashboardAnalytics = serde_json::from_value(json).unwrap();
+
+    assert_eq!(analytics.days, 30);
+    assert_eq!(analytics.start_date, "2026-08-09");
+    assert_eq!(analytics.end_date, "2026-09-07");
+    assert_eq!(analytics.total_payments, 4);
+    assert_eq!(analytics.assets.len(), 2);
+    assert_eq!(analytics.assets[0].asset_symbol, "USDC");
+    assert_eq!(analytics.assets[0].share_percent, 75.0);
+    // Amounts stay strings: they are per-asset units and must not be turned
+    // into a float that quietly loses wei-level precision.
+    assert_eq!(analytics.assets[1].total_amount, "1.5");
+    assert_eq!(analytics.assets[1].daily[0].date, "2026-09-07");
+}
+
+#[test]
+fn test_dashboard_analytics_empty_account() {
+    // A new merchant gets a valid window with no series — the panels render
+    // an empty state from this, never mock data.
+    let json = serde_json::json!({
+        "days": 30,
+        "start_date": "2026-08-09",
+        "end_date": "2026-09-07",
+        "total_payments": 0,
+        "assets": []
+    });
+    let analytics: DashboardAnalytics = serde_json::from_value(json).unwrap();
+
+    assert!(analytics.assets.is_empty());
+    assert_eq!(analytics.total_payments, 0);
+}
+
+#[test]
+fn test_dashboard_analytics_default_is_empty() {
+    let analytics = DashboardAnalytics::default();
+    assert_eq!(analytics.days, 0);
+    assert!(analytics.assets.is_empty());
+}
+
+// =========================================================================
 // Store types
 // =========================================================================
 

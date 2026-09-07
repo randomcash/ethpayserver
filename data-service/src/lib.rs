@@ -17,6 +17,10 @@
 //! sqlx migrate run --source migrations/postgres
 //! ```
 
+pub mod analytics;
+
+pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
+
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
