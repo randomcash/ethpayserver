@@ -274,14 +274,36 @@ pub fn PaymentsPage() -> impl IntoView {
                         };
 
                         if filtered.is_empty() {
+                            let searching = !search.is_empty();
+                            let offset = current_offset.get();
                             view! {
                                 <div class="empty-state">
                                     <div class="empty-state-icon">
                                         <IconSearch />
                                     </div>
                                     <h3>"No payments found"</h3>
-                                    <p>"Payments will appear here once invoices receive transactions."</p>
+                                    // The search filters THIS page only, client
+                                    // side, while the count and the pager come
+                                    // from the server's unfiltered total. Saying
+                                    // "no payments" to someone whose match is on
+                                    // page 2 is wrong, so say what is true.
+                                    <p>{if searching {
+                                        "No payments on this page match your search. Other pages may have matches."
+                                    } else {
+                                        "Payments will appear here once invoices receive transactions."
+                                    }}</p>
                                 </div>
+                                // Rendered here too, and that is the point: this
+                                // branch used to drop the pager entirely, so a
+                                // search matching nothing on page 3 left the user
+                                // with no way off page 3 except clearing the box.
+                                <Pagination
+                                    total=total
+                                    page_size=PAGE_SIZE
+                                    current_offset=offset
+                                    on_page_change=move |new_offset| set_current_offset.set(new_offset)
+                                    item_label="payments"
+                                />
                             }.into_any()
                         } else {
                             let offset = current_offset.get();

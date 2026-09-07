@@ -2740,6 +2740,17 @@ a:hover {
     .mobile-only {
         display: block !important;
     }
+
+    /* `display: block` is wrong for these two, and the utility above cannot know
+       that. Both are flex columns whose spacing comes entirely from `gap`, so
+       forcing `block` leaves the gap declared and inert: every card's border
+       sits flush against the next one. Measured before this rule existed -
+       display: block, row-gap: 12px, actual distance between cards: 0px.
+       Restoring `flex` costs nothing on desktop, where the utility hides them. */
+    .payments-cards,
+    .invoices-cards {
+        display: flex !important;
+    }
 }
 
 /* Mobile Invoice Cards */
