@@ -73,9 +73,16 @@ async fn integration_user_crud() {
         "create_user -> get_user must round-trip the pinned identifier"
     );
 
+    // RCS-203: this used to return Ok(()) and discard the change, which reads
+    // exactly like a successful write. Rejecting it is the point - a caller
+    // that assigns this field should find out, not be told it worked.
     let mut tampered = fetched.clone();
     tampered.kdf_salt_identifier = "attacker-chosen".to_string();
-    service.update_user(&tampered).await.unwrap();
+    let err = service.update_user(&tampered).await.unwrap_err();
+    assert!(
+        matches!(&err, AuthError::ImmutableField(f) if f == "kdf_salt_identifier"),
+        "expected ImmutableField, got {err:?}"
+    );
     let after = service.get_user(user.id).await.unwrap().unwrap();
     assert_eq!(
         after.kdf_salt_identifier, user.kdf_salt_identifier,
@@ -423,4 +430,87 @@ async fn integration_cascade_delete_user() {
     assert!(service.get_device(device.id).await.unwrap().is_none());
     assert!(service.get_session(session.id).await.unwrap().is_none());
     assert!(service.get_wallet(wallet.id).await.unwrap().is_none());
+}
+
+/// The Postgres half of RCS-203.
+///
+/// `kdf_salt_identifier` is pinned at registration and the stored
+/// `recovery_verification_hash` was derived from it, so a change would strand
+/// the account. The statement has always refused to apply one — it omits the
+/// column from its SET clause — but it used to report success while doing so,
+/// which is indistinguishable from having worked.
+#[tokio::test]
+#[ignore]
+async fn integration_kdf_salt_identifier_is_immutable() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut user = test_user();
+    user.email = Some(unique_email());
+    user.kdf_salt_identifier = user.email.clone().unwrap();
+    service.create_user(&user).await.unwrap();
+
+    // Changing it is an error, not a silent no-op.
+    let mut tampered = user.clone();
+    tampered.kdf_salt_identifier = format!("wallet:{}", unique_wallet_address());
+    let err = service.update_user(&tampered).await.unwrap_err();
+    assert!(
+        matches!(&err, AuthError::ImmutableField(f) if f == "kdf_salt_identifier"),
+        "expected ImmutableField, got {err:?}"
+    );
+
+    // The whole update is rejected, so no other field from it leaked through.
+    let stored = service.get_user(user.id).await.unwrap().unwrap();
+    assert_eq!(stored.kdf_salt_identifier, user.kdf_salt_identifier);
+
+    // An update that leaves it alone still works, including one that adds an
+    // email — the case RCS-201 exists for, where recomputing would change it.
+    let mut updated = stored;
+    updated.failed_login_attempts = 2;
+    service.update_user(&updated).await.unwrap();
+    let stored = service.get_user(user.id).await.unwrap().unwrap();
+    assert_eq!(stored.failed_login_attempts, 2);
+    assert_eq!(stored.kdf_salt_identifier, user.kdf_salt_identifier);
+}
+
+/// A row the old binary wrote during a rolling deploy has a NULL identifier and
+/// must still be pinnable — that is what the COALESCE is for, and the new WHERE
+/// clause has to keep letting it through rather than treating it as a change.
+#[tokio::test]
+#[ignore]
+async fn integration_null_kdf_salt_identifier_can_still_be_pinned() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut user = test_user();
+    user.email = Some(unique_email());
+    user.kdf_salt_identifier = user.email.clone().unwrap();
+    service.create_user(&user).await.unwrap();
+
+    // Simulate the pre-backfill state.
+    sqlx::query("UPDATE users SET kdf_salt_identifier = NULL WHERE id = $1")
+        .bind(user.id.0)
+        .execute(service.pool())
+        .await
+        .unwrap();
+
+    // A read of that row falls back to the computed identifier, and writing it
+    // back pins it for good.
+    let loaded = service.get_user(user.id).await.unwrap().unwrap();
+    assert_eq!(loaded.kdf_salt_identifier, user.kdf_salt_identifier);
+    service.update_user(&loaded).await.unwrap();
+
+    let pinned: Option<String> =
+        sqlx::query_scalar("SELECT kdf_salt_identifier FROM users WHERE id = $1")
+            .bind(user.id.0)
+            .fetch_one(service.pool())
+            .await
+            .unwrap();
+    assert_eq!(pinned.as_deref(), Some(user.kdf_salt_identifier.as_str()));
+
+    // And now that it is pinned, it is immutable like any other row.
+    let mut tampered = loaded;
+    tampered.kdf_salt_identifier = format!("wallet:{}", unique_wallet_address());
+    assert!(matches!(
+        service.update_user(&tampered).await,
+        Err(AuthError::ImmutableField(_))
+    ));
 }

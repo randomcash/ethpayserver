@@ -123,6 +123,13 @@ impl UserRepository for PgDataService {
                 last_login_at = $7, failed_login_attempts = $8, locked_until = $9,
                 role = $10
             WHERE id = $1
+              -- Reject a changed identifier instead of silently discarding it.
+              -- COALESCE above pins a NULL row, which is why NULL still
+              -- matches; anything else must equal what is stored, or no row is
+              -- updated and the caller is told (RCS-203). Without this the
+              -- write looked successful and the change simply evaporated.
+              AND (users.kdf_salt_identifier IS NULL
+                   OR users.kdf_salt_identifier = $11)
             "#,
         )
         .bind(user.id.0)
@@ -141,7 +148,19 @@ impl UserRepository for PgDataService {
         .map_err(sqlx_to_auth_error)?;
 
         if result.rows_affected() == 0 {
-            return Err(AuthError::UserNotFound(user.id.to_string()));
+            // Zero rows now has two causes, and reporting the wrong one sends
+            // the reader hunting for a user that is sitting right there. Ask.
+            let existing: Option<Option<String>> =
+                sqlx::query_scalar("SELECT kdf_salt_identifier FROM users WHERE id = $1")
+                    .bind(user.id.0)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(sqlx_to_auth_error)?;
+
+            return match existing {
+                Some(_) => Err(AuthError::ImmutableField("kdf_salt_identifier".to_string())),
+                None => Err(AuthError::UserNotFound(user.id.to_string())),
+            };
         }
         Ok(())
     }
