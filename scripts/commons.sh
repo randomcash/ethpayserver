@@ -40,7 +40,7 @@ case "${1:-status}" in
     # Resolving under the patch rewrites Cargo.lock's commons entries to the
     # local path form. That is fine locally and must never be committed - it
     # would undo the pin for everyone. Restore it on unlink, and say so now.
-    cargo metadata --format-version 1 >/dev/null 2>&1 || true
+    ( cd "$repo_root" && cargo metadata --format-version 1 >/dev/null 2>&1 ) || true
     echo "linked → $path"
     echo
     echo "NOTE: Cargo.lock now points at that path instead of the pinned revision."
@@ -62,7 +62,8 @@ case "${1:-status}" in
     rev="$(current_rev)"
     echo "pinned rev : ${rev:-<none found>}"
     if [ -f "$config" ]; then
-      echo "local link : ACTIVE → $(grep -m1 -oP 'path = "\K[^"]+' "$config" | xargs dirname)"
+      linked_path="$(grep -m1 -oP 'path = "\K[^"]+' "$config" || true)"
+      echo "local link : ACTIVE → $(dirname "$linked_path")"
       echo "             builds here do NOT use the pin above"
     else
       echo "local link : none"
@@ -77,12 +78,18 @@ case "${1:-status}" in
       rev="$(git -C "$sibling" rev-parse origin/main)"
     fi
     [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || die "expected a full 40-char sha, got '$rev'"
+    if [ -f "$config" ]; then
+      die "a local link is active; 'unlink' first, or the lock will be written in path form"
+    fi
     old="$(current_rev)"
+    # Without this the sed below matches nothing, the manifest is untouched, and
+    # the script still reports success.
+    [ -n "$old" ] || die "no 40-char rev found in $manifest; fix the pin by hand"
     [ "$rev" = "$old" ] && { echo "already pinned to $rev"; exit 0; }
     sed -i "s/rev = \"$old\"/rev = \"$rev\"/g" "$manifest"
     echo "pinned $old → $rev"
     echo "run 'cargo update -p types -p auth -p crypto -p rates -p ui-kit' then commit Cargo.toml and Cargo.lock"
     ;;
-  -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \?//' ;;
+  -h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \?//' ;;
   *) die "unknown command '${1}' (link|unlink|status|pin)" ;;
 esac

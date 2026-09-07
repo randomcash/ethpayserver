@@ -52,8 +52,16 @@ jobs:
             echo "::error::no payserver-commons rev pinned in Cargo.toml"
             exit 1
           fi
+          # Per crate, and the crate name has to be in the match. Grepping only
+          # for the revision proves that SOME entry is pinned, which a partial
+          # un-pin passes: `types` pinned, `ui-kit` left as a path entry, green.
           for CRATE in types auth crypto rates ui-kit; do
-            if ! grep -q "payserver-commons.git?rev=$REV" Cargo.lock; then
+            if ! awk -v c="$CRATE" -v r="$REV" '
+                 /^\[\[package\]\]/ { name=""; src="" }
+                 /^name = / { gsub(/[",]/,""); name=$3 }
+                 /^source = / { src=$0 }
+                 name == c && src ~ r { found=1 }
+                 END { exit !found }' Cargo.lock; then
               echo "::error::Cargo.lock does not pin $CRATE at $REV."
               echo "Run 'scripts/commons.sh unlink' and commit the regenerated Cargo.lock."
               exit 1

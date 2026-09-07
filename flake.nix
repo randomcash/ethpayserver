@@ -13,10 +13,20 @@
 
     flake-utils.url = "github:numtide/flake-utils";
 
-    # payserver-commons source; override locally with:
+    # payserver-commons source for the sandboxed build. The Nix build has no
+    # network, so cargo cannot fetch the revision Cargo.toml pins - this input
+    # supplies that source, and the src derivation below ASSERTS the two agree
+    # rather than letting them drift into two answers.
+    #
+    # Moving the pin is therefore two steps, and the assert makes forgetting the
+    # second one a build failure instead of a silently different binary:
+    #   scripts/commons.sh pin <sha>
+    #   nix flake lock --update-input payserver-commons
+    #
+    # Override locally with:
     #   --override-input payserver-commons path:../payserver-commons
     payserver-commons = {
-      url = "git+https://gitlab.com/random.cash/payserver-commons.git";
+      url = "git+https://github.com/randomcash/payserver-commons.git";
       flake = false;
     };
   };
@@ -50,10 +60,15 @@
         craneLibWasm = (crane.mkLib pkgs).overrideToolchain wasmToolchain;
 
         # Combined source tree: ethpayserver at the root with payserver-commons
-        # embedded as a subdirectory.  The workspace [patch] section normally
-        # references ../payserver-commons/* — we rewrite those to
-        # ./payserver-commons/* so the entire dependency graph lives under one
-        # Nix store path.
+        # embedded as a subdirectory, and a [patch] APPENDED to point the pinned
+        # git dependency at it.
+        #
+        # This used to rewrite an existing sibling-path [patch] with
+        # `--replace-fail`. RCS-218 deleted that block - commons is now pinned by
+        # revision - so those patterns match nothing and `--replace-fail` aborts
+        # the derivation. Appending is also the right shape now: the manifest
+        # states the revision, and this redirects it to the copy Nix already has,
+        # because the sandbox has no network to fetch it with.
         src = let
           ethClean = craneLib.cleanCargoSource ./.;
         in
@@ -64,13 +79,34 @@
             cp -rL ${payserver-commons} $out/payserver-commons
             chmod -R u+w $out/payserver-commons
 
-            # Rewrite workspace [patch] paths
-            substituteInPlace $out/Cargo.toml \
-              --replace-fail '"../payserver-commons/' '"./payserver-commons/'
+            # Two pins, one truth. If the flake input and the manifest disagree,
+            # this build would silently compile different commons than CI and
+            # every developer - so it stops here instead.
+            pinned=$(sed -n 's/.*rev = "\([0-9a-f]\{40\}\)".*/\1/p' $out/Cargo.toml | head -1)
+            if [ -z "$pinned" ]; then
+              echo "no payserver-commons revision pinned in Cargo.toml" >&2
+              exit 1
+            fi
+            if [ "$pinned" != "${payserver-commons.rev}" ]; then
+              echo "payserver-commons pin mismatch:" >&2
+              echo "  Cargo.toml  : $pinned" >&2
+              echo "  flake input : ${payserver-commons.rev}" >&2
+              echo "run: nix flake lock --update-input payserver-commons" >&2
+              exit 1
+            fi
 
-            # Rewrite client direct path deps
-            substituteInPlace $out/client/Cargo.toml \
-              --replace-fail '"../../payserver-commons/' '"../payserver-commons/'
+            cat >> $out/Cargo.toml <<'EOF'
+
+# Appended by flake.nix. The sandbox cannot fetch the pinned revision, so the
+# flake input above supplies it and this redirects the dependency to that copy.
+# The revision is asserted to match before this is written.
+[patch."https://github.com/randomcash/payserver-commons.git"]
+types = { path = "./payserver-commons/types" }
+auth = { path = "./payserver-commons/auth" }
+crypto = { path = "./payserver-commons/crypto" }
+rates = { path = "./payserver-commons/rates" }
+ui-kit = { path = "./payserver-commons/ui-kit" }
+EOF
           '';
 
         buildInputs =

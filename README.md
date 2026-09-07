@@ -300,8 +300,10 @@ scripts/lane.sh --list
 scripts/lane.sh --remove <name>
 ```
 
-Lanes exist because worktrees and relative paths do not mix — see the header of
-`scripts/lane.sh`.
+A lane is only needed when you want to **edit** commons in parallel: every
+worktree otherwise shares the one `../payserver-commons` on one branch. A lane
+that just builds the pinned revision needs nothing special — plain
+`git worktree add` works now that nothing depends on directory layout.
 
 ## API Endpoints
 
