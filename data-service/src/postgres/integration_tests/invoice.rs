@@ -1,7 +1,7 @@
 //! Invoice integration tests.
 
 use chrono::{Duration, Utc};
-use types::{InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter};
+use types::{InvoiceData, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter};
 
 use super::{assert_amount_eq, create_test_service, seeded_test_invoice};
 
@@ -215,4 +215,143 @@ async fn integration_invoice_query_scopes_to_a_set_of_stores() {
             .unwrap();
     assert_eq!(empty_total, 0, "no memberships must mean no rows");
     assert!(empty_rows.is_empty(), "no memberships must mean no rows");
+}
+
+/// RCS-231: search has to reach the SQL, and it has to reach *both* queries.
+///
+/// The pager takes `total` from the count query and the rows from the data
+/// query. They are built separately, so a predicate added to one and not the
+/// other does not fail - it reports a number that does not describe the page.
+/// Every assertion below therefore checks the count and the rows together.
+///
+/// The store-scope half is the other trap: the search predicate is ANDed onto
+/// the scope, never a replacement for it. The term here deliberately matches a
+/// row in a store the caller cannot see (RCS-211, RCS-222).
+#[tokio::test]
+#[ignore]
+async fn integration_invoice_search_is_scoped_and_counts_what_it_returns() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    // Unique per run: the test database is shared with every other test in the
+    // file, so the term has to identify these rows and nothing else.
+    let token = format!("rcs231{}", uuid::Uuid::new_v4().simple());
+
+    let mut mine_matching = seeded_test_invoice(&service).await;
+    mine_matching.metadata = Some(serde_json::json!({ "order_number": token }));
+    let mine_other = InvoiceData {
+        store_id: mine_matching.store_id,
+        ..seeded_test_invoice(&service).await
+    };
+    // Same term, different tenant.
+    let mut theirs_matching = seeded_test_invoice(&service).await;
+    theirs_matching.metadata = Some(serde_json::json!({ "order_number": token }));
+
+    for inv in [&mine_matching, &mine_other, &theirs_matching] {
+        InvoiceWriter::upsert(&service, inv).await.unwrap();
+    }
+
+    // Unscoped: both tenants' matches, and a count that says so.
+    let (total, rows) = InvoiceReader::query(
+        &service,
+        &InvoiceQueryParams::new().with_search(token.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 2, "the search must reach the count query");
+    assert_eq!(rows.len(), 2, "the search must reach the data query");
+
+    // Scoped: the other tenant's match is gone, from the count as well.
+    for scoped in [
+        InvoiceQueryParams::new()
+            .with_store_id(mine_matching.store_id)
+            .with_search(token.clone()),
+        InvoiceQueryParams::new()
+            .with_store_ids(vec![mine_matching.store_id])
+            .with_search(token.clone()),
+    ] {
+        let (total, rows) = InvoiceReader::query(&service, &scoped).await.unwrap();
+        assert_eq!(total, 1, "search must not widen the store scope");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].id, mine_matching.id,
+            "a match in a store the caller cannot see must stay invisible"
+        );
+    }
+
+    // Blank is no filter, not an impossible one: the caller's other invoice
+    // comes back too.
+    let (total, rows) = InvoiceReader::query(
+        &service,
+        &InvoiceQueryParams::new()
+            .with_store_ids(vec![mine_matching.store_id])
+            .with_search("   "),
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 2, "a whitespace term must not filter anything");
+    assert_eq!(rows.len(), 2);
+
+    // A wildcard the user typed is a literal, not a pattern.
+    let (total, _) = InvoiceReader::query(
+        &service,
+        &InvoiceQueryParams::new()
+            .with_store_ids(vec![mine_matching.store_id])
+            .with_search("%"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 0, "`%` must be escaped, not match every row");
+}
+
+/// RCS-231: the id predicate is anchored, and the currency one is not.
+///
+/// Pinned because the difference is a deliberate indexing decision (`%...%` can
+/// never use an index; `term%` can), not an accident of how the SQL was typed.
+#[tokio::test]
+#[ignore]
+async fn integration_invoice_search_anchors_the_id_but_not_the_currency() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut invoice = seeded_test_invoice(&service).await;
+    invoice.currency = "USDC".to_string();
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    let id = invoice.id.0.clone();
+    let scope = vec![invoice.store_id];
+
+    let (total, rows) = InvoiceReader::query(
+        &service,
+        &InvoiceQueryParams::new()
+            .with_store_ids(scope.clone())
+            .with_search(id[..8].to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "an id prefix is what someone pasting an id types");
+    assert_eq!(rows[0].id, invoice.id);
+
+    let (total, _) = InvoiceReader::query(
+        &service,
+        &InvoiceQueryParams::new()
+            .with_store_ids(scope.clone())
+            .with_search(id[8..16].to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        total, 0,
+        "the id predicate is anchored; a mid-string run must not match"
+    );
+
+    // Currency is a substring, and the match is case-insensitive.
+    let (total, rows) = InvoiceReader::query(
+        &service,
+        &InvoiceQueryParams::new()
+            .with_store_ids(scope)
+            .with_search("SD"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1, "currency is matched as a substring, case-folded");
+    assert_eq!(rows[0].id, invoice.id);
 }

@@ -214,6 +214,11 @@ pub struct ListPaymentsQuery {
     pub store_id: Option<Uuid>,
     /// Filter by status (confirmed, pending).
     pub status: Option<String>,
+    /// Free-text search over tx hash, invoice id, asset symbol and sender.
+    ///
+    /// Applied in SQL so `total` counts the filtered set (RCS-231). Blank is
+    /// no filter.
+    pub search: Option<String>,
     /// Maximum number of results.
     pub limit: Option<i64>,
     /// Offset for pagination.
@@ -258,6 +263,11 @@ pub struct ListInvoicesQuery {
     pub status: Option<String>,
     /// Filter by currency.
     pub currency: Option<String>,
+    /// Free-text search over id, currency, amount and metadata.
+    ///
+    /// Applied in SQL so `total` counts the filtered set (RCS-231). Blank is
+    /// no filter.
+    pub search: Option<String>,
     /// Maximum number of results.
     pub limit: Option<i64>,
     /// Offset for pagination.

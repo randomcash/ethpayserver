@@ -31,6 +31,47 @@ mod integration_tests;
 #[cfg(test)]
 mod tests;
 
+// =============================================================================
+// List search (RCS-231)
+// =============================================================================
+
+/// Escape the characters `LIKE` treats as wildcards, and lower-case the term.
+///
+/// Without this a merchant typing `%` matches every row, and `_` matches any
+/// character - a search box is not a pattern language. Backslash is `LIKE`'s
+/// default escape character, so escaping it first keeps a literal backslash
+/// literal without needing an `ESCAPE` clause.
+///
+/// Lower-casing here rather than reaching for `ILIKE` is what keeps the
+/// predicate index-able: `ILIKE` can use no btree index at all, while
+/// `LOWER(col) LIKE 'x%'` can be served by an expression index - the shape the
+/// existing `idx_watched_lower_addr_chain` and `idx_tokens_symbol` already use.
+/// Terms are ASCII hex, currency codes and asset symbols, where Rust's
+/// `to_lowercase` and Postgres' `LOWER` agree.
+fn escape_like(term: &str) -> String {
+    let mut out = String::with_capacity(term.len() + 2);
+    for ch in term.to_lowercase().chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// `term%` - an anchored prefix, for columns holding an identifier the user
+/// pastes whole (tx hashes, invoice ids) and where an index can serve the scan.
+pub(super) fn search_prefix_pattern(term: &str) -> String {
+    format!("{}%", escape_like(term))
+}
+
+/// `%term%` - a substring, for short columns where a partial match is what the
+/// user means (asset symbols, currencies, amounts) and where anchoring the
+/// pattern would buy no index anyway.
+pub(super) fn search_contains_pattern(term: &str) -> String {
+    format!("%{}%", escape_like(term))
+}
+
 /// PostgreSQL data service implementation.
 #[derive(Clone)]
 pub struct PgDataService {

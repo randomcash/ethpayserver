@@ -54,6 +54,26 @@ impl InMemoryDataService {
     }
 }
 
+// =============================================================================
+// List search (RCS-231)
+// =============================================================================
+//
+// These mirror the SQL in `postgres/{invoice,payment}.rs` column for column.
+// The Postgres side lower-cases the term and the column and matches with
+// `LIKE`, anchored (`term%`) or not (`%term%`); these are the Rust spelling of
+// exactly that. A double that disagrees with the real store about a filter is
+// how RCS-203 happened, so if one side changes, both change.
+
+/// `LOWER(col) LIKE 'term%'`.
+fn search_starts_with(haystack: Option<&str>, term: &str) -> bool {
+    haystack.is_some_and(|h| h.to_lowercase().starts_with(term))
+}
+
+/// `LOWER(col) LIKE '%term%'`.
+fn search_contains(haystack: Option<&str>, term: &str) -> bool {
+    haystack.is_some_and(|h| h.to_lowercase().contains(term))
+}
+
 #[async_trait]
 impl InvoiceReader for InMemoryDataService {
     async fn get(&self, id: &InvoiceId) -> RepositoryResult<Option<InvoiceData>> {
@@ -91,6 +111,21 @@ impl InvoiceReader for InMemoryDataService {
                     && inv.currency != *currency
                 {
                     return false;
+                }
+                // Search is ANDed on top of the store scope above, never in
+                // place of it: a term that matches another tenant's invoice
+                // still must not return it (RCS-211, RCS-222).
+                if let Some(term) = params.search_term() {
+                    let term = term.to_lowercase();
+                    let metadata = inv.metadata.as_ref().map(ToString::to_string);
+                    let matched = search_starts_with(Some(inv.id.0.as_str()), &term)
+                        || search_contains(Some(inv.currency.as_str()), &term)
+                        || search_contains(Some(inv.amount.as_str()), &term)
+                        // RCS-216: drop this line with its Postgres twin.
+                        || search_contains(metadata.as_deref(), &term);
+                    if !matched {
+                        return false;
+                    }
                 }
                 true
             })
@@ -244,6 +279,18 @@ impl PaymentReader for InMemoryDataService {
                         return false;
                     }
                     if !confirmed && p.confirmed_at.is_some() {
+                        return false;
+                    }
+                }
+                // ANDed on top of the store scope above, never in place of it
+                // (RCS-211, RCS-222).
+                if let Some(term) = params.search_term() {
+                    let term = term.to_lowercase();
+                    let matched = search_starts_with(Some(p.tx_hash.as_str()), &term)
+                        || search_starts_with(Some(p.invoice_id.0.as_str()), &term)
+                        || search_contains(Some(p.asset_symbol.as_str()), &term)
+                        || search_contains(p.from_address.as_deref(), &term);
+                    if !matched {
                         return false;
                     }
                 }
