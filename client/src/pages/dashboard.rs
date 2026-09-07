@@ -8,8 +8,12 @@ use leptos_router::components::A;
 use send_wrapper::SendWrapper;
 
 use crate::api::{ApiError, ChainHealthInfo, EvmApiClient};
+use crate::app::{StoreContext, StoresStatus};
+use crate::pages::payments::format::{
+    format_crypto_amount, payment_status, payment_status_class, truncate_hash,
+};
 use crate::services::StatusUpdate;
-use crate::util::chain_name;
+use crate::util::{chain_name, relative_time};
 
 /// Dashboard page component.
 #[component]
@@ -293,70 +297,142 @@ fn DashboardActivity() -> impl IntoView {
     }
 }
 
-/// Recent payments list.
+/// How many payments the panel shows. The "View all" link covers the rest.
+const RECENT_PAYMENTS_LIMIT: i64 = 5;
+
+/// Recent payments list — the newest rows for the store the dashboard is
+/// scoped to.
+///
+/// This panel used to be a literal list of invented tx hashes, amounts, dollar
+/// values and timestamps, shown identically to every account including ones
+/// with no payments at all (RCS-224). Everything here now comes off the row.
+///
+/// There is deliberately no fiat column. Rendering one needs a rate for the
+/// asset *at the time the payment landed*; `/rates` only serves the current
+/// rate, and today's price against a month-old payment is another invented
+/// number next to a real one. The crypto amount and its chain are both true,
+/// so that is what the row shows.
 #[component]
 fn RecentPayments() -> impl IntoView {
-    let payments = vec![
-        (
-            "0x1a2b...3c4d",
-            "0.5 ETH",
-            "$892.50",
-            "Completed",
-            "2 min ago",
-        ),
-        (
-            "0x5e6f...7g8h",
-            "150 USDC",
-            "$150.00",
-            "Completed",
-            "15 min ago",
-        ),
-        (
-            "0x9i0j...1k2l",
-            "0.25 ETH",
-            "$446.25",
-            "Processing",
-            "32 min ago",
-        ),
-        (
-            "0x3m4n...5o6p",
-            "500 USDT",
-            "$500.00",
-            "Completed",
-            "1 hour ago",
-        ),
-        (
-            "0x7q8r...9s0t",
-            "0.1 ETH",
-            "$178.50",
-            "Completed",
-            "2 hours ago",
-        ),
-    ];
+    let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
+    let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
+    // Signals off StoreContext are Copy; take them once so the resource closure
+    // does not need to own the (non-Copy) context.
+    let selected_store_id = store_ctx.selected_store_id;
+    let store_status = store_ctx.stores_status;
+
+    // Same WebSocket trigger DashboardMetrics uses, so the list does not go
+    // stale next to counters that just moved.
+    let (ws_version, set_ws_version) = signal(0u32);
+    if let Some(ws_update) = use_context::<ReadSignal<Option<StatusUpdate>>>() {
+        Effect::new(move || {
+            if let Some(StatusUpdate::PaymentUpdate { .. }) = ws_update.get() {
+                set_ws_version.update(|n| *n = n.wrapping_add(1));
+            }
+        });
+    }
+
+    // Relative timestamps are computed at render, so a dashboard left open
+    // would otherwise say "Just now" indefinitely.
+    let tick = use_tick(RELATIVE_TIME_TICK_MS);
+
+    let payments_resource = LocalResource::new(move || {
+        let api = api.get();
+        let store_id = selected_store_id.get();
+        let stores_loaded = matches!(store_status.get(), StoresStatus::Loaded);
+        let _ = ws_version.get();
+
+        async move {
+            // Mirrors `pages/payments/list.rs` (RCS-171): "All Stores" is a
+            // real query, but only once the store list has landed, and a
+            // non-admin's 400 is a "pick a store" state rather than an error.
+            // RCS-222 is widening the server side of that; when it lands this
+            // branch simply stops being reached.
+            if store_id.is_none() && !stores_loaded {
+                return Ok(None);
+            }
+            match api
+                .list_payments(
+                    store_id.as_deref(),
+                    None,
+                    Some(RECENT_PAYMENTS_LIMIT),
+                    Some(0),
+                )
+                .await
+            {
+                Ok(response) => Ok(Some(response)),
+                Err(ApiError::Http { status: 400, .. }) if store_id.is_none() => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    });
 
     view! {
-        <div class="payments-list">
-            {payments.into_iter().map(|(tx, amount, usd, status, time)| {
-                let status_class = match status {
-                    "Completed" => "badge badge-success",
-                    "Processing" => "badge badge-warning",
-                    _ => "badge badge-secondary",
-                };
-                view! {
-                    <div class="payment-row">
-                        <div class="payment-info">
-                            <span class="payment-tx">{tx}</span>
-                            <span class="payment-time">{time}</span>
-                        </div>
-                        <div class="payment-amount">
-                            <span class="payment-crypto">{amount}</span>
-                            <span class="payment-usd">{usd}</span>
-                        </div>
-                        <span class=status_class>{status}</span>
+        <Suspense fallback=move || view! {
+            <div class="activity-note">"Loading payments…"</div>
+        }>
+            {move || payments_resource.get().map(|result| match &*result {
+                Err(e) => view! {
+                    <div class="activity-note activity-note-error">
+                        {format!("Could not load payments: {e}")}
                     </div>
+                }.into_any(),
+                // Store list still settling, or an "All Stores" read this
+                // account is not allowed to make. Either way we have no rows
+                // for a specific store, and inventing some is the bug.
+                Ok(None) => view! {
+                    <div class="activity-note">
+                        "Select a store in the sidebar to see its payments."
+                    </div>
+                }.into_any(),
+                Ok(Some(response)) if response.payments.is_empty() => view! {
+                    <div class="activity-note">
+                        "No payments yet. They appear here once an invoice receives a transaction."
+                    </div>
+                }.into_any(),
+                Ok(Some(response)) => {
+                    // Server orders by detected_at DESC, so these are already
+                    // newest first.
+                    let rows = response.payments.clone();
+                    // One clock read for the whole list, re-read on each tick.
+                    let _ = tick.get();
+                    let now_ms = js_sys::Date::now();
+
+                    view! {
+                        <div class="payments-list">
+                            {rows.into_iter().map(|payment| {
+                                let tx = truncate_hash(&payment.tx_hash, 8, 6);
+                                let when = relative_time(&payment.detected_at, now_ms)
+                                    .unwrap_or_else(|| payment.detected_at.clone());
+                                let amount = format!(
+                                    "{} {}",
+                                    format_crypto_amount(&payment.amount, payment.decimals),
+                                    payment.asset_symbol
+                                );
+                                let network = chain_name(payment.chain_id);
+                                let status = payment_status(&payment);
+                                let status_class = payment_status_class(&payment);
+                                let href = format!("/evm/payments/{}", payment.id);
+
+                                view! {
+                                    <A href=href attr:class="payment-row">
+                                        <div class="payment-info">
+                                            <span class="payment-tx">{tx}</span>
+                                            <span class="payment-time">{when}</span>
+                                        </div>
+                                        <div class="payment-amount">
+                                            <span class="payment-crypto">{amount}</span>
+                                            <span class="payment-chain">{network}</span>
+                                        </div>
+                                        <span class=status_class>{status}</span>
+                                    </A>
+                                }
+                            }).collect_view()}
+                        </div>
+                    }.into_any()
                 }
-            }).collect_view()}
-        </div>
+            })}
+        </Suspense>
     }
 }
 
@@ -553,6 +629,9 @@ fn NetworkStatus() -> impl IntoView {
 /// How often the network panel re-reads `/health/chains`, in milliseconds.
 /// Well inside the 60s TTL on the monitor's Redis keys.
 const CHAIN_HEALTH_POLL_MS: u32 = 20_000;
+
+/// How often rendered relative timestamps are recomputed, in milliseconds.
+const RELATIVE_TIME_TICK_MS: u32 = 30_000;
 
 /// A counter that increments every `interval_ms` for as long as the calling
 /// component is alive.

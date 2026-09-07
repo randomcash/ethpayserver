@@ -1826,6 +1826,10 @@ a:hover {
     border-bottom: 1px solid var(--border-color);
     transition: background var(--transition-fast);
     gap: var(--space-3);
+    /* The dashboard panel renders each row as a link to the payment; without
+       this the whole row picks up the default anchor colour and underline. */
+    color: inherit;
+    text-decoration: none;
 }
 
 @media (max-width: 600px) {
@@ -1884,7 +1888,7 @@ a:hover {
     color: var(--text-primary);
 }
 
-.payment-usd {
+.payment-chain {
     font-size: var(--text-xs);
     color: var(--text-muted);
 }

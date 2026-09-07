@@ -1,9 +1,12 @@
-//! Formatting and status helpers shared across the payments pages.
+//! Formatting and status helpers for payment rows.
+//!
+//! Shared across the payments pages and the dashboard's recent-payments panel,
+//! so a payment reads the same wherever it is shown (RCS-224).
 
 use crate::api::Payment;
 
 /// Helper to determine payment status display.
-pub(super) fn payment_status(payment: &Payment) -> &'static str {
+pub(crate) fn payment_status(payment: &Payment) -> &'static str {
     if payment.reorged {
         "reorged"
     } else if payment.confirmed_at.is_some() {
@@ -14,7 +17,7 @@ pub(super) fn payment_status(payment: &Payment) -> &'static str {
 }
 
 /// CSS class for payment status badge.
-pub(super) fn payment_status_class(payment: &Payment) -> &'static str {
+pub(crate) fn payment_status_class(payment: &Payment) -> &'static str {
     if payment.reorged {
         "badge badge-error"
     } else if payment.confirmed_at.is_some() {
@@ -25,7 +28,7 @@ pub(super) fn payment_status_class(payment: &Payment) -> &'static str {
 }
 
 /// Format ISO date string for display.
-pub(super) fn format_date(iso: &str) -> String {
+pub(crate) fn format_date(iso: &str) -> String {
     if iso.len() >= 10 {
         let date_part = &iso[..10];
         let parts: Vec<&str> = date_part.split('-').collect();
@@ -52,7 +55,7 @@ pub(super) fn format_date(iso: &str) -> String {
 }
 
 /// Truncate address/hash for display.
-pub(super) fn truncate_hash(hash: &str, prefix: usize, suffix: usize) -> String {
+pub(crate) fn truncate_hash(hash: &str, prefix: usize, suffix: usize) -> String {
     if hash.len() > prefix + suffix + 3 {
         format!("{}...{}", &hash[..prefix], &hash[hash.len() - suffix..])
     } else {
@@ -61,7 +64,7 @@ pub(super) fn truncate_hash(hash: &str, prefix: usize, suffix: usize) -> String 
 }
 
 /// Format crypto amount from smallest unit to human readable using token decimals.
-pub(super) fn format_crypto_amount(amount: &str, decimals: u8) -> String {
+pub(crate) fn format_crypto_amount(amount: &str, decimals: u8) -> String {
     if decimals == 0 {
         return amount.to_string();
     }
