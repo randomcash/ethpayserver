@@ -2706,13 +2706,30 @@ a:hover {
     color: var(--text-muted);
 }
 
-/* Responsive Visibility */
+/* Responsive Visibility
+ *
+ * `!important` here is not laziness, it is the only thing that works. These are
+ * utility classes applied alongside a component class, and the component class
+ * is defined later in this file with its own `display`:
+ *
+ *     .mobile-only     { display: none }   line 2714
+ *     .invoices-cards  { display: flex }   line 2729
+ *     .payments-cards  { display: flex }   line 3189
+ *
+ * Identical specificity (0,1,0), so source order decides and the component
+ * wins. `<div class="payments-cards mobile-only">` was therefore visible on
+ * desktop, which is why every table rendered twice: the table and the card
+ * list, one under the other, showing the same rows.
+ *
+ * The media query below already carried `!important` for the mobile direction -
+ * someone hit this and patched half of it. This is the other half.
+ */
 .desktop-only {
-    display: block;
+    display: block !important;
 }
 
 .mobile-only {
-    display: none;
+    display: none !important;
 }
 
 @media (max-width: 768px) {
@@ -2722,6 +2739,17 @@ a:hover {
 
     .mobile-only {
         display: block !important;
+    }
+
+    /* `display: block` is wrong for these two, and the utility above cannot know
+       that. Both are flex columns whose spacing comes entirely from `gap`, so
+       forcing `block` leaves the gap declared and inert: every card's border
+       sits flush against the next one. Measured before this rule existed -
+       display: block, row-gap: 12px, actual distance between cards: 0px.
+       Restoring `flex` costs nothing on desktop, where the utility hides them. */
+    .payments-cards,
+    .invoices-cards {
+        display: flex !important;
     }
 }
 

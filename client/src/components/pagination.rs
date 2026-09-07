@@ -66,6 +66,22 @@ pub fn Pagination(
     let showing_start = current_offset + 1;
     let showing_end = (current_offset + page_size).min(total);
 
+    // Bound outside the view! macro on purpose, and not merely for tidiness.
+    //
+    // Writing the comparison inline as `disabled=current_page >= total_pages`
+    // does not do what it looks like: the macro tokenises `>` as the end of the
+    // opening tag, so <button> closed right there and everything after it -
+    // `= total_pages title="Next page" on:click=…` - became TEXT inside the
+    // button. That is the stray "= total_pages title = Next page" that showed up
+    // under every table. It compiled, because text nodes are valid, and it took
+    // the on:click with it, so Next and Last did nothing at all.
+    //
+    // Parenthesising works but reads as noise and clippy removes it as
+    // `unused_parens`, which would reintroduce the bug. A binding cannot be
+    // mistaken for markup.
+    let at_first_page = current_page <= 1;
+    let at_last_page = current_page >= total_pages;
+
     let pages = page_numbers(current_page, total_pages);
 
     view! {
@@ -78,7 +94,7 @@ pub fn Pagination(
                 // First
                 <button
                     class="pagination-btn"
-                    disabled=current_page <= 1
+                    disabled=at_first_page
                     title="First page"
                     on:click=move |_| on_page_change(0)
                 >
@@ -87,7 +103,7 @@ pub fn Pagination(
                 // Previous
                 <button
                     class="pagination-btn"
-                    disabled=current_page <= 1
+                    disabled=at_first_page
                     title="Previous page"
                     on:click=move |_| on_page_change(((current_page - 2) * page_size).max(0))
                 >
@@ -121,7 +137,7 @@ pub fn Pagination(
                 // Next
                 <button
                     class="pagination-btn"
-                    disabled=current_page >= total_pages
+                    disabled=at_last_page
                     title="Next page"
                     on:click=move |_| on_page_change(current_page * page_size)
                 >
@@ -130,7 +146,7 @@ pub fn Pagination(
                 // Last
                 <button
                     class="pagination-btn"
-                    disabled=current_page >= total_pages
+                    disabled=at_last_page
                     title="Last page"
                     on:click=move |_| on_page_change((total_pages - 1) * page_size)
                 >

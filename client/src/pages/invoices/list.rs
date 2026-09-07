@@ -371,14 +371,33 @@ pub fn InvoicesPage() -> impl IntoView {
                         };
 
                         if filtered.is_empty() {
+                            let searching = !search.is_empty();
+                            let offset = current_offset.get();
                             view! {
                                 <div class="empty-state">
                                     <div class="empty-state-icon">
                                         <IconSearch />
                                     </div>
                                     <h3>"No invoices found"</h3>
-                                    <p>"Create an invoice to get started, or adjust your filters."</p>
+                                    // Same as payments: the search filters this
+                                    // page client side while the pager counts
+                                    // every page, so "no invoices" is wrong for
+                                    // someone whose match is elsewhere.
+                                    <p>{if searching {
+                                        "No invoices on this page match your search. Other pages may have matches."
+                                    } else {
+                                        "Create an invoice to get started, or adjust your filters."
+                                    }}</p>
                                 </div>
+                                // Kept, so a search that empties the current page
+                                // cannot strand the user on it.
+                                <Pagination
+                                    total=total
+                                    page_size=PAGE_SIZE
+                                    current_offset=offset
+                                    on_page_change=move |new_offset| set_current_offset.set(new_offset)
+                                    item_label="invoices"
+                                />
                             }.into_any()
                         } else {
                             let offset = current_offset.get();
