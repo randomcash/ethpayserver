@@ -5,7 +5,7 @@
  * Run with:  E2E_REMOTE=true npx playwright test tests/scout.spec.ts
  */
 import { test as base, expect, type Page, type ConsoleMessage } from '@playwright/test';
-import { setupVirtualAuthenticator } from '../fixtures/auth';
+import { setupVirtualAuthenticator, isClientPanic } from '../fixtures/auth';
 
 let scoutPage: Page;
 const issues: string[] = [];
@@ -22,11 +22,25 @@ test.describe.configure({ mode: 'serial' });
 test.beforeAll(async ({ browser }) => {
   const ctx = await browser.newContext();
   scoutPage = await ctx.newPage();
+  // A client panic is an issue(), not just a logged line. scout has collected
+  // console errors since it was written and only ever PRINTED them, which is
+  // why RCS-220 - two panics on every registration - survived for months in a
+  // suite that reported no issues. The summary asserts on non-auth issues, so
+  // recording it here is what makes it fail.
+  //
+  // Only panics. Ordinary console errors are noisy on this page (404s, the
+  // checkout WebSocket handshake) and failing on those would get this muted.
+  const notePanic = (text: string) => {
+    if (isClientPanic(text)) issue('PANIC', `WASM client panicked: ${text.split('\n')[0].trim()}`);
+  };
   scoutPage.on('console', (msg: ConsoleMessage) => {
-    if (msg.type() === 'error') consoleErrors.push(msg.text());
+    if (msg.type() !== 'error') return;
+    consoleErrors.push(msg.text());
+    notePanic(msg.text());
   });
   scoutPage.on('pageerror', (err: Error) => {
     consoleErrors.push(`UNCAUGHT: ${err.message}`);
+    notePanic(err.message);
   });
 });
 
