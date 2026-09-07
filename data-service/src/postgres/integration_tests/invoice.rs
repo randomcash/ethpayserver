@@ -165,3 +165,54 @@ async fn integration_invoice_with_metadata() {
     let metadata = fetched.metadata.unwrap();
     assert_eq!(metadata["order_id"], "12345");
 }
+
+/// RCS-222: membership scoping has to be a real WHERE clause, not just a value
+/// the handler computed and dropped.
+///
+/// The gate tests upstream prove the right *scope* comes back; this proves the
+/// query honours it. That gap is where the interesting bugs live — the binds
+/// here are positional, so a filter added in the wrong order silently applies
+/// the wrong value to the wrong column and still returns rows.
+#[tokio::test]
+#[ignore]
+async fn integration_invoice_query_scopes_to_a_set_of_stores() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    // Three stores, one invoice each, so "did it filter" and "did it filter to
+    // the right ones" are different observations.
+    let mine_a = seeded_test_invoice(&service).await;
+    let mine_b = seeded_test_invoice(&service).await;
+    let theirs = seeded_test_invoice(&service).await;
+    for inv in [&mine_a, &mine_b, &theirs] {
+        InvoiceWriter::upsert(&service, inv).await.unwrap();
+    }
+
+    let (total, rows) = InvoiceReader::query(
+        &service,
+        &InvoiceQueryParams::new().with_store_ids(vec![mine_a.store_id, mine_b.store_id]),
+    )
+    .await
+    .unwrap();
+
+    let ids: Vec<_> = rows.iter().map(|i| i.id.clone()).collect();
+    assert!(ids.contains(&mine_a.id), "own store's invoice must appear");
+    assert!(ids.contains(&mine_b.id), "own store's invoice must appear");
+    assert!(
+        !ids.contains(&theirs.id),
+        "an invoice from a store outside the set must not appear"
+    );
+    assert_eq!(
+        total, 2,
+        "the count query must carry the same filter as the data query; \
+         a mismatch here is what makes pagination lie"
+    );
+
+    // The empty case is the one that matters most: it must filter everything
+    // out, not degrade into an unfiltered read of every store on the server.
+    let (empty_total, empty_rows) =
+        InvoiceReader::query(&service, &InvoiceQueryParams::new().with_store_ids(vec![]))
+            .await
+            .unwrap();
+    assert_eq!(empty_total, 0, "no memberships must mean no rows");
+    assert!(empty_rows.is_empty(), "no memberships must mean no rows");
+}

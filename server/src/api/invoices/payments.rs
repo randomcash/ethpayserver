@@ -10,7 +10,7 @@ use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
 use super::{
-    InvoiceStatusResponse, ListPaymentsQuery, PaymentListResponse, PaymentResponse,
+    InvoiceStatusResponse, ListPaymentsQuery, PaymentListResponse, PaymentResponse, StoreScope,
     get_invoice_with_permission, resolve_store_names, verify_store_access_for_query,
 };
 use crate::api::extractors::AuthenticatedUser;
@@ -78,11 +78,10 @@ pub async fn list_payments<A>(
 where
     A: SessionService + 'static,
 {
-    // Resolve the store scope once. `Some` is membership-checked, `None` means
-    // every store and is admin-only. See verify_store_access_for_query - the
-    // Option is load-bearing, a nil-UUID sentinel here was RCS-211.
-    let store_id =
-        verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    // Resolve the store scope once: one store (membership-checked), the
+    // caller's own stores, or the whole server for an admin. The distinction is
+    // load-bearing - a nil-UUID sentinel here was RCS-211.
+    let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
 
     let mut params = PaymentQueryParams::new();
 
@@ -103,9 +102,9 @@ where
     }
 
     // `None` is an admin querying every store, so no store filter is applied.
-    if let Some(store_id) = store_id {
-        params = params.with_store_id(store_id);
-    }
+    // Only StoreScope::All leaves the query unfiltered, and only an admin gets
+    // it. A merchant with no store_id is filtered to their own memberships.
+    params = scope.apply_payment(params);
 
     let (total, payments) = PaymentReader::query(&*state.data_service, &params)
         .await
@@ -123,12 +122,15 @@ where
     // were handed. Only the admin all-stores page genuinely has to ask - and it
     // asks for every distinct invoice concurrently rather than one after
     // another, so the cost is one round trip of latency instead of N.
-    let store_of_invoice: std::collections::HashMap<String, ::types::StoreId> = match store_id {
-        Some(scope) => payments
+    // Only StoreScope::One can skip the lookups: it is the single case where
+    // every row is known to share one store. Membership scoping spans stores
+    // just like the admin view, so it has to ask (RCS-222).
+    let store_of_invoice: std::collections::HashMap<String, ::types::StoreId> = match &scope {
+        StoreScope::One(store_id) => payments
             .iter()
-            .map(|payment| (payment.invoice_id.0.clone(), scope))
+            .map(|payment| (payment.invoice_id.0.clone(), *store_id))
             .collect(),
-        None => {
+        StoreScope::Membership(_) | StoreScope::All => {
             let unique: std::collections::BTreeSet<&str> = payments
                 .iter()
                 .map(|payment| payment.invoice_id.0.as_str())

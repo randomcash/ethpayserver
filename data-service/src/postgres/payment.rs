@@ -10,6 +10,30 @@ use types::{AssetType, InvoiceId, PaymentData, PaymentQueryParams};
 
 use super::PgDataService;
 
+/// Bind the payment filter values in exactly the order the WHERE clause names
+/// them.
+///
+/// Extracted so the count query and the data query cannot drift apart. These
+/// binds are positional: one list missing a value shifts every later filter
+/// onto the wrong placeholder, which does not fail — it silently answers a
+/// different question. Two hand-maintained copies of the same sequence is how
+/// that happens, so there is now one (RCS-222).
+fn bind_payment_filters<'q>(
+    mut query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    params: &'q PaymentQueryParams,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    if let Some(store_id) = params.store_id {
+        query = query.bind(store_id.0);
+    }
+    if let Some(ref store_ids) = params.store_ids {
+        query = query.bind(store_ids.iter().map(|s| s.0).collect::<Vec<_>>());
+    }
+    if let Some(ref invoice_id) = params.invoice_id {
+        query = query.bind(invoice_id.as_str());
+    }
+    query
+}
+
 /// Convert AssetType to database string.
 fn asset_type_to_db(asset_type: AssetType) -> &'static str {
     match asset_type {
@@ -118,10 +142,19 @@ impl PaymentReader for PgDataService {
         // Build dynamic WHERE clause
         let mut conditions = Vec::new();
         let mut bind_idx = 1;
-        let needs_join = params.store_id.is_some();
+        // Either store filter needs the invoices join - payments carry no
+        // store_id of their own (RCS-222).
+        let needs_join = params.store_id.is_some() || params.store_ids.is_some();
 
         if params.store_id.is_some() {
             conditions.push(format!("i.store_id = ${}", bind_idx));
+            bind_idx += 1;
+        }
+        // Membership scoping. An empty list matches nothing, which is the
+        // correct answer for a caller who belongs to no store - it must not
+        // collapse into "no filter". Binds below repeat this order exactly.
+        if params.store_ids.is_some() {
+            conditions.push(format!("i.store_id = ANY(${})", bind_idx));
             bind_idx += 1;
         }
         if params.invoice_id.is_some() {
@@ -174,13 +207,7 @@ impl PaymentReader for PgDataService {
         );
 
         // Bind parameters to count query
-        let mut count_query = sqlx::query(&count_sql);
-        if let Some(store_id) = params.store_id {
-            count_query = count_query.bind(store_id.0);
-        }
-        if let Some(ref invoice_id) = params.invoice_id {
-            count_query = count_query.bind(invoice_id.as_str());
-        }
+        let count_query = bind_payment_filters(sqlx::query(&count_sql), params);
 
         let count_row = count_query
             .fetch_one(&self.pool)
@@ -189,14 +216,9 @@ impl PaymentReader for PgDataService {
         let total: i64 = count_row.get("count");
 
         // Bind parameters to data query
-        let mut data_query = sqlx::query(&data_sql);
-        if let Some(store_id) = params.store_id {
-            data_query = data_query.bind(store_id.0);
-        }
-        if let Some(ref invoice_id) = params.invoice_id {
-            data_query = data_query.bind(invoice_id.as_str());
-        }
-        data_query = data_query.bind(params.limit).bind(params.offset);
+        let data_query = bind_payment_filters(sqlx::query(&data_sql), params)
+            .bind(params.limit)
+            .bind(params.offset);
 
         let rows = data_query
             .fetch_all(&self.pool)

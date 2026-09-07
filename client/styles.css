@@ -3776,6 +3776,34 @@ a:hover {
     margin-top: var(--space-4);
 }
 
+/* Not inside a layout container that already provides its own `gap`. There the
+   stacked-form margin above is not merely redundant, it pushes every second
+   field 16px below the first:
+
+     .form-row      Amount vs Currency in the create-invoice modal
+     .settings-grid Account Created vs Last Login in Settings > Account
+
+   Both were reported as "slightly down", and both are this one rule.
+   `.form-row > .form-group` already says `margin-top: 0`, but that rule and the
+   one above have identical specificity (0,2,0), so it loses on source order and
+   has never applied. These are child+sibling (0,3,0) and win wherever they sit,
+   rather than depending on where the next rule gets added.
+
+   Extend this list when a new gap-based container starts holding .form-groups;
+   CSS cannot ask whether a parent set a gap. */
+.form-row > .form-group + .form-group,
+.settings-grid > .form-group + .form-group {
+    margin-top: 0;
+}
+
+/* An <input> and a <select> carrying the same class rendered 34px and 36px:
+   identical padding, border and box-sizing, but a select's intrinsic content
+   box is taller. Side by side that reads as one control sagging. Pin the height
+   so anything styled .form-input is the same height as everything else. */
+.form-input {
+    min-height: 36px;
+}
+
 .form-label {
     font-size: var(--text-sm);
     font-weight: 500;
