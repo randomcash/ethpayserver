@@ -13,8 +13,25 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   workers: 1,
+  // `list` first in CI too. The html reporter writes a file and prints nothing
+  // until the run ends, so a job killed at its timeout-minutes cap produced 30
+  // minutes of total silence and no way to tell which test was hanging - the
+  // log had not one line of Playwright output.
+  //
+  // `list` alone still would not name the hanging test: onTestBegin returns
+  // early when the output is not a TTY, and an Actions log is not one, so only
+  // finished tests print. The workflow sets PLAYWRIGHT_LIST_PRINT_STEPS=1,
+  // which makes onStepEnd print regardless of TTY - progress from *inside* the
+  // running test, which is what a hang needs. `line` is not the answer here: it
+  // emits cursor-control escapes that render as garbage in a non-TTY log.
+  //
+  // Deliberately no `github` reporter. The E2E job is skipped on pull_request
+  // (it is gated on refs/heads/*), so annotations could never reach a PR diff,
+  // and on testnet pushes the suite is knowingly red under continue-on-error
+  // (RCS-192) - it would stamp ~56 error annotations on every push for failures
+  // already tracked. It belongs in the commit that removes continue-on-error.
   reporter: process.env.CI
-    ? [['html', { open: 'never' }], ['./perf-reporter.ts']]
+    ? [['list'], ['html', { open: 'never' }], ['./perf-reporter.ts']]
     : [['list'], ['./perf-reporter.ts']],
   timeout: REMOTE ? 60_000 : 30_000,
   use: {

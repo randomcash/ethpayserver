@@ -308,12 +308,16 @@ jobs:
         working-directory: e2e
         run: npm ci && npx playwright install --with-deps chromium
 
+      # Steps print regardless of TTY; plain `list` only prints tests as they
+      # FINISH, so a job killed at the 30-minute cap would name the last
+      # completed test and never the one actually hanging.
       - name: Run E2E tests
         working-directory: e2e
         env:
           E2E_API_URL: http://127.0.0.1:3000
           E2E_BASE_URL: http://127.0.0.1:8080
           E2E_DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
+          PLAYWRIGHT_LIST_PRINT_STEPS: "1"
         run: npx playwright test
 
       - name: Upload report
