@@ -135,6 +135,16 @@ async function waitForPaid(
   }
 }
 
+/**
+ * What the cleanup hook needs, published the moment it exists (RCS-233).
+ *
+ * The hook cannot read the test's locals: the run this cleanup matters most
+ * for is the one that threw, and by then that scope is gone. Module scope is
+ * the only place the test body and the hook both see.
+ */
+let createdStoreId: string | null = null;
+let apiToken: string | null = null;
+
 test.describe('Synthetic payment (live testnet)', () => {
   // A retry would broadcast a second transaction and leave the first invoice
   // half-paid, so this suite never retries even when the rest of CI does.
@@ -144,12 +154,61 @@ test.describe('Synthetic payment (live testnet)', () => {
     'Set E2E_SYNTHETIC_PAYMENT=true to run the on-chain payment test (spends testnet ETH)',
   );
 
+  /**
+   * Remove the store this run created (RCS-233).
+   *
+   * Without this the daily schedule left one store behind per day, forever.
+   * The case that has to work is the *failing* one — waiting on an on-chain
+   * payment is what fails here — so this is a hook rather than anything in the
+   * test body, which a throw skips straight past.
+   *
+   * `afterEach` rather than `afterAll` because it is the hook that is told
+   * whether the test passed, and the suite holds exactly one test, so it still
+   * runs exactly once.
+   *
+   * A cleanup failure only fails the run when the test itself passed. On an
+   * already-failed run it is announced but not rethrown: a leaked store must
+   * never become the reported cause and bury the payment failure underneath
+   * it. Announced either way — swallowing it quietly would restore the
+   * original bug in a form nobody can see, which is the whole point of this
+   * ticket.
+   *
+   * `DELETE /stores/{id}` archives rather than deletes (`archive_store` in
+   * `server/src/api/stores/crud.rs`), so a failed run's invoice and payments
+   * stay readable for the post-mortem; the store only leaves the store list.
+   */
+  test.afterEach(async ({}, testInfo) => {
+    const storeId = createdStoreId;
+    createdStoreId = null;
+    if (!storeId || !apiToken) return;
+
+    try {
+      await api(`/stores/${storeId}`, { method: 'DELETE', token: apiToken });
+      console.log(`cleaned up store ${storeId}`);
+      return;
+    } catch (err) {
+      const msg =
+        `Failed to clean up synthetic-payment store ${storeId}: ${err}. ` +
+        `It is still on the server and will stay there — delete it with ` +
+        `\`node scripts/sweep-e2e-stores.mjs --execute\` (RCS-233).`;
+      console.log(`::error title=Synthetic payment store leaked::${msg}`);
+      if (process.env.GITHUB_STEP_SUMMARY) {
+        appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### \u274c Store leaked\n\n${msg}\n`);
+      }
+      if (testInfo.status === testInfo.expectedStatus) throw new Error(msg);
+      console.log(
+        'Not failing the run on this: the test had already failed, and that is the story.',
+      );
+    }
+  });
+
   test('invoice → on-chain tx → paid → webhook', async () => {
     test.setTimeout(RECEIPT_TIMEOUT_MS + PAID_TIMEOUT_MS + WEBHOOK_TIMEOUT_MS + 5 * 60_000);
 
     const mnemonic = requireEnv('E2E_TEST_MNEMONIC', 'BIP39 phrase for the merchant xpub + spender');
     const token = requireEnv('E2E_API_TOKEN', 'API key (ak_...) that may create stores and invoices');
     const rpcUrl = requireEnv('E2E_SEPOLIA_RPC_URL', 'Sepolia RPC endpoint to broadcast from');
+    apiToken = token;
 
     const merchantXpub = HDKey.fromMasterSeed(mnemonicToSeedSync(mnemonic)).derive(MERCHANT_PATH)
       .publicExtendedKey;
@@ -195,14 +254,19 @@ test.describe('Synthetic payment (live testnet)', () => {
       console.log(`webhook sink listening on :${sink.port}, public at ${sink.publicUrl}`);
 
       // Fresh store per run: the derivation index advances per payment method,
-      // so reusing one would couple today's run to yesterday's state. Stores are
-      // left behind on purpose — a failed run's invoice is the evidence.
+      // so reusing one would couple today's run to yesterday's state. The
+      // afterEach hook above removes it again — keep the name on the
+      // `e2e-synthetic-` prefix that `scripts/sweep-e2e-stores.mjs` matches, so
+      // a run that dies before cleanup is still findable (RCS-233).
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const store = await api<{ id: string }>('/stores', {
         method: 'POST',
         token,
         body: { name: `e2e-synthetic-${stamp}` },
       });
+      // Published before anything else can throw: everything below this line
+      // fails often, and each of those failures used to leak the store.
+      createdStoreId = store.id;
 
       await api(`/stores/${store.id}/payment-methods`, {
         method: 'POST',
