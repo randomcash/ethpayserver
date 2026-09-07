@@ -50,9 +50,16 @@ jobs:
 
       # Only the specs that can actually pass against a remote origin. The
       # other five (stores, invoices, payment-methods, webhooks,
-      # ui-interactions) all build on the `registeredPage` fixture, and the
-      # WebAuthn virtual authenticator's RP ID is `localhost`, so passkey
-      # registration cannot succeed against testnet.random.cash (e2e/README.md).
+      # ui-interactions) all build on the `registeredPage` fixture.
+      #
+      # This used to say passkey registration "cannot succeed against
+      # testnet.random.cash" because the virtual authenticator's RP ID is
+      # localhost. That was wrong: addVirtualAuthenticator has no RP ID, the
+      # server logs rp_id=testnet.random.cash, and a single registration against
+      # live testnet completes end to end. The real limit is rate limiting - the
+      # auth tier allows 5 req/min/IP, so a spec that registers repeatedly gets
+      # 429s (see e2e/README.md).
+      #
       # Running the full suite here would fail from the first scheduled run,
       # ping healthchecks /fail every morning and file a testnet-is-failing
       # issue daily — desensitising the dead-man's switch before it ever

@@ -43,7 +43,12 @@ export async function register(page: Page): Promise<RecoveryCredentials> {
   // Fill username if a text input is present in the passkey form
   const usernameInput = page.locator('.ps-passkey-form input:not([type="hidden"]):not([type="checkbox"])');
   if (await usernameInput.isVisible({ timeout: 1_000 }).catch(() => false)) {
-    await usernameInput.fill(`e2e_user_${Date.now()}`);
+    // Date.now() alone collides when parallel workers register in the same
+    // millisecond. That was harmless while every run started from a reset
+    // database; now that this spec runs against shared environments, a
+    // collision would surface as a confusing duplicate-account failure.
+    const unique = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    await usernameInput.fill(`e2e_user_${unique}`);
   }
 
   // Trigger passkey creation — the virtual authenticator handles the prompt
@@ -81,7 +86,25 @@ export async function register(page: Page): Promise<RecoveryCredentials> {
   // run against nothing - passing silently as coverage, which is the outcome
   // this work exists to avoid. So: throw rather than skip.
   const wordLocator = page.locator('.ps-mnemonic-word');
-  await wordLocator.first().waitFor({ state: 'visible', timeout: 10_000 });
+  try {
+    await wordLocator.first().waitFor({ state: 'visible', timeout: 10_000 });
+  } catch {
+    // A bare "waitFor timed out" says nothing about why. Registration can fail
+    // for reasons the page states plainly - a 429 from the auth rate limit is
+    // the one that actually bit - so surface that text instead of the timeout.
+    const shown = (
+      await page
+        .locator('.ps-auth-error, [class*="error"]')
+        .first()
+        .textContent({ timeout: 1_000 })
+        .catch(() => null)
+    )?.trim();
+    throw new Error(
+      shown
+        ? `registration did not reach the recovery screen: ${shown}`
+        : 'registration did not reach the recovery screen and reported no error',
+    );
+  }
 
   const words = await wordLocator.all();
   for (const [i, word] of words.entries()) {

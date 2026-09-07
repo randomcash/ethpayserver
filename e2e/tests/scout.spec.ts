@@ -49,6 +49,29 @@ async function goto(path: string) {
   await scoutPage.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
 }
 
+/**
+ * `goto` for the authenticated tests, which all assume a live session.
+ *
+ * When the session is gone the app renders the Sign In page, so every
+ * `.sidebar-link` / `.user-menu-trigger` the test then reaches for is simply
+ * absent. playwright.config sets no `actionTimeout`, so the first `click()` on
+ * one of those waits until the TEST times out — 60s of nothing, and because
+ * this suite is serial, every later test is abandoned. That is how one lost
+ * session cost 11 of 22 tests and reported no cause; the scout exists to name
+ * problems in one line, not to hang on them.
+ *
+ * So check once, here, and turn it into a normal skip: the issue is recorded,
+ * the rest of the suite still runs, and the summary still prints.
+ */
+async function gotoAuthed(path: string) {
+  await goto(path);
+  const signIn = scoutPage.locator('h1', { hasText: /sign in/i });
+  if (await signIn.isVisible({ timeout: 2_000 }).catch(() => false)) {
+    issue('SESSION', `Bounced to Sign In on ${path} — session was lost after registration`);
+    test.skip(true, 'Session lost — see the SESSION issue in the summary');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Unauthenticated flows — these always run
 // ---------------------------------------------------------------------------
@@ -183,7 +206,11 @@ test.describe('Auth & Authenticated', () => {
     // Fill username if present
     const usernameInput = scoutPage.locator('.ps-passkey-form input:not([type="hidden"]):not([type="checkbox"])');
     if (await usernameInput.isVisible({ timeout: 1_000 }).catch(() => false)) {
-      await usernameInput.fill(`scout_${Date.now()}`);
+      // Random suffix as well as a timestamp: this spec targets shared
+      // environments, where a same-millisecond collision would surface as a
+      // confusing duplicate-account failure rather than a clean one.
+      const unique = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      await usernameInput.fill(`scout_${unique}`);
     }
 
     // Take screenshot before clicking
@@ -193,28 +220,55 @@ test.describe('Auth & Authenticated', () => {
     const createBtn = scoutPage.locator('.ps-passkey-button');
     await createBtn.click();
 
-    // Wait for any error message or recovery step
-    await scoutPage.waitForTimeout(3_000);
+    // No blind sleep here: the race below waits on a real signal instead, and
+    // 3s of fixed delay only ate budget the diagnostics need.
 
     // Check for errors
     const errorAlert = scoutPage.locator('.ps-auth-error, .ps-alert-error, [class*="error"]');
     const errorTexts: string[] = [];
     const errorCount = await errorAlert.count();
     for (let i = 0; i < errorCount; i++) {
-      const text = await errorAlert.nth(i).textContent().catch(() => '');
+      const text = await errorAlert.nth(i).textContent({ timeout: 2_000 }).catch(() => '');
       if (text && text.trim()) errorTexts.push(text.trim());
     }
     if (errorTexts.length > 0) {
       issue('REGISTER', `Error after passkey creation: ${errorTexts.join(' | ')}`);
     }
 
-    // Handle recovery step. Accepts both shapes: "Skip for Now" where it still
-    // exists, and the confirm path that replaces it (RCS-214).
-    const skipButton = scoutPage.locator('.ps-button-ghost, button', { hasText: /skip/i });
+    // Handle the recovery step, which registration now REQUIRES (RCS-214) -
+    // "Skip for Now" is gone from the default flow, so the confirm path is the
+    // only way through.
+    //
+    // The 5s budget this used was the actual cause of the remote failure in #56,
+    // reported there as "passkey registration does not establish a session".
+    // Registration succeeds; it parks on the recovery screen, and against a
+    // remote server the passkey round trip takes longer than 5s to get there.
+    // Both isVisible checks then returned false, the step was silently skipped,
+    // registration never completed, and the run ended on Sign In - which reads
+    // exactly like a failed login. fixtures/auth.ts already carries a comment
+    // about this same 5s trap; scout kept it.
+    //
+    // Verified against live testnet on 2026-09-06: with a proper wait, start ->
+    // complete -> /auth/me all return 200 and the session is established.
+    // Budget matters. playwright.config allows 30s per test locally and 60s
+    // remotely, and this test still needs ~10s afterwards for the URL assertion
+    // and screenshots. A 30s wait would consume the local budget and time the
+    // test out INSTEAD of producing the issue() diagnostics scout exists for -
+    // and CI runs this suite against localhost on every push to testnet. 15s is
+    // comfortably past the round trip that defeated the old 5s wait.
+    //
+    // No "Skip for Now" branch: RCS-214 removed that button, so matching it could
+    // only burn the timeout, and its broad `button` selector risked clicking an
+    // unrelated button once the dashboard had rendered.
     const savedButton = scoutPage.locator('.ps-button-primary', { hasText: /written it down/i });
-    if (await skipButton.isVisible({ timeout: 5_000 }).catch(() => false)) {
-      await skipButton.click();
-    } else if (await savedButton.isVisible({ timeout: 5_000 }).catch(() => false)) {
+    const settledUrl = /\/(evm)?$/;
+
+    await Promise.race([
+      scoutPage.waitForURL(settledUrl, { timeout: 15_000 }).catch(() => {}),
+      savedButton.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {}),
+    ]);
+
+    if (await savedButton.isVisible().catch(() => false)) {
       await savedButton.click();
       await scoutPage.locator('.ps-checkbox').check();
       await scoutPage.locator('.ps-button-primary', { hasText: /complete setup/i }).click();
@@ -231,7 +285,7 @@ test.describe('Auth & Authenticated', () => {
       issue('REGISTER', `Registration did not redirect to dashboard. Final URL: ${scoutPage.url()}`);
 
       // Try to see what page we ended up on
-      const pageText = await scoutPage.locator('body').textContent().catch(() => '');
+      const pageText = await scoutPage.locator('body').textContent({ timeout: 2_000 }).catch(() => '');
       if (pageText?.includes('Sign In')) {
         issue('REGISTER', 'Ended up on login page — session not created after registration');
       }
@@ -242,7 +296,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('dashboard loads', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm');
+    await gotoAuthed('/evm');
 
     if (!await scoutPage.locator('.dashboard-header, .page-title').first().isVisible({ timeout: 10_000 }).catch(() => false)) {
       issue('DASHBOARD', 'Dashboard header not visible');
@@ -263,7 +317,15 @@ test.describe('Auth & Authenticated', () => {
     }
 
     // WebSocket indicator
-    const wsLabel = await scoutPage.locator('.ws-indicator-label').textContent().catch(() => '');
+    // Explicit timeout, like every textContent in this file. playwright.config
+    // sets no actionTimeout, so an element that never appears makes textContent
+    // wait until the TEST times out - the .catch never runs, and scout reports a
+    // 60s timeout instead of the issue() it exists to record. That is what made
+    // `dashboard loads` fail: .ws-indicator-label is absent on this deployment.
+    const wsLabel = await scoutPage
+      .locator('.ws-indicator-label')
+      .textContent({ timeout: 2_000 })
+      .catch(() => '');
     if (wsLabel === 'Offline') {
       issue('WEBSOCKET', 'Shows Offline on live site');
     }
@@ -298,7 +360,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('user menu interactions', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm');
+    await gotoAuthed('/evm');
 
     const trigger = scoutPage.locator('.user-menu-trigger');
     const dropdown = scoutPage.locator('.user-menu-dropdown');
@@ -327,7 +389,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('event listener leak check', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm');
+    await gotoAuthed('/evm');
 
     const trigger = scoutPage.locator('.user-menu-trigger');
     const client = await scoutPage.context().newCDPSession(scoutPage);
@@ -371,7 +433,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('create invoice modal', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm');
+    await gotoAuthed('/evm');
 
     // Scoped to the header: the modal's own submit button carries the same
     // label, so an unscoped match is a strict-mode violation.
@@ -402,7 +464,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('stores page', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm/stores');
+    await gotoAuthed('/evm/stores');
 
     if (!await scoutPage.locator('.page-title').isVisible({ timeout: 10_000 }).catch(() => false)) {
       issue('STORES', 'Title not visible');
@@ -416,7 +478,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('invoices page', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm/invoices');
+    await gotoAuthed('/evm/invoices');
 
     if (!await scoutPage.locator('.page-title').isVisible({ timeout: 10_000 }).catch(() => false)) {
       issue('INVOICES', 'Title not visible');
@@ -430,7 +492,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('payments page', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm/payments');
+    await gotoAuthed('/evm/payments');
 
     if (!await scoutPage.locator('.page-title').isVisible({ timeout: 10_000 }).catch(() => false)) {
       issue('PAYMENTS', 'Title not visible');
@@ -439,7 +501,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('wallets page', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm/wallets');
+    await gotoAuthed('/evm/wallets');
 
     if (!await scoutPage.locator('.page-title').isVisible({ timeout: 10_000 }).catch(() => false)) {
       issue('WALLETS', 'Title not visible');
@@ -453,7 +515,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('settings page tabs', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm/settings');
+    await gotoAuthed('/evm/settings');
 
     const tabs = scoutPage.locator('.settings-tab');
     const count = await tabs.count();
@@ -462,7 +524,7 @@ test.describe('Auth & Authenticated', () => {
     }
 
     for (let i = 0; i < count; i++) {
-      const label = await tabs.nth(i).textContent().catch(() => '');
+      const label = await tabs.nth(i).textContent({ timeout: 2_000 }).catch(() => '');
       await tabs.nth(i).click();
       await scoutPage.waitForTimeout(500);
       const content = scoutPage.locator('.settings-tab-content, .detail-card');
@@ -474,7 +536,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('404 page', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm/nonexistent');
+    await gotoAuthed('/evm/nonexistent');
 
     if (!await scoutPage.locator('.evm-not-found').isVisible({ timeout: 5_000 }).catch(() => false)) {
       issue('404', 'Not-found page did not render');
@@ -501,7 +563,7 @@ test.describe('Auth & Authenticated', () => {
 
   test('cross-component stress', async () => {
     test.skip(!authenticated, 'Registration failed');
-    await goto('/evm');
+    await gotoAuthed('/evm');
 
     const menu = scoutPage.locator('.user-menu-trigger');
     const store = scoutPage.locator('.store-selector-btn');

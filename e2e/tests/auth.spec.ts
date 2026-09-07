@@ -1,12 +1,37 @@
 import { test, expect, register, login } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
 
+// Skipped remotely, and the reason matters because two previous ones were wrong.
+//
+// NOT the RP ID. The README claimed the virtual authenticator's RP ID
+// ("localhost") could not match a remote domain, but
+// `WebAuthn.addVirtualAuthenticator` has no RP ID parameter - it comes from the
+// page's origin at credentials.create() time. The server agrees, logging
+// `rp_id=testnet.random.cash` at startup, and a single registration against live
+// testnet completes end to end: start -> complete -> /auth/me all 200, session
+// stored. Verified 2026-09-06.
+//
+// NOT resetDatabase() either. fixtures/db.ts returns early when E2E_REMOTE is
+// true, so it was already a no-op remotely and could not have blocked anything.
+//
+// The actual blocker is RATE LIMITING. The auth tier allows 5 requests per
+// minute per IP (RATE_LIMIT_AUTH, server/src/api/rate_limit.rs), and this spec
+// performs five registrations plus a login in well under a minute. Running it
+// remotely gives `HTTP 429: Too many requests` and three of five tests fail -
+// measured, not assumed. scout.spec.ts registers once, which is why it passes
+// remotely and this does not.
+//
+// Lifting this needs a decision, not a flag: either the spec paces itself under
+// 5/min, or test runs get a higher limit. Tracked separately.
 const SKIP_AUTH = process.env.E2E_SKIP_AUTH
   ? process.env.E2E_SKIP_AUTH === 'true'
   : process.env.E2E_REMOTE === 'true';
 
 test.describe('Authentication', () => {
-  test.skip(() => SKIP_AUTH, 'Skipped: passkey origin mismatch in remote mode (E2E_SKIP_AUTH)');
+  test.skip(() => SKIP_AUTH, 'Skipped: auth endpoints rate-limit at 5/min/IP (see header)');
+
+  // Local hygiene only - fixtures/db.ts makes this a no-op when E2E_REMOTE is
+  // set, so it never touches a shared database.
   test.beforeAll(async () => {
     await resetDatabase();
   });
