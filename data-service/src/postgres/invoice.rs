@@ -52,6 +52,15 @@ impl InvoiceReader for PgDataService {
             conditions.push(format!("store_id = ${}", bind_idx));
             bind_idx += 1;
         }
+        // Membership scoping (RCS-222). Separate from `store_id`, and an empty
+        // list stays a filter that matches nothing rather than becoming no
+        // filter at all - a caller who belongs to no store must see no rows,
+        // not every row. Every bind block below repeats this in the same order;
+        // the binds are positional, so order is the correctness condition.
+        if params.store_ids.is_some() {
+            conditions.push(format!("store_id = ANY(${})", bind_idx));
+            bind_idx += 1;
+        }
         if params.status.is_some() {
             conditions.push(format!("status = ${}::invoice_status", bind_idx));
             bind_idx += 1;
@@ -99,6 +108,9 @@ impl InvoiceReader for PgDataService {
         if let Some(store_id) = params.store_id {
             count_query = count_query.bind(store_id.0);
         }
+        if let Some(ref store_ids) = params.store_ids {
+            count_query = count_query.bind(store_ids.iter().map(|s| s.0).collect::<Vec<_>>());
+        }
         if let Some(status) = params.status {
             count_query = count_query.bind(status_to_db(status));
         }
@@ -122,6 +134,9 @@ impl InvoiceReader for PgDataService {
         let mut data_query = sqlx::query(&data_sql);
         if let Some(store_id) = params.store_id {
             data_query = data_query.bind(store_id.0);
+        }
+        if let Some(ref store_ids) = params.store_ids {
+            data_query = data_query.bind(store_ids.iter().map(|s| s.0).collect::<Vec<_>>());
         }
         if let Some(status) = params.status {
             data_query = data_query.bind(status_to_db(status));

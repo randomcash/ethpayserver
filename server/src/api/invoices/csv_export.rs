@@ -9,11 +9,11 @@ use futures::StreamExt;
 use std::sync::Arc;
 
 use ::types::{
-    InvoiceQueryParams, InvoiceReader, InvoiceStatus, PaymentQueryParams, PaymentReader, StoreId,
+    InvoiceQueryParams, InvoiceReader, InvoiceStatus, PaymentQueryParams, PaymentReader,
 };
 use auth::SessionService;
 
-use super::{ListInvoicesQuery, ListPaymentsQuery, verify_store_access_for_query};
+use super::{ListInvoicesQuery, ListPaymentsQuery, StoreScope, verify_store_access_for_query};
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
@@ -56,14 +56,11 @@ pub(crate) fn csv_row(fields: &[&str]) -> String {
 
 /// Build invoice query params from filter fields (shared by list and export).
 fn build_invoice_filter_params(
-    store_id: Option<StoreId>,
+    scope: &StoreScope,
     status: Option<&str>,
     currency: Option<&str>,
 ) -> Result<InvoiceQueryParams, StatusCode> {
-    let mut params = InvoiceQueryParams::new();
-    if let Some(sid) = store_id {
-        params = params.with_store_id(sid);
-    }
+    let mut params = scope.apply_invoice(InvoiceQueryParams::new());
     if let Some(s) = status {
         let parsed: InvoiceStatus = s.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
         params = params.with_status(parsed);
@@ -76,13 +73,10 @@ fn build_invoice_filter_params(
 
 /// Build payment query params from filter fields (shared by list and export).
 fn build_payment_filter_params(
-    store_id: Option<StoreId>,
+    scope: &StoreScope,
     status: Option<&str>,
 ) -> Result<PaymentQueryParams, StatusCode> {
-    let mut params = PaymentQueryParams::new();
-    if let Some(sid) = store_id {
-        params = params.with_store_id(sid);
-    }
+    let mut params = scope.apply_payment(PaymentQueryParams::new());
     if let Some(s) = status {
         match s {
             "confirmed" => params = params.with_confirmed(true),
@@ -106,10 +100,9 @@ pub async fn export_invoices_csv<A>(
 where
     A: SessionService + 'static,
 {
-    let store_id =
-        verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
     let base_params =
-        build_invoice_filter_params(store_id, query.status.as_deref(), query.currency.as_deref())?;
+        build_invoice_filter_params(&scope, query.status.as_deref(), query.currency.as_deref())?;
 
     // Count total matching rows.
     let count_params = base_params.clone().with_limit(1).with_offset(0);
@@ -130,9 +123,12 @@ where
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    let store_label = store_id
-        .map(|s| s.0.to_string())
-        .unwrap_or_else(|| "all".to_string());
+    // "all" covers both the admin's whole-server export and a merchant's
+    // across-my-stores one; neither names a single store (RCS-222).
+    let store_label = match &scope {
+        StoreScope::One(s) => s.0.to_string(),
+        _ => "all".to_string(),
+    };
     let date = Utc::now().format("%Y%m%d");
     let filename = format!("invoices_{}_{}.csv", store_label, date);
 
@@ -235,9 +231,8 @@ pub async fn export_payments_csv<A>(
 where
     A: SessionService + 'static,
 {
-    let store_id =
-        verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
-    let base_params = build_payment_filter_params(store_id, query.status.as_deref())?;
+    let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    let base_params = build_payment_filter_params(&scope, query.status.as_deref())?;
 
     let count_params = base_params.clone().with_limit(1).with_offset(0);
     let (total, _) = PaymentReader::query(&*state.data_service, &count_params)
@@ -257,9 +252,12 @@ where
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    let store_label = store_id
-        .map(|s| s.0.to_string())
-        .unwrap_or_else(|| "all".to_string());
+    // "all" covers both the admin's whole-server export and a merchant's
+    // across-my-stores one; neither names a single store (RCS-222).
+    let store_label = match &scope {
+        StoreScope::One(s) => s.0.to_string(),
+        _ => "all".to_string(),
+    };
     let date = Utc::now().format("%Y%m%d");
     let filename = format!("payments_{}_{}.csv", store_label, date);
 
