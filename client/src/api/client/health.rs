@@ -18,6 +18,12 @@ impl EvmApiClient {
     /// `/health` is exempt from the IP rate limit tiers
     /// (`server/src/api/rate_limit.rs`), so polling this is safe.
     pub async fn get_chains_health(&self) -> Result<ChainsHealthResponse, ApiError> {
-        self.get("/health/chains").await
+        // "/api/health/chains", not "/health/chains". EvmApiClient is built with
+        // an EMPTY base_url (app/layout.rs), so every path here is absolute and
+        // carries its own "/api" - see every other method. Without it the
+        // request never reaches the server: nginx serves the SPA fallback for
+        // unknown paths, the client parses index.html as JSON, and the panel
+        // shows "Parse error: expected value at line 1 column 1".
+        self.get("/api/health/chains").await
     }
 }
