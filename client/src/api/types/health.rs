@@ -12,8 +12,10 @@ pub struct ChainHealthInfo {
     pub chain_id: u64,
     /// Human-readable chain name as the monitor reports it.
     pub chain_name: String,
-    /// Connection status: "connected", "connecting", "disconnected", or
-    /// "failed: {reason}" — the failure variant carries the reason inline.
+    /// Connection status: "connected", "connecting", "disconnected" or
+    /// "failed". Admins additionally get "failed: {reason}" — the reason is
+    /// withheld from everyone else because an RPC error string routinely
+    /// carries the provider host and its API key.
     pub status: String,
     /// Current head block on chain, when the monitor knows it.
     #[serde(default)]
@@ -21,9 +23,11 @@ pub struct ChainHealthInfo {
     /// Last block the monitor actually processed.
     #[serde(default)]
     pub last_processed_block: Option<u64>,
-    /// Number of addresses being watched on this chain.
+    /// Number of addresses being watched on this chain. Admin only, so absent
+    /// for everyone else - `None` rather than `0`, because "not told" and
+    /// "watching nothing" are different answers.
     #[serde(default)]
-    pub watched_addresses: usize,
+    pub watched_addresses: Option<usize>,
     /// The monitor's own verdict on this chain.
     #[serde(default)]
     pub is_healthy: bool,

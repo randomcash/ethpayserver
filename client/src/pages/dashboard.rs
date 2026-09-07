@@ -560,18 +560,18 @@ fn NetworkStatus() -> impl IntoView {
             <div class="activity-note">"Loading chain status…"</div>
         }>
             {move || health_resource.get().map(|result| match &*result {
-                // The server answers 503 when the monitor has published no
-                // health at all, and 403 when the caller is not a server admin.
-                // Both mean "we cannot tell you", which is not the same as "all
-                // good" and must not render as rows.
+                // 503 means the monitor has published no health at all. That is
+                // "we cannot tell you", which is not the same as "all good" and
+                // must not render as rows - a green panel over dead monitors
+                // was RCS-196.
+                //
+                // There is no 403 case: the endpoint answers everyone, and
+                // simply says less to a non-admin (block heights, the watched
+                // address count and the failure reason are withheld). Whether a
+                // chain is up is exactly what a merchant needs.
                 Err(ApiError::Http { status: 503, .. }) => view! {
                     <div class="activity-note activity-note-error">
                         "No chain health reported — the monitor has not published any."
-                    </div>
-                }.into_any(),
-                Err(ApiError::Http { status: 403, .. }) => view! {
-                    <div class="activity-note">
-                        "Chain status is available to server admins."
                     </div>
                 }.into_any(),
                 Err(e) => view! {
@@ -724,7 +724,7 @@ mod tests {
             status: status.to_string(),
             current_block: current,
             last_processed_block: processed,
-            watched_addresses: 0,
+            watched_addresses: None,
             is_healthy: true,
         }
     }
