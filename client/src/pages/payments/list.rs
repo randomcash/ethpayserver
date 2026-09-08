@@ -7,7 +7,7 @@ use crate::api::{ApiError, EvmApiClient, Payment};
 use crate::app::{StoreContext, StoresStatus};
 use crate::components::{NoStoreSelected, PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
-use crate::util::{chain_name, short_store_id};
+use crate::util::{chain_name, short_store_id, use_debounced_search};
 
 use super::format::{
     format_crypto_amount, format_date, payment_status, payment_status_class, truncate_hash,
@@ -35,11 +35,23 @@ pub fn PaymentsPage() -> impl IntoView {
     // Filter state
     let (active_filter, set_active_filter) = signal("all".to_string());
     let (search_query, set_search_query) = signal(String::new());
+    // The box tracks every keystroke; only this settles, and only it is ever
+    // queried. Search is a server-side filter now (RCS-231), so one request
+    // per character is what the debounce is standing between us and.
+    let search_param = use_debounced_search(search_query.into());
     let (current_offset, set_current_offset) = signal(0i64);
 
-    // Reset offset when filter or store changes
+    // Reset offset when filter, search term or store changes.
+    //
+    // The search term belongs in here now that it filters the whole result
+    // set: typing on page 3 would otherwise ask for page 3 of the matches,
+    // which for most terms is past the end and renders as "no payments found".
+    // This Effect is declared before the resource below on purpose — effects
+    // run in creation order, so the offset is already 0 by the time the
+    // resource reads it, and the stale page is never fetched.
     let _reset_offset_on_filter = Effect::new(move || {
         let _ = active_filter.get();
+        let _ = search_param.get();
         let _ = store_ctx.selected_store_id.get();
         set_current_offset.set(0);
     });
@@ -91,6 +103,7 @@ pub fn PaymentsPage() -> impl IntoView {
         let store_id = store_ctx.selected_store_id.get();
         let stores_loaded = matches!(store_status.get(), StoresStatus::Loaded);
         let status = status_param.get();
+        let search = search_param.get();
         let offset = current_offset.get();
         let _ = refresh.get();
 
@@ -106,6 +119,7 @@ pub fn PaymentsPage() -> impl IntoView {
                 .list_payments(
                     store_id.as_deref(),
                     status.as_deref(),
+                    search.as_deref(),
                     Some(PAGE_SIZE),
                     Some(offset),
                 )
@@ -153,8 +167,9 @@ pub fn PaymentsPage() -> impl IntoView {
                         let api = api.get();
                         let store_id = store_ctx.selected_store_id.get();
                         let status = status_param.get();
+                        let search = search_param.get();
                         wasm_bindgen_futures::spawn_local(async move {
-                            match api.export_payments_csv(store_id.as_deref(), status.as_deref()).await {
+                            match api.export_payments_csv(store_id.as_deref(), status.as_deref(), search.as_deref()).await {
                                 Ok(csv) => crate::pages::trigger_csv_download(&csv, "payments.csv"),
                                 Err(e) => {
                                     web_sys::console::error_1(
@@ -229,7 +244,7 @@ pub fn PaymentsPage() -> impl IntoView {
                     Ok(Some(response)) => {
                         let total = response.total;
                         let mut payments = response.payments.clone();
-                        let search = search_query.get();
+                        let searching = search_param.get().is_some();
 
                         // Track known payment IDs so WS can distinguish new vs existing.
                         known_payment_ids.set_value(
@@ -258,23 +273,7 @@ pub fn PaymentsPage() -> impl IntoView {
                             }
                         }
 
-                        // Client-side search filter
-                        let filtered: Vec<Payment> = if search.is_empty() {
-                            payments
-                        } else {
-                            let q = search.to_lowercase();
-                            payments.into_iter().filter(|p| {
-                                p.tx_hash.to_lowercase().contains(&q)
-                                    || p.asset_symbol.to_lowercase().contains(&q)
-                                    || p.from_address.as_ref()
-                                        .map(|a| a.to_lowercase().contains(&q))
-                                        .unwrap_or(false)
-                                    || p.invoice_id.to_lowercase().contains(&q)
-                            }).collect()
-                        };
-
-                        if filtered.is_empty() {
-                            let searching = !search.is_empty();
+                        if payments.is_empty() {
                             let offset = current_offset.get();
                             view! {
                                 <div class="empty-state">
@@ -282,21 +281,23 @@ pub fn PaymentsPage() -> impl IntoView {
                                         <IconSearch />
                                     </div>
                                     <h3>"No payments found"</h3>
-                                    // The search filters THIS page only, client
-                                    // side, while the count and the pager come
-                                    // from the server's unfiltered total. Saying
-                                    // "no payments" to someone whose match is on
-                                    // page 2 is wrong, so say what is true.
+                                    // Plain again, and it has to be: the hedge
+                                    // this used to carry ("other pages may have
+                                    // matches") was honest only while the search
+                                    // filtered the fetched page. The server
+                                    // filters now (RCS-231), so an empty result
+                                    // is the whole result — sending the user to
+                                    // look on another page would be a lie.
                                     <p>{if searching {
-                                        "No payments on this page match your search. Other pages may have matches."
+                                        "No payments match your search."
                                     } else {
                                         "Payments will appear here once invoices receive transactions."
                                     }}</p>
                                 </div>
                                 // Rendered here too, and that is the point: this
                                 // branch used to drop the pager entirely, so a
-                                // search matching nothing on page 3 left the user
-                                // with no way off page 3 except clearing the box.
+                                // filter matching nothing on page 3 left the user
+                                // with no way off page 3 except clearing it.
                                 <Pagination
                                     total=total
                                     page_size=PAGE_SIZE
@@ -325,7 +326,7 @@ pub fn PaymentsPage() -> impl IntoView {
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {filtered.clone().into_iter().map(|payment| {
+                                            {payments.clone().into_iter().map(|payment| {
                                                 view! { <PaymentRow payment=payment show_store=show_store.get() /> }
                                             }).collect_view()}
                                         </tbody>
@@ -334,7 +335,7 @@ pub fn PaymentsPage() -> impl IntoView {
 
                                 // Payment Cards (Mobile)
                                 <div class="payments-cards mobile-only">
-                                    {filtered.into_iter().map(|payment| {
+                                    {payments.into_iter().map(|payment| {
                                         view! { <PaymentCard payment=payment show_store=show_store.get() /> }
                                     }).collect_view()}
                                 </div>

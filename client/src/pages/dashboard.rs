@@ -567,6 +567,7 @@ fn RecentPayments() -> impl IntoView {
                 .list_payments(
                     store_id.as_deref(),
                     None,
+                    None,
                     Some(RECENT_PAYMENTS_LIMIT),
                     Some(0),
                 )
