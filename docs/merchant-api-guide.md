@@ -114,13 +114,16 @@ Response (`201 Created`):
 }
 ```
 
-### Configure a Wallet (HD Wallet via xpub)
+### Add a Wallet (HD Wallet via xpub)
 
 ETHPayServer derives unique payment addresses from an extended public key
 (BIP-32 xpub). This means the server never holds private keys.
 
+Wallets belong to the account, not to a store. Every store uses the account's
+primary wallet unless it is pinned to a different one.
+
 ```bash
-curl -X PUT https://your-instance.example.com/stores/{store_id}/wallet \
+curl -X POST https://your-instance.example.com/wallets \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -129,18 +132,49 @@ curl -X PUT https://your-instance.example.com/stores/{store_id}/wallet \
   }'
 ```
 
-Response (`200 OK`):
+Response (`201 Created`):
 
 ```json
 {
   "id": "b2c3d4e5-f6a7-8901-bcde-f23456789012",
-  "store_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "user_id": "11111111-2222-3333-4444-555555555555",
   "xpub_masked": "xpub6CU...3fDVmz",
   "derivation_index": 0,
   "name": "Main Wallet",
+  "is_primary": true,
   "created_at": "2026-04-01T12:01:00Z"
 }
 ```
+
+The first wallet you add becomes the primary. `PATCH /wallets/{wallet_id}` with
+`{"is_primary": true}` moves it later.
+
+Adding an xpub you already hold returns the wallet you already have rather than
+a second one. A key has exactly one derivation counter: a second counter on the
+same key would hand the same address to two different customers.
+
+To give one store its own wallet:
+
+```bash
+curl -X PUT https://your-instance.example.com/stores/{store_id}/wallet \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"wallet_id": "b2c3d4e5-f6a7-8901-bcde-f23456789012"}'
+```
+
+`DELETE /stores/{store_id}/wallet` removes that pin so the store follows the
+primary again. It does not delete the wallet, and no derivation counter is
+reset.
+
+Both calls change where money actually goes: the store's payment methods are
+released from whatever key they were configured with and follow the store from
+then on, so the next invoice is paid to an address derived from the wallet you
+named. Addresses already issued keep working - in-flight invoices still resolve
+on them.
+
+An xpub can belong to only one account. Registering one another merchant has
+already added returns `409 Conflict`, because two accounts deriving from one
+key would hand the same addresses to both their customers.
 
 The xpub must be at the BIP-44 account level (`m/44'/60'/0'`). Payment
 addresses are derived at `m/44'/60'/0'/0/{index}`.

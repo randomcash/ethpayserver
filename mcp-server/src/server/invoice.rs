@@ -133,14 +133,18 @@ impl EthpayMcpServer {
         for (method_idx, crypto_amount, rate_str, rate_at) in validated_methods {
             let pm = &payment_methods[method_idx];
 
-            let index = StorePaymentMethodWriter::next_derivation_index(&*self.data_service, pm.id)
-                .await
-                .map_err(|e| format!("Failed to get derivation index: {e}"))?;
+            // Key and index from the same statement - see
+            // `server/src/api/invoices/payment_options.rs` for why pairing a
+            // separately-read xpub with an index re-issues addresses.
+            let allocation =
+                StorePaymentMethodWriter::allocate_derivation(&*self.data_service, pm.id)
+                    .await
+                    .map_err(|e| format!("Failed to allocate derivation index: {e}"))?;
 
-            let deriver =
-                XpubDeriver::from_xpub(&pm.xpub).map_err(|e| format!("Invalid xpub: {e}"))?;
+            let deriver = XpubDeriver::from_xpub(&allocation.xpub)
+                .map_err(|e| format!("Invalid xpub: {e}"))?;
             let address = deriver
-                .derive_address(index as u32)
+                .derive_address(allocation.index as u32)
                 .map_err(|e| format!("Address derivation failed: {e}"))?;
             let payment_address = address.to_string();
 
@@ -153,6 +157,8 @@ impl EthpayMcpServer {
                 token_address: pm.token_address.clone(),
                 decimals: pm.decimals,
                 payment_address: payment_address.clone(),
+                wallet_id: Some(allocation.wallet_id),
+                derivation_index: Some(allocation.index),
                 amount: crypto_amount,
                 rate: rate_str,
                 rate_at,

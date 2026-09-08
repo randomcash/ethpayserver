@@ -919,6 +919,8 @@ pub fn create_test_payment_option(invoice_id: &InvoiceId) -> PaymentOptionData {
         token_address: None,
         decimals: 18,
         payment_address: "0x1234567890abcdef1234567890abcdef12345678".to_string(),
+        wallet_id: None,
+        derivation_index: None,
         amount: "50000000000000000".to_string(), // ~0.05 ETH worth $100 at hypothetical rate
         rate: Some("2000.00".to_string()),
         rate_at: Some(Utc::now()),

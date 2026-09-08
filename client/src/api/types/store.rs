@@ -34,9 +34,16 @@ pub struct StorePaymentMethod {
     /// Asset symbol (ETH, USDC, USDT, etc.)
     pub asset_symbol: String,
     /// BIP-32 extended public key (masked for security).
-    pub xpub_masked: String,
-    /// Next derivation index to use.
-    pub derivation_index: i32,
+    ///
+    /// `None` when the method resolves to no wallet at all — it is not pinned,
+    /// its store has no override, and the account has no primary. RCS-234 moved
+    /// the key and counter onto the wallet, so a method can now exist without
+    /// one; it is listed rather than hidden, and refuses to derive rather than
+    /// guessing which key to use.
+    pub xpub_masked: Option<String>,
+    /// Next derivation index the resolved wallet will issue. `None` for the
+    /// same reason as `xpub_masked`.
+    pub derivation_index: Option<i32>,
     /// Whether this payment method is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,

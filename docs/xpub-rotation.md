@@ -11,15 +11,31 @@ developer machine is breached, or as part of a scheduled key rotation policy.
 
 ## What happens during rotation
 
-1. **All payment methods** for the store are updated to the new xpub.
-2. **Derivation indices reset** to zero on each payment method.
+1. **All payment methods** for the store are repointed at the account wallet
+   holding the new xpub, which is created if the account does not have it yet.
+2. **Derivation indices are not reset.** The destination wallet carries the
+   only correct position for its own key. If the account has used that xpub
+   before, rotation resumes where it left off; if the key is new, it starts at
+   zero because a new key has issued nothing.
+
+   This changed with RCS-234. Rotation used to write the new xpub onto each
+   payment method and zero that method's counter, which was safe only while a
+   method owned its counter outright. A wallet is shared between the methods
+   and stores that use its key, so zeroing it would re-issue every address that
+   key has already produced - including addresses holding funds.
 3. **Existing watched addresses** remain active. In-flight invoices (pending,
    processing) continue to detect payments on old-xpub-derived addresses.
 4. **New invoices** derive payment addresses from the new xpub.
-5. **A rotation record** is persisted per payment method for audit.
+5. **A rotation record** is persisted per payment method for audit, capturing
+   the previous xpub and the index it had reached.
 
 Old addresses are only deactivated when their parent invoice resolves (paid,
 expired, or cancelled). No manual cleanup is needed.
+
+**Rotation is account-wide in effect.** Because a wallet can back several
+stores, rotating one store onto a new key moves only that store's payment
+methods; the other stores stay on the old wallet. To move an entire account,
+rotate each store, or point the stores at a new wallet and make it primary.
 
 ## API
 
