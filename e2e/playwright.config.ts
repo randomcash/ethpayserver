@@ -4,6 +4,12 @@ import { defineConfig } from '@playwright/test';
 // remote origin. Must stay in step with fixtures/api.ts and fixtures/db.ts.
 const REMOTE = process.env.E2E_REMOTE === 'true';
 
+// Where to find the payserver-client checkout for the local dev server.
+// Overridable because not everyone lays their repositories out the same way,
+// and a wrong path here fails as a Playwright timeout rather than as
+// "the frontend is not where I looked".
+const CLIENT_DIR = process.env.PAYSERVER_CLIENT_DIR ?? '../../payserver-client';
+
 const API_URL = process.env.E2E_API_URL || (REMOTE ? 'https://testnet.random.cash' : 'http://localhost:3000');
 const BASE_URL = process.env.E2E_BASE_URL || (REMOTE ? 'https://testnet.random.cash' : 'http://localhost:8080');
 
@@ -67,8 +73,11 @@ export default defineConfig({
         timeout: 120_000,
       },
       {
+        // The frontend lives in its own repository now, so local runs need a
+        // checkout of it. Default to a sibling directory, which is the layout
+        // scripts/commons.sh already assumes for payserver-commons.
         command: 'trunk serve',
-        cwd: '../client',
+        cwd: CLIENT_DIR,
         url: BASE_URL,
         reuseExistingServer: true,
         timeout: 60_000,

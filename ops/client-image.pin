@@ -1,0 +1,18 @@
+# The payserver-client image this payserver deploys and tests against.
+#
+# The frontend lives in its own repository (randomcash/payserver-client) and
+# publishes its own image, so it no longer shares this repo's commit sha. This
+# file is the pin that replaces that coupling: an exact, immutable tag, moved
+# deliberately, reviewed like any other change.
+#
+# Do NOT point this at `latest`. The whole reason the per-commit tag exists is
+# that a moving tag makes "which frontend is live" unanswerable and a rollback
+# a rebuild. The same argument that produced RCS-190 for the server images
+# applies here, more so now that the frontend can change without this repo
+# moving at all.
+#
+# To move it: pick a tag from
+#   https://github.com/randomcash/payserver-client/pkgs/container/payserver-client
+# and open a PR. CI pulls exactly this image for the E2E run, so a frontend that
+# breaks the payment flow fails here rather than on testnet.
+ghcr.io/randomcash/payserver-client:sha-1593505

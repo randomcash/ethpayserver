@@ -38,13 +38,12 @@ cosign verify \
   --certificate-identity-regexp "https://gitlab.com/random.cash/ethpayserver//.gitlab-ci.yml@refs/(heads|tags)/.*" \
   --certificate-oidc-issuer "https://gitlab.com" \
   registry.gitlab.com/random.cash/ethpayserver/evmmonitor:<tag>
-
-# Checkout client
-cosign verify \
-  --certificate-identity-regexp "https://gitlab.com/random.cash/ethpayserver//.gitlab-ci.yml@refs/(heads|tags)/.*" \
-  --certificate-oidc-issuer "https://gitlab.com" \
-  registry.gitlab.com/random.cash/ethpayserver/client:<tag>
 ```
+
+The checkout client is no longer published from this repository. It lives in
+[payserver-client](https://github.com/randomcash/payserver-client) and publishes
+its own image; the tag this payserver deploys is pinned in
+`ops/client-image.pin`.
 
 Replace `<tag>` with the short commit SHA or branch-latest tag
 (e.g. `main-latest`, `a1b2c3d`).

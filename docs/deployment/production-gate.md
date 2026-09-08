@@ -127,7 +127,9 @@ cd /path/to/ethpayserver/docker
 # Update the image tag in .env or docker-compose override:
 export SERVER_IMAGE=registry.gitlab.com/random.cash/ethpayserver:<previous_sha>
 export MONITOR_IMAGE=registry.gitlab.com/random.cash/ethpayserver/evmmonitor:<previous_sha>
-export CLIENT_IMAGE=registry.gitlab.com/random.cash/ethpayserver/client:<previous_sha>
+# The frontend is versioned separately and does not follow <previous_sha>.
+# Use the tag pinned at that commit: git show <previous_sha>:ops/client-image.pin
+export CLIENT_IMAGE=ghcr.io/randomcash/payserver-client:<pinned_tag>
 
 # Pull and restart
 docker compose -f docker-compose.prod.yml pull

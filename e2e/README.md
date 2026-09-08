@@ -5,7 +5,10 @@ Playwright end-to-end tests for ethpayserver.
 ## Local mode (default)
 
 Runs against a local backend and trunk dev server. Requires PostgreSQL with an
-`ethpayserver_e2e` database.
+`ethpayserver_e2e` database, and a checkout of
+[payserver-client](https://github.com/randomcash/payserver-client) — the
+frontend is its own repository now. A sibling directory is assumed; set
+`PAYSERVER_CLIENT_DIR` if yours is elsewhere.
 
 ```bash
 cd e2e
@@ -14,7 +17,10 @@ npx playwright test
 ```
 
 The config spawns `cargo run --release --bin ethpayserver` and `trunk serve`
-automatically (skipped if already running via `reuseExistingServer`).
+automatically (skipped if already running via `reuseExistingServer`). CI does
+not use either: it runs the server binary it just built and the published
+payserver-client image pinned in `ops/client-image.pin`, so the suite exercises
+the real nginx routing rather than the dev server's proxy.
 
 ## Remote mode
 

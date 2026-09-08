@@ -224,8 +224,15 @@ ethpayserver/
 ├── server/            # Main API server (ethpayserver binary)
 ├── evm/               # EVM blockchain interaction (evmmonitor binary)
 ├── data-service/      # PostgreSQL + Redis data access layer
+├── e2e/               # Playwright suite, against the server + the client image
 └── memos/             # Project documentation and notes
 ```
+
+The web frontend is **not** here. It lives in
+[payserver-client](https://github.com/randomcash/payserver-client), because it
+is meant to serve every payserver — EVM, Tron, Solana, Monero — rather than this
+one. The image tag deployed alongside this server is pinned in
+`ops/client-image.pin`.
 
 ### Crates
 
@@ -241,11 +248,15 @@ Shared libraries from [payserver-commons](https://github.com/randomcash/payserve
 
 | Crate | Description |
 |-------|-------------|
-| `types` | Common types: `Network`, `InvoiceData`, `PaymentData`, repository traits |
+| `types` | Common types: `ChainId` (CAIP-2), `InvoiceData`, `PaymentData`, repository traits |
+| `api-types` | The REST request/response shapes, shared with the frontend so the contract has one definition |
 | `auth` | User authentication: passkeys, Ethereum wallets, BIP39 recovery |
 | `crypto` | Cryptographic primitives: Argon2id, AES-256, X25519, Ed25519 |
 | `rates` | Fiat/crypto exchange rate providers |
-| `ui-kit` | Shared Leptos components, including the auth pages |
+| `scrub` | Secret/PII redaction for error reports — see `evm::telemetry` |
+
+`ui-kit` is also published there but is not used here: it is Leptos components,
+consumed by [payserver-client](https://github.com/randomcash/payserver-client).
 
 #### Which version you build against
 

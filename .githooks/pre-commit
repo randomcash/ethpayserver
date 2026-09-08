@@ -10,7 +10,7 @@ set -e
 # Ensure rustup's cargo is used so rust-toolchain.toml is respected.
 export PATH="$HOME/.cargo/bin:$PATH"
 
-CRATES="-p server -p data-service -p evm -p ethpayserver-client"
+CRATES="-p server -p data-service -p evm"
 
 if ! git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$'; then
     exit 0
