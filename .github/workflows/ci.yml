@@ -188,6 +188,13 @@ jobs:
       - name: Build monitor
         run: cargo build --release --bin evmmonitor --features monitor-bin
 
+      # upload-artifact@v4 roots the archive at the least common ancestor of the
+      # paths given. While `client/dist/` was in this list that ancestor was the
+      # repo root, so the archive carried a `target/release/` prefix and both
+      # consumers below unpacked into place. Dropping the client made
+      # `target/release` itself the ancestor, the prefix vanished, and the
+      # binaries landed loose in the workspace - which is why the download steps
+      # now name an explicit destination. Do not remove those.
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -257,6 +264,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: binaries
+          # The archive is rooted at target/release (see the upload step), so
+          # unpack it back there rather than into the workspace root.
+          path: target/release
 
       - name: Make binaries executable
         run: chmod +x target/release/ethpayserver target/release/migrate_postgres
@@ -386,6 +396,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: binaries
+          # The archive is rooted at target/release (see the upload step), so
+          # unpack it back there rather than into the workspace root.
+          path: target/release
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
