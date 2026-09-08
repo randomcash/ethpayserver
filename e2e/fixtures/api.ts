@@ -8,7 +8,8 @@
  *           root, so `/stores` is `/stores`.
  * - remote: `E2E_API_URL=https://testnet.random.cash` — the client container's
  *           nginx proxies `/api/` to the backend and strips the prefix
- *           (`docker/client-nginx.conf`), so `/stores` is `/api/stores`.
+ *           (its nginx config, which now ships inside the payserver-client
+ *           image), so `/stores` is `/api/stores`.
  *
  * `E2E_API_PREFIX` overrides the inferred prefix for any other topology.
  *

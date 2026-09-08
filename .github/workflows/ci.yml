@@ -54,8 +54,8 @@ jobs:
           fi
           # Per crate, and the crate name has to be in the match. Grepping only
           # for the revision proves that SOME entry is pinned, which a partial
-          # un-pin passes: `types` pinned, `ui-kit` left as a path entry, green.
-          for CRATE in api-types types auth crypto rates scrub ui-kit; do
+          # un-pin passes: `types` pinned, `auth` left as a path entry, green.
+          for CRATE in api-types types auth crypto rates scrub; do
             if ! awk -v c="$CRATE" -v r="$REV" '
                  /^\[\[package\]\]/ { name=""; src="" }
                  /^name = / { gsub(/[",]/,""); name=$3 }
@@ -166,7 +166,7 @@ jobs:
         with:
           shared-key: build-release
 
-      - name: Install mold + trunk
+      - name: Install mold
         run: |
           # apt on hosted runners hangs often enough to matter: a stuck
           # `apt-get update` held the pipeline for 30+ minutes against a
@@ -179,7 +179,6 @@ jobs:
             sleep 15
             if [ "$attempt" = 3 ]; then echo "::error::apt failed 3 times"; exit 1; fi
           done
-          cargo install trunk --locked
 
       - name: Build server
         run: |
@@ -189,11 +188,6 @@ jobs:
       - name: Build monitor
         run: cargo build --release --bin evmmonitor --features monitor-bin
 
-      - name: Build client
-        run: cd client && trunk build --release
-        env:
-          RUSTFLAGS: ""
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -202,7 +196,6 @@ jobs:
             target/release/ethpayserver
             target/release/migrate_postgres
             target/release/evmmonitor
-            client/dist/
           retention-days: 1
 
   # Gating as of RCS-192. This job carried `continue-on-error: true` for its
@@ -230,6 +223,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [build]
+    # The frontend image comes from another repository, so this job pulls it
+    # anonymously and that only works while the payserver-client package is
+    # public. If it is ever made private, this pull fails with a denied
+    # manifest rather than anything mentioning visibility - so: make it public,
+    # or add a login here with a token that can read that package.
+    permissions:
+      contents: read
+      packages: read
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     services:
       postgres:
@@ -297,22 +298,38 @@ jobs:
       # `npx serve` has no API proxy, so every /api call fell through to the SPA
       # fallback and the client parsed index.html as JSON ("Parse error: expected
       # value at line 1 column 1"). That failed all 30 authenticated tests and was
-      # invisible while this job carried continue-on-error. Reuse the deployed
-      # client's own nginx config so CI exercises the production routing rules;
-      # only the upstream address and listen port are rewritten.
+      # invisible while this job carried continue-on-error. So the frontend here
+      # is the real published image, nginx config and all, and E2E exercises the
+      # production routing rules rather than an approximation of them.
+      #
+      # It is the exact image this repo deploys (ops/client-image.pin), which
+      # also means a client the payserver has not pinned cannot reach testnet
+      # through a green E2E run.
       - name: Serve frontend
         run: |
+          CLIENT_IMAGE="$(grep -v '^[[:space:]]*#' ops/client-image.pin | tr -d '[:space:]')"
+          [ -n "$CLIENT_IMAGE" ] || { echo "::error::ops/client-image.pin is empty"; exit 1; }
+          echo "frontend: $CLIENT_IMAGE"
+          docker pull "$CLIENT_IMAGE"
+
+          # Take the routing rules from the image rather than keeping a second
+          # copy here: a stale copy would pass CI and then diverge from what is
+          # actually served. Only the upstream address and listen port change.
+          cid="$(docker create "$CLIENT_IMAGE")"
+          docker cp "$cid:/etc/nginx/conf.d/default.conf" /tmp/ci-client-nginx.conf.orig
+          docker rm -f "$cid" >/dev/null
+
           # Dual-stack on purpose. The suite browses http://localhost:8080 so
           # the WebAuthn origin matches the server's rp_origin, and `localhost`
           # can resolve to ::1 before 127.0.0.1; a v4-only listener turns that
           # into a connection refused.
           sed -e 's|http://server:3000|http://127.0.0.1:3000|g' \
               -e 's|listen 80;|listen 8080;\n    listen [::]:8080;|' \
-              docker/client-nginx.conf > /tmp/ci-client-nginx.conf
+              /tmp/ci-client-nginx.conf.orig > /tmp/ci-client-nginx.conf
+
           docker run -d --name e2e-frontend --network host \
-            -v "$PWD/client/dist:/usr/share/nginx/html:ro" \
             -v /tmp/ci-client-nginx.conf:/etc/nginx/conf.d/default.conf:ro \
-            nginx:alpine
+            "$CLIENT_IMAGE"
           for i in $(seq 1 30); do
             curl -sf http://localhost:8080/ >/dev/null && break || sleep 1
           done
@@ -361,6 +378,7 @@ jobs:
       packages: write
     outputs:
       sha_tag: ${{ steps.tag.outputs.sha_tag }}
+      client_image: ${{ steps.tag.outputs.client_image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -387,6 +405,15 @@ jobs:
           # server reports on /health — so a running container can be matched
           # to the image it came from.
           echo "sha_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+          # The frontend is built and tagged in payserver-client, so it has no
+          # tag of ours to derive. Read the pin here, in a job that checks the
+          # repo out, and hand it to deploy - which runs on the self-hosted box
+          # with no checkout at all, so it cannot read this file itself.
+          CLIENT_IMAGE="$(grep -v '^[[:space:]]*#' ops/client-image.pin | tr -d '[:space:]')"
+          [ -n "$CLIENT_IMAGE" ] || { echo "::error::ops/client-image.pin is empty"; exit 1; }
+          echo "client_image=$CLIENT_IMAGE" >> "$GITHUB_OUTPUT"
+
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
@@ -408,14 +435,6 @@ jobs:
             -t ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.sha_tag }} .
           docker push ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.tag }}
           docker push ${{ env.IMAGE_BASE }}/evmmonitor:${{ steps.tag.outputs.sha_tag }}
-
-      - name: Build & push client
-        run: |
-          docker build -f docker/client.Dockerfile \
-            -t ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.tag }} \
-            -t ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.sha_tag }} .
-          docker push ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.tag }}
-          docker push ${{ env.IMAGE_BASE }}/client:${{ steps.tag.outputs.sha_tag }}
 
   # staging (main) + production (tags) deploy via SSH push — see central-infrastructure/deploy.yml
   notify-deploy:
@@ -464,6 +483,7 @@ jobs:
       - name: Deploy via local docker compose
         env:
           SHA_TAG: ${{ needs.docker.outputs.sha_tag }}
+          CLIENT_IMAGE: ${{ needs.docker.outputs.client_image }}
         run: |
           set -e
           # Deploy the immutable per-commit tag, not the moving one (RCS-190).
@@ -473,10 +493,17 @@ jobs:
           [ -n "$SHA_TAG" ] || { echo "::error::docker job produced no sha tag"; exit 1; }
 
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          # The frontend is versioned independently now, so it does not follow
+          # $SHA_TAG - it is pinned, and that pin is what E2E just ran against.
+          # It arrives as a job output because this job has no checkout to read
+          # ops/client-image.pin from.
+          [ -n "$CLIENT_IMAGE" ] || { echo "::error::docker job produced no client image"; exit 1; }
+          export CLIENT_IMAGE
+
           cd ~/deploy/ethpayserver/testnet
 
           export SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:$SHA_TAG
-          export CLIENT_IMAGE=ghcr.io/randomcash/ethpayserver/client:$SHA_TAG
           export MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:$SHA_TAG
 
           # Whatever is live right now becomes the rollback target, but only
@@ -500,6 +527,7 @@ jobs:
       - name: Verify deploy is actually configured (RCS-187)
         env:
           SHA_TAG: ${{ needs.docker.outputs.sha_tag }}
+          CLIENT_IMAGE: ${{ needs.docker.outputs.client_image }}
         run: |
           set -e
           cd ~/deploy/ethpayserver/testnet
@@ -569,8 +597,17 @@ jobs:
             echo "roll back with:"
             echo "  cd ~/deploy/ethpayserver/testnet \\"
             echo "  && SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:$PREV \\"
-            echo "  CLIENT_IMAGE=ghcr.io/randomcash/ethpayserver/client:$PREV \\"
+            echo "  CLIENT_IMAGE=$CLIENT_IMAGE \\"
             echo "  MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:$PREV \\"
             echo "  docker compose up -d"
             echo "(images only — migrations already applied stay applied)"
+            # $PREV names a commit of THIS repo, and the frontend no longer
+            # shares that numbering, so the line above keeps the currently
+            # pinned client rather than pretending to roll it back too. If the
+            # frontend is what broke, move ops/client-image.pin instead — or
+            # for an immediate fix, read the tag this repo pinned at the time:
+            # $PREV is an image tag (`sha-` + short sha), not a git ref, so
+            # strip the prefix or the command fails in the middle of an incident.
+            echo "frontend pinned separately; its tag at $PREV:"
+            echo "  git show ${PREV#sha-}:ops/client-image.pin"
           fi

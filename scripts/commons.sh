@@ -18,7 +18,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/Cargo.toml"
 config="$repo_root/.cargo/config.toml"
 url="https://github.com/randomcash/payserver-commons.git"
-crates=(api-types types auth crypto rates scrub ui-kit)
+crates=(api-types types auth crypto rates scrub)
 
 die() { echo "error: $*" >&2; exit 1; }
 current_rev() { grep -m1 -oP 'rev = "\K[0-9a-f]{40}' "$manifest" || true; }
@@ -53,10 +53,35 @@ case "${1:-status}" in
     # path form the link left behind. Without this, unlinking looks clean while
     # the lock still says something else.
     echo "restoring Cargo.lock to the pinned revision..."
-    # `cargo metadata` re-resolves and rewrites the lock; `cargo update -p` cannot
-    # be used here because the patched entries carry no git source to match on.
+    # `cargo metadata` on its own is NOT enough, and it fails silently: `link`
+    # rewrote the commons entries into path form, which carries no source line,
+    # so cargo has nothing to re-resolve them from and leaves them exactly as
+    # they are. The script then printed "unlinked" over a lock still pointing at
+    # a local checkout - which the CI pin check rejects, several minutes later,
+    # for reasons that look nothing like this.
+    #
+    # Deleting those entries outright is what forces a genuine re-resolve:
+    # cargo rebuilds them from the pinned revision in Cargo.toml.
+    lock="$repo_root/Cargo.lock"
+    if [ -f "$lock" ]; then
+      awk -v want="${crates[*]}" '
+        BEGIN { split(want, a, " "); for (i in a) drop_name[a[i]] = 1 }
+        function flush() { if (buf != "" && !drop) printf "%s", buf; buf = ""; drop = 0 }
+        /^\[\[package\]\]/ { flush() }
+        { buf = buf $0 "\n" }
+        /^name = / { n = $3; gsub(/"/, "", n); if (n in drop_name) drop = 1 }
+        END { flush() }
+      ' "$lock" > "$lock.tmp" && mv "$lock.tmp" "$lock"
+    fi
     ( cd "$repo_root" && cargo metadata --format-version 1 >/dev/null 2>&1 ) || true
-    echo "unlinked - building against the pinned revision again"
+    # Say plainly whether it worked rather than assuming it did.
+    rev="$(current_rev)"
+    if [ -n "$rev" ] && grep -q "$rev" "$lock" 2>/dev/null; then
+      echo "unlinked - Cargo.lock pinned at $rev again"
+    else
+      echo "unlinked, but Cargo.lock does NOT record $rev." >&2
+      echo "Run 'cargo update ${crates[*]/#/-p }' before committing." >&2
+    fi
     ;;
   status)
     rev="$(current_rev)"
@@ -88,7 +113,7 @@ case "${1:-status}" in
     [ "$rev" = "$old" ] && { echo "already pinned to $rev"; exit 0; }
     sed -i "s/rev = \"$old\"/rev = \"$rev\"/g" "$manifest"
     echo "pinned $old → $rev"
-    echo "run 'cargo update -p api-types -p types -p auth -p crypto -p rates -p scrub -p ui-kit' then commit Cargo.toml and Cargo.lock"
+    echo "run 'cargo update ${crates[*]/#/-p }' then commit Cargo.toml and Cargo.lock"
     ;;
   -h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \?//' ;;
   *) die "unknown command '${1}' (link|unlink|status|pin)" ;;

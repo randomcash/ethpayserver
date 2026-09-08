@@ -9,7 +9,7 @@ set -e
 # Ensure rustup's cargo is used so rust-toolchain.toml is respected.
 export PATH="$HOME/.cargo/bin:$PATH"
 
-CRATES="-p server -p data-service -p evm -p ethpayserver-client"
+CRATES="-p server -p data-service -p evm"
 
 echo "=== pre-push: checking format ==="
 cargo fmt $CRATES -- --check || { echo "Format check failed. Run: cargo fmt"; exit 1; }

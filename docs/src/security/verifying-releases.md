@@ -19,13 +19,17 @@ cosign verify \
   registry.gitlab.com/random.cash/ethpayserver:<tag>
 ```
 
-Three images are published per commit:
+Two images are published per commit:
 
 | Image | Reference |
 |-------|-----------|
 | Server (API + migrations) | `registry.gitlab.com/random.cash/ethpayserver:<tag>` |
 | EVM monitor | `registry.gitlab.com/random.cash/ethpayserver/evmmonitor:<tag>` |
-| Checkout client | `registry.gitlab.com/random.cash/ethpayserver/client:<tag>` |
+
+The checkout client used to be the third. It is now built and published by
+[payserver-client](https://github.com/randomcash/payserver-client), which serves
+every payserver rather than this one; the tag deployed here is pinned in
+`ops/client-image.pin`.
 
 Tags follow the pattern `<short-sha>` (immutable, e.g. `a1b2c3d`) or
 `<branch>-latest` (rolling, e.g. `main-latest`).
