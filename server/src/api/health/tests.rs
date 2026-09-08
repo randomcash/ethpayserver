@@ -148,6 +148,13 @@ fn chain_health_connected_conversion() {
     assert_eq!(info.status, "connected");
     assert!(info.is_healthy);
     assert_eq!(info.watched_addresses, Some(42));
+
+    // The conversion has to widen the monitor's EIP-155 number into a CAIP-2
+    // identifier. It previously emitted "1", which the client parses as a
+    // `ChainId` and rejects - taking the whole chains-health response down
+    // rather than one field. This test constructed a `ChainHealth` and never
+    // looked at `chain_id`, which is why it passed.
+    assert_eq!(info.chain_id, "eip155:1");
 }
 
 #[test]

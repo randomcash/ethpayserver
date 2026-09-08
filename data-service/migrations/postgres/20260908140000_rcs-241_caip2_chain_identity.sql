@@ -97,6 +97,18 @@ ALTER TABLE store_settings
 -- first enabled chain is treated as the default in places, so re-ordering the
 -- array would quietly change behaviour. Dropped again below - it exists only
 -- for the length of this statement.
+-- The column default is NOT converted by `USING` - that clause rewrites rows,
+-- while the default is re-coerced by assignment cast and survives as an integer
+-- array. It then violates the domain on any insert that omits the column:
+--
+--   INSERT INTO server_settings (id) VALUES (1);
+--   ERROR: value for domain caip2 violates check constraint "caip2_check"
+--
+-- The application always binds the column, so this is latent there - but a
+-- hand-written insert during an incident is exactly the case the domain exists
+-- for, and it would fail confusingly. Dropped here, restored below.
+ALTER TABLE server_settings ALTER COLUMN enabled_chain_ids DROP DEFAULT;
+
 CREATE FUNCTION rcs241_to_caip2(ids BIGINT[]) RETURNS caip2[] AS $fn$
     SELECT COALESCE(
         array_agg(('eip155:' || id::text)::caip2 ORDER BY ord),
@@ -110,6 +122,13 @@ ALTER TABLE server_settings
     USING rcs241_to_caip2(enabled_chain_ids);
 
 DROP FUNCTION rcs241_to_caip2(BIGINT[]);
+
+ALTER TABLE server_settings
+    ALTER COLUMN enabled_chain_ids SET DEFAULT ARRAY[
+        'eip155:1', 'eip155:10', 'eip155:137', 'eip155:42161', 'eip155:8453',
+        'eip155:56', 'eip155:43114', 'eip155:250', 'eip155:100', 'eip155:324',
+        'eip155:59144', 'eip155:534352'
+    ]::caip2[];
 
 -- ---------------------------------------------------------------------------
 -- 3. Payment method ids carry a chain too

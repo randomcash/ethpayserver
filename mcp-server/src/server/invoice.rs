@@ -190,14 +190,21 @@ impl EthpayMcpServer {
                 let token_contract: Option<evm::Address> =
                     pm.token_address.as_ref().and_then(|a| a.parse().ok());
 
+                // The monitor is EVM-only and its commands take an EIP-155
+                // number. Skipping silently here would leave a payment option
+                // and a watched_addresses row that nothing is monitoring, with
+                // no trace of why - every other boundary added by RCS-241 logs.
+                let Some(eip155) = pm.chain_id.evm_chain_id() else {
+                    tracing::error!(
+                        chain_id = %pm.chain_id,
+                        "not an EVM chain; this server cannot watch its addresses"
+                    );
+                    continue;
+                };
+
                 let cmd = evm::monitor::events::MonitorCommand::WatchAddress(
                     evm::monitor::events::WatchAddressCommand {
-                        // The monitor command is EVM-only and takes an EIP-155
-                        // number; skip anything this server cannot watch.
-                        chain_id: match pm.chain_id.evm_chain_id() {
-                            Some(eip155) => eip155,
-                            None => continue,
-                        },
+                        chain_id: eip155,
                         address,
                         invoice_id: invoice_uuid,
                         expected_amount: expected,

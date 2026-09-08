@@ -257,8 +257,8 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
             amount: invoice.amount.clone(),
             amount_received: invoice.amount_received.clone(),
             asset_symbol: invoice.currency.clone(),
-            chain_id: String::new(), // Invoice-level event: no chain is involved
-            network: None,           // Network-agnostic
+            chain_id: None, // Invoice-level event: no chain is involved
+            network: None,  // Network-agnostic
             payment: None,
         };
 

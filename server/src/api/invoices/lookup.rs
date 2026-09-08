@@ -25,27 +25,6 @@ pub struct TxHashLookupPath {
     pub tx_hash: String,
 }
 
-/// Lookup an invoice by transaction hash.
-///
-/// Finds the payment matching the given chain_id and tx_hash, then returns
-/// the associated invoice. Returns 404 if no match or if the caller doesn't
-/// own the invoice's store (prevents enumeration).
-#[utoipa::path(
-    get,
-    path = "/invoices/by-tx/{chain_id}/{tx_hash}",
-    tag = "invoices",
-    security(("bearer_auth" = [])),
-    params(
-        ("chain_id" = u64, Path, description = "EIP-155 chain ID"),
-        ("tx_hash" = String, Path, description = "Transaction hash (0x-prefixed, 64 hex chars)")
-    ),
-    responses(
-        (status = 200, description = "Invoice and payment found", body = TxHashLookupResponse),
-        (status = 400, description = "Malformed tx_hash"),
-        (status = 401, description = "Unauthorized"),
-        (status = 404, description = "No invoice found for this transaction"),
-    )
-)]
 /// Parse the chain id out of a path segment.
 ///
 /// A CAIP-2 identifier in a path segment needs no escaping: RFC 3986 allows `:`
@@ -59,6 +38,27 @@ fn parse_path_chain_id(raw: &str) -> Result<types::ChainId, (StatusCode, Json<se
     })
 }
 
+/// Lookup an invoice by transaction hash.
+///
+/// Finds the payment matching the given chain_id and tx_hash, then returns
+/// the associated invoice. Returns 404 if no match or if the caller doesn't
+/// own the invoice's store (prevents enumeration).
+#[utoipa::path(
+    get,
+    path = "/invoices/by-tx/{chain_id}/{tx_hash}",
+    tag = "invoices",
+    security(("bearer_auth" = [])),
+    params(
+        ("chain_id" = String, Path, description = "CAIP-2 chain identifier, e.g. eip155:1"),
+        ("tx_hash" = String, Path, description = "Transaction hash (0x-prefixed, 64 hex chars)")
+    ),
+    responses(
+        (status = 200, description = "Invoice and payment found", body = TxHashLookupResponse),
+        (status = 400, description = "Malformed tx_hash"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "No invoice found for this transaction"),
+    )
+)]
 pub async fn lookup_by_tx_hash<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,

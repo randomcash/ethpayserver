@@ -76,7 +76,9 @@ impl<
             (
                 p.asset_symbol.clone(),
                 Some(p.chain_id.clone()),
-                Some(p.chain_id.to_string()),
+                // See `network` on the payload: no name is derivable from an
+                // identifier, and duplicating chain_id here helps nobody.
+                None,
             )
         } else {
             // No payment yet, use invoice currency as a placeholder
@@ -93,10 +95,10 @@ impl<
             amount: invoice.amount.clone(),
             amount_received: invoice.amount_received.clone(),
             asset_symbol,
-            // No payment yet means no chain has been involved. The empty string
-            // is honest about that; `0` used to claim chain zero, which is not
-            // a chain.
-            chain_id: chain_id.map(|c| c.to_string()).unwrap_or_default(),
+            // No payment yet means no chain has been involved, so the field is
+            // omitted rather than claiming one. `0` used to be sent here, which
+            // is not a chain.
+            chain_id: chain_id.map(|c| c.to_string()),
             network,
             payment: payment.map(|p| WebhookPaymentInfo {
                 tx_hash: p.tx_hash.clone(),
