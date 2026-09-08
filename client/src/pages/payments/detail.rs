@@ -51,7 +51,7 @@ pub fn PaymentDetailPage() -> impl IntoView {
 /// Inner component that renders payment detail once data is loaded.
 #[component]
 fn PaymentDetailView(payment: Payment) -> impl IntoView {
-    let network = chain_name(payment.chain_id);
+    let network = chain_name(&payment.chain_id).to_string();
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
     let amount_display = format!(
@@ -77,15 +77,18 @@ fn PaymentDetailView(payment: Payment) -> impl IntoView {
     let invoice_link = payment.invoice_id.clone();
 
     // Explorer URL based on chain
-    let explorer_base = match payment.chain_id {
-        1 => "https://etherscan.io",
-        137 => "https://polygonscan.com",
-        42161 => "https://arbiscan.io",
-        10 => "https://optimistic.etherscan.io",
-        8453 => "https://basescan.org",
-        56 => "https://bscscan.com",
-        43114 => "https://snowtrace.io",
-        11155111 => "https://sepolia.etherscan.io",
+    let explorer_base = match payment.chain_id.as_str() {
+        "eip155:1" => "https://etherscan.io",
+        "eip155:137" => "https://polygonscan.com",
+        "eip155:42161" => "https://arbiscan.io",
+        "eip155:10" => "https://optimistic.etherscan.io",
+        "eip155:8453" => "https://basescan.org",
+        "eip155:56" => "https://bscscan.com",
+        "eip155:43114" => "https://snowtrace.io",
+        "eip155:11155111" => "https://sepolia.etherscan.io",
+        // Etherscan is the wrong answer for a non-EVM chain, but the link is
+        // cosmetic and a wrong link is better than no page. `chain_configs`
+        // carries the real explorer URL; wiring that up is the proper fix.
         _ => "https://etherscan.io",
     };
     let tx_explorer_url = format!("{}/tx/{}", explorer_base, payment.tx_hash);
@@ -104,7 +107,7 @@ fn PaymentDetailView(payment: Payment) -> impl IntoView {
                         <h1 class="payment-detail-title">{amount_display.clone()}</h1>
                         <span class=status_class>{status}</span>
                     </div>
-                    <p class="payment-detail-subtitle">{network}" · "{detected_display.clone()}</p>
+                    <p class="payment-detail-subtitle">{network.clone()}" · "{detected_display.clone()}</p>
                 </div>
                 <div class="payment-detail-actions">
                     <a href=tx_explorer_url.clone() target="_blank" class="btn btn-secondary btn-sm">

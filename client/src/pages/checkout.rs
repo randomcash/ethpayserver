@@ -259,7 +259,7 @@ fn render_checkout(
                         <label>"Pay with"</label>
                         <div class="checkout-chain-options">
                             {opts.into_iter().enumerate().map(|(i, opt)| {
-                                let label = format!("{} ({})", opt.asset_symbol, chain_name(opt.chain_id));
+                                let label = format!("{} ({})", opt.asset_symbol, chain_name(&opt.chain_id));
                                 view! {
                                     <button
                                         class=move || if selected_idx.get() == i { "chain-option active" } else { "chain-option" }
@@ -284,7 +284,7 @@ fn render_checkout(
                     let addr = option.payment_address.clone();
                     let display_amount = format_crypto_amount(&option.amount, option.decimals);
                     let asset = option.asset_symbol.clone();
-                    let chain = chain_name(option.chain_id);
+                    let chain = chain_name(&option.chain_id).to_string();
                     let addr_for_copy = addr.clone();
 
                     let qr_data = addr.clone();

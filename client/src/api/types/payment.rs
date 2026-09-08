@@ -1,6 +1,7 @@
 //! Payment-related API types.
 
 use serde::{Deserialize, Serialize};
+use types::ChainId;
 
 /// Payment data from the API.
 ///
@@ -17,7 +18,7 @@ pub struct Payment {
     #[serde(default)]
     pub store_name: Option<String>,
     /// Chain ID (EIP-155).
-    pub chain_id: u64,
+    pub chain_id: ChainId,
     /// Invoice ID this payment belongs to.
     pub invoice_id: String,
     /// Transaction hash.
@@ -57,7 +58,7 @@ pub struct PaymentOption {
     /// Format: "{ASSET}-{CHAIN_ID}" e.g., "ETH-1", "USDC-137".
     pub payment_method_id: String,
     /// EIP-155 chain ID.
-    pub chain_id: u64,
+    pub chain_id: ChainId,
     /// Asset symbol (e.g., "ETH", "USDC").
     pub asset_symbol: String,
     /// Token contract address (None for native assets).

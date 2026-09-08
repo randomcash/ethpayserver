@@ -110,6 +110,7 @@ pub(super) fn IconExport() -> impl IntoView {
 mod tests {
     use super::*;
     use crate::api::InvoiceStatus;
+    use types::ChainId;
 
     #[test]
     fn test_format_date_iso() {
@@ -151,15 +152,17 @@ mod tests {
 
     #[test]
     fn test_chain_name() {
-        assert_eq!(chain_name(1), "Ethereum");
-        assert_eq!(chain_name(137), "Polygon");
-        assert_eq!(chain_name(42161), "Arbitrum");
-        assert_eq!(chain_name(10), "Optimism");
-        assert_eq!(chain_name(8453), "Base");
-        assert_eq!(chain_name(56), "BSC");
-        assert_eq!(chain_name(43114), "Avalanche");
-        assert_eq!(chain_name(11155111), "Sepolia");
-        assert_eq!(chain_name(99999), "Unknown");
+        assert_eq!(chain_name(&ChainId::evm(1)), "Ethereum");
+        assert_eq!(chain_name(&ChainId::evm(137)), "Polygon");
+        assert_eq!(chain_name(&ChainId::evm(42161)), "Arbitrum");
+        assert_eq!(chain_name(&ChainId::evm(10)), "Optimism");
+        assert_eq!(chain_name(&ChainId::evm(8453)), "Base");
+        assert_eq!(chain_name(&ChainId::evm(56)), "BSC");
+        assert_eq!(chain_name(&ChainId::evm(43114)), "Avalanche");
+        assert_eq!(chain_name(&ChainId::evm(11155111)), "Sepolia");
+        // An unnamed chain renders as its own identifier rather than "Unknown":
+        // ugly but true, and it lets a reader work out which chain it is.
+        assert_eq!(chain_name(&ChainId::evm(99999)), "eip155:99999");
     }
 
     #[test]
@@ -168,7 +171,7 @@ mod tests {
             id: "p1".into(),
             store_id: None,
             store_name: None,
-            chain_id: 1,
+            chain_id: ChainId::evm(1),
             invoice_id: "inv-1".into(),
             amount: "100".into(),
             asset_symbol: "ETH".into(),
@@ -191,7 +194,7 @@ mod tests {
             id: "p2".into(),
             store_id: None,
             store_name: None,
-            chain_id: 1,
+            chain_id: ChainId::evm(1),
             invoice_id: "inv-1".into(),
             amount: "100".into(),
             asset_symbol: "ETH".into(),
@@ -214,7 +217,7 @@ mod tests {
             id: "p3".into(),
             store_id: None,
             store_name: None,
-            chain_id: 1,
+            chain_id: ChainId::evm(1),
             invoice_id: "inv-1".into(),
             amount: "100".into(),
             asset_symbol: "ETH".into(),
@@ -291,7 +294,7 @@ mod tests {
                 id: "p1".into(),
                 store_id: None,
                 store_name: None,
-                chain_id: 1,
+                chain_id: ChainId::evm(1),
                 invoice_id: "inv-1".into(),
                 amount: "100".into(),
                 asset_symbol: "ETH".into(),
@@ -308,7 +311,7 @@ mod tests {
                 id: "p2".into(),
                 store_id: None,
                 store_name: None,
-                chain_id: 1,
+                chain_id: ChainId::evm(1),
                 invoice_id: "inv-1".into(),
                 amount: "50".into(),
                 asset_symbol: "ETH".into(),
@@ -325,7 +328,7 @@ mod tests {
                 id: "p3".into(),
                 store_id: None,
                 store_name: None,
-                chain_id: 1,
+                chain_id: ChainId::evm(1),
                 invoice_id: "inv-1".into(),
                 amount: "75".into(),
                 asset_symbol: "ETH".into(),

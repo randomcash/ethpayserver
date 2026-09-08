@@ -1,6 +1,7 @@
 //! Payment methods tab component.
 
 use leptos::prelude::*;
+use types::ChainId;
 
 use crate::api::{
     CreatePaymentMethodRequest, EvmApiClient, StorePaymentMethod, UpdatePaymentMethodRequest,
@@ -42,12 +43,22 @@ pub fn PaymentMethodsTab(store_id: String) -> impl IntoView {
             set_create_error.set(Some("Asset symbol and xpub are required".to_string()));
             return;
         }
-        let chain_id: u64 = match new_chain_id.get_untracked().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                set_create_error.set(Some("Invalid chain ID".to_string()));
-                return;
-            }
+        // Accepts either a full CAIP-2 identifier (`eip155:1`) or a bare
+        // EIP-155 number, which is what merchants have always typed here and
+        // what every EVM chain list shows.
+        let raw = new_chain_id.get_untracked();
+        let chain_id = match ChainId::parse(raw.trim()) {
+            Ok(id) => id,
+            Err(_) => match raw.trim().parse::<u64>() {
+                Ok(eip155) => ChainId::evm(eip155),
+                Err(_) => {
+                    set_create_error.set(Some(
+                        "Enter a chain ID (e.g. 1) or a CAIP-2 identifier (e.g. eip155:1)"
+                            .to_string(),
+                    ));
+                    return;
+                }
+            },
         };
         let decimals: u8 = match new_decimals.get_untracked().parse() {
             Ok(v) => v,
@@ -279,7 +290,7 @@ fn PaymentMethodRow(
     set_refresh_counter: WriteSignal<u32>,
 ) -> impl IntoView {
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
-    let network = chain_name(method.chain_id);
+    let network = chain_name(&method.chain_id).to_string();
     let asset_type = if method.token_address.is_some() {
         "ERC20"
     } else {

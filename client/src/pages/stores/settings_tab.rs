@@ -1,6 +1,7 @@
 //! Settings tab component (defaults, branding, notifications, token policy).
 
 use leptos::prelude::*;
+use types::ChainId;
 
 use crate::api::{
     EvmApiClient, SetTokenPolicyRequest, StoreSettings, TokenPolicyEntry,
@@ -45,7 +46,8 @@ pub fn SettingsTab(store_id: String) -> impl IntoView {
     let populate = move |s: &StoreSettings| {
         set_chain_id.set(
             s.default_chain_id
-                .map(|c| c.to_string())
+                .as_ref()
+                .map(ToString::to_string)
                 .unwrap_or_default(),
         );
         set_display_currency.set(s.default_display_currency.clone().unwrap_or_default());
@@ -322,9 +324,14 @@ fn TokenPolicyPanel(store_id: String) -> impl IntoView {
     };
 
     let add_entry = move |_| {
-        let chain: i64 = match new_chain_id.get().parse() {
-            Ok(c) => c,
-            Err(_) => return,
+        // Same forgiving parse as the payment-method form: a CAIP-2 identifier
+        // or a bare EIP-155 number.
+        let raw = new_chain_id.get();
+        let Some(chain) = ChainId::parse(raw.trim())
+            .ok()
+            .or_else(|| raw.trim().parse::<u64>().ok().map(ChainId::evm))
+        else {
+            return;
         };
         let symbol = new_asset_symbol.get();
         if symbol.is_empty() {
@@ -481,8 +488,12 @@ fn TokenPolicyPanel(store_id: String) -> impl IntoView {
                     />
                     <span style="font-size: 0.7rem; color: var(--text-muted);">
                         {move || {
-                            let id = new_chain_id.get();
-                            if let Ok(n) = id.parse::<u64>() { chain_name(n) } else { "" }
+                            let raw = new_chain_id.get();
+                            ChainId::parse(raw.trim())
+                                .ok()
+                                .or_else(|| raw.trim().parse::<u64>().ok().map(ChainId::evm))
+                                .map(|c| chain_name(&c).to_string())
+                                .unwrap_or_default()
                         }}
                     </span>
                 </div>

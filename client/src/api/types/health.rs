@@ -1,6 +1,7 @@
 //! Health-related API types.
 
 use serde::{Deserialize, Serialize};
+use types::ChainId;
 
 /// Health of a single chain the monitor is watching.
 ///
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainHealthInfo {
     /// Chain ID (EIP-155).
-    pub chain_id: u64,
+    pub chain_id: ChainId,
     /// Human-readable chain name as the monitor reports it.
     pub chain_name: String,
     /// Connection status: "connected", "connecting", "disconnected" or
