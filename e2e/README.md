@@ -106,14 +106,31 @@ node scripts/new-test-wallet.mjs
 # Reclaim funds parked in derived receive addresses (RCS-202). Dry run by
 # default; pass --execute to broadcast.
 E2E_TEST_MNEMONIC="..." E2E_SEPOLIA_RPC_URL="https://..." \
-  node scripts/sweep-test-wallet.mjs --scan 50
+  node scripts/sweep-test-wallet.mjs --scan 1000
 ```
 
-Each nightly run moves `INVOICE_AMOUNT_ETH` (0.0001) from the spender to an
-address derived from the *same* seed, so the principal is parked rather than
-spent — only gas (~0.00002/run at 0.94 gwei) is actually consumed. At 0.05
-funded that is ~416 runs without sweeping, ~2,500 with. The spec emits a
-`::warning::` once fewer than 20 runs' worth remain.
+`--scan` has to cover the *whole* history, not a window near zero. Before
+RCS-234 the derivation counter lived on the payment method, so a fresh store
+each night restarted at 0 and the parked funds piled up on the first few
+addresses; the counter now lives on an account-level wallet keyed by the xpub,
+so the indices march outwards three per night and never restart. A scan that
+stops short reports nothing to sweep rather than failing, so the default is 1000
+(over three years of nightlies). Raise it rather than trim it.
+
+Each nightly run makes three payments of a random 0.00005–0.00015 ETH
+(~0.0003/run on average) from the spender to addresses derived from the *same*
+seed, so the principal is parked rather than spent — only gas (~0.00006/run at
+0.94 gwei, three transfers) is actually consumed. At 0.05 funded that is ~140
+runs without sweeping, ~800 with.
+
+The spec emits a `::warning::` once fewer than 20 runs' worth remain, and sizes
+a run at its **worst case** — three maximum draws plus a gas reserve each, the
+larger of a 0.0005 floor and three times the live gas price, so ~0.00195 while
+Sepolia is quiet — because the amounts of future runs have not been drawn yet
+and the gas price they will pay is not today's. That is a
+deliberately pessimistic ~0.039 ETH line (it assumes the parked principal is
+gone), so a wallet funded at 0.05 and never swept starts warning after a few
+weeks. Sweep it, or fund ~0.1.
 
 ## Leftover synthetic-payment stores (`scripts/sweep-e2e-stores.mjs`)
 
@@ -142,10 +159,31 @@ rows themselves needs database access.
 
 ## Synthetic payment (`tests/synthetic-payment.spec.ts`)
 
-The only test that exercises the money path for real: it creates an invoice over
-the API, broadcasts an actual Sepolia transaction to the address the server
+The only test that exercises the money path for real: it creates invoices over
+the API, broadcasts actual Sepolia transactions to the addresses the server
 derived, waits for `paid` on the public checkout WebSocket, and asserts the store
 webhook fired with a valid HMAC signature.
+
+Three invoices per run, on one store and one payment method, paid one at a time.
+That is the regression test for RCS-235: the addresses come from a single xpub
+and a single counter, and when the counter was wrong two invoices were quoted the
+same address — which one invoice per run can never see. The run asserts the three
+addresses are distinct, that the counter on the wallet the store derives from
+advanced by exactly three (RCS-234), that the payment method agrees with that
+wallet rather than keeping a number of its own, and that each payment paid its
+own invoice and no other.
+
+The three payments share an 18-minute wall clock, checked against the job's
+30-minute `timeout-minutes` in `.github/workflows/e2e-scheduled.yml`: each
+payment keeps its full per-payment timeouts, but a run that would overrun the job
+fails inside Playwright — naming the invoice it was waiting on — rather than
+being killed at the cap with no report and a leaked store.
+
+The pure parts (the amount draw, the shared budget) live in
+`fixtures/synthetic-payment.ts` and are unit-tested by
+`tests/synthetic-payment-helpers.spec.ts`, which runs in every suite: the spec
+itself only runs on a runner holding secrets, so arithmetic left inside it is
+unverified until a nightly spends real ETH to find out.
 
 It is **off unless `E2E_SYNTHETIC_PAYMENT=true`**, because it spends testnet ETH
 and needs secrets — the in-pipeline `e2e` job must not pick it up. When it *is*

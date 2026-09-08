@@ -77,16 +77,35 @@ export class WebhookSink {
     return new WebhookSink(server, tunnel, publicUrl, port, received);
   }
 
-  /** Wait for a webhook whose `event_type` matches, or reject on timeout. */
-  async waitFor(eventType: string, timeoutMs: number): Promise<ReceivedWebhook> {
+  /**
+   * Wait for a webhook whose `event_type` matches, or reject on timeout.
+   *
+   * `match` narrows further, and a run that pays more than one invoice needs
+   * it: unfiltered this returns the *first* delivery of that type the sink ever
+   * took, so the second payment would be handed the first payment's webhook and
+   * assert against it — green while attributing every payment to one invoice,
+   * which is precisely the failure the multi-invoice run looks for (RCS-235).
+   */
+  async waitFor(
+    eventType: string,
+    timeoutMs: number,
+    match: (hook: ReceivedWebhook) => boolean = () => true,
+  ): Promise<ReceivedWebhook> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const hit = this.received.find((w) => w.body.event_type === eventType);
+      const hit = this.received.find((w) => w.body.event_type === eventType && match(w));
       if (hit) return hit;
       if (Date.now() >= deadline) {
-        const seen = this.received.map((w) => String(w.body.event_type)).join(', ') || 'none';
+        // Invoice ids too: with a filter in play, "received: payment_confirmed"
+        // on its own reads as a server that never delivered, when in fact it
+        // delivered for a different invoice.
+        const seen =
+          this.received
+            .map((w) => `${String(w.body.event_type)}(${String(w.body.invoice_id ?? 'no invoice_id')})`)
+            .join(', ') || 'none';
         throw new Error(
-          `No '${eventType}' webhook within ${timeoutMs}ms at ${this.publicUrl} (received: ${seen})`,
+          `No '${eventType}' webhook matching the filter within ${timeoutMs}ms at ` +
+            `${this.publicUrl} (received: ${seen})`,
         );
       }
       await new Promise((r) => setTimeout(r, 1_000));
