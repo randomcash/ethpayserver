@@ -274,7 +274,7 @@ fn WebhookConfig(
     } else {
         "Disabled"
     };
-    let updated_display = format_date(&webhook.updated_at);
+    let updated_display = format_date(&webhook.updated_at.to_rfc3339());
 
     view! {
         <div class="detail-card">

@@ -296,8 +296,8 @@ fn PaymentMethodRow(
     } else {
         "Native"
     };
-    let method_id = method.id.clone();
-    let method_id_toggle = method.id.clone();
+    let method_id = method.id;
+    let method_id_toggle = method.id;
     let is_enabled = method.enabled;
 
     let (toggling, set_toggling) = signal(false);
@@ -308,14 +308,16 @@ fn PaymentMethodRow(
         move |_| {
             let api = api.get();
             let sid = store_id.clone();
-            let mid = method_id_toggle.clone();
+            let mid = method_id_toggle;
             set_toggling.set(true);
             leptos::task::spawn_local(async move {
                 let req = UpdatePaymentMethodRequest {
                     enabled: Some(!is_enabled),
                     xpub: None,
                 };
-                let _ = api.update_payment_method(&sid, &mid, &req).await;
+                let _ = api
+                    .update_payment_method(&sid.to_string(), &mid.to_string(), &req)
+                    .await;
                 set_toggling.set(false);
                 set_refresh_counter.update(|c| *c += 1);
             });
@@ -327,10 +329,12 @@ fn PaymentMethodRow(
         move |_| {
             let api = api.get();
             let sid = store_id.clone();
-            let mid = method_id.clone();
+            let mid = method_id;
             set_deleting.set(true);
             leptos::task::spawn_local(async move {
-                let _ = api.delete_payment_method(&sid, &mid).await;
+                let _ = api
+                    .delete_payment_method(&sid.to_string(), &mid.to_string())
+                    .await;
                 set_deleting.set(false);
                 set_refresh_counter.update(|c| *c += 1);
             });

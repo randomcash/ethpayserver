@@ -5,8 +5,6 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::repository::{StoreRepository, StoreRoleRepository, UserStoreRepository};
@@ -14,37 +12,7 @@ use auth::{SessionService, StoreId, UserId, UserStore};
 
 use super::super::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
-
-/// Request to add a member to a store.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct AddMemberRequest {
-    /// User ID to add.
-    pub user_id: Uuid,
-    /// Role name (Owner, Manager, Employee, Guest).
-    pub role: String,
-}
-
-/// Request to update a member's role.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateMemberRequest {
-    /// New role name.
-    pub role: String,
-}
-
-/// Store member response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct MemberResponse {
-    /// User ID.
-    pub user_id: Uuid,
-    /// Store ID.
-    pub store_id: Uuid,
-    /// Role ID.
-    pub role_id: Uuid,
-    /// Role name.
-    pub role_name: String,
-    /// Role permissions.
-    pub permissions: Vec<String>,
-}
+pub use api_types::{AddMemberRequest, MemberResponse, UpdateMemberRequest};
 
 /// List members of a store.
 ///

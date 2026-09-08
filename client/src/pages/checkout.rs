@@ -232,7 +232,7 @@ fn render_checkout(
     let options_for_selector = active_options.clone();
     let amount = data.amount.clone();
     let currency = data.currency.clone();
-    let expires_at = data.expires_at.clone();
+    let expires_at = data.expires_at;
 
     let status_label = match status.as_str() {
         "processing" => "Payment detected, awaiting confirmation...",
@@ -248,7 +248,7 @@ fn render_checkout(
             <div class="checkout-amount-section">
                 <p class="checkout-amount">{amount.clone()}" "{currency.clone()}</p>
                 <p class="checkout-status-label">{status_label}</p>
-                <CountdownTimer expires_at=expires_at />
+                <CountdownTimer expires_at=expires_at.to_rfc3339() />
             </div>
 
             // Chain/asset selector

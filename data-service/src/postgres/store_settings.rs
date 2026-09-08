@@ -12,7 +12,15 @@ use crate::{
 fn row_to_settings(row: &sqlx::postgres::PgRow) -> StoreSettings {
     StoreSettings {
         store_id: row.get("store_id"),
-        default_chain_id: row.get("default_chain_id"),
+        // Read through the column's own type. This used to be `row.get` into
+        // an `Option<i64>` against what RCS-241 made a `caip2` TEXT column -
+        // which compiles, because sqlx is checked at runtime, and fails the
+        // first time a store actually sets a default chain.
+        default_chain_id: row.get::<Option<String>, _>("default_chain_id").map(|raw| {
+            types::ChainId::parse(raw.as_str()).unwrap_or_else(|e| {
+                panic!("store_settings.default_chain_id holds `{raw}`, not a CAIP-2 chain id ({e})")
+            })
+        }),
         default_display_currency: row.get("default_display_currency"),
         logo_url: row.get("logo_url"),
         accent_color: row.get("accent_color"),
@@ -39,7 +47,7 @@ impl StoreSettingsWriter for PgDataService {
     async fn upsert_store_settings(
         &self,
         store_id: Uuid,
-        default_chain_id: Option<i64>,
+        default_chain_id: Option<&types::ChainId>,
         default_display_currency: Option<&str>,
         logo_url: Option<&str>,
         accent_color: Option<&str>,
@@ -60,7 +68,7 @@ impl StoreSettingsWriter for PgDataService {
             "#,
         )
         .bind(store_id)
-        .bind(default_chain_id)
+        .bind(default_chain_id.map(types::ChainId::as_str))
         .bind(default_display_currency)
         .bind(logo_url)
         .bind(accent_color)

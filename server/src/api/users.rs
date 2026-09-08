@@ -8,8 +8,6 @@ use axum::{
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService};
@@ -18,74 +16,52 @@ use data_service::ApiKeyFullInfo;
 use super::api_key_hash::hash_api_key;
 use super::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
+pub use api_types::{
+    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
+    RotateApiKeyResponsePayload, UpdateApiKeyPayload,
+};
 
-/// Response for listing API keys.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ApiKeyListResponse {
-    pub keys: Vec<ApiKeyInfoResponse>,
-}
-
-/// API key info for list/get responses.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ApiKeyInfoResponse {
-    pub id: Uuid,
-    pub name: String,
-    pub key_prefix: String,
-    pub is_active: bool,
-    pub created_at: DateTime<Utc>,
-    pub last_used_at: Option<DateTime<Utc>>,
-    pub expires_at: Option<DateTime<Utc>>,
-    /// Per-key rate limit in requests per minute. Null = server default.
-    pub rate_limit_rpm: Option<i32>,
-    /// Set when the key is deprecated via rotation. Key remains valid during
-    /// the grace window; null means not deprecated.
-    pub deprecated_at: Option<DateTime<Utc>>,
-    /// When the grace window ends for a deprecated key (computed server-side
-    /// from `deprecated_at` + grace seconds). Null for non-deprecated keys.
-    /// Surfacing this lets the client render the exact expiry without
-    /// hardcoding the grace duration.
-    pub deprecation_expires_at: Option<DateTime<Utc>>,
-}
-
-impl ApiKeyInfoResponse {
-    /// Build from an `ApiKey` plus the ancillary rate-limit / deprecation fields
-    /// not present on the auth-crate struct. Used by endpoints that already
-    /// have an `ApiKey` in hand (e.g. update_api_key after a mutation).
-    fn from_key_with_rate_limit(
-        key: &ApiKey,
-        rate_limit_rpm: Option<i32>,
-        deprecated_at: Option<DateTime<Utc>>,
-    ) -> Self {
-        let info = ApiKeyInfo::from(key);
-        Self {
-            id: info.id.0,
-            name: info.name,
-            key_prefix: info.key_prefix,
-            is_active: info.is_active,
-            created_at: info.created_at,
-            last_used_at: info.last_used_at,
-            expires_at: info.expires_at,
-            rate_limit_rpm,
-            deprecated_at,
-            deprecation_expires_at: deprecated_at.map(deprecation_expires_at),
-        }
+/// Build from an `ApiKey` plus the ancillary rate-limit / deprecation fields
+/// not present on the auth-crate struct. Used by endpoints that already
+/// have an `ApiKey` in hand (e.g. update_api_key after a mutation).
+pub(crate) fn api_key_info_with_rate_limit(
+    key: &ApiKey,
+    rate_limit_rpm: Option<i32>,
+    deprecated_at: Option<DateTime<Utc>>,
+) -> ApiKeyInfoResponse {
+    let info = ApiKeyInfo::from(key);
+    ApiKeyInfoResponse {
+        id: info.id.0,
+        name: info.name,
+        key_prefix: info.key_prefix,
+        is_active: info.is_active,
+        created_at: info.created_at,
+        last_used_at: info.last_used_at,
+        expires_at: info.expires_at,
+        rate_limit_rpm,
+        deprecated_at,
+        deprecation_expires_at: deprecated_at.map(deprecation_expires_at),
     }
 }
 
-impl From<ApiKeyFullInfo> for ApiKeyInfoResponse {
-    fn from(info: ApiKeyFullInfo) -> Self {
-        Self {
-            id: info.id,
-            name: info.name,
-            key_prefix: info.key_prefix,
-            is_active: info.is_active,
-            created_at: info.created_at,
-            last_used_at: info.last_used_at,
-            expires_at: info.expires_at,
-            rate_limit_rpm: info.rate_limit_rpm,
-            deprecated_at: info.deprecated_at,
-            deprecation_expires_at: info.deprecated_at.map(deprecation_expires_at),
-        }
+/// Build the wire shape from the `auth` domain type.
+///
+/// A free function rather than a `From` impl: `ApiKeyFullInfo` belongs to `auth` and
+/// `ApiKeyInfoResponse` to `api-types`, so neither is local here. `api-types` does not
+/// depend on `auth` deliberately - it is compiled into the browser bundle and
+/// `auth` is a server-side crate.
+pub(crate) fn api_key_info_response(info: ApiKeyFullInfo) -> ApiKeyInfoResponse {
+    ApiKeyInfoResponse {
+        id: info.id,
+        name: info.name,
+        key_prefix: info.key_prefix,
+        is_active: info.is_active,
+        created_at: info.created_at,
+        last_used_at: info.last_used_at,
+        expires_at: info.expires_at,
+        rate_limit_rpm: info.rate_limit_rpm,
+        deprecated_at: info.deprecated_at,
+        deprecation_expires_at: info.deprecated_at.map(deprecation_expires_at),
     }
 }
 
@@ -94,45 +70,6 @@ impl From<ApiKeyFullInfo> for ApiKeyInfoResponse {
 /// matches when the server actually starts rejecting the key.
 fn deprecation_expires_at(deprecated_at: DateTime<Utc>) -> DateTime<Utc> {
     deprecated_at + chrono::Duration::seconds(super::extractors::deprecation_grace_secs())
-}
-
-/// Request to create a new API key.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct CreateApiKeyPayload {
-    /// Human-readable name for the key.
-    pub name: String,
-    /// Optional expiration time.
-    pub expires_at: Option<DateTime<Utc>>,
-}
-
-/// Response after creating an API key (includes plaintext key).
-#[derive(Debug, Serialize, ToSchema)]
-pub struct CreateApiKeyResponsePayload {
-    pub id: Uuid,
-    pub name: String,
-    pub key_prefix: String,
-    pub is_active: bool,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    /// The plaintext API key. Store this securely — it cannot be retrieved again.
-    pub key: String,
-}
-
-/// Response after rotating an API key.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct RotateApiKeyResponsePayload {
-    /// The new API key's ID.
-    pub id: Uuid,
-    pub name: String,
-    pub key_prefix: String,
-    pub created_at: DateTime<Utc>,
-    /// The new plaintext API key. Store this securely.
-    pub key: String,
-    /// When the old key was deprecated (grace window starts here).
-    pub old_key_deprecated_at: DateTime<Utc>,
-    /// When the old key's grace window ends and it stops authenticating.
-    /// Clients should show this directly instead of hardcoding "48 hours".
-    pub old_key_grace_expires_at: DateTime<Utc>,
 }
 
 /// List all API keys for the authenticated user.
@@ -159,7 +96,7 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let keys = keys.into_iter().map(ApiKeyInfoResponse::from).collect();
+    let keys = keys.into_iter().map(api_key_info_response).collect();
 
     Ok(Json(ApiKeyListResponse { keys }))
 }
@@ -257,13 +194,6 @@ where
     }
 }
 
-/// Request to update an API key's rate limit.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateApiKeyPayload {
-    /// Per-key rate limit in requests per minute. Null = use server default.
-    pub rate_limit_rpm: Option<i32>,
-}
-
 /// Update an API key's settings (currently: rate_limit_rpm).
 #[utoipa::path(
     patch,
@@ -330,7 +260,7 @@ where
         .flatten()
         .and_then(|info| info.deprecated_at);
 
-    Ok(Json(ApiKeyInfoResponse::from_key_with_rate_limit(
+    Ok(Json(api_key_info_with_rate_limit(
         &key,
         payload.rate_limit_rpm,
         deprecated_at,

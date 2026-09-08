@@ -212,3 +212,13 @@ mod tests {
         assert_eq!(relative_time("whenever", 0.0), None);
     }
 }
+
+/// `relative_time` for a value that is already a timestamp.
+///
+/// Since the API contract moved to `api-types`, response fields arrive as
+/// `DateTime<Utc>` rather than ISO strings. The `&str` form stays for the
+/// places that genuinely still hold text (recovery, API-key expiry).
+#[must_use]
+pub fn relative_time_at(at: chrono::DateTime<chrono::Utc>, now_ms: f64) -> Option<String> {
+    relative_time(&at.to_rfc3339(), now_ms)
+}

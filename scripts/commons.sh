@@ -18,7 +18,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/Cargo.toml"
 config="$repo_root/.cargo/config.toml"
 url="https://github.com/randomcash/payserver-commons.git"
-crates=(types auth crypto rates ui-kit)
+crates=(api-types types auth crypto rates ui-kit)
 
 die() { echo "error: $*" >&2; exit 1; }
 current_rev() { grep -m1 -oP 'rev = "\K[0-9a-f]{40}' "$manifest" || true; }
@@ -88,7 +88,7 @@ case "${1:-status}" in
     [ "$rev" = "$old" ] && { echo "already pinned to $rev"; exit 0; }
     sed -i "s/rev = \"$old\"/rev = \"$rev\"/g" "$manifest"
     echo "pinned $old → $rev"
-    echo "run 'cargo update -p types -p auth -p crypto -p rates -p ui-kit' then commit Cargo.toml and Cargo.lock"
+    echo "run 'cargo update -p api-types -p types -p auth -p crypto -p rates -p ui-kit' then commit Cargo.toml and Cargo.lock"
     ;;
   -h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \?//' ;;
   *) die "unknown command '${1}' (link|unlink|status|pin)" ;;

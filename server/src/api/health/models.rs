@@ -1,175 +1,34 @@
 //! Response and data types for the health check endpoints.
 
-use std::collections::HashMap;
-
+pub use api_types::{
+    ChainHealthInfo, ChainsHealthResponse, DeepHealthResponse, DependencyHealth, HealthResponse,
+    MonitorHealth, ReadinessResponse, RpcHealth,
+};
 use evm::monitor::{ChainHealth, SourceStatus};
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
-/// Health check response.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct HealthResponse {
-    /// Service status.
-    pub status: String,
-
-    /// Service version.
-    pub version: String,
-
-    /// Build commit SHA (short) baked in at compile time.
-    pub build_sha: String,
-
-    /// Database connectivity.
-    pub database: bool,
-
-    /// Redis connectivity (for monitor service).
-    /// None if Redis is not configured.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub redis: Option<bool>,
-}
-
-/// Readiness probe response (returned on 503).
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ReadinessResponse {
-    /// "ready" or "not_ready".
-    pub status: String,
-    /// Names of failing dependencies (e.g. "postgres", "redis", "rpc:56").
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub failing: Vec<String>,
-}
-
-/// Status of a single dependency in the deep health check.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct DependencyHealth {
-    /// "ok" or "error".
-    pub status: String,
-    /// Latency in milliseconds.
-    pub latency_ms: u64,
-    /// Error message if status is "error".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// RPC chain status in the deep health check.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct RpcHealth {
-    /// "ok" or "error".
-    pub status: String,
-    /// Latency in milliseconds (time to read health from Redis, not RPC RTT).
-    pub latency_ms: u64,
-    /// Last block number reported by the monitor.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_block: Option<u64>,
-    /// Error message if status is "error".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// Monitor liveness status in the deep health check.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct MonitorHealth {
-    /// "ok" or "error".
-    pub status: String,
-    /// Whether chain health data in Redis is fresh (updated within 60 s).
-    pub data_fresh: bool,
-}
-
-/// Deep health diagnostic response.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct DeepHealthResponse {
-    /// Build commit SHA (short) baked in at compile time.
-    pub build_sha: String,
-    /// Service version from Cargo.toml.
-    pub version: String,
-    /// Postgres health.
-    pub postgres: DependencyHealth,
-    /// Redis health.
-    pub redis: DependencyHealth,
-    /// Per-chain RPC health keyed by chain_id.
-    pub rpcs: HashMap<String, RpcHealth>,
-    /// EVM monitor liveness.
-    pub monitor: MonitorHealth,
-}
-
-/// Chain health information for a single chain.
+/// Build the wire shape from the monitor's per-chain health.
 ///
-/// Two audiences, one shape. Whether a chain is up is something every merchant
-/// needs - a dashboard that cannot say "payments are not being detected right
-/// now" is worse than no dashboard. How far behind the monitor is, and why a
-/// connection failed, is operational detail that belongs to admins.
-///
-/// So the detail fields are `Option` and simply absent for everyone else,
-/// rather than there being two response types to keep in step. See
-/// [`Self::redact`].
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ChainHealthInfo {
-    /// Chain ID (EIP-155).
-    pub chain_id: String,
-    /// Human-readable chain name.
-    pub chain_name: String,
-    /// Connection status. Public form is one of `connected`, `connecting`,
-    /// `disconnected`, `failed`; admins additionally get `failed: {reason}`.
-    pub status: String,
-    /// Current block number on chain. Admin only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_block: Option<u64>,
-    /// Last block processed by the monitor. Admin only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_processed_block: Option<u64>,
-    /// Number of addresses being watched. Admin only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub watched_addresses: Option<usize>,
-    /// Overall health status.
-    pub is_healthy: bool,
-}
-
-impl ChainHealthInfo {
-    /// Strip everything a non-admin should not see.
-    ///
-    /// `is_healthy`, `status` and the chain's identity stay: that is the "on or
-    /// off" answer the dashboard exists to show. Block heights, the watched
-    /// address count and the failure reason go - the reason especially, since
-    /// an RPC error string routinely carries the provider and the endpoint.
-    pub fn redact(mut self) -> Self {
-        self.current_block = None;
-        self.last_processed_block = None;
-        self.watched_addresses = None;
-        if let Some(bare) = self.status.split(':').next() {
-            self.status = bare.trim().to_string();
-        }
-        self
+/// A free function rather than a `From` impl: `ChainHealth` belongs to `evm`
+/// and `ChainHealthInfo` to `api-types`, so neither is local here and the
+/// orphan rule forbids the impl. That is the rule working - the conversion is
+/// EVM-specific and does not belong in a contract every chain shares.
+pub(crate) fn chain_health_info(h: ChainHealth) -> ChainHealthInfo {
+    ChainHealthInfo {
+        // `ChainHealth` comes from the EVM monitor and carries an EIP-155
+        // number. `.to_string()` on it yields "1", not "eip155:1" - which
+        // the client now parses as a `ChainId` and rejects, taking the
+        // whole chains-health response down with it.
+        chain_id: types::ChainId::evm(h.chain_id),
+        chain_name: h.chain_name,
+        status: match h.status {
+            SourceStatus::Connected => "connected".to_string(),
+            SourceStatus::Connecting => "connecting".to_string(),
+            SourceStatus::Disconnected => "disconnected".to_string(),
+            SourceStatus::Failed(msg) => format!("failed: {}", msg),
+        },
+        current_block: h.current_block,
+        last_processed_block: h.last_processed_block,
+        watched_addresses: Some(h.watched_addresses),
+        is_healthy: h.is_healthy,
     }
-}
-
-impl From<ChainHealth> for ChainHealthInfo {
-    fn from(h: ChainHealth) -> Self {
-        Self {
-            // `ChainHealth` comes from the EVM monitor and carries an EIP-155
-            // number. `.to_string()` on it yields "1", not "eip155:1" - which
-            // the client now parses as a `ChainId` and rejects, taking the
-            // whole chains-health response down with it.
-            chain_id: types::ChainId::evm(h.chain_id).to_string(),
-            chain_name: h.chain_name,
-            status: match h.status {
-                SourceStatus::Connected => "connected".to_string(),
-                SourceStatus::Connecting => "connecting".to_string(),
-                SourceStatus::Disconnected => "disconnected".to_string(),
-                SourceStatus::Failed(msg) => format!("failed: {}", msg),
-            },
-            current_block: h.current_block,
-            last_processed_block: h.last_processed_block,
-            watched_addresses: Some(h.watched_addresses),
-            is_healthy: h.is_healthy,
-        }
-    }
-}
-
-/// Chains health response.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ChainsHealthResponse {
-    /// Health information for each monitored chain.
-    pub chains: Vec<ChainHealthInfo>,
-    /// Whether all chains are healthy.
-    pub all_healthy: bool,
-    /// Data freshness - whether health data is recent (updated within 60s).
-    pub data_fresh: bool,
 }

@@ -75,7 +75,7 @@ where
         store_id: cancelled.store_id.0.to_string(),
         store_name: None,
         currency: cancelled.currency,
-        status: cancelled.status.to_string(),
+        status: cancelled.status,
         amount: cancelled.amount,
         amount_received: cancelled.amount_received,
         created_at: cancelled.created_at,

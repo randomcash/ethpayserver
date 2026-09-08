@@ -6,6 +6,7 @@
 )]
 
 use std::collections::HashMap;
+use types::ChainId;
 
 use evm::monitor::{ChainHealth, SourceStatus};
 
@@ -144,7 +145,7 @@ fn chain_health_connected_conversion() {
         watched_addresses: 42,
         is_healthy: true,
     };
-    let info: ChainHealthInfo = health.into();
+    let info = super::models::chain_health_info(health);
     assert_eq!(info.status, "connected");
     assert!(info.is_healthy);
     assert_eq!(info.watched_addresses, Some(42));
@@ -154,7 +155,7 @@ fn chain_health_connected_conversion() {
     // `ChainId` and rejects - taking the whole chains-health response down
     // rather than one field. This test constructed a `ChainHealth` and never
     // looked at `chain_id`, which is why it passed.
-    assert_eq!(info.chain_id, "eip155:1");
+    assert_eq!(info.chain_id, ChainId::parse("eip155:1").unwrap());
 }
 
 #[test]
@@ -168,7 +169,7 @@ fn chain_health_failed_conversion() {
         watched_addresses: 0,
         is_healthy: false,
     };
-    let info: ChainHealthInfo = health.into();
+    let info = super::models::chain_health_info(health);
     assert_eq!(info.status, "failed: rpc timeout");
     assert!(!info.is_healthy);
 }
@@ -184,7 +185,7 @@ fn chain_health_disconnected_conversion() {
         watched_addresses: 10,
         is_healthy: false,
     };
-    let info: ChainHealthInfo = health.into();
+    let info = super::models::chain_health_info(health);
     assert_eq!(info.status, "disconnected");
     assert!(!info.is_healthy);
 }
@@ -236,7 +237,7 @@ fn rpc_health_last_block_omitted_when_none() {
 
 fn detailed() -> ChainHealthInfo {
     ChainHealthInfo {
-        chain_id: "eip155:11155111".to_string(),
+        chain_id: ChainId::parse("eip155:11155111").unwrap(),
         chain_name: "Sepolia".to_string(),
         status: "failed: https://eth-sepolia.example.com/v2/SECRET-KEY timed out".to_string(),
         current_block: Some(9_100_200),
@@ -251,7 +252,7 @@ fn redacted_chain_health_keeps_the_on_off_answer() {
     let public = detailed().redact();
 
     // The whole point of showing this to a merchant.
-    assert_eq!(public.chain_id, "eip155:11155111");
+    assert_eq!(public.chain_id, ChainId::evm(11_155_111));
     assert_eq!(public.chain_name, "Sepolia");
     assert!(!public.is_healthy);
     assert_eq!(public.status, "failed");

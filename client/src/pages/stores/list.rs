@@ -221,10 +221,10 @@ pub fn StoresPage() -> impl IntoView {
 /// Store card component.
 #[component]
 fn StoreCard(store: Store) -> impl IntoView {
-    let store_id = store.id.clone();
-    let store_link = store.id.clone();
+    let store_id = store.id;
+    let store_link = store.id;
     let store_name = store.name.clone();
-    let created_display = format_date(&store.created_at);
+    let created_display = format_date(&store.created_at.to_rfc3339());
 
     view! {
         <A href=format!("/evm/stores/{}", store_link) attr:class="store-card">
@@ -254,7 +254,7 @@ fn StoreCard(store: Store) -> impl IntoView {
             </div>
 
             <div class="store-card-footer">
-                <span class="store-card-id">{store_id}</span>
+                <span class="store-card-id">{store_id.to_string()}</span>
                 <IconChevronRight />
             </div>
         </A>

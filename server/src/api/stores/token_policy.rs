@@ -5,8 +5,6 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::repository::StoreRepository;
@@ -18,32 +16,7 @@ use data_service::{
 use super::super::extractors::AuthenticatedUser;
 use super::require_store_settings_permission;
 use crate::state::PgAppState;
-
-/// Token policy entry for API requests/responses.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct TokenPolicyEntryPayload {
-    pub chain_id: String,
-    pub token_address: Option<String>,
-    pub asset_symbol: String,
-}
-
-/// Token policy response.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct TokenPolicyResponse {
-    pub id: String,
-    pub store_id: Uuid,
-    pub mode: String,
-    pub entries: Vec<TokenPolicyEntryPayload>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-/// Request to set a token policy.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct SetTokenPolicyRequest {
-    pub mode: String,
-    pub entries: Vec<TokenPolicyEntryPayload>,
-}
+pub use api_types::{SetTokenPolicyRequest, TokenPolicyEntryPayload, TokenPolicyResponse};
 
 /// Get store token policy.
 pub async fn get_token_policy<A>(
@@ -76,7 +49,7 @@ where
                 .entries
                 .into_iter()
                 .map(|e| TokenPolicyEntryPayload {
-                    chain_id: e.chain_id.to_string(),
+                    chain_id: e.chain_id.clone(),
                     token_address: e.token_address,
                     asset_symbol: e.asset_symbol,
                 })
@@ -129,8 +102,7 @@ where
         .into_iter()
         .map(|e| {
             Ok(TokenPolicyEntryInput {
-                chain_id: types::ChainId::parse(e.chain_id.as_str())
-                    .map_err(|_| StatusCode::BAD_REQUEST)?,
+                chain_id: e.chain_id,
                 token_address: e.token_address,
                 asset_symbol: e.asset_symbol,
             })
@@ -150,7 +122,7 @@ where
             .entries
             .into_iter()
             .map(|e| TokenPolicyEntryPayload {
-                chain_id: e.chain_id.to_string(),
+                chain_id: e.chain_id.clone(),
                 token_address: e.token_address,
                 asset_symbol: e.asset_symbol,
             })

@@ -55,7 +55,7 @@ jobs:
           # Per crate, and the crate name has to be in the match. Grepping only
           # for the revision proves that SOME entry is pinned, which a partial
           # un-pin passes: `types` pinned, `ui-kit` left as a path entry, green.
-          for CRATE in types auth crypto rates ui-kit; do
+          for CRATE in api-types types auth crypto rates ui-kit; do
             if ! awk -v c="$CRATE" -v r="$REV" '
                  /^\[\[package\]\]/ { name=""; src="" }
                  /^name = / { gsub(/[",]/,""); name=$3 }

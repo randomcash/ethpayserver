@@ -28,7 +28,7 @@ pub(super) fn InvoiceRow(invoice: Invoice, show_store: bool) -> impl IntoView {
     let invoice_id = invoice.id.clone();
     let invoice_link = invoice.id.clone();
     let order_id = get_metadata_field(&invoice, "order_id");
-    let created_display = format_date(&invoice.created_at);
+    let created_display = format_date(&invoice.created_at.to_rfc3339());
     let store_display = show_store.then(|| store_label(&invoice));
 
     view! {
@@ -86,7 +86,7 @@ pub(super) fn InvoiceCard(invoice: Invoice, show_store: bool) -> impl IntoView {
     let invoice_id = invoice.id.clone();
     let invoice_link = invoice.id.clone();
     let order_id = get_metadata_field(&invoice, "order_id");
-    let created_display = format_date(&invoice.created_at);
+    let created_display = format_date(&invoice.created_at.to_rfc3339());
     let store_display = show_store.then(|| store_label(&invoice));
 
     view! {
@@ -177,10 +177,11 @@ mod tests {
             store_name: store_name.map(str::to_string),
             currency: "USD".to_string(),
             status: InvoiceStatus::Pending,
+            customer_email: None,
             amount: "10.00".to_string(),
             amount_received: "0.00".to_string(),
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-            expires_at: "2024-01-02T00:00:00Z".to_string(),
+            created_at: "2024-01-01T00:00:00Z".parse().unwrap(),
+            expires_at: "2024-01-02T00:00:00Z".parse().unwrap(),
             metadata: None,
             payment_options: vec![],
         }

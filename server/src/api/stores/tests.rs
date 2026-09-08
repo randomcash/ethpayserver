@@ -50,7 +50,7 @@ fn test_store_response_from_store() {
         created_at: now,
     };
 
-    let response: StoreResponse = store.into();
+    let response = store_response(store);
     assert_eq!(response.id, Uuid::nil());
     assert_eq!(response.name, "Test Store");
     assert_eq!(response.website, Some("https://example.com".to_string()));
@@ -70,7 +70,7 @@ fn test_store_response_without_website() {
         created_at: Utc::now(),
     };
 
-    let response: StoreResponse = store.into();
+    let response = store_response(store);
     assert!(response.website.is_none());
 }
 
@@ -85,7 +85,7 @@ fn test_store_response_archived() {
         created_at: Utc::now(),
     };
 
-    let response: StoreResponse = store.into();
+    let response = store_response(store);
     assert!(response.archived);
 }
 
@@ -110,7 +110,7 @@ fn test_payment_method_response_native() {
     };
 
     let response: PaymentMethodResponse = pm.into();
-    assert_eq!(response.chain_id, "eip155:1");
+    assert_eq!(response.chain_id, ChainId::parse("eip155:1").unwrap());
     assert_eq!(response.asset_symbol, "ETH");
     assert!(response.token_address.is_none());
     assert_eq!(response.derivation_index, Some(5));
@@ -136,7 +136,7 @@ fn test_payment_method_response_erc20() {
     };
 
     let response: PaymentMethodResponse = pm.into();
-    assert_eq!(response.chain_id, "eip155:137");
+    assert_eq!(response.chain_id, ChainId::parse("eip155:137").unwrap());
     assert_eq!(response.asset_symbol, "USDC");
     assert_eq!(response.token_address, Some(token_addr));
     assert!(!response.enabled);
@@ -195,7 +195,7 @@ fn test_create_payment_method_request() {
         "xpub": "xpub123..."
     }"#;
     let req: CreatePaymentMethodRequest = serde_json::from_str(json).unwrap();
-    assert_eq!(req.chain_id, "eip155:1");
+    assert_eq!(req.chain_id, ChainId::parse("eip155:1").unwrap());
     assert!(req.token_address.is_none());
     assert_eq!(req.asset_symbol, "ETH");
     assert_eq!(req.decimals, 18);
@@ -556,7 +556,7 @@ fn test_wallet_addresses_response_empty() {
 fn test_store_settings_response_serialization() {
     let response = StoreSettingsResponse {
         store_id: Uuid::nil(),
-        default_chain_id: Some(137),
+        default_chain_id: Some(ChainId::evm(137)),
         default_display_currency: Some("USD".to_string()),
         logo_url: Some("https://example.com/logo.png".to_string()),
         accent_color: Some("#FF5500".to_string()),
@@ -564,7 +564,7 @@ fn test_store_settings_response_serialization() {
         updated_at: "2026-04-20T00:00:00Z".to_string(),
     };
     let json = serde_json::to_value(&response).unwrap();
-    assert_eq!(json["default_chain_id"], 137);
+    assert_eq!(json["default_chain_id"], "eip155:137");
     assert_eq!(json["default_display_currency"], "USD");
     assert_eq!(json["logo_url"], "https://example.com/logo.png");
     assert_eq!(json["accent_color"], "#FF5500");
@@ -599,14 +599,14 @@ fn test_valid_notification_events_list() {
 #[test]
 fn test_update_settings_request_deserialization() {
     let json = serde_json::json!({
-        "default_chain_id": 1,
+        "default_chain_id": "eip155:1",
         "default_display_currency": "EUR",
         "logo_url": "https://example.com/logo.png",
         "accent_color": "#00FF00",
         "notification_prefs": {"payment_detected": {"webhook": false}}
     });
     let req: UpdateStoreSettingsRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(req.default_chain_id, Some(1));
+    assert_eq!(req.default_chain_id, Some(ChainId::evm(1)));
     assert_eq!(req.default_display_currency.as_deref(), Some("EUR"));
     assert_eq!(
         req.logo_url.as_deref(),
@@ -663,7 +663,7 @@ fn test_rotate_wallet_response_serialization() {
             RotationEntry {
                 id: Uuid::new_v4(),
                 payment_method_id: Uuid::new_v4(),
-                chain_id: "eip155:1".to_string(),
+                chain_id: Some(ChainId::evm(1)),
                 asset_symbol: "ETH".to_string(),
                 previous_xpub_masked: "xpub6D4B...cLW5".to_string(),
                 previous_derivation_index: 5,
@@ -672,7 +672,7 @@ fn test_rotate_wallet_response_serialization() {
             RotationEntry {
                 id: Uuid::new_v4(),
                 payment_method_id: Uuid::new_v4(),
-                chain_id: "eip155:137".to_string(),
+                chain_id: Some(ChainId::evm(137)),
                 asset_symbol: "USDC".to_string(),
                 previous_xpub_masked: "xpub6D4B...cLW5".to_string(),
                 previous_derivation_index: 12,

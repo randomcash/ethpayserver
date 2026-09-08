@@ -65,7 +65,7 @@ pub(super) fn ProtectedLayout() -> impl IntoView {
                 Ok(fetched) => {
                     // If selected store no longer exists, clear selection.
                     if let Some(ref id) = selected_store_id.get_untracked()
-                        && !fetched.iter().any(|s| &s.id == id)
+                        && !fetched.iter().any(|s| &s.id.to_string() == id)
                     {
                         set_selected_store_id.set(None);
                         ui_kit::hooks::use_storage::remove_local(SELECTED_STORE_KEY);
@@ -74,9 +74,9 @@ pub(super) fn ProtectedLayout() -> impl IntoView {
                     if selected_store_id.get_untracked().is_none()
                         && let Some(first) = fetched.first()
                     {
-                        let id = first.id.clone();
+                        let id = first.id;
                         let _ = set_local(SELECTED_STORE_KEY, &id);
-                        set_selected_store_id.set(Some(id));
+                        set_selected_store_id.set(Some(id.to_string()));
                     }
                     set_stores.set(fetched);
                     set_stores_status.set(StoresStatus::Loaded);
@@ -261,11 +261,11 @@ where
                     // Store list from API
                     <For
                         each=move || store_ctx.stores.get()
-                        key=|store| store.id.clone()
+                        key=|store| store.id
                         let:store
                     >
                         {
-                            let store_id = store.id.clone();
+                            let store_id = store.id.to_string();
                             let store_name = store.name.clone();
                             let store_ctx = store_ctx.clone();
                             let id_for_click = store_id.clone();
@@ -291,7 +291,7 @@ where
                                         let store_ctx = store_ctx.clone();
                                         let id = store_id.clone();
                                         move || {
-                                            let is_active = store_ctx.selected_store_id.get().as_deref() == Some(&id);
+                                            let is_active = store_ctx.selected_store_id.get().as_deref() == Some(&id.to_string());
                                             is_active.then(|| view! { <IconCheck /> })
                                         }
                                     }

@@ -73,7 +73,7 @@ impl StoreContext {
     pub fn selected_store(&self) -> Option<Store> {
         let id = self.selected_store_id.get();
         let stores = self.stores.get();
-        id.and_then(|id| stores.iter().find(|s| s.id == id).cloned())
+        id.and_then(|id| stores.iter().find(|s| s.id.to_string() == id).cloned())
     }
 
     /// Trigger a refetch of the stores list.

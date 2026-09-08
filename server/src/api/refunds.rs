@@ -9,7 +9,6 @@ use axum::{
     http::StatusCode,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use auth::{SessionService, UserStoreRepository};
@@ -19,58 +18,7 @@ use types::{InvoiceId, InvoiceStatus, RefundData, RefundStatus};
 use super::extractors::AuthenticatedUser;
 use crate::metrics;
 use crate::state::PgAppState;
-
-/// Request body for creating a refund.
-#[derive(Debug, Deserialize)]
-pub struct CreateRefundRequest {
-    /// Optional partial refund amount (in smallest unit).
-    /// If omitted, refunds the full payment amount.
-    pub amount: Option<String>,
-    /// Reason for the refund.
-    pub reason: Option<String>,
-}
-
-/// Refund response.
-#[derive(Debug, Serialize)]
-pub struct RefundResponse {
-    pub id: Uuid,
-    pub invoice_id: String,
-    pub payment_id: Uuid,
-    pub to_address: String,
-    pub chain_id: String,
-    pub asset_type: String,
-    pub asset_symbol: String,
-    pub amount: String,
-    pub tx_hash: Option<String>,
-    pub status: String,
-    pub fee_amount: Option<String>,
-    pub reason: Option<String>,
-    pub error_message: Option<String>,
-    pub created_at: chrono::DateTime<Utc>,
-    pub confirmed_at: Option<chrono::DateTime<Utc>>,
-}
-
-impl From<RefundData> for RefundResponse {
-    fn from(r: RefundData) -> Self {
-        Self {
-            id: r.id,
-            invoice_id: r.invoice_id.0,
-            payment_id: r.payment_id,
-            to_address: r.to_address,
-            chain_id: r.chain_id.to_string(),
-            asset_type: r.asset_type,
-            asset_symbol: r.asset_symbol,
-            amount: r.amount,
-            tx_hash: r.tx_hash,
-            status: r.status.to_string(),
-            fee_amount: r.fee_amount,
-            reason: r.reason,
-            error_message: r.error_message,
-            created_at: r.created_at,
-            confirmed_at: r.confirmed_at,
-        }
-    }
-}
+pub use api_types::{CreateRefundRequest, RefundResponse};
 
 /// Initiate a refund for a paid invoice.
 ///

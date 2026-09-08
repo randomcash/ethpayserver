@@ -13,87 +13,15 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use serde::Deserialize;
 
 use auth::AuthenticationService;
 use data_service::{PaymentOptionReader, PaymentReader};
 use types::{InvoiceId, InvoiceReader, InvoiceStatus};
 
-use super::invoices::PaymentOptionResponse;
 use super::ws::StatusUpdate;
 use crate::state::PgAppState;
-use types::PaymentData;
-
-/// Public view of a payment on the checkout page.
-///
-/// Deliberately omits fields present on the authenticated `PaymentResponse`:
-/// - `from_address` — sender wallet address. Leaking it here would let anyone
-///   with the invoice link correlate an invoice to the customer's wallet.
-/// - `reorged` — internal state that confuses customers with transient
-///   "your payment was invalidated" UX when a transient reorg happens.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct CheckoutPaymentInfo {
-    /// Payment ID.
-    pub id: String,
-    /// Chain ID (EIP-155).
-    pub chain_id: String,
-    /// Transaction hash — already public on-chain.
-    pub tx_hash: String,
-    /// Amount received (smallest unit as string).
-    pub amount: String,
-    /// Asset symbol.
-    pub asset_symbol: String,
-    /// Token contract address (ERC20 only, None for native).
-    pub token_address: Option<String>,
-    /// Block number (for confirmation counting).
-    pub block_number: Option<u64>,
-    /// When the payment was detected.
-    pub detected_at: chrono::DateTime<chrono::Utc>,
-    /// When the payment reached required confirmations (None = pending).
-    pub confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl From<PaymentData> for CheckoutPaymentInfo {
-    fn from(p: PaymentData) -> Self {
-        Self {
-            id: p.id.to_string(),
-            chain_id: p.chain_id.to_string(),
-            tx_hash: p.tx_hash,
-            amount: p.amount,
-            asset_symbol: p.asset_symbol,
-            token_address: p.token_address,
-            block_number: p.block_number,
-            detected_at: p.detected_at,
-            confirmed_at: p.confirmed_at,
-        }
-    }
-}
-
-/// Public checkout response — only payment-relevant fields.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct CheckoutResponse {
-    /// Invoice ID.
-    pub id: String,
-    /// Invoice currency (e.g., "USD").
-    pub currency: String,
-    /// Current status.
-    pub status: String,
-    /// Requested amount.
-    pub amount: String,
-    /// Amount received so far.
-    pub amount_received: String,
-    /// Expiration timestamp.
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-    /// Whether the invoice is expired.
-    pub is_expired: bool,
-    /// Whether the invoice is fully paid.
-    pub is_paid: bool,
-    /// Payment options (addresses, chains, amounts).
-    pub payment_options: Vec<PaymentOptionResponse>,
-    /// Payments received (privacy-filtered — no sender addresses).
-    pub payments: Vec<CheckoutPaymentInfo>,
-}
+pub use api_types::{CheckoutPaymentInfo, CheckoutResponse};
 
 /// Get public checkout data for an invoice.
 ///
@@ -233,6 +161,7 @@ async fn handle_checkout_socket(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use types::ChainId;
 
     #[test]
     fn test_checkout_response_serialization() {
@@ -263,7 +192,7 @@ mod tests {
     fn test_checkout_payment_info_never_exposes_sender() {
         let info = CheckoutPaymentInfo {
             id: "pay_1".to_string(),
-            chain_id: "eip155:1".to_string(),
+            chain_id: ChainId::parse("eip155:1").unwrap(),
             tx_hash: "0xabc".to_string(),
             amount: "1".to_string(),
             asset_symbol: "ETH".to_string(),

@@ -202,7 +202,7 @@ where
             // behind it is or which endpoint failed.
             let chain_infos: Vec<ChainHealthInfo> = chains
                 .into_iter()
-                .map(ChainHealthInfo::from)
+                .map(super::models::chain_health_info)
                 .map(|info| if is_admin { info } else { info.redact() })
                 .collect();
 

@@ -14,8 +14,8 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::{IntoParams, ToSchema};
+use serde::Deserialize;
+use utoipa::IntoParams;
 use uuid::Uuid;
 
 use auth::repository::{StoreRepository, UserStoreRepository};
@@ -28,121 +28,11 @@ use evm::{XpubDeriver, validate_xpub};
 use super::super::extractors::AuthenticatedUser;
 use super::{ApiErr, mask_xpub, repository_error, require_store_settings_permission};
 use crate::state::PgAppState;
-
-/// Request to add a wallet to the account.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct CreateWalletRequest {
-    /// Extended public key (xpub) for address derivation.
-    pub xpub: String,
-    /// Optional wallet name.
-    pub name: Option<String>,
-}
-
-/// Request to update a wallet.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateWalletRequest {
-    /// New name. Absent leaves the name alone.
-    pub name: Option<String>,
-    /// Set to `true` to make this the account primary. `false` is ignored:
-    /// an account either has a primary or is choosing a different one, and
-    /// "no primary" is not a state a merchant can usefully ask for.
-    pub is_primary: Option<bool>,
-}
-
-/// Request to point a store at a wallet.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct SetStoreWalletRequest {
-    /// Wallet to use for this store. Must belong to the same account.
-    pub wallet_id: Uuid,
-}
-
-/// Account wallet response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct WalletResponse {
-    /// Wallet ID.
-    pub id: Uuid,
-    /// Owning account.
-    pub user_id: Uuid,
-    /// Extended public key (masked for security).
-    pub xpub_masked: String,
-    /// Next derivation index this wallet will issue.
-    pub derivation_index: i32,
-    /// Wallet name.
-    pub name: Option<String>,
-    /// Whether stores fall back to this wallet.
-    pub is_primary: bool,
-    /// Creation timestamp.
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl From<data_service::Wallet> for WalletResponse {
-    fn from(w: data_service::Wallet) -> Self {
-        Self {
-            id: w.id,
-            user_id: w.user_id,
-            xpub_masked: mask_xpub(&w.xpub),
-            derivation_index: w.derivation_index,
-            name: w.name,
-            is_primary: w.is_primary,
-            created_at: w.created_at,
-        }
-    }
-}
-
-/// The wallet a store derives from, and how it got there.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct StoreWalletResponse {
-    /// Store ID.
-    pub store_id: Uuid,
-    /// The wallet this store's addresses come from.
-    #[serde(flatten)]
-    pub wallet: WalletResponse,
-    /// True when the store is pinned to this wallet, false when it is simply
-    /// following the account primary. The distinction is what tells a merchant
-    /// whether changing their primary will move this store's payouts.
-    pub is_override: bool,
-}
-
-/// Wallet xpub export response (full, unmasked).
-#[derive(Debug, Serialize, ToSchema)]
-pub struct WalletXpubResponse {
-    /// Wallet ID.
-    pub id: Uuid,
-    /// Owning account.
-    pub user_id: Uuid,
-    /// Full extended public key (unmasked).
-    pub xpub: String,
-    /// Next derivation index this wallet will issue.
-    pub derivation_index: i32,
-    /// Wallet name.
-    pub name: Option<String>,
-    /// Creation timestamp.
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// A derived wallet address with its index and derivation path.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DerivedAddressEntry {
-    /// Ethereum address (checksummed hex).
-    pub address: String,
-    /// BIP-44 derivation index.
-    pub index: u32,
-    /// Full BIP-44 derivation path.
-    pub derivation_path: String,
-    /// Whether this index has been assigned to a payment option.
-    pub used: bool,
-}
-
-/// Response for listing derived wallet addresses.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct WalletAddressesResponse {
-    /// Wallet ID.
-    pub wallet_id: Uuid,
-    /// Next derivation index (number of addresses assigned so far).
-    pub derivation_index: i32,
-    /// Derived addresses.
-    pub addresses: Vec<DerivedAddressEntry>,
-}
+pub use api_types::{
+    CreateWalletRequest, DerivedAddressEntry, RotateWalletRequest, RotateWalletResponse,
+    RotationEntry, SetStoreWalletRequest, StoreWalletResponse, UpdateWalletRequest,
+    WalletAddressesResponse, WalletResponse, WalletXpubResponse,
+};
 
 /// Query parameters for listing wallet addresses.
 #[derive(Debug, Deserialize, IntoParams)]
@@ -600,47 +490,6 @@ where
 // Wallet XPub Rotation
 // =============================================================================
 
-/// Request to rotate wallet xpub.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct RotateWalletRequest {
-    /// New extended public key to rotate to.
-    pub xpub: String,
-    /// Optional reason for rotation (e.g., "key compromise", "scheduled rotation").
-    pub reason: Option<String>,
-}
-
-/// A single rotation event in the response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct RotationEntry {
-    /// Rotation ID.
-    pub id: Uuid,
-    /// Payment method that was rotated.
-    pub payment_method_id: Uuid,
-    /// Chain ID of the rotated payment method.
-    pub chain_id: String,
-    /// Asset symbol of the rotated payment method.
-    pub asset_symbol: String,
-    /// Previous xpub (masked).
-    pub previous_xpub_masked: String,
-    /// Derivation index at time of rotation.
-    pub previous_derivation_index: i32,
-    /// When the rotation occurred.
-    pub rotated_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Response from wallet rotation.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct RotateWalletResponse {
-    /// Store ID.
-    pub store_id: Uuid,
-    /// New xpub (masked).
-    pub new_xpub_masked: String,
-    /// Number of payment methods rotated.
-    pub methods_rotated: usize,
-    /// Individual rotation entries.
-    pub rotations: Vec<RotationEntry>,
-}
-
 /// Rotate the xpub a store's payment methods derive from.
 ///
 /// Points every payment method for this store at the account wallet holding
@@ -736,7 +585,7 @@ where
             payment_method_id: rotation.payment_method_id,
             chain_id: by_id
                 .get(&rotation.payment_method_id)
-                .map_or_else(String::new, |m| m.chain_id.to_string()),
+                .map(|m| m.chain_id.clone()),
             asset_symbol: by_id
                 .get(&rotation.payment_method_id)
                 .map_or_else(String::new, |m| m.asset_symbol.clone()),

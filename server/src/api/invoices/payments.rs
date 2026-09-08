@@ -269,7 +269,7 @@ where
 
     Ok(Json(InvoiceStatusResponse {
         id: invoice.id.0,
-        status: invoice.status.to_string(),
+        status: invoice.status,
         amount: invoice.amount.clone(),
         amount_received: invoice.amount_received,
         currency: invoice.currency,
