@@ -3,10 +3,11 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 
-use crate::api::{ApiError, EvmApiClient, Invoice};
+use crate::api::{ApiError, EvmApiClient};
 use crate::app::{StoreContext, StoresStatus};
 use crate::components::{CreateInvoiceSignal, NoStoreSelected, PAGE_SIZE, Pagination};
 use crate::services::StatusUpdate;
+use crate::util::use_debounced_search;
 
 use super::helpers::IconExport;
 use super::widgets::{IconPlus, IconSearch, InvoiceCard, InvoiceRow};
@@ -33,6 +34,10 @@ pub fn InvoicesPage() -> impl IntoView {
     let (active_filter, set_active_filter) = signal("all".to_string());
     let (currency_filter, set_currency_filter) = signal("all".to_string());
     let (search_query, set_search_query) = signal(String::new());
+    // The box tracks every keystroke; only this settles, and only it is ever
+    // queried. Search is a server-side filter now (RCS-231), so one request
+    // per character is what the debounce is standing between us and.
+    let search_param = use_debounced_search(search_query.into());
     let (current_offset, set_current_offset) = signal(0i64);
 
     // TX hash lookup state
@@ -88,10 +93,18 @@ pub fn InvoicesPage() -> impl IntoView {
         });
     };
 
-    // Reset offset when any filter or store changes
+    // Reset offset when any filter, the search term or the store changes.
+    //
+    // The search term belongs in here now that it filters the whole result
+    // set: typing on page 3 would otherwise ask for page 3 of the matches,
+    // which for most terms is past the end and renders as "no invoices found".
+    // This Effect is declared before the resource below on purpose — effects
+    // run in creation order, so the offset is already 0 by the time the
+    // resource reads it, and the stale page is never fetched.
     let _reset_offset_on_filter = Effect::new(move || {
         let _ = active_filter.get();
         let _ = currency_filter.get();
+        let _ = search_param.get();
         let _ = store_ctx.selected_store_id.get();
         set_current_offset.set(0);
     });
@@ -152,6 +165,7 @@ pub fn InvoicesPage() -> impl IntoView {
         let stores_loaded = matches!(store_status.get(), StoresStatus::Loaded);
         let status = status_param.get();
         let currency = currency_param.get();
+        let search = search_param.get();
         let offset = current_offset.get();
         let _ = refresh.get();
 
@@ -169,6 +183,7 @@ pub fn InvoicesPage() -> impl IntoView {
                     store_id.as_deref(),
                     status.as_deref(),
                     currency.as_deref(),
+                    search.as_deref(),
                     Some(PAGE_SIZE),
                     Some(offset),
                 )
@@ -214,8 +229,9 @@ pub fn InvoicesPage() -> impl IntoView {
                         let api = api.get();
                         let store_id = store_ctx.selected_store_id.get();
                         let status = status_param.get();
+                        let search = search_param.get();
                         wasm_bindgen_futures::spawn_local(async move {
-                            match api.export_invoices_csv(store_id.as_deref(), status.as_deref()).await {
+                            match api.export_invoices_csv(store_id.as_deref(), status.as_deref(), search.as_deref()).await {
                                 Ok(csv) => crate::pages::trigger_csv_download(&csv, "invoices.csv"),
                                 Err(e) => {
                                     web_sys::console::error_1(
@@ -339,7 +355,7 @@ pub fn InvoicesPage() -> impl IntoView {
                     Ok(Some(response)) => {
                         let total = response.total;
                         let mut invoices = response.invoices.clone();
-                        let search = search_query.get();
+                        let searching = search_param.get().is_some();
 
                         // Apply WebSocket status patches in-place (avoids full re-fetch).
                         let patches = ws_patches.get();
@@ -355,23 +371,7 @@ pub fn InvoicesPage() -> impl IntoView {
                             }
                         }
 
-                        // Client-side search filter
-                        let filtered: Vec<Invoice> = if search.is_empty() {
-                            invoices
-                        } else {
-                            let q = search.to_lowercase();
-                            invoices.into_iter().filter(|inv| {
-                                inv.id.to_lowercase().contains(&q)
-                                    || inv.currency.to_lowercase().contains(&q)
-                                    || inv.amount.contains(&q)
-                                    || inv.metadata.as_ref()
-                                        .map(|m| m.to_string().to_lowercase().contains(&q))
-                                        .unwrap_or(false)
-                            }).collect()
-                        };
-
-                        if filtered.is_empty() {
-                            let searching = !search.is_empty();
+                        if invoices.is_empty() {
                             let offset = current_offset.get();
                             view! {
                                 <div class="empty-state">
@@ -379,17 +379,18 @@ pub fn InvoicesPage() -> impl IntoView {
                                         <IconSearch />
                                     </div>
                                     <h3>"No invoices found"</h3>
-                                    // Same as payments: the search filters this
-                                    // page client side while the pager counts
-                                    // every page, so "no invoices" is wrong for
-                                    // someone whose match is elsewhere.
+                                    // Same as payments: the hedge this used to
+                                    // carry was honest only while the search
+                                    // filtered the fetched page. The server
+                                    // filters now (RCS-231), so an empty result
+                                    // is the whole result.
                                     <p>{if searching {
-                                        "No invoices on this page match your search. Other pages may have matches."
+                                        "No invoices match your search."
                                     } else {
                                         "Create an invoice to get started, or adjust your filters."
                                     }}</p>
                                 </div>
-                                // Kept, so a search that empties the current page
+                                // Kept, so a filter that empties the current page
                                 // cannot strand the user on it.
                                 <Pagination
                                     total=total
@@ -418,7 +419,7 @@ pub fn InvoicesPage() -> impl IntoView {
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {filtered.clone().into_iter().map(|invoice| {
+                                            {invoices.clone().into_iter().map(|invoice| {
                                                 view! { <InvoiceRow invoice=invoice show_store=show_store.get() /> }
                                             }).collect_view()}
                                         </tbody>
@@ -427,7 +428,7 @@ pub fn InvoicesPage() -> impl IntoView {
 
                                 // Invoice Cards (Mobile)
                                 <div class="invoices-cards mobile-only">
-                                    {filtered.into_iter().map(|invoice| {
+                                    {invoices.into_iter().map(|invoice| {
                                         view! { <InvoiceCard invoice=invoice show_store=show_store.get() /> }
                                     }).collect_view()}
                                 </div>
