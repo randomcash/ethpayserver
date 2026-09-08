@@ -3,6 +3,7 @@ use super::*;
 use auth::{Store, StoreId, UserId};
 use chrono::Utc;
 use data_service::StorePaymentMethod;
+use types::ChainId;
 use uuid::Uuid;
 
 // =========================================================================
@@ -97,7 +98,7 @@ fn test_payment_method_response_native() {
     let pm = StorePaymentMethod {
         id: Uuid::nil(),
         store_id: Uuid::nil(),
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         token_address: None,
         asset_symbol: "ETH".to_string(),
         wallet_id: Some(Uuid::new_v4()),
@@ -109,7 +110,7 @@ fn test_payment_method_response_native() {
     };
 
     let response: PaymentMethodResponse = pm.into();
-    assert_eq!(response.chain_id, 1);
+    assert_eq!(response.chain_id, "eip155:1");
     assert_eq!(response.asset_symbol, "ETH");
     assert!(response.token_address.is_none());
     assert_eq!(response.derivation_index, Some(5));
@@ -123,7 +124,7 @@ fn test_payment_method_response_erc20() {
     let pm = StorePaymentMethod {
         id: Uuid::nil(),
         store_id: Uuid::nil(),
-        chain_id: 137,
+        chain_id: ChainId::parse("eip155:137").unwrap(),
         token_address: Some(token_addr.clone()),
         asset_symbol: "USDC".to_string(),
         wallet_id: Some(Uuid::new_v4()),
@@ -135,7 +136,7 @@ fn test_payment_method_response_erc20() {
     };
 
     let response: PaymentMethodResponse = pm.into();
-    assert_eq!(response.chain_id, 137);
+    assert_eq!(response.chain_id, "eip155:137");
     assert_eq!(response.asset_symbol, "USDC");
     assert_eq!(response.token_address, Some(token_addr));
     assert!(!response.enabled);
@@ -187,14 +188,14 @@ fn test_update_store_request_empty() {
 #[test]
 fn test_create_payment_method_request() {
     let json = r#"{
-        "chain_id": 1,
+        "chain_id": "eip155:1",
         "token_address": null,
         "asset_symbol": "ETH",
         "decimals": 18,
         "xpub": "xpub123..."
     }"#;
     let req: CreatePaymentMethodRequest = serde_json::from_str(json).unwrap();
-    assert_eq!(req.chain_id, 1);
+    assert_eq!(req.chain_id, "eip155:1");
     assert!(req.token_address.is_none());
     assert_eq!(req.asset_symbol, "ETH");
     assert_eq!(req.decimals, 18);
@@ -662,7 +663,7 @@ fn test_rotate_wallet_response_serialization() {
             RotationEntry {
                 id: Uuid::new_v4(),
                 payment_method_id: Uuid::new_v4(),
-                chain_id: 1,
+                chain_id: "eip155:1".to_string(),
                 asset_symbol: "ETH".to_string(),
                 previous_xpub_masked: "xpub6D4B...cLW5".to_string(),
                 previous_derivation_index: 5,
@@ -671,7 +672,7 @@ fn test_rotate_wallet_response_serialization() {
             RotationEntry {
                 id: Uuid::new_v4(),
                 payment_method_id: Uuid::new_v4(),
-                chain_id: 137,
+                chain_id: "eip155:137".to_string(),
                 asset_symbol: "USDC".to_string(),
                 previous_xpub_masked: "xpub6D4B...cLW5".to_string(),
                 previous_derivation_index: 12,
@@ -685,10 +686,10 @@ fn test_rotate_wallet_response_serialization() {
     assert_eq!(json["new_xpub_masked"], "xpub6CUG...3fDVmz");
     let rotations = json["rotations"].as_array().unwrap();
     assert_eq!(rotations.len(), 2);
-    assert_eq!(rotations[0]["chain_id"], 1);
+    assert_eq!(rotations[0]["chain_id"], "eip155:1");
     assert_eq!(rotations[0]["asset_symbol"], "ETH");
     assert_eq!(rotations[0]["previous_derivation_index"], 5);
-    assert_eq!(rotations[1]["chain_id"], 137);
+    assert_eq!(rotations[1]["chain_id"], "eip155:137");
     assert_eq!(rotations[1]["asset_symbol"], "USDC");
 }
 

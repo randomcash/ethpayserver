@@ -6,6 +6,7 @@ use evm::monitor::bridge::MemoryBridge;
 use evm::monitor::events::PaymentDetected;
 use evm::{Address, B256, U256};
 use std::sync::Arc;
+use types::ChainId;
 use types::{InvoiceData, InvoiceId, InvoiceStatus, InvoiceWriter, PaymentReader, StoreId};
 
 use super::helpers::{MockEVMMonitor, create_test_consumer, create_test_invoice};
@@ -113,6 +114,6 @@ async fn test_handle_payment_detected_unknown_chain() {
         .await
         .unwrap();
     assert_eq!(payments.len(), 1);
-    assert_eq!(payments[0].chain_id, 99999);
+    assert_eq!(payments[0].chain_id, ChainId::evm(99999));
     assert_eq!(payments[0].asset_symbol, "ETH"); // Fallback for unknown chains
 }

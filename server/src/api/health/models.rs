@@ -103,7 +103,7 @@ pub struct DeepHealthResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ChainHealthInfo {
     /// Chain ID (EIP-155).
-    pub chain_id: u64,
+    pub chain_id: String,
     /// Human-readable chain name.
     pub chain_name: String,
     /// Connection status. Public form is one of `connected`, `connecting`,
@@ -143,7 +143,7 @@ impl ChainHealthInfo {
 impl From<ChainHealth> for ChainHealthInfo {
     fn from(h: ChainHealth) -> Self {
         Self {
-            chain_id: h.chain_id,
+            chain_id: h.chain_id.to_string(),
             chain_name: h.chain_name,
             status: match h.status {
                 SourceStatus::Connected => "connected".to_string(),

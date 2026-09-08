@@ -151,8 +151,8 @@ impl EthpayMcpServer {
             let option = PaymentOptionData {
                 id: PaymentOptionId(Uuid::new_v4()),
                 invoice_id: invoice.id.clone(),
-                payment_method_id: PaymentMethodId::new(&pm.asset_symbol, pm.chain_id),
-                chain_id: pm.chain_id,
+                payment_method_id: PaymentMethodId::new(&pm.asset_symbol, &pm.chain_id),
+                chain_id: pm.chain_id.clone(),
                 asset_symbol: pm.asset_symbol.clone(),
                 token_address: pm.token_address.clone(),
                 decimals: pm.decimals,
@@ -176,7 +176,7 @@ impl EthpayMcpServer {
                 &*self.data_service,
                 &payment_address,
                 &option.id,
-                pm.chain_id,
+                &pm.chain_id,
                 token_addr_str,
             )
             .await
@@ -192,7 +192,12 @@ impl EthpayMcpServer {
 
                 let cmd = evm::monitor::events::MonitorCommand::WatchAddress(
                     evm::monitor::events::WatchAddressCommand {
-                        chain_id: pm.chain_id,
+                        // The monitor command is EVM-only and takes an EIP-155
+                        // number; skip anything this server cannot watch.
+                        chain_id: match pm.chain_id.evm_chain_id() {
+                            Some(eip155) => eip155,
+                            None => continue,
+                        },
                         address,
                         invoice_id: invoice_uuid,
                         expected_amount: expected,
@@ -209,7 +214,7 @@ impl EthpayMcpServer {
                 } else if let Err(e) = WatchedAddressWriter::mark_notified(
                     &*self.data_service,
                     &payment_address,
-                    pm.chain_id,
+                    &pm.chain_id,
                     token_addr_str,
                 )
                 .await

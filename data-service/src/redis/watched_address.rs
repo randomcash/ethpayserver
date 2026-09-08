@@ -65,7 +65,7 @@ impl LiveWatchedAddressReader for RedisDataService {
     async fn get_watched_invoice(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<InvoiceId>> {
         let key = Self::watched_address_key(chain_id, address, token_address);
@@ -81,7 +81,7 @@ impl LiveWatchedAddressReader for RedisDataService {
 
     async fn get_all_watched(
         &self,
-    ) -> RepositoryResult<Vec<(String, InvoiceId, u64, Option<String>)>> {
+    ) -> RepositoryResult<Vec<(String, InvoiceId, types::ChainId, Option<String>)>> {
         let mut conn = self.conn.clone();
         let pattern = format!("{}:*", KEY_PREFIX);
         let mut result = Vec::new();
@@ -137,7 +137,7 @@ impl LiveWatchedAddressWriter for RedisDataService {
         &self,
         address: &str,
         invoice_id: &InvoiceId,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<()> {
         let key = Self::watched_address_key(chain_id, address, token_address);
@@ -153,7 +153,7 @@ impl LiveWatchedAddressWriter for RedisDataService {
     async fn unwatch_address(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<bool> {
         let key = Self::watched_address_key(chain_id, address, token_address);

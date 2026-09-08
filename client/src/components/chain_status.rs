@@ -1,7 +1,7 @@
 //! Chain connection status component.
 
 use leptos::prelude::*;
-use types::Network;
+use types::ChainId;
 use ui_kit::components::Spinner;
 use ui_kit::components::crypto::NetworkBadge;
 
@@ -37,8 +37,8 @@ impl ConnectionStatus {
 /// Chain status info.
 #[derive(Clone, Debug)]
 pub struct ChainInfo {
-    pub network: Network,
-    pub chain_id: u64,
+    pub name: String,
+    pub chain_id: ChainId,
     pub status: ConnectionStatus,
     pub block_number: Option<u64>,
     pub latency_ms: Option<u32>,
@@ -58,7 +58,7 @@ pub fn ChainStatus(
     view! {
         <div class=status_class>
             <div class="evm-chain-status-header">
-                <NetworkBadge network=info.network />
+                <NetworkBadge chain_id=info.chain_id.clone() name=info.name.clone() />
                 <span class="evm-chain-status-indicator">
                     {match info.status {
                         ConnectionStatus::Connecting => view! { <Spinner size="sm" /> }.into_any(),
@@ -84,7 +84,7 @@ pub fn ChainStatus(
                     })}
                     <div class="evm-chain-detail">
                         <span class="evm-chain-detail-label">"Chain ID"</span>
-                        <span class="evm-chain-detail-value">{info.chain_id}</span>
+                        <span class="evm-chain-detail-value">{info.chain_id.to_string()}</span>
                     </div>
                 </div>
             })}
@@ -131,14 +131,14 @@ mod tests {
     #[test]
     fn test_chain_info_creation() {
         let info = ChainInfo {
-            network: Network::Ethereum,
-            chain_id: 1,
+            name: "Ethereum".to_string(),
+            chain_id: ChainId::evm(1),
             status: ConnectionStatus::Connected,
             block_number: Some(18000000),
             latency_ms: Some(50),
         };
 
-        assert_eq!(info.chain_id, 1);
+        assert_eq!(info.chain_id, ChainId::evm(1));
         assert_eq!(info.status, ConnectionStatus::Connected);
         assert!(info.block_number.is_some());
     }

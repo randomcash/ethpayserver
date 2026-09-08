@@ -82,7 +82,7 @@ pub struct WebhookPayload {
     pub asset_symbol: String,
 
     /// Chain ID (EIP-155).
-    pub chain_id: u64,
+    pub chain_id: String,
 
     /// Network name (null for testnets/custom chains).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,7 +168,7 @@ mod tests {
             amount: "1000000000000000000".to_string(),
             amount_received: "1000000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
-            chain_id: 1,
+            chain_id: "eip155:1".to_string(),
             network: Some("ethereum".to_string()),
             payment: Some(WebhookPaymentInfo {
                 tx_hash: "0x1234".to_string(),

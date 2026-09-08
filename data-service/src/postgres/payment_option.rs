@@ -8,6 +8,7 @@ use crate::{PaymentOptionReader, PaymentOptionWriter, RepositoryResult, sqlx_to_
 use types::{InvoiceId, PaymentMethodId, PaymentOptionData, PaymentOptionId};
 
 use super::PgDataService;
+use super::conversions::chain_id_from_row;
 
 #[async_trait]
 impl PaymentOptionReader for PgDataService {
@@ -113,7 +114,7 @@ impl PaymentOptionReader for PgDataService {
     async fn get_by_address(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<PaymentOptionData>> {
         let row = match token_address {
@@ -129,7 +130,7 @@ impl PaymentOptionReader for PgDataService {
                     "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(token)
             .fetch_optional(&self.pool)
             .await
@@ -146,7 +147,7 @@ impl PaymentOptionReader for PgDataService {
                     "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .fetch_optional(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?,
@@ -185,7 +186,7 @@ impl PaymentOptionWriter for PgDataService {
         .bind(option.id.0)
         .bind(option.invoice_id.as_str())
         .bind(&option.payment_method_id.0)
-        .bind(option.chain_id as i64)
+        .bind(option.chain_id.as_str())
         .bind(asset_type)
         .bind(&option.asset_symbol)
         .bind(&option.token_address)
@@ -264,14 +265,14 @@ impl PaymentOptionWriter for PgDataService {
 /// Convert a database row to PaymentOptionData.
 fn row_to_payment_option(row: &sqlx::postgres::PgRow) -> PaymentOptionData {
     let id: Uuid = row.get("id");
-    let chain_id: i64 = row.get("chain_id");
+    let chain_id = chain_id_from_row(row, "chain_id");
     let decimals: i16 = row.get("decimals");
 
     PaymentOptionData {
         id: PaymentOptionId(id),
         invoice_id: InvoiceId::from_string(row.get("invoice_id")),
         payment_method_id: PaymentMethodId(row.get("payment_method_id")),
-        chain_id: chain_id as u64,
+        chain_id,
         asset_symbol: row.get("asset_symbol"),
         token_address: row.get("token_address"),
         decimals: decimals as u8,

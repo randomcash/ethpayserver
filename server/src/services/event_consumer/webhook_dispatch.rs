@@ -1,6 +1,5 @@
 //! Webhook notification dispatch for invoice events.
 
-use evm::chain_id_to_network;
 use types::{InvoiceData, PaymentData, StoreSettingsReader, StoreWebhookReader};
 use uuid::Uuid;
 
@@ -74,11 +73,10 @@ impl<
         // Create webhook payload
         // With network-agnostic invoices, chain info comes from the payment
         let (asset_symbol, chain_id, network) = if let Some(p) = payment {
-            let network = chain_id_to_network(p.chain_id);
             (
                 p.asset_symbol.clone(),
-                Some(p.chain_id),
-                network.map(|n| n.to_string()),
+                Some(p.chain_id.clone()),
+                Some(p.chain_id.to_string()),
             )
         } else {
             // No payment yet, use invoice currency as a placeholder
@@ -95,7 +93,10 @@ impl<
             amount: invoice.amount.clone(),
             amount_received: invoice.amount_received.clone(),
             asset_symbol,
-            chain_id: chain_id.unwrap_or(0),
+            // No payment yet means no chain has been involved. The empty string
+            // is honest about that; `0` used to claim chain zero, which is not
+            // a chain.
+            chain_id: chain_id.map(|c| c.to_string()).unwrap_or_default(),
             network,
             payment: payment.map(|p| WebhookPaymentInfo {
                 tx_hash: p.tx_hash.clone(),

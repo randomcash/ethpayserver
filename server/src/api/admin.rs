@@ -63,7 +63,7 @@ pub struct ServerSettingsResponse {
     pub default_confirmations: i32,
     pub invoice_expiry_minutes: i32,
     pub rate_limit_rpm: i32,
-    pub enabled_chain_ids: Vec<i64>,
+    pub enabled_chain_ids: Vec<String>,
 }
 
 /// Request body for updating server settings.
@@ -72,7 +72,7 @@ pub struct UpdateServerSettingsRequest {
     pub default_confirmations: i32,
     pub invoice_expiry_minutes: i32,
     pub rate_limit_rpm: i32,
-    pub enabled_chain_ids: Vec<i64>,
+    pub enabled_chain_ids: Vec<String>,
 }
 
 // ============================================================================
@@ -311,7 +311,11 @@ where
         default_confirmations: settings.default_confirmations,
         invoice_expiry_minutes: settings.invoice_expiry_minutes,
         rate_limit_rpm: settings.rate_limit_rpm,
-        enabled_chain_ids: settings.enabled_chain_ids,
+        enabled_chain_ids: settings
+            .enabled_chain_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
     }))
 }
 
@@ -340,7 +344,15 @@ where
         default_confirmations: body.default_confirmations,
         invoice_expiry_minutes: body.invoice_expiry_minutes,
         rate_limit_rpm: body.rate_limit_rpm,
-        enabled_chain_ids: body.enabled_chain_ids,
+        enabled_chain_ids: body
+            .enabled_chain_ids
+            .iter()
+            .map(|c| types::ChainId::parse(c.as_str()))
+            .collect::<Result<Vec<_>, _>>()
+            // A malformed identifier is the caller's mistake, not a server
+            // fault. The database would reject it anyway via the `caip2`
+            // domain, but a 400 here says so plainly.
+            .map_err(|_| StatusCode::BAD_REQUEST)?,
     };
 
     state
@@ -384,10 +396,13 @@ mod tests {
             default_confirmations: 3,
             invoice_expiry_minutes: 60,
             rate_limit_rpm: 100,
-            enabled_chain_ids: vec![1, 137],
+            enabled_chain_ids: vec!["eip155:1".to_string(), "eip155:137".to_string()],
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["default_confirmations"], 3);
-        assert_eq!(json["enabled_chain_ids"], serde_json::json!([1, 137]));
+        assert_eq!(
+            json["enabled_chain_ids"],
+            serde_json::json!(["eip155:1", "eip155:137"])
+        );
     }
 }

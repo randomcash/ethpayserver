@@ -37,7 +37,7 @@ pub struct CheckoutPaymentInfo {
     /// Payment ID.
     pub id: String,
     /// Chain ID (EIP-155).
-    pub chain_id: u64,
+    pub chain_id: String,
     /// Transaction hash — already public on-chain.
     pub tx_hash: String,
     /// Amount received (smallest unit as string).
@@ -58,7 +58,7 @@ impl From<PaymentData> for CheckoutPaymentInfo {
     fn from(p: PaymentData) -> Self {
         Self {
             id: p.id.to_string(),
-            chain_id: p.chain_id,
+            chain_id: p.chain_id.to_string(),
             tx_hash: p.tx_hash,
             amount: p.amount,
             asset_symbol: p.asset_symbol,
@@ -263,7 +263,7 @@ mod tests {
     fn test_checkout_payment_info_never_exposes_sender() {
         let info = CheckoutPaymentInfo {
             id: "pay_1".to_string(),
-            chain_id: 1,
+            chain_id: "eip155:1".to_string(),
             tx_hash: "0xabc".to_string(),
             amount: "1".to_string(),
             asset_symbol: "ETH".to_string(),

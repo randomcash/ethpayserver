@@ -5,22 +5,25 @@ use chrono::Utc;
 use data_service::InMemoryDataService;
 use evm::{Address, U256};
 use std::sync::Arc;
-use types::{InvoiceData, InvoiceId, InvoiceStatus, InvoiceWriter, Network, StoreId};
+use types::{ChainId, InvoiceData, InvoiceId, InvoiceStatus, InvoiceWriter, StoreId};
 
 use crate::services::email;
 use crate::services::evm_monitor::{EVMMonitor, EVMMonitorError};
 
-/// Get the native asset symbol for a network (test helper).
-pub fn network_native_symbol(network: types::Network) -> String {
-    use types::Network::*;
-    match network {
-        Ethereum | Arbitrum | Optimism | Base | ZkSync | Linea | Scroll => "ETH",
-        Polygon => "POL",
-        Avalanche => "AVAX",
-        BinanceSmartChain => "BNB",
-        Fantom => "FTM",
-        Gnosis => "xDAI",
-        // Non-EVM networks - shouldn't reach here
+/// Native asset symbol for a chain (test helper).
+///
+/// Keyed on the CAIP-2 identifier. In production this comes from
+/// `chain_configs`; the tests keep a small table so they do not need a database
+/// row to assert on a symbol.
+pub fn native_symbol(chain_id: &ChainId) -> String {
+    match chain_id.as_str() {
+        "eip155:1" | "eip155:42161" | "eip155:10" | "eip155:8453" | "eip155:324"
+        | "eip155:59144" | "eip155:534352" => "ETH",
+        "eip155:137" => "POL",
+        "eip155:43114" => "AVAX",
+        "eip155:56" => "BNB",
+        "eip155:250" => "FTM",
+        "eip155:100" => "xDAI",
         _ => "UNKNOWN",
     }
     .to_string()
@@ -33,7 +36,7 @@ pub struct MockEVMMonitor;
 impl EVMMonitor for MockEVMMonitor {
     async fn watch_address(
         &self,
-        _network: Network,
+        _chain_id: &ChainId,
         _address: Address,
         _invoice_id: uuid::Uuid,
         _expected_amount: Option<U256>,
@@ -55,7 +58,7 @@ impl EVMMonitor for MockEVMMonitor {
 
     async fn unwatch_address(
         &self,
-        _network: Network,
+        _chain_id: &ChainId,
         _address: Address,
         _token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {

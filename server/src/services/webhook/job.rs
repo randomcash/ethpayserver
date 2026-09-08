@@ -93,7 +93,7 @@ mod tests {
             amount: "1000".to_string(),
             amount_received: "1000".to_string(),
             asset_symbol: "ETH".to_string(),
-            chain_id: 1,
+            chain_id: "eip155:1".to_string(),
             network: Some("ethereum".to_string()),
             payment: None,
         }
@@ -184,7 +184,7 @@ mod tests {
             amount: "500".to_string(),
             amount_received: "0".to_string(),
             asset_symbol: "USDC".to_string(),
-            chain_id: 137,
+            chain_id: "eip155:137".to_string(),
             network: Some("polygon".to_string()),
             payment: None,
         };

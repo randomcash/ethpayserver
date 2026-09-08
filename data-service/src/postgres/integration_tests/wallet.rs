@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use sqlx::Row;
-use types::{StorePaymentMethodReader, StorePaymentMethodWriter};
+use types::{ChainId, StorePaymentMethodReader, StorePaymentMethodWriter};
 use uuid::Uuid;
 
 use super::super::PgDataService;
@@ -72,14 +72,20 @@ async fn two_methods_on_one_xpub_never_get_the_same_index() {
     let store = seed_store_for(&service, user).await;
 
     let eth = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .expect("create eth method");
     let usdc = StorePaymentMethodWriter::create_payment_method(
         &service,
         store,
-        1,
+        &ChainId::evm(1),
         Some("0x1111111111111111111111111111111111111111"),
         "USDC",
         6,
@@ -375,7 +381,13 @@ async fn a_wallet_in_use_cannot_be_deleted() {
     let store = seed_store_for(&service, user).await;
 
     let method = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
@@ -412,7 +424,13 @@ async fn rotation_repoints_without_resetting_the_counter() {
     let store = seed_store_for(&service, user).await;
 
     let method = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
@@ -468,7 +486,13 @@ async fn payment_options_record_the_wallet_and_index_they_used() {
     let store = seed_store_for(&service, user).await;
 
     let method = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
@@ -492,8 +516,8 @@ async fn payment_options_record_the_wallet_and_index_they_used() {
     let option = types::PaymentOptionData {
         id: types::PaymentOptionId::new(),
         invoice_id: types::InvoiceId::from_string(invoice_id.clone()),
-        payment_method_id: types::PaymentMethodId::new("ETH", 1),
-        chain_id: 1,
+        payment_method_id: types::PaymentMethodId::new("ETH", &ChainId::evm(1)),
+        chain_id: ChainId::evm(1),
         asset_symbol: "ETH".to_string(),
         token_address: None,
         decimals: 18,
@@ -567,7 +591,13 @@ async fn an_xpub_another_account_holds_is_refused() {
     // method by pasting an xpub - or the guard is trivially bypassed.
     let my_store = seed_store_for(&service, mine).await;
     let err = StorePaymentMethodWriter::create_payment_method(
-        &service, my_store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        my_store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .expect_err("configuring a method with another account's key must be refused");
@@ -649,7 +679,13 @@ async fn setting_a_store_override_changes_where_derivation_happens() {
     // Configured the ordinary way: the method is pinned to the key that was
     // pasted, exactly as the migration leaves existing methods.
     let method = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
@@ -716,7 +752,13 @@ async fn a_method_with_no_resolvable_wallet_is_visible_but_cannot_allocate() {
     let store = seed_store_for(&service, user).await;
 
     let method = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
@@ -771,7 +813,13 @@ async fn allocation_returns_the_key_of_the_wallet_whose_counter_moved() {
     let store = seed_store_for(&service, user).await;
 
     let stale = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
@@ -823,7 +871,13 @@ async fn rotation_moves_a_store_override_off_the_retired_key() {
     let store = seed_store_for(&service, user).await;
 
     let method = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
@@ -860,7 +914,13 @@ async fn a_wallet_is_deletable_once_only_history_refers_to_it() {
     let store = seed_store_for(&service, user).await;
 
     let method = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
@@ -883,8 +943,8 @@ async fn a_wallet_is_deletable_once_only_history_refers_to_it() {
     let option = types::PaymentOptionData {
         id: types::PaymentOptionId::new(),
         invoice_id: types::InvoiceId::from_string(invoice_id),
-        payment_method_id: types::PaymentMethodId::new("ETH", 1),
-        chain_id: 1,
+        payment_method_id: types::PaymentMethodId::new("ETH", &ChainId::evm(1)),
+        chain_id: ChainId::evm(1),
         asset_symbol: "ETH".to_string(),
         token_address: None,
         decimals: 18,
@@ -944,12 +1004,24 @@ async fn re_adding_a_native_asset_updates_rather_than_duplicating() {
     let store = seed_store_for(&service, user).await;
 
     let first = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
     let second = StorePaymentMethodWriter::create_payment_method(
-        &service, store, 1, None, "ETH", 18, &xpub_a,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
     )
     .await
     .unwrap();
@@ -994,7 +1066,13 @@ async fn rotating_a_store_records_no_rotation_from_a_key_to_itself() {
         (137, None, "MATIC"),
     ] {
         StorePaymentMethodWriter::create_payment_method(
-            &service, store, chain, token, symbol, 18, &xpub_a,
+            &service,
+            store,
+            &ChainId::evm(chain),
+            token,
+            symbol,
+            18,
+            &xpub_a,
         )
         .await
         .unwrap();
@@ -1059,12 +1137,28 @@ async fn rotating_one_store_leaves_its_siblings_where_they_were() {
     let sibling = seed_store_for(&service, user).await;
 
     // Both stores derive from the same account primary, neither pinned.
-    StorePaymentMethodWriter::create_payment_method(&service, rotated, 1, None, "ETH", 18, &xpub_a)
-        .await
-        .unwrap();
-    StorePaymentMethodWriter::create_payment_method(&service, sibling, 1, None, "ETH", 18, &xpub_a)
-        .await
-        .unwrap();
+    StorePaymentMethodWriter::create_payment_method(
+        &service,
+        rotated,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
+    )
+    .await
+    .unwrap();
+    StorePaymentMethodWriter::create_payment_method(
+        &service,
+        sibling,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        &xpub_a,
+    )
+    .await
+    .unwrap();
     WalletWriter::clear_store_wallet(&service, rotated)
         .await
         .unwrap();
@@ -1118,7 +1212,13 @@ async fn a_refused_rotation_leaves_the_store_entirely_unmoved() {
     let store = seed_store_for(&service, user).await;
     for (chain, symbol) in [(1u64, "ETH"), (137, "MATIC")] {
         StorePaymentMethodWriter::create_payment_method(
-            &service, store, chain, None, symbol, 18, &mine,
+            &service,
+            store,
+            &ChainId::evm(chain),
+            None,
+            symbol,
+            18,
+            &mine,
         )
         .await
         .unwrap();

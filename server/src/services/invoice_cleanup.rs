@@ -257,8 +257,8 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
             amount: invoice.amount.clone(),
             amount_received: invoice.amount_received.clone(),
             asset_symbol: invoice.currency.clone(),
-            chain_id: 0,   // No specific chain for network-agnostic invoices
-            network: None, // Network-agnostic
+            chain_id: String::new(), // Invoice-level event: no chain is involved
+            network: None,           // Network-agnostic
             payment: None,
         };
 
@@ -314,13 +314,17 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         let mut count = 0u64;
         for info in addresses {
             if let Err(e) = self
-                .unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref())
+                .unwatch_and_deactivate(
+                    &info.address,
+                    &info.chain_id,
+                    info.token_address.as_deref(),
+                )
                 .await
             {
                 tracing::warn!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
-                    chain_id = info.chain_id,
+                    chain_id = %info.chain_id,
                     error = %e,
                     "Failed to cleanup expired address"
                 );
@@ -328,7 +332,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                 tracing::debug!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
-                    chain_id = info.chain_id,
+                    chain_id = %info.chain_id,
                     "Unwatched expired invoice address"
                 );
                 count += 1;
@@ -345,13 +349,17 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         let mut count = 0u64;
         for info in addresses {
             if let Err(e) = self
-                .unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref())
+                .unwatch_and_deactivate(
+                    &info.address,
+                    &info.chain_id,
+                    info.token_address.as_deref(),
+                )
                 .await
             {
                 tracing::warn!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
-                    chain_id = info.chain_id,
+                    chain_id = %info.chain_id,
                     error = %e,
                     "Failed to cleanup paid address"
                 );
@@ -359,7 +367,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                 tracing::debug!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
-                    chain_id = info.chain_id,
+                    chain_id = %info.chain_id,
                     "Unwatched paid invoice address"
                 );
                 count += 1;
@@ -377,13 +385,17 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         let mut count = 0u64;
         for info in addresses {
             if let Err(e) = self
-                .unwatch_and_deactivate(&info.address, info.chain_id, info.token_address.as_deref())
+                .unwatch_and_deactivate(
+                    &info.address,
+                    &info.chain_id,
+                    info.token_address.as_deref(),
+                )
                 .await
             {
                 tracing::warn!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
-                    chain_id = info.chain_id,
+                    chain_id = %info.chain_id,
                     error = %e,
                     "Failed to cleanup cancelled address"
                 );
@@ -391,7 +403,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                 tracing::debug!(
                     address = %info.address,
                     invoice_id = %info.invoice_id,
-                    chain_id = info.chain_id,
+                    chain_id = %info.chain_id,
                     "Unwatched cancelled invoice address"
                 );
                 count += 1;
@@ -405,7 +417,7 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
     async fn unwatch_and_deactivate(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> Result<(), CleanupError> {
         // Parse address
@@ -416,9 +428,12 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         // Parse token contract address
         let token_contract: Option<Address> = token_address.and_then(|t| t.parse().ok());
 
-        // Send UnwatchAddress command to monitor (using chain_id for testnet support)
+        // The monitor is EVM-only and its RPCs take an EIP-155 number.
+        let eip155 = chain_id
+            .evm_chain_id()
+            .ok_or_else(|| CleanupError::NotAnEvmChain(chain_id.to_string()))?;
         self.evm_monitor
-            .unwatch_address_by_chain_id(chain_id, addr, token_contract)
+            .unwatch_address_by_chain_id(eip155, addr, token_contract)
             .await?;
 
         // Deactivate in database
@@ -503,6 +518,8 @@ impl CleanupStats {
 /// Errors that can occur during cleanup operations.
 #[derive(Debug, thiserror::Error)]
 pub enum CleanupError {
+    #[error("not an EVM chain: {0}")]
+    NotAnEvmChain(String),
     #[error("Repository error: {0}")]
     Repository(#[from] types::RepositoryError),
 

@@ -2,8 +2,8 @@
 
 use chrono::Utc;
 use data_service::PaymentOptionReader;
+use evm::get_any_chain_config;
 use evm::monitor::events::PaymentDetected;
-use evm::{chain_id_to_network, get_any_chain_config};
 use types::{
     AssetType, InvoiceId, InvoiceReader, PaymentData, PaymentWriter, TokenReader,
     WatchedAddressReader,
@@ -34,8 +34,9 @@ impl<
         &self,
         event: PaymentDetected,
     ) -> Result<(), EventConsumerError> {
-        // Try to get network from chain_id (None for testnets)
-        let network = chain_id_to_network(event.chain_id);
+        // The monitor speaks EIP-155 numbers; everything past this boundary
+        // speaks CAIP-2.
+        let chain_id = types::ChainId::evm(event.chain_id);
 
         // Determine asset type and symbol based on whether it's native or token
         let (asset_type, asset_symbol, token_address) = if event.is_native {
@@ -51,9 +52,12 @@ impl<
             })?;
             let token_addr_str = format!("{:#x}", token_addr);
 
-            // Try to look up token in DB (only if we have a known network)
-            let symbol = if let Some(net) = network {
-                match TokenReader::get_by_address(&*self.data_service, net, &token_addr_str).await?
+            // Look the token up by chain. Every chain has an identifier now, so
+            // the old "only if we recognise this network" branch is gone —
+            // testnets used to fall through it and lose their token symbols.
+            let symbol = {
+                match TokenReader::get_by_address(&*self.data_service, &chain_id, &token_addr_str)
+                    .await?
                 {
                     Some(token) => token.symbol.unwrap_or_else(|| "ERC20".to_string()),
                     None => {
@@ -65,9 +69,6 @@ impl<
                         format!("0x{}...", &token_addr_str[2..8])
                     }
                 }
-            } else {
-                // Testnet - use shortened address as symbol
-                format!("0x{}...", &token_addr_str[2..8])
             };
 
             (AssetType::ERC20, symbol, Some(token_addr_str))
@@ -78,7 +79,7 @@ impl<
         let payment_option_id = WatchedAddressReader::get_payment_option_id(
             &*self.data_service,
             &payment_address_str,
-            event.chain_id,
+            &chain_id,
             token_address.as_deref(),
         )
         .await?;
@@ -171,13 +172,13 @@ impl<
         };
 
         // Record metrics before asset_symbol is moved into PaymentData
-        metrics::record_payment_detected(event.chain_id, &asset_symbol);
+        metrics::record_payment_detected(&chain_id, &asset_symbol);
 
         let payment = PaymentData {
             id: Uuid::new_v4(),
             invoice_id: InvoiceId::from_string(event.invoice_id.to_string()),
             payment_option_id: payment_option_id.map(|id| id.0),
-            chain_id: event.chain_id,
+            chain_id: chain_id.clone(),
             asset_type,
             amount: event.amount.to_string(),
             asset_symbol,

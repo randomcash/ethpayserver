@@ -20,7 +20,7 @@ pub mod util;
 
 pub use app::App;
 
-use types::Network;
+use types::ChainId;
 use ui_kit::module::{CheckoutPluginConfig, ModuleInfo};
 use ui_kit::types::RouteInfo;
 use wasm_bindgen::prelude::*;
@@ -85,27 +85,26 @@ pub fn checkout_plugin() -> CheckoutPluginConfig {
 }
 
 // Checkout slot implementations
-fn render_network_badge(_chain_id: u64, network_name: &str) -> leptos::prelude::AnyView {
+fn render_network_badge(chain_id: &ChainId, network_name: &str) -> leptos::prelude::AnyView {
     use leptos::prelude::*;
     use ui_kit::components::crypto::NetworkBadge;
 
-    // Try to parse network from name
-    let network = network_name.parse::<Network>().unwrap_or(Network::Ethereum);
-
+    // The name is passed through rather than derived: a CAIP-2 reference is
+    // mostly an opaque genesis hash, so nothing can turn one into a name.
     view! {
-        <NetworkBadge network=network />
+        <NetworkBadge chain_id=chain_id.clone() name=network_name.to_string() />
     }
     .into_any()
 }
 
-fn render_amount_details(chain_id: u64, _amount: &str) -> Option<leptos::prelude::AnyView> {
+fn render_amount_details(chain_id: &ChainId, _amount: &str) -> Option<leptos::prelude::AnyView> {
     use leptos::prelude::*;
 
     // Show gas info for EVM chains
     Some(
         view! {
             <div class="evm-amount-details">
-                <span class="evm-chain-info">"Chain ID: " {chain_id}</span>
+                <span class="evm-chain-info">"Chain: " {chain_id.to_string()}</span>
             </div>
         }
         .into_any(),
@@ -126,7 +125,7 @@ fn render_qr_code(payment_request: &str) -> leptos::prelude::AnyView {
 
 fn render_wallet_actions(
     _payment_address: &str,
-    _chain_id: u64,
+    _chain_id: &ChainId,
 ) -> Option<leptos::prelude::AnyView> {
     use leptos::prelude::*;
 

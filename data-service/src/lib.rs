@@ -174,21 +174,21 @@ mod tests {
         let ds = InMemoryDataService::new();
         let payment_option_id = PaymentOptionId(uuid::Uuid::new_v4());
         let address = "0x1234567890abcdef1234567890abcdef12345678";
-        let chain_id: u64 = 1; // Ethereum mainnet
+        let chain_id = types::ChainId::evm(1); // Ethereum mainnet
 
-        WatchedAddressWriter::upsert(&ds, address, &payment_option_id, chain_id, None)
+        WatchedAddressWriter::upsert(&ds, address, &payment_option_id, &chain_id, None)
             .await
             .unwrap();
 
-        let found = WatchedAddressReader::get_payment_option_id(&ds, address, chain_id, None)
+        let found = WatchedAddressReader::get_payment_option_id(&ds, address, &chain_id, None)
             .await
             .unwrap();
         assert_eq!(found, Some(payment_option_id.clone()));
 
-        WatchedAddressWriter::deactivate(&ds, address, chain_id, None)
+        WatchedAddressWriter::deactivate(&ds, address, &chain_id, None)
             .await
             .unwrap();
-        let found = WatchedAddressReader::get_payment_option_id(&ds, address, chain_id, None)
+        let found = WatchedAddressReader::get_payment_option_id(&ds, address, &chain_id, None)
             .await
             .unwrap();
         assert!(found.is_none());

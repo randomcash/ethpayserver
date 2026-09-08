@@ -229,7 +229,7 @@ fn rpc_health_last_block_omitted_when_none() {
 
 fn detailed() -> ChainHealthInfo {
     ChainHealthInfo {
-        chain_id: 11155111,
+        chain_id: "eip155:11155111".to_string(),
         chain_name: "Sepolia".to_string(),
         status: "failed: https://eth-sepolia.example.com/v2/SECRET-KEY timed out".to_string(),
         current_block: Some(9_100_200),
@@ -244,7 +244,7 @@ fn redacted_chain_health_keeps_the_on_off_answer() {
     let public = detailed().redact();
 
     // The whole point of showing this to a merchant.
-    assert_eq!(public.chain_id, 11155111);
+    assert_eq!(public.chain_id, "eip155:11155111");
     assert_eq!(public.chain_name, "Sepolia");
     assert!(!public.is_healthy);
     assert_eq!(public.status, "failed");

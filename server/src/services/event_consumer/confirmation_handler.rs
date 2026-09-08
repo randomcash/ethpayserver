@@ -34,6 +34,7 @@ impl<
         &self,
         event: PaymentConfirmed,
     ) -> Result<(), EventConsumerError> {
+        let chain_id = types::ChainId::evm(event.chain_id);
         let invoice_id = InvoiceId::from_string(event.invoice_id.to_string());
         let tx_hash = format!("{:#x}", event.tx_hash);
 
@@ -63,12 +64,12 @@ impl<
         );
 
         // Record metrics
-        metrics::record_payment_confirmed(event.chain_id, &payment.asset_symbol);
+        metrics::record_payment_confirmed(&chain_id, &payment.asset_symbol);
 
         // Record confirmation duration (detected_at → confirmed_at)
         if let Ok(duration) = (event.confirmed_at - payment.detected_at).to_std() {
             metrics::record_payment_confirmation_duration(
-                event.chain_id,
+                &chain_id,
                 &payment.asset_symbol,
                 duration,
             );

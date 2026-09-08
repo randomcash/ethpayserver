@@ -7,12 +7,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use futures::stream::{self, BoxStream, StreamExt};
 use types::{
-    CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus,
-    InvoiceWriter, Network, PaymentData, PaymentEventWriter, PaymentMethodId, PaymentOptionData,
-    PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, PaymentQueryParams, PaymentReader,
-    PaymentWriter, PendingWatchInfo, RepositoryError, RepositoryResult, StoreId, StoreSettings,
-    StoreSettingsReader, StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams,
-    TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
+    ChainId, CleanupAddressInfo, InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader,
+    InvoiceStatus, InvoiceWriter, PaymentData, PaymentEventWriter, PaymentMethodId,
+    PaymentOptionData, PaymentOptionId, PaymentOptionReader, PaymentOptionWriter,
+    PaymentQueryParams, PaymentReader, PaymentWriter, PendingWatchInfo, RepositoryError,
+    RepositoryResult, StoreId, StoreSettings, StoreSettingsReader, StoreWebhook,
+    StoreWebhookReader, TokenData, TokenQueryParams, TokenReader, TokenWriter,
+    WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
 
@@ -25,7 +26,7 @@ pub struct InMemoryDataService {
     payments: RwLock<HashMap<Uuid, PaymentData>>,
     payment_options: RwLock<HashMap<Uuid, PaymentOptionData>>,
     // Key: (address, chain_id, token_address) -> payment_option_id
-    addresses: RwLock<HashMap<(String, u64, Option<String>), PaymentOptionId>>,
+    addresses: RwLock<HashMap<(String, ChainId, Option<String>), PaymentOptionId>>,
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
@@ -330,14 +331,14 @@ impl PaymentWriter for InMemoryDataService {
     async fn mark_reorged(
         &self,
         invoice_id: &InvoiceId,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         fork_block: u64,
     ) -> RepositoryResult<u64> {
         let mut payments = self.payments.write().unwrap();
         let mut count = 0u64;
         for payment in payments.values_mut() {
             if payment.invoice_id == *invoice_id
-                && payment.chain_id == chain_id
+                && &payment.chain_id == chain_id
                 && payment.block_number.is_some_and(|b| b >= fork_block)
                 && !payment.reorged
             {
@@ -396,7 +397,7 @@ impl PaymentOptionReader for InMemoryDataService {
     async fn get_by_address(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<PaymentOptionData>> {
         let options = self.payment_options.read().unwrap();
@@ -404,7 +405,7 @@ impl PaymentOptionReader for InMemoryDataService {
             .values()
             .find(|po| {
                 po.payment_address == address
-                    && po.chain_id == chain_id
+                    && &po.chain_id == chain_id
                     && po.token_address.as_deref() == token_address
             })
             .cloned())
@@ -456,7 +457,7 @@ impl WatchedAddressReader for InMemoryDataService {
     async fn get_invoice_id(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<InvoiceId>> {
         let addresses = self.addresses.read().unwrap();
@@ -464,7 +465,7 @@ impl WatchedAddressReader for InMemoryDataService {
 
         if let Some(po_id) = addresses.get(&(
             address.to_string(),
-            chain_id,
+            chain_id.clone(),
             token_address.map(String::from),
         )) && let Some(po) = options.get(&po_id.0)
         {
@@ -476,14 +477,14 @@ impl WatchedAddressReader for InMemoryDataService {
     async fn get_payment_option_id(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<PaymentOptionId>> {
         let addresses = self.addresses.read().unwrap();
         Ok(addresses
             .get(&(
                 address.to_string(),
-                chain_id,
+                chain_id.clone(),
                 token_address.map(String::from),
             ))
             .cloned())
@@ -491,12 +492,17 @@ impl WatchedAddressReader for InMemoryDataService {
 
     async fn get_active(
         &self,
-    ) -> RepositoryResult<Vec<(String, PaymentOptionId, u64, Option<String>)>> {
+    ) -> RepositoryResult<Vec<(String, PaymentOptionId, types::ChainId, Option<String>)>> {
         let addresses = self.addresses.read().unwrap();
         Ok(addresses
             .iter()
             .map(|((addr, chain_id, token_addr), po_id)| {
-                (addr.clone(), po_id.clone(), *chain_id, token_addr.clone())
+                (
+                    addr.clone(),
+                    po_id.clone(),
+                    chain_id.clone(),
+                    token_addr.clone(),
+                )
             })
             .collect())
     }
@@ -512,7 +518,7 @@ impl WatchedAddressReader for InMemoryDataService {
                     address: addr.clone(),
                     payment_option_id: po_id.clone(),
                     invoice_id: po.invoice_id.as_str().to_string(),
-                    chain_id: *chain_id,
+                    chain_id: chain_id.clone(),
                     expected_amount: Some(po.amount.clone()),
                     token_address: token_address.clone(),
                 })
@@ -539,7 +545,7 @@ impl WatchedAddressReader for InMemoryDataService {
                                 address: addr.clone(),
                                 payment_option_id: po_id.clone(),
                                 invoice_id: po.invoice_id.as_str().to_string(),
-                                chain_id: *chain_id,
+                                chain_id: chain_id.clone(),
                                 token_address: token_address.clone(),
                             })
                         } else {
@@ -566,7 +572,7 @@ impl WatchedAddressReader for InMemoryDataService {
                                 address: addr.clone(),
                                 payment_option_id: po_id.clone(),
                                 invoice_id: po.invoice_id.as_str().to_string(),
-                                chain_id: *chain_id,
+                                chain_id: chain_id.clone(),
                                 token_address: token_address.clone(),
                             })
                         } else {
@@ -593,7 +599,7 @@ impl WatchedAddressReader for InMemoryDataService {
                                 address: addr.clone(),
                                 payment_option_id: po_id.clone(),
                                 invoice_id: po.invoice_id.as_str().to_string(),
-                                chain_id: *chain_id,
+                                chain_id: chain_id.clone(),
                                 token_address: token_address.clone(),
                             })
                         } else {
@@ -612,14 +618,14 @@ impl WatchedAddressWriter for InMemoryDataService {
         &self,
         address: &str,
         payment_option_id: &PaymentOptionId,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<()> {
         let mut addresses = self.addresses.write().unwrap();
         addresses.insert(
             (
                 address.to_string(),
-                chain_id,
+                chain_id.clone(),
                 token_address.map(String::from),
             ),
             payment_option_id.clone(),
@@ -630,7 +636,7 @@ impl WatchedAddressWriter for InMemoryDataService {
     async fn mark_notified(
         &self,
         _address: &str,
-        _chain_id: u64,
+        _chain_id: &ChainId,
         _token_address: Option<&str>,
     ) -> RepositoryResult<()> {
         // No-op for in-memory testing
@@ -640,13 +646,13 @@ impl WatchedAddressWriter for InMemoryDataService {
     async fn deactivate(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<bool> {
         let mut addresses = self.addresses.write().unwrap();
         let key = (
             address.to_string(),
-            chain_id,
+            chain_id.clone(),
             token_address.map(String::from),
         );
         if addresses.remove(&key).is_some() {
@@ -683,26 +689,26 @@ impl TokenReader for InMemoryDataService {
 
     async fn get_by_address(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         address: &str,
     ) -> RepositoryResult<Option<TokenData>> {
         let tokens = self.tokens.read().unwrap();
         Ok(tokens
             .values()
-            .find(|t| t.network == network && t.address.eq_ignore_ascii_case(address))
+            .find(|t| &t.chain_id == chain_id && t.address.eq_ignore_ascii_case(address))
             .cloned())
     }
 
     async fn find_by_symbol(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         symbol: &str,
     ) -> RepositoryResult<Option<TokenData>> {
         let tokens = self.tokens.read().unwrap();
         Ok(tokens
             .values()
             .find(|t| {
-                t.network == network
+                &t.chain_id == chain_id
                     && t.symbol
                         .as_ref()
                         .is_some_and(|s| s.eq_ignore_ascii_case(symbol))
@@ -720,8 +726,8 @@ impl TokenReader for InMemoryDataService {
                 {
                     return false;
                 }
-                if let Some(network) = params.network
-                    && t.network != network
+                if let Some(ref chain) = params.chain_id
+                    && t.chain_id != *chain
                 {
                     return false;
                 }
@@ -745,9 +751,10 @@ impl TokenReader for InMemoryDataService {
 
         let total = results.len() as i64;
         results.sort_by(|a, b| {
-            a.network
-                .display_name()
-                .cmp(b.network.display_name())
+            // Sorted by identifier, not display name: there is no display name
+            // without a chain_configs lookup, and the identifier is stable.
+            a.chain_id
+                .cmp(&b.chain_id)
                 .then_with(|| a.symbol.cmp(&b.symbol))
         });
 
@@ -758,11 +765,11 @@ impl TokenReader for InMemoryDataService {
         Ok((total, results))
     }
 
-    async fn get_enabled_for_network(&self, network: Network) -> RepositoryResult<Vec<TokenData>> {
+    async fn get_enabled_for_chain(&self, chain_id: &ChainId) -> RepositoryResult<Vec<TokenData>> {
         let tokens = self.tokens.read().unwrap();
         Ok(tokens
             .values()
-            .filter(|t| t.network == network && t.enabled)
+            .filter(|t| &t.chain_id == chain_id && t.enabled)
             .cloned()
             .collect())
     }
@@ -913,8 +920,8 @@ pub fn create_test_payment_option(invoice_id: &InvoiceId) -> PaymentOptionData {
     PaymentOptionData {
         id: PaymentOptionId(Uuid::new_v4()),
         invoice_id: invoice_id.clone(),
-        payment_method_id: PaymentMethodId::new("ETH", 1),
-        chain_id: 1,
+        payment_method_id: PaymentMethodId::new("ETH", &ChainId::evm(1)),
+        chain_id: ChainId::evm(1),
         asset_symbol: "ETH".to_string(),
         token_address: None,
         decimals: 18,
@@ -938,7 +945,7 @@ pub fn create_test_payment(
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: payment_option_id.map(|po| po.0),
-        chain_id: 1, // Ethereum mainnet
+        chain_id: ChainId::evm(1), // Ethereum mainnet
         asset_type: types::AssetType::Native,
         amount: "50000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),

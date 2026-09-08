@@ -4,22 +4,28 @@ mod payment_detected;
 mod reorg;
 
 use super::*;
-use helpers::network_native_symbol;
+use helpers::native_symbol;
 
 #[test]
-fn test_network_native_symbol() {
-    use types::Network;
-    assert_eq!(network_native_symbol(Network::Ethereum), "ETH");
-    assert_eq!(network_native_symbol(Network::Polygon), "POL");
-    assert_eq!(network_native_symbol(Network::Avalanche), "AVAX");
-    assert_eq!(network_native_symbol(Network::BinanceSmartChain), "BNB");
-    assert_eq!(network_native_symbol(Network::Arbitrum), "ETH");
-    assert_eq!(network_native_symbol(Network::Optimism), "ETH");
-    assert_eq!(network_native_symbol(Network::Base), "ETH");
-    assert_eq!(network_native_symbol(Network::Fantom), "FTM");
-    assert_eq!(network_native_symbol(Network::Gnosis), "xDAI");
-    // Non-EVM networks
-    assert_eq!(network_native_symbol(Network::BitcoinMainnet), "UNKNOWN");
+fn test_native_symbol() {
+    use types::ChainId;
+    assert_eq!(native_symbol(&ChainId::evm(1)), "ETH");
+    assert_eq!(native_symbol(&ChainId::evm(42161)), "ETH");
+    assert_eq!(native_symbol(&ChainId::evm(10)), "ETH");
+    assert_eq!(native_symbol(&ChainId::evm(8453)), "ETH");
+    assert_eq!(native_symbol(&ChainId::evm(137)), "POL");
+    assert_eq!(native_symbol(&ChainId::evm(43114)), "AVAX");
+    assert_eq!(native_symbol(&ChainId::evm(56)), "BNB");
+    assert_eq!(native_symbol(&ChainId::evm(250)), "FTM");
+    assert_eq!(native_symbol(&ChainId::evm(100)), "xDAI");
+
+    // A chain this table does not know, including a non-EVM one. It renders
+    // rather than failing, which is the property the closed enum lacked.
+    assert_eq!(native_symbol(&ChainId::evm(999_999)), "UNKNOWN");
+    assert_eq!(
+        native_symbol(&ChainId::parse("tron:728126428").unwrap()),
+        "UNKNOWN"
+    );
 }
 
 #[test]

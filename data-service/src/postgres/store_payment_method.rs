@@ -5,6 +5,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::PgDataService;
+use super::conversions::chain_id_from_row;
 use super::wallet::STORE_WALLET_RESOLUTION;
 use crate::{RepositoryError, RepositoryResult, sqlx_to_repo_error};
 use types::{DerivationAllocation, StorePaymentMethod};
@@ -41,7 +42,7 @@ fn row_to_payment_method(row: &sqlx::postgres::PgRow) -> StorePaymentMethod {
     StorePaymentMethod {
         id: row.get("id"),
         store_id: row.get("store_id"),
-        chain_id: row.get::<i64, _>("chain_id") as u64,
+        chain_id: chain_id_from_row(row, "chain_id"),
         token_address: row.get("token_address"),
         asset_symbol: row.get("asset_symbol"),
         decimals: decimals as u8,
@@ -104,7 +105,7 @@ impl StorePaymentMethodReader for PgDataService {
     async fn get_payment_method_by_chain(
         &self,
         store_id: Uuid,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<StorePaymentMethod>> {
         let row = match token_address {
@@ -115,7 +116,7 @@ impl StorePaymentMethodReader for PgDataService {
                     method_from()
                 ))
                 .bind(store_id)
-                .bind(chain_id as i64)
+                .bind(chain_id.as_str())
                 .bind(addr)
                 .fetch_optional(&self.pool)
                 .await
@@ -127,7 +128,7 @@ impl StorePaymentMethodReader for PgDataService {
                     method_from()
                 ))
                 .bind(store_id)
-                .bind(chain_id as i64)
+                .bind(chain_id.as_str())
                 .fetch_optional(&self.pool)
                 .await
             }
@@ -163,7 +164,7 @@ impl StorePaymentMethodWriter for PgDataService {
     async fn create_payment_method(
         &self,
         store_id: Uuid,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
         asset_symbol: &str,
         decimals: u8,
@@ -195,7 +196,7 @@ impl StorePaymentMethodWriter for PgDataService {
 
         let id: Uuid = sqlx::query(sql)
             .bind(store_id)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(token_address)
             .bind(asset_symbol)
             .bind(decimals as i16)

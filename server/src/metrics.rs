@@ -220,7 +220,7 @@ pub fn record_invoice_cancelled() {
 }
 
 /// Record a payment detection.
-pub fn record_payment_detected(chain_id: u64, asset_symbol: &str) {
+pub fn record_payment_detected(chain_id: &types::ChainId, asset_symbol: &str) {
     counter!(
         "ethpayserver_payments_detected_total",
         "chain_id" => chain_id.to_string(),
@@ -230,7 +230,7 @@ pub fn record_payment_detected(chain_id: u64, asset_symbol: &str) {
 }
 
 /// Record a payment confirmation.
-pub fn record_payment_confirmed(chain_id: u64, asset_symbol: &str) {
+pub fn record_payment_confirmed(chain_id: &types::ChainId, asset_symbol: &str) {
     counter!(
         "ethpayserver_payments_confirmed_total",
         "chain_id" => chain_id.to_string(),
@@ -315,7 +315,7 @@ pub fn record_store_created() {
 }
 
 /// Record a payout initiation.
-pub fn record_payout_initiated(chain_id: u64, asset_symbol: &str) {
+pub fn record_payout_initiated(chain_id: &types::ChainId, asset_symbol: &str) {
     counter!(
         "ethpayserver_payouts_initiated_total",
         "chain_id" => chain_id.to_string(),
@@ -325,7 +325,7 @@ pub fn record_payout_initiated(chain_id: u64, asset_symbol: &str) {
 }
 
 /// Record a refund initiation.
-pub fn record_refund_initiated(chain_id: u64, asset_symbol: &str) {
+pub fn record_refund_initiated(chain_id: &types::ChainId, asset_symbol: &str) {
     counter!(
         "ethpayserver_refunds_initiated_total",
         "chain_id" => chain_id.to_string(),
@@ -348,7 +348,11 @@ pub fn record_rate_limited(tier: &str) {
 // ============================================================================
 
 /// Record the duration from payment detected to confirmed.
-pub fn record_payment_confirmation_duration(chain_id: u64, asset_symbol: &str, duration: Duration) {
+pub fn record_payment_confirmation_duration(
+    chain_id: &types::ChainId,
+    asset_symbol: &str,
+    duration: Duration,
+) {
     histogram!(
         "ethpayserver_payment_confirmation_duration_seconds",
         "chain_id" => chain_id.to_string(),
