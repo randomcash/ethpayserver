@@ -424,11 +424,15 @@ test.describe('Synthetic payment (live testnet)', () => {
       // that across stores. Asserting a delta from whatever it is now is the
       // only form that holds either way.
       const storeWallet = await api<StoreWallet>(`/stores/${store.id}/wallet`, { token });
+      // `null` when the resolution chain runs out, and `undefined` if the field
+      // ever stops being sent — both are "no wallet", and both must fail here
+      // rather than at the first invoice with no explanation.
       expect(
-        (method as PaymentMethod).derivation_index,
-        `the new payment method resolves to no wallet at all — it cannot derive ` +
-          `an address, and every invoice below would fail without saying why`,
-      ).not.toBeNull();
+        typeof method.derivation_index,
+        `the new payment method resolves to no wallet at all ` +
+          `(derivation_index: ${method.derivation_index}) — it cannot derive an ` +
+          `address, and every invoice below would fail without saying why`,
+      ).toBe('number');
       console.log(
         `store ${store.id} derives from wallet ${storeWallet.id} at index ` +
           `${storeWallet.derivation_index} (override: ${storeWallet.is_override})`,
