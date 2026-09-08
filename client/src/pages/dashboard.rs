@@ -622,7 +622,7 @@ fn RecentPayments() -> impl IntoView {
                                     format_crypto_amount(&payment.amount, payment.decimals),
                                     payment.asset_symbol
                                 );
-                                let network = chain_name(payment.chain_id);
+                                let network = chain_name(&payment.chain_id).to_string();
                                 let status = payment_status(&payment);
                                 let status_class = payment_status_class(&payment);
                                 let href = format!("/evm/payments/{}", payment.id);
@@ -740,7 +740,7 @@ fn chain_detail(chain: &ChainHealthInfo, state: ChainState) -> String {
 /// Display name for a chain row, preferring what the monitor reported.
 fn chain_label(chain: &ChainHealthInfo) -> String {
     if chain.chain_name.trim().is_empty() {
-        chain_name(chain.chain_id).to_string()
+        chain_name(&chain.chain_id).to_string()
     } else {
         chain.chain_name.clone()
     }
@@ -929,10 +929,11 @@ fn IconMinus() -> impl IntoView {
 mod tests {
     use super::{ChainState, chain_detail, chain_label, monitor_lag};
     use crate::api::ChainHealthInfo;
+    use types::ChainId;
 
     fn chain(status: &str, current: Option<u64>, processed: Option<u64>) -> ChainHealthInfo {
         ChainHealthInfo {
-            chain_id: 11_155_111,
+            chain_id: ChainId::evm(11_155_111),
             chain_name: "Sepolia".to_string(),
             status: status.to_string(),
             current_block: current,
@@ -1060,7 +1061,7 @@ mod tests {
         let mut c = chain("connected", Some(1), Some(1));
         assert_eq!(chain_label(&c), "Sepolia");
         c.chain_name = "  ".to_string();
-        c.chain_id = 1;
+        c.chain_id = ChainId::evm(1);
         assert_eq!(chain_label(&c), "Ethereum");
     }
 }

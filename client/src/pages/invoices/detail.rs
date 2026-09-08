@@ -245,7 +245,7 @@ fn InvoiceDetailContent(invoice: Invoice, payments: Vec<Payment>) -> impl IntoVi
                                     view! {
                                         <div class="detail-row">
                                             <span class="detail-label">
-                                                {format!("{} ({})", opt.asset_symbol, chain_name(opt.chain_id))}
+                                                {format!("{} ({})", opt.asset_symbol, chain_name(&opt.chain_id))}
                                             </span>
                                             <code class="detail-value">{addr_display}</code>
                                         </div>

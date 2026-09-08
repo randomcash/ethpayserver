@@ -81,10 +81,22 @@ pub struct WebhookPayload {
     /// Asset symbol (e.g., "ETH", "USDT").
     pub asset_symbol: String,
 
-    /// Chain ID (EIP-155).
-    pub chain_id: u64,
+    /// CAIP-2 chain identifier, e.g. `eip155:1`.
+    ///
+    /// Was a JSON number (the EIP-155 id) before RCS-241. Absent entirely on
+    /// invoice-level events, which involve no chain - it previously sent `0`
+    /// there, which is not a chain, and briefly sent `""`, which is not an
+    /// identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
 
-    /// Network name (null for testnets/custom chains).
+    /// Human-readable chain name.
+    ///
+    /// Always absent since RCS-241. It used to be a name from a closed enum
+    /// (`"ethereum"`), and that enum is gone: a CAIP-2 reference is mostly an
+    /// opaque genesis hash, so no function can derive a name from one. The
+    /// mapping lives in `chain_configs`; until this reads it, sending anything
+    /// here would either be a guess or a duplicate of `chain_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
 
@@ -168,7 +180,7 @@ mod tests {
             amount: "1000000000000000000".to_string(),
             amount_received: "1000000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),
-            chain_id: 1,
+            chain_id: Some("eip155:1".to_string()),
             network: Some("ethereum".to_string()),
             payment: Some(WebhookPaymentInfo {
                 tx_hash: "0x1234".to_string(),

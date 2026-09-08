@@ -1,23 +1,27 @@
 //! Network selector component for choosing EVM networks.
 
 use leptos::prelude::*;
-use types::Network;
+use types::ChainId;
 use ui_kit::components::crypto::NetworkBadge;
 
-/// Available EVM networks for selection.
-const AVAILABLE_NETWORKS: &[(Network, u64)] = &[
-    (Network::Ethereum, 1),
-    (Network::Polygon, 137),
-    (Network::Arbitrum, 42161),
-    (Network::Optimism, 10),
-    (Network::Base, 8453),
-    (Network::Avalanche, 43114),
-    (Network::BinanceSmartChain, 56),
-    (Network::ZkSync, 324),
-    (Network::Linea, 59144),
-    (Network::Scroll, 534352),
-    (Network::Fantom, 250),
-    (Network::Gnosis, 100),
+/// EVM chains offered by this server, as (display name, EIP-155 id).
+///
+/// The name is carried alongside because a CAIP-2 identifier does not imply
+/// one - `eip155:137` is not "Polygon" to anything but a lookup. A multi-chain
+/// shell drives this from `chain_configs`; this server knows its own chains.
+const AVAILABLE_NETWORKS: &[(&str, u64)] = &[
+    ("Ethereum", 1),
+    ("Polygon", 137),
+    ("Arbitrum", 42161),
+    ("Optimism", 10),
+    ("Base", 8453),
+    ("Avalanche", 43114),
+    ("BNB Chain", 56),
+    ("zkSync", 324),
+    ("Linea", 59144),
+    ("Scroll", 534352),
+    ("Fantom", 250),
+    ("Gnosis", 100),
 ];
 
 /// Network selector component.
@@ -49,9 +53,9 @@ fn SingleNetworkSelector(
 ) -> impl IntoView {
     view! {
         <div class="evm-network-selector">
-            {AVAILABLE_NETWORKS.iter().map(|(network, chain_id)| {
+            {AVAILABLE_NETWORKS.iter().map(|(name, chain_id)| {
                 let chain_id = *chain_id;
-                let network = *network;
+                let name = *name;
                 let is_selected = move || selected.get() == Some(chain_id);
 
                 view! {
@@ -66,7 +70,7 @@ fn SingleNetworkSelector(
                             }
                         }
                     >
-                        <NetworkBadge network=network />
+                        <NetworkBadge chain_id=ChainId::evm(chain_id) name=name.to_string() />
                     </button>
                 }
             }).collect_view()}
@@ -78,9 +82,9 @@ fn SingleNetworkSelector(
 fn MultiNetworkSelector(selected: RwSignal<Vec<u64>>) -> impl IntoView {
     view! {
         <div class="evm-network-selector evm-network-selector-multi">
-            {AVAILABLE_NETWORKS.iter().map(|(network, chain_id)| {
+            {AVAILABLE_NETWORKS.iter().map(|(name, chain_id)| {
                 let chain_id = *chain_id;
-                let network = *network;
+                let name = *name;
                 let is_selected = move || selected.get().contains(&chain_id);
 
                 view! {
@@ -97,7 +101,7 @@ fn MultiNetworkSelector(selected: RwSignal<Vec<u64>>) -> impl IntoView {
                             });
                         }
                     >
-                        <NetworkBadge network=network />
+                        <NetworkBadge chain_id=ChainId::evm(chain_id) name=name.to_string() />
                         {move || if is_selected() {
                             view! { <span class="evm-network-check">"✓"</span> }.into_any()
                         } else {

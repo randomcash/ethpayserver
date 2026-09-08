@@ -31,7 +31,7 @@ pub struct CreatePayoutRequest {
     /// Destination wallet address.
     pub destination_address: String,
     /// EIP-155 chain ID to sweep from.
-    pub chain_id: u64,
+    pub chain_id: String,
     /// Asset symbol to sweep (e.g., "ETH", "USDC").
     pub asset_symbol: String,
     /// Token contract address (required for ERC20 payouts).
@@ -45,7 +45,7 @@ pub struct PayoutResponse {
     pub store_id: Uuid,
     pub invoice_ids: Vec<String>,
     pub destination_address: String,
-    pub chain_id: u64,
+    pub chain_id: String,
     pub asset_type: String,
     pub asset_symbol: String,
     pub amount: String,
@@ -64,7 +64,7 @@ impl From<PayoutData> for PayoutResponse {
             store_id: p.store_id.0,
             invoice_ids: p.invoice_ids,
             destination_address: p.destination_address,
-            chain_id: p.chain_id,
+            chain_id: p.chain_id.to_string(),
             asset_type: p.asset_type,
             asset_symbol: p.asset_symbol,
             amount: p.amount,
@@ -89,6 +89,28 @@ pub struct PayoutListResponse {
 ///
 /// Creates a payout record. The actual transaction signing and broadcasting
 /// is handled by a background service that monitors pending payouts.
+/// Total of the payments on this chain and asset that may be paid out.
+///
+/// Reorged and unconfirmed payments are excluded; an unparseable amount is
+/// skipped rather than failing the payout, matching the behaviour before
+/// RCS-241.
+fn sum_payable(
+    payments: &[types::PaymentData],
+    chain_id: &types::ChainId,
+    asset_symbol: &str,
+) -> U256 {
+    payments
+        .iter()
+        .filter(|p| {
+            p.confirmed_at.is_some()
+                && !p.reorged
+                && &p.chain_id == chain_id
+                && p.asset_symbol == asset_symbol
+        })
+        .filter_map(|p| p.amount.parse::<U256>().ok())
+        .fold(U256::ZERO, |acc, amt| acc + amt)
+}
+
 pub async fn create_payout<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
@@ -122,12 +144,13 @@ where
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Determine asset type from token_address
+    let chain_id = types::ChainId::parse(&body.chain_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let asset_type = if body.token_address.is_some() {
-        "erc20".to_string()
+        "erc20"
     } else {
-        "native".to_string()
-    };
+        "native"
+    }
+    .to_string();
 
     // Calculate total amount from confirmed payments for the specified invoices
     let mut total_amount = U256::ZERO;
@@ -137,23 +160,11 @@ where
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        for payment in payments {
-            if payment.confirmed_at.is_some()
-                && !payment.reorged
-                && payment.chain_id == body.chain_id
-                && payment.asset_symbol == body.asset_symbol
-                && let Ok(amt) = payment.amount.parse::<U256>()
-            {
-                total_amount += amt;
-            }
-        }
+        total_amount += sum_payable(&payments, &chain_id, &body.asset_symbol);
     }
 
     if total_amount.is_zero() {
-        tracing::warn!(
-            store_id = %store_id,
-            "No confirmed payments found for payout"
-        );
+        tracing::warn!(store_id = %store_id, "No confirmed payments found for payout");
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -162,7 +173,7 @@ where
         store_id,
         invoice_ids: body.invoice_ids,
         destination_address: body.destination_address,
-        chain_id: body.chain_id,
+        chain_id: chain_id.clone(),
         asset_type,
         asset_symbol: body.asset_symbol.clone(),
         token_address: body.token_address,
@@ -182,7 +193,7 @@ where
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    metrics::record_payout_initiated(body.chain_id, &body.asset_symbol);
+    metrics::record_payout_initiated(&chain_id, &body.asset_symbol);
 
     tracing::info!(
         payout_id = %payout.id,

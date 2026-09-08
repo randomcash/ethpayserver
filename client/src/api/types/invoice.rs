@@ -1,6 +1,7 @@
 //! Invoice-related API types.
 
 use serde::{Deserialize, Serialize};
+use types::ChainId;
 
 // Re-export InvoiceStatus from the shared types crate.
 pub use types::InvoiceStatus;
@@ -140,7 +141,7 @@ pub struct CreateInvoiceRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckoutPaymentInfo {
     pub id: String,
-    pub chain_id: u64,
+    pub chain_id: ChainId,
     pub tx_hash: String,
     pub amount: String,
     pub asset_symbol: String,

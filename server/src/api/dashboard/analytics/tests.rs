@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::*;
+use types::ChainId;
 
 fn day(iso: &str) -> NaiveDate {
     NaiveDate::parse_from_str(iso, "%Y-%m-%d").unwrap()
@@ -224,7 +225,7 @@ mod repository {
             id: uuid::Uuid::new_v4(),
             invoice_id: invoice_id.clone(),
             payment_option_id: None,
-            chain_id: 1,
+            chain_id: ChainId::parse("eip155:1").unwrap(),
             asset_type: types::AssetType::Native,
             amount: "1000000000000000000".to_string(),
             asset_symbol: "ETH".to_string(),

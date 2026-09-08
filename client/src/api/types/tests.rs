@@ -1,4 +1,5 @@
 use super::*;
+use types::ChainId;
 
 #[test]
 fn test_invoice_status() {
@@ -37,7 +38,7 @@ fn test_payment_serialization() {
         id: "pay_001".to_string(),
         store_id: None,
         store_name: None,
-        chain_id: 1,
+        chain_id: ChainId::evm(1),
         invoice_id: "inv_001".to_string(),
         amount: "50000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
@@ -378,7 +379,7 @@ fn test_invoice_status_response_from_backend() {
         "payments": [
             {
                 "id": "pay-1",
-                "chain_id": 1,
+                "chain_id": "eip155:1",
                 "invoice_id": "inv-1",
                 "tx_hash": "0xabc123",
                 "amount": "50000000000000000",
@@ -409,7 +410,7 @@ fn test_store_payment_method_serialization() {
     let pm = StorePaymentMethod {
         id: "pm_001".to_string(),
         store_id: "store_001".to_string(),
-        chain_id: 1,
+        chain_id: ChainId::evm(1),
         token_address: None,
         asset_symbol: "ETH".to_string(),
         xpub_masked: Some("xpub12...pub123".to_string()),
@@ -419,7 +420,7 @@ fn test_store_payment_method_serialization() {
     };
     let json = serde_json::to_string(&pm).unwrap();
     let parsed: StorePaymentMethod = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.chain_id, 1);
+    assert_eq!(parsed.chain_id, ChainId::evm(1));
     assert_eq!(parsed.asset_symbol, "ETH");
     assert!(parsed.enabled);
     assert!(parsed.token_address.is_none());
@@ -430,7 +431,7 @@ fn test_store_payment_method_erc20() {
     let pm = StorePaymentMethod {
         id: "pm_002".to_string(),
         store_id: "store_001".to_string(),
-        chain_id: 137,
+        chain_id: ChainId::evm(137),
         token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
         asset_symbol: "USDC".to_string(),
         xpub_masked: Some("xpub45...pub456".to_string()),
@@ -450,7 +451,7 @@ fn test_store_payment_method_enabled_default() {
     let json = r#"{
         "id": "pm_003",
         "store_id": "s1",
-        "chain_id": 1,
+        "chain_id": "eip155:1",
         "token_address": null,
         "asset_symbol": "ETH",
         "xpub_masked": "xpub...pub",
@@ -467,7 +468,7 @@ fn test_store_payment_method_from_backend_json() {
     let json = r#"{
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "store_id": "660e8400-e29b-41d4-a716-446655440000",
-        "chain_id": 11155111,
+        "chain_id": "eip155:11155111",
         "token_address": null,
         "asset_symbol": "ETH",
         "xpub_masked": "xpub6CUG...Ht4QRnxv",
@@ -477,7 +478,7 @@ fn test_store_payment_method_from_backend_json() {
     }"#;
     let pm: StorePaymentMethod = serde_json::from_str(json).unwrap();
     assert_eq!(pm.id, "550e8400-e29b-41d4-a716-446655440000");
-    assert_eq!(pm.chain_id, 11155111);
+    assert_eq!(pm.chain_id, ChainId::evm(11155111));
     assert_eq!(pm.asset_symbol, "ETH");
     // Option since RCS-234: a payment method can resolve to no wallet.
     assert_eq!(pm.xpub_masked.as_deref(), Some("xpub6CUG...Ht4QRnxv"));
@@ -492,7 +493,7 @@ fn test_store_payment_method_from_backend_erc20_json() {
     let json = r#"{
         "id": "770e8400-e29b-41d4-a716-446655440000",
         "store_id": "660e8400-e29b-41d4-a716-446655440000",
-        "chain_id": 1,
+        "chain_id": "eip155:1",
         "token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
         "asset_symbol": "USDC",
         "xpub_masked": "xpub6D4B...9kW3F2Rq",
@@ -501,7 +502,7 @@ fn test_store_payment_method_from_backend_erc20_json() {
         "created_at": "2024-06-15T10:30:00Z"
     }"#;
     let pm: StorePaymentMethod = serde_json::from_str(json).unwrap();
-    assert_eq!(pm.chain_id, 1);
+    assert_eq!(pm.chain_id, ChainId::evm(1));
     assert_eq!(pm.asset_symbol, "USDC");
     assert_eq!(
         pm.token_address.as_deref(),
@@ -513,14 +514,14 @@ fn test_store_payment_method_from_backend_erc20_json() {
 #[test]
 fn test_create_payment_method_request() {
     let req = CreatePaymentMethodRequest {
-        chain_id: 1,
+        chain_id: ChainId::evm(1),
         token_address: None,
         asset_symbol: "ETH".to_string(),
         decimals: 18,
         xpub: "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string(),
     };
     let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["chain_id"], 1);
+    assert_eq!(json["chain_id"], "eip155:1");
     assert!(json["token_address"].is_null());
     assert_eq!(json["asset_symbol"], "ETH");
     assert_eq!(json["decimals"], 18);
@@ -530,14 +531,14 @@ fn test_create_payment_method_request() {
 #[test]
 fn test_create_payment_method_request_erc20() {
     let req = CreatePaymentMethodRequest {
-        chain_id: 137,
+        chain_id: ChainId::evm(137),
         token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
         asset_symbol: "USDC".to_string(),
         decimals: 6,
         xpub: "xpub123...".to_string(),
     };
     let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["chain_id"], 137);
+    assert_eq!(json["chain_id"], "eip155:137");
     assert_eq!(
         json["token_address"],
         "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
@@ -791,7 +792,7 @@ fn test_invoice_with_payment_options() {
             {
                 "id": "po-1",
                 "payment_method_id": "ETH-1",
-                "chain_id": 1,
+                "chain_id": "eip155:1",
                 "asset_symbol": "ETH",
                 "token_address": null,
                 "decimals": 18,
@@ -804,7 +805,7 @@ fn test_invoice_with_payment_options() {
     }"#;
     let invoice: Invoice = serde_json::from_str(json).unwrap();
     assert_eq!(invoice.payment_options.len(), 1);
-    assert_eq!(invoice.payment_options[0].chain_id, 1);
+    assert_eq!(invoice.payment_options[0].chain_id, ChainId::evm(1));
     assert_eq!(invoice.payment_options[0].asset_symbol, "ETH");
 }
 

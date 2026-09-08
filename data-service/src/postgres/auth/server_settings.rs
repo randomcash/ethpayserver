@@ -24,7 +24,20 @@ impl ServerSettingsRepository for PgDataService {
             default_confirmations: r.get("default_confirmations"),
             invoice_expiry_minutes: r.get("invoice_expiry_minutes"),
             rate_limit_rpm: r.get("rate_limit_rpm"),
-            enabled_chain_ids: r.get("enabled_chain_ids"),
+            // Read as TEXT[] and validate each. The `caip2` domain already
+            // enforces the grammar, so a failure here means the column was
+            // altered out from under us - treated like any other schema
+            // mismatch rather than silently dropping a chain the server is
+            // meant to be serving.
+            enabled_chain_ids: r
+                .get::<Vec<String>, _>("enabled_chain_ids")
+                .into_iter()
+                .map(|id| {
+                    types::ChainId::parse(id.as_str()).unwrap_or_else(|e| {
+                        panic!("server_settings.enabled_chain_ids holds `{id}`, not a CAIP-2 chain id ({e})")
+                    })
+                })
+                .collect(),
         }))
     }
 
@@ -44,7 +57,16 @@ impl ServerSettingsRepository for PgDataService {
         .bind(settings.default_confirmations)
         .bind(settings.invoice_expiry_minutes)
         .bind(settings.rate_limit_rpm)
-        .bind(&settings.enabled_chain_ids)
+        // Bound as TEXT[]; the column's `caip2` domain re-checks each element
+        // on the way in, so an invalid identifier is rejected by the database
+        // even if it somehow got past the type.
+        .bind(
+            settings
+                .enabled_chain_ids
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>(),
+        )
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;

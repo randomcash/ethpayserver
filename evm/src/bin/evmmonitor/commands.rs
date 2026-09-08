@@ -23,13 +23,20 @@ pub(crate) async fn restore_watched_addresses(
         Ok(addresses) => {
             let mut restored_count = 0;
             for (address, invoice_id, chain_id, token_address) in addresses {
+                // This monitor is EVM-only and indexes chains by EIP-155
+                // number; anything else cannot be one of ours.
+                let Some(eip155) = chain_id.evm_chain_id() else {
+                    warn!(chain_id = %chain_id, address = %address, "not an EVM chain; skipping");
+                    continue;
+                };
+
                 // Only restore addresses for chains we're monitoring
-                if !monitored_chain_ids.contains(&chain_id) {
-                    debug!(chain_id, address = %address, "skipping address for unmonitored chain");
+                if !monitored_chain_ids.contains(&eip155) {
+                    debug!(chain_id = %chain_id, address = %address, "skipping address for unmonitored chain");
                     continue;
                 }
 
-                if let Some(monitor) = coordinator.get_chain(chain_id).await {
+                if let Some(monitor) = coordinator.get_chain(eip155).await {
                     // Parse address - it's stored as lowercase hex string
                     let parsed_address = match address.parse() {
                         Ok(addr) => addr,
@@ -102,7 +109,7 @@ pub(crate) async fn handle_commands(
                     .watch_address(
                         &address_str,
                         &invoice_id,
-                        cmd.chain_id,
+                        &types::ChainId::evm(cmd.chain_id),
                         token_address_str.as_deref(),
                     )
                     .await
@@ -153,7 +160,11 @@ pub(crate) async fn handle_commands(
                 let address_str = cmd.address.to_string().to_lowercase();
                 let token_address_str = cmd.token_contract.map(|a| a.to_string().to_lowercase());
                 if let Err(e) = persistence
-                    .unwatch_address(&address_str, cmd.chain_id, token_address_str.as_deref())
+                    .unwatch_address(
+                        &address_str,
+                        &types::ChainId::evm(cmd.chain_id),
+                        token_address_str.as_deref(),
+                    )
                     .await
                 {
                     debug!(error = %e, "failed to remove watched address from persistence");

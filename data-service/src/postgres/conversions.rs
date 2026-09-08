@@ -1,57 +1,7 @@
 //! Database type conversions.
 
 use crate::RepositoryError;
-use types::{InvoiceStatus, Network};
-
-/// Convert Rust Network enum to database string.
-///
-/// Returns an error if given a non-EVM network (e.g., Bitcoin networks).
-/// Ethpayserver only handles EVM-compatible chains.
-pub fn try_network_to_db(network: Network) -> Result<&'static str, RepositoryError> {
-    match network {
-        Network::Ethereum => Ok("ethereum"),
-        Network::Polygon => Ok("polygon"),
-        Network::Arbitrum => Ok("arbitrum"),
-        Network::Optimism => Ok("optimism"),
-        Network::Base => Ok("base"),
-        Network::Avalanche => Ok("avalanche"),
-        Network::BinanceSmartChain => Ok("binance_smart_chain"),
-        Network::ZkSync => Ok("zksync"),
-        Network::Linea => Ok("linea"),
-        Network::Scroll => Ok("scroll"),
-        Network::Fantom => Ok("fantom"),
-        Network::Gnosis => Ok("gnosis"),
-        _ => Err(RepositoryError::InvalidData(format!(
-            "Unsupported network for ethpayserver: {:?}",
-            network
-        ))),
-    }
-}
-
-/// Convert database string to Rust Network enum.
-///
-/// Returns an error if the database contains an unknown network value,
-/// indicating data corruption or schema mismatch.
-pub fn try_db_to_network(s: &str) -> Result<Network, RepositoryError> {
-    match s {
-        "ethereum" => Ok(Network::Ethereum),
-        "polygon" => Ok(Network::Polygon),
-        "arbitrum" => Ok(Network::Arbitrum),
-        "optimism" => Ok(Network::Optimism),
-        "base" => Ok(Network::Base),
-        "avalanche" => Ok(Network::Avalanche),
-        "binance_smart_chain" => Ok(Network::BinanceSmartChain),
-        "zksync" => Ok(Network::ZkSync),
-        "linea" => Ok(Network::Linea),
-        "scroll" => Ok(Network::Scroll),
-        "fantom" => Ok(Network::Fantom),
-        "gnosis" => Ok(Network::Gnosis),
-        _ => Err(RepositoryError::InvalidData(format!(
-            "Unknown network in database: {}",
-            s
-        ))),
-    }
-}
+use types::InvoiceStatus;
 
 /// Convert Rust InvoiceStatus enum to database string.
 ///
@@ -88,4 +38,24 @@ pub fn try_db_to_status(s: &str) -> Result<InvoiceStatus, RepositoryError> {
             s
         ))),
     }
+}
+
+/// Read a CAIP-2 chain id from a row.
+///
+/// Parsing cannot fail against this schema: the column is the `caip2` domain,
+/// whose CHECK enforces exactly the grammar `ChainId::parse` enforces. Treated
+/// as a schema mismatch rather than made fallible everywhere - `row.get` already
+/// panics when a column is not the type its mapper expects, and making every row
+/// mapper return `Result` for a case the database forbids would obscure the
+/// failures that can actually happen.
+pub fn chain_id_from_row(row: &sqlx::postgres::PgRow, column: &str) -> types::ChainId {
+    use sqlx::Row;
+    let raw: String = row.get(column);
+    types::ChainId::parse(raw.as_str()).unwrap_or_else(|e| {
+        panic!(
+            "column `{column}` holds `{raw}`, which is not a CAIP-2 chain id ({e}). \
+             The `caip2` domain should have made this impossible - has the column \
+             been altered, or was the RCS-241 migration skipped?"
+        )
+    })
 }

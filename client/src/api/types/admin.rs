@@ -1,6 +1,7 @@
 //! Admin/settings API types.
 
 use serde::{Deserialize, Serialize};
+use types::ChainId;
 
 /// Admin user info (from GET /admin/users).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +30,7 @@ pub struct ServerSettingsResponse {
     pub default_confirmations: i32,
     pub invoice_expiry_minutes: i32,
     pub rate_limit_rpm: i32,
-    pub enabled_chain_ids: Vec<i64>,
+    pub enabled_chain_ids: Vec<ChainId>,
 }
 
 /// Request to update server settings.
@@ -38,7 +39,7 @@ pub struct UpdateServerSettingsRequest {
     pub default_confirmations: i32,
     pub invoice_expiry_minutes: i32,
     pub rate_limit_rpm: i32,
-    pub enabled_chain_ids: Vec<i64>,
+    pub enabled_chain_ids: Vec<ChainId>,
 }
 
 /// Request to update a user's role.

@@ -35,7 +35,7 @@ pub struct PaymentOptionResponse {
     /// Payment method ID (e.g., "ETH-1", "USDC-137").
     pub payment_method_id: String,
     /// Chain ID (EIP-155).
-    pub chain_id: u64,
+    pub chain_id: String,
     /// Asset symbol.
     pub asset_symbol: String,
     /// Token contract address (for ERC20, null for native).
@@ -57,7 +57,7 @@ impl From<PaymentOptionData> for PaymentOptionResponse {
         Self {
             id: po.id.0.to_string(),
             payment_method_id: po.payment_method_id.0,
-            chain_id: po.chain_id,
+            chain_id: po.chain_id.to_string(),
             asset_symbol: po.asset_symbol,
             token_address: po.token_address,
             decimals: po.decimals,
@@ -112,7 +112,7 @@ pub struct PaymentResponse {
     /// Store name (list endpoints only) — see [`InvoiceResponse::store_name`].
     pub store_name: Option<String>,
     /// Chain ID (EIP-155).
-    pub chain_id: u64,
+    pub chain_id: String,
     /// Invoice ID this payment belongs to.
     pub invoice_id: String,
     /// Transaction hash.
@@ -146,7 +146,7 @@ impl From<PaymentData> for PaymentResponse {
             // which already resolves the invoice, fills these in.
             store_id: None,
             store_name: None,
-            chain_id: p.chain_id,
+            chain_id: p.chain_id.to_string(),
             invoice_id: p.invoice_id.0,
             tx_hash: p.tx_hash,
             amount: p.amount,

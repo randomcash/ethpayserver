@@ -1,6 +1,7 @@
 //! Store-related API types.
 
 use serde::{Deserialize, Serialize};
+use types::ChainId;
 
 fn default_true() -> bool {
     true
@@ -28,7 +29,7 @@ pub struct StorePaymentMethod {
     pub id: String,
     pub store_id: String,
     /// EIP-155 chain ID (1 = Ethereum, 137 = Polygon, etc.)
-    pub chain_id: u64,
+    pub chain_id: ChainId,
     /// Token contract address for ERC20, None for native asset.
     pub token_address: Option<String>,
     /// Asset symbol (ETH, USDC, USDT, etc.)
@@ -90,7 +91,7 @@ pub struct UserStoreInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreSettings {
     pub store_id: String,
-    pub default_chain_id: Option<i64>,
+    pub default_chain_id: Option<ChainId>,
     pub default_display_currency: Option<String>,
     pub logo_url: Option<String>,
     pub accent_color: Option<String>,
@@ -101,7 +102,7 @@ pub struct StoreSettings {
 /// Token policy entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenPolicyEntry {
-    pub chain_id: i64,
+    pub chain_id: ChainId,
     pub token_address: Option<String>,
     pub asset_symbol: String,
 }
@@ -134,7 +135,7 @@ pub struct UpdateStoreRequest {
 /// Create payment method request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreatePaymentMethodRequest {
-    pub chain_id: u64,
+    pub chain_id: ChainId,
     pub token_address: Option<String>,
     pub asset_symbol: String,
     pub decimals: u8,
@@ -159,7 +160,7 @@ pub struct UpdateWebhookRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateStoreSettingsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_chain_id: Option<i64>,
+    pub default_chain_id: Option<ChainId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_display_currency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

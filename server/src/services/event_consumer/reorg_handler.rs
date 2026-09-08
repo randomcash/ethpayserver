@@ -1,6 +1,5 @@
 //! Handler for `ReorgDetected` events.
 
-use evm::chain_id_to_network;
 use evm::monitor::events::ReorgDetected;
 use types::{InvoiceId, InvoiceStatus, InvoiceWriter, PaymentReader};
 
@@ -26,12 +25,10 @@ impl<
         &self,
         event: ReorgDetected,
     ) -> Result<(), EventConsumerError> {
-        // Try to get network from chain_id (None for testnets)
-        let network = chain_id_to_network(event.chain_id);
+        let chain_id = types::ChainId::evm(event.chain_id);
 
         tracing::warn!(
-            chain_id = event.chain_id,
-            network = ?network,
+            chain_id = %chain_id,
             fork_block = event.fork_block,
             depth = event.depth,
             affected_invoices = event.affected_invoices.len(),
@@ -44,7 +41,7 @@ impl<
             // Mark payments from this chain at or after the fork block as reorged
             let reorged_count = self
                 .data_service
-                .mark_reorged(&invoice_id, event.chain_id, event.fork_block)
+                .mark_reorged(&invoice_id, &chain_id, event.fork_block)
                 .await?;
 
             if reorged_count == 0 {

@@ -6,7 +6,7 @@
 //! expectations.
 
 use chrono::{Duration, Utc};
-use types::{InvoiceWriter, PaymentOptionWriter, PaymentWriter};
+use types::{ChainId, InvoiceWriter, PaymentOptionWriter, PaymentWriter};
 
 use crate::analytics::{PaymentAnalyticsReader, PaymentVolumeQuery};
 
@@ -88,7 +88,7 @@ async fn integration_analytics_uses_the_payment_options_decimals() {
 
     let option = test_payment_option_with_rate(
         &invoice.id,
-        1,
+        &ChainId::evm(1),
         "USDC",
         Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
         6,
@@ -130,7 +130,7 @@ async fn integration_analytics_excludes_reorged_payments() {
     let mut payment = test_payment(&invoice.id);
     payment.block_number = Some(100);
     PaymentWriter::upsert(&service, &payment).await.unwrap();
-    PaymentWriter::mark_reorged(&service, &invoice.id, 1, 100)
+    PaymentWriter::mark_reorged(&service, &invoice.id, &ChainId::evm(1), 100)
         .await
         .unwrap();
 

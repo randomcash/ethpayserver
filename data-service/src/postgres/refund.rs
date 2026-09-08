@@ -8,6 +8,7 @@ use crate::{RefundReader, RefundWriter, RepositoryResult, sqlx_to_repo_error};
 use types::{InvoiceId, RefundData, RefundStatus, StoreId};
 
 use super::PgDataService;
+use super::conversions::chain_id_from_row;
 
 fn db_to_refund_status(s: &str) -> RefundStatus {
     s.parse().unwrap_or(RefundStatus::Failed)
@@ -23,9 +24,7 @@ fn try_row_to_refund(row: &sqlx::postgres::PgRow) -> RepositoryResult<RefundData
         payment_id: row.try_get("payment_id").map_err(sqlx_to_repo_error)?,
         store_id: StoreId(row.try_get("store_id").map_err(sqlx_to_repo_error)?),
         to_address: row.try_get("to_address").map_err(sqlx_to_repo_error)?,
-        chain_id: row
-            .try_get::<i64, _>("chain_id")
-            .map_err(sqlx_to_repo_error)? as u64,
+        chain_id: chain_id_from_row(row, "chain_id"),
         asset_type: row.try_get("asset_type").map_err(sqlx_to_repo_error)?,
         asset_symbol: row.try_get("asset_symbol").map_err(sqlx_to_repo_error)?,
         token_address: row.try_get("token_address").map_err(sqlx_to_repo_error)?,
@@ -125,7 +124,7 @@ impl RefundWriter for PgDataService {
         .bind(refund.payment_id)
         .bind(refund.store_id.0)
         .bind(&refund.to_address)
-        .bind(refund.chain_id as i64)
+        .bind(refund.chain_id.as_str())
         .bind(&refund.asset_type)
         .bind(&refund.asset_symbol)
         .bind(&refund.token_address)

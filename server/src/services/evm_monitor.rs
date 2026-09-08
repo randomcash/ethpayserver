@@ -5,17 +5,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use evm::Address;
 use evm::monitor::events::{MonitorCommand, UnwatchAddressCommand, WatchAddressCommand};
 use evm::monitor::{COMMANDS_CHANNEL, ChainHealth, EVENTS_CHANNEL, EventBridge, RedisBridge};
-use evm::{Address, network_to_chain_id};
-use types::Network;
+use types::ChainId;
 use uuid::Uuid;
 
 /// Error type for EVM monitor operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EVMMonitorError {
-    #[error("unsupported network: {0:?}")]
-    UnsupportedNetwork(Network),
+    #[error("not an EVM chain: {0}")]
+    NotAnEvmChain(ChainId),
 
     #[error("bridge error: {0}")]
     Bridge(#[from] evm::EvmError),
@@ -30,7 +30,7 @@ pub trait EVMMonitor: Send + Sync {
     /// Start watching an address for incoming payments.
     async fn watch_address(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         address: Address,
         invoice_id: Uuid,
         expected_amount: Option<evm::U256>,
@@ -50,7 +50,7 @@ pub trait EVMMonitor: Send + Sync {
     /// Stop watching an address.
     async fn unwatch_address(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         address: Address,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError>;
@@ -104,23 +104,20 @@ impl RedisEVMMonitor {
 impl EVMMonitor for RedisEVMMonitor {
     async fn watch_address(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         address: Address,
         invoice_id: Uuid,
         expected_amount: Option<evm::U256>,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
-        let chain_id =
-            network_to_chain_id(network).ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
+        // This monitor talks to EVM RPCs, which take an EIP-155 number. That
+        // is the only place the number is still the right representation.
+        let eip155 = chain_id
+            .evm_chain_id()
+            .ok_or_else(|| EVMMonitorError::NotAnEvmChain(chain_id.clone()))?;
 
-        self.watch_address_by_chain_id(
-            chain_id,
-            address,
-            invoice_id,
-            expected_amount,
-            token_contract,
-        )
-        .await
+        self.watch_address_by_chain_id(eip155, address, invoice_id, expected_amount, token_contract)
+            .await
     }
 
     async fn watch_address_by_chain_id(
@@ -152,14 +149,17 @@ impl EVMMonitor for RedisEVMMonitor {
 
     async fn unwatch_address(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         address: Address,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
-        let chain_id =
-            network_to_chain_id(network).ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
+        // This monitor talks to EVM RPCs, which take an EIP-155 number. That
+        // is the only place the number is still the right representation.
+        let eip155 = chain_id
+            .evm_chain_id()
+            .ok_or_else(|| EVMMonitorError::NotAnEvmChain(chain_id.clone()))?;
 
-        self.unwatch_address_by_chain_id(chain_id, address, token_contract)
+        self.unwatch_address_by_chain_id(eip155, address, token_contract)
             .await
     }
 

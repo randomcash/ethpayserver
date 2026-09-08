@@ -50,8 +50,6 @@ pub use network::{
     ALL_CHAINS, ChainConfig, EvmNetwork, get_any_chain_config, get_chain_config,
     get_chain_config_by_id,
 };
-#[cfg(feature = "types")]
-pub use network::{chain_id_to_network, network_to_chain_id};
 pub use provider::EvmProvider;
 pub use tokens::{EvmTokenStandard, Token, discover_token, get_token_balance, get_token_info};
 pub use wallet::{HdWallet, XpubDeriver, generate_mnemonic, validate_mnemonic, validate_xpub};

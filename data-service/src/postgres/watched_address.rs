@@ -11,13 +11,14 @@ use crate::{
 use types::{InvoiceId, PaymentOptionId};
 
 use super::PgDataService;
+use super::conversions::chain_id_from_row;
 
 #[async_trait]
 impl WatchedAddressReader for PgDataService {
     async fn get_invoice_id(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<InvoiceId>> {
         let row = if let Some(token) = token_address {
@@ -30,7 +31,7 @@ impl WatchedAddressReader for PgDataService {
                 "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(token)
             .fetch_optional(&self.pool)
             .await
@@ -45,7 +46,7 @@ impl WatchedAddressReader for PgDataService {
                 "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .fetch_optional(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?
@@ -57,7 +58,7 @@ impl WatchedAddressReader for PgDataService {
     async fn get_payment_option_id(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<PaymentOptionId>> {
         let row = if let Some(token) = token_address {
@@ -69,7 +70,7 @@ impl WatchedAddressReader for PgDataService {
                 "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(token)
             .fetch_optional(&self.pool)
             .await
@@ -83,7 +84,7 @@ impl WatchedAddressReader for PgDataService {
                 "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .fetch_optional(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?
@@ -97,7 +98,7 @@ impl WatchedAddressReader for PgDataService {
 
     async fn get_active(
         &self,
-    ) -> RepositoryResult<Vec<(String, PaymentOptionId, u64, Option<String>)>> {
+    ) -> RepositoryResult<Vec<(String, PaymentOptionId, types::ChainId, Option<String>)>> {
         let rows = sqlx::query(
             r#"
             SELECT wa.address, wa.payment_option_id, wa.chain_id, wa.token_address
@@ -113,12 +114,12 @@ impl WatchedAddressReader for PgDataService {
         for r in &rows {
             let address: String = r.get("address");
             let payment_option_id: Uuid = r.get("payment_option_id");
-            let chain_id: i64 = r.get("chain_id");
+            let chain_id = chain_id_from_row(r, "chain_id");
             let token_address: Option<String> = r.get("token_address");
             result.push((
                 address,
                 PaymentOptionId(payment_option_id),
-                chain_id as u64,
+                chain_id,
                 token_address,
             ));
         }
@@ -151,12 +152,12 @@ impl WatchedAddressReader for PgDataService {
         let mut result = Vec::with_capacity(rows.len());
         for r in &rows {
             let payment_option_id: Uuid = r.get("payment_option_id");
-            let chain_id: i64 = r.get("chain_id");
+            let chain_id = chain_id_from_row(r, "chain_id");
             result.push(PendingWatchInfo {
                 address: r.get("address"),
                 payment_option_id: PaymentOptionId(payment_option_id),
                 invoice_id: r.get("invoice_id"),
-                chain_id: chain_id as u64,
+                chain_id,
                 expected_amount: r.get("expected_amount"),
                 token_address: r.get("token_address"),
             });
@@ -189,12 +190,12 @@ impl WatchedAddressReader for PgDataService {
         let mut result = Vec::with_capacity(rows.len());
         for r in &rows {
             let payment_option_id: Uuid = r.get("payment_option_id");
-            let chain_id: i64 = r.get("chain_id");
+            let chain_id = chain_id_from_row(r, "chain_id");
             result.push(CleanupAddressInfo {
                 address: r.get("address"),
                 payment_option_id: PaymentOptionId(payment_option_id),
                 invoice_id: r.get("invoice_id"),
-                chain_id: chain_id as u64,
+                chain_id,
                 token_address: r.get("token_address"),
             });
         }
@@ -221,12 +222,12 @@ impl WatchedAddressReader for PgDataService {
         let mut result = Vec::with_capacity(rows.len());
         for r in &rows {
             let payment_option_id: Uuid = r.get("payment_option_id");
-            let chain_id: i64 = r.get("chain_id");
+            let chain_id = chain_id_from_row(r, "chain_id");
             result.push(CleanupAddressInfo {
                 address: r.get("address"),
                 payment_option_id: PaymentOptionId(payment_option_id),
                 invoice_id: r.get("invoice_id"),
-                chain_id: chain_id as u64,
+                chain_id,
                 token_address: r.get("token_address"),
             });
         }
@@ -253,12 +254,12 @@ impl WatchedAddressReader for PgDataService {
         let mut result = Vec::with_capacity(rows.len());
         for r in &rows {
             let payment_option_id: Uuid = r.get("payment_option_id");
-            let chain_id: i64 = r.get("chain_id");
+            let chain_id = chain_id_from_row(r, "chain_id");
             result.push(CleanupAddressInfo {
                 address: r.get("address"),
                 payment_option_id: PaymentOptionId(payment_option_id),
                 invoice_id: r.get("invoice_id"),
-                chain_id: chain_id as u64,
+                chain_id,
                 token_address: r.get("token_address"),
             });
         }
@@ -273,7 +274,7 @@ impl WatchedAddressWriter for PgDataService {
         &self,
         address: &str,
         payment_option_id: &PaymentOptionId,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<()> {
         // Get the invoice's expiration for the watched address
@@ -321,7 +322,7 @@ impl WatchedAddressWriter for PgDataService {
             )
             .bind(&invoice_id)
             .bind(payment_option_id.0)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(address)
             .bind(token)
             .bind(expires_at)
@@ -340,7 +341,7 @@ impl WatchedAddressWriter for PgDataService {
                 "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .fetch_optional(&mut *tx)
             .await
             .map_err(sqlx_to_repo_error)?;
@@ -356,7 +357,7 @@ impl WatchedAddressWriter for PgDataService {
                 .bind(payment_option_id.0)
                 .bind(expires_at)
                 .bind(address)
-                .bind(chain_id as i64)
+                .bind(chain_id.as_str())
                 .execute(&mut *tx)
                 .await
                 .map_err(sqlx_to_repo_error)?;
@@ -372,7 +373,7 @@ impl WatchedAddressWriter for PgDataService {
                 )
                 .bind(&invoice_id)
                 .bind(payment_option_id.0)
-                .bind(chain_id as i64)
+                .bind(chain_id.as_str())
                 .bind(address)
                 .bind(expires_at)
                 .execute(&mut *tx)
@@ -389,7 +390,7 @@ impl WatchedAddressWriter for PgDataService {
     async fn mark_notified(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<()> {
         if let Some(token) = token_address {
@@ -401,7 +402,7 @@ impl WatchedAddressWriter for PgDataService {
                 "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(token)
             .execute(&self.pool)
             .await
@@ -415,7 +416,7 @@ impl WatchedAddressWriter for PgDataService {
                 "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .execute(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?;
@@ -427,7 +428,7 @@ impl WatchedAddressWriter for PgDataService {
     async fn deactivate(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<bool> {
         let result = if let Some(token) = token_address {
@@ -439,7 +440,7 @@ impl WatchedAddressWriter for PgDataService {
                 "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(token)
             .execute(&self.pool)
             .await
@@ -453,7 +454,7 @@ impl WatchedAddressWriter for PgDataService {
                 "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .execute(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?

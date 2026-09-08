@@ -384,7 +384,7 @@ fn store_label(payment: &Payment) -> String {
 fn PaymentRow(payment: Payment, show_store: bool) -> impl IntoView {
     let store_display = show_store.then(|| store_label(&payment));
     let tx_display = truncate_hash(&payment.tx_hash, 10, 8);
-    let network = chain_name(payment.chain_id);
+    let network = chain_name(&payment.chain_id).to_string();
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
     let date_display = format_date(&payment.detected_at);
@@ -449,7 +449,7 @@ fn PaymentRow(payment: Payment, show_store: bool) -> impl IntoView {
 fn PaymentCard(payment: Payment, show_store: bool) -> impl IntoView {
     let store_display = show_store.then(|| store_label(&payment));
     let tx_display = truncate_hash(&payment.tx_hash, 8, 6);
-    let network = chain_name(payment.chain_id);
+    let network = chain_name(&payment.chain_id).to_string();
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
     let date_display = format_date(&payment.detected_at);
@@ -506,13 +506,14 @@ fn PaymentCard(payment: Payment, show_store: bool) -> impl IntoView {
 mod tests {
     use super::store_label;
     use crate::api::Payment;
+    use types::ChainId;
 
     fn payment(store_id: Option<&str>, store_name: Option<&str>) -> Payment {
         Payment {
             id: "pay-1".to_string(),
             store_id: store_id.map(str::to_string),
             store_name: store_name.map(str::to_string),
-            chain_id: 1,
+            chain_id: ChainId::evm(1),
             invoice_id: "inv-1".to_string(),
             tx_hash: "0xabc".to_string(),
             amount: "1".to_string(),

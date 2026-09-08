@@ -21,8 +21,21 @@ pub(crate) fn is_valid_tx_hash(hash: &str) -> bool {
 /// Path parameters for tx hash lookup.
 #[derive(Debug, Deserialize)]
 pub struct TxHashLookupPath {
-    pub chain_id: u64,
+    pub chain_id: String,
     pub tx_hash: String,
+}
+
+/// Parse the chain id out of a path segment.
+///
+/// A CAIP-2 identifier in a path segment needs no escaping: RFC 3986 allows `:`
+/// in `pchar`, so `/…/eip155:1/0xabc…` is a legal URL as written.
+fn parse_path_chain_id(raw: &str) -> Result<types::ChainId, (StatusCode, Json<serde_json::Value>)> {
+    types::ChainId::parse(raw).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("invalid chain id: {e}") })),
+        )
+    })
 }
 
 /// Lookup an invoice by transaction hash.
@@ -36,7 +49,7 @@ pub struct TxHashLookupPath {
     tag = "invoices",
     security(("bearer_auth" = [])),
     params(
-        ("chain_id" = u64, Path, description = "EIP-155 chain ID"),
+        ("chain_id" = String, Path, description = "CAIP-2 chain identifier, e.g. eip155:1"),
         ("tx_hash" = String, Path, description = "Transaction hash (0x-prefixed, 64 hex chars)")
     ),
     responses(
@@ -62,10 +75,12 @@ where
         ));
     }
 
+    let chain_id = parse_path_chain_id(&path.chain_id)?;
+
     // Look up payment by (chain_id, tx_hash)
     let payment = state
         .data_service
-        .get_payment_by_tx_hash(path.chain_id, &path.tx_hash)
+        .get_payment_by_tx_hash(&chain_id, &path.tx_hash)
         .await
         .map_err(|_| {
             (

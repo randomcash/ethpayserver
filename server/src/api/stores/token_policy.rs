@@ -22,7 +22,7 @@ use crate::state::PgAppState;
 /// Token policy entry for API requests/responses.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TokenPolicyEntryPayload {
-    pub chain_id: i64,
+    pub chain_id: String,
     pub token_address: Option<String>,
     pub asset_symbol: String,
 }
@@ -76,7 +76,7 @@ where
                 .entries
                 .into_iter()
                 .map(|e| TokenPolicyEntryPayload {
-                    chain_id: e.chain_id,
+                    chain_id: e.chain_id.to_string(),
                     token_address: e.token_address,
                     asset_symbol: e.asset_symbol,
                 })
@@ -121,15 +121,21 @@ where
         }
     }
 
+    // Collected through `Result` so one malformed identifier fails the whole
+    // request rather than being silently dropped from the policy - a policy
+    // missing an entry is a policy that permits something it should not.
     let inputs: Vec<TokenPolicyEntryInput> = req
         .entries
         .into_iter()
-        .map(|e| TokenPolicyEntryInput {
-            chain_id: e.chain_id,
-            token_address: e.token_address,
-            asset_symbol: e.asset_symbol,
+        .map(|e| {
+            Ok(TokenPolicyEntryInput {
+                chain_id: types::ChainId::parse(e.chain_id.as_str())
+                    .map_err(|_| StatusCode::BAD_REQUEST)?,
+                token_address: e.token_address,
+                asset_symbol: e.asset_symbol,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, StatusCode>>()?;
 
     let policy =
         StoreTokenPolicyWriter::upsert_token_policy(&*state.data_service, store_id, mode, &inputs)
@@ -144,7 +150,7 @@ where
             .entries
             .into_iter()
             .map(|e| TokenPolicyEntryPayload {
-                chain_id: e.chain_id,
+                chain_id: e.chain_id.to_string(),
                 token_address: e.token_address,
                 asset_symbol: e.asset_symbol,
             })

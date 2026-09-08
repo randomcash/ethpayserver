@@ -6,6 +6,7 @@ use evm::monitor::bridge::MemoryBridge;
 use evm::monitor::events::PaymentConfirmed;
 use evm::{Address, B256, U256};
 use std::sync::Arc;
+use types::ChainId;
 use types::{
     InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentData,
     PaymentReader, PaymentWriter, StoreId,
@@ -46,7 +47,7 @@ async fn test_handle_payment_confirmed_transitions_to_paid() {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         asset_type: types::AssetType::Native,
         amount: "1000000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
@@ -124,7 +125,7 @@ async fn test_handle_payment_confirmed_skips_cancelled_invoice() {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         asset_type: types::AssetType::Native,
         amount: "1000000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
@@ -196,7 +197,7 @@ async fn test_handle_payment_confirmed_late_payment_on_expired_invoice() {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         asset_type: types::AssetType::Native,
         amount: "1000000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
@@ -283,7 +284,7 @@ async fn test_receipt_sent_on_paid_with_email() {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         asset_type: types::AssetType::Native,
         amount: "50000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
@@ -361,7 +362,7 @@ async fn test_no_receipt_when_email_absent() {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         asset_type: types::AssetType::Native,
         amount: "50000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
@@ -443,7 +444,7 @@ async fn test_receipt_sent_from_customer_email_column() {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         asset_type: types::AssetType::Native,
         amount: "50000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),

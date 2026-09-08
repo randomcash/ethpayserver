@@ -22,7 +22,7 @@ use crate::state::PgAppState;
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePaymentMethodRequest {
     /// Chain ID (e.g., 1 for Ethereum, 137 for Polygon, 11155111 for Sepolia).
-    pub chain_id: u64,
+    pub chain_id: String,
     /// Token address for ERC20 tokens, null for native asset.
     pub token_address: Option<String>,
     /// Asset symbol (e.g., ETH, USDC).
@@ -50,7 +50,7 @@ pub struct PaymentMethodResponse {
     /// Store ID.
     pub store_id: Uuid,
     /// Chain ID.
-    pub chain_id: u64,
+    pub chain_id: String,
     /// Token address (null for native asset).
     pub token_address: Option<String>,
     /// Asset symbol.
@@ -72,7 +72,7 @@ impl From<StorePaymentMethod> for PaymentMethodResponse {
         Self {
             id: pm.id,
             store_id: pm.store_id,
-            chain_id: pm.chain_id,
+            chain_id: pm.chain_id.to_string(),
             token_address: pm.token_address,
             asset_symbol: pm.asset_symbol,
             xpub_masked: pm.xpub.as_deref().map(mask_xpub),
@@ -150,6 +150,9 @@ where
         return Err(StatusCode::BAD_REQUEST.into());
     }
 
+    let chain_id = types::ChainId::parse(req.chain_id.as_str())
+        .map_err(|_| ApiErr::from(StatusCode::BAD_REQUEST))?;
+
     // Verify store exists
     let _ = state
         .data_service
@@ -161,7 +164,7 @@ where
     let method = StorePaymentMethodWriter::create_payment_method(
         &*state.data_service,
         store_id,
-        req.chain_id,
+        &chain_id,
         req.token_address.as_deref(),
         &req.asset_symbol,
         req.decimals,

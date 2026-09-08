@@ -6,7 +6,8 @@
 use std::collections::HashSet;
 
 use types::{
-    InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentOptionWriter, PaymentReader, PaymentWriter,
+    ChainId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentOptionWriter, PaymentReader,
+    PaymentWriter,
 };
 
 use super::{
@@ -39,7 +40,7 @@ async fn integration_multi_currency_payment_aggregation() {
     // Create ETH payment option (rate: 1 USD = 0.0005 ETH)
     let eth_po = test_payment_option_with_rate(
         &invoice.id,
-        1, // Ethereum mainnet
+        &ChainId::evm(1), // Ethereum mainnet
         "ETH",
         None,                       // Native asset
         18,                         // ETH decimals
@@ -53,7 +54,7 @@ async fn integration_multi_currency_payment_aggregation() {
     // Create USDC payment option (rate: 1 USD = 1 USDC)
     let usdc_po = test_payment_option_with_rate(
         &invoice.id,
-        1, // Ethereum mainnet
+        &ChainId::evm(1), // Ethereum mainnet
         "USDC",
         Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
         6,                     // USDC decimals
@@ -70,7 +71,7 @@ async fn integration_multi_currency_payment_aggregation() {
     let eth_payment = test_payment_with_credit(
         &invoice.id,
         Some(eth_po.id.0),
-        1,
+        &ChainId::evm(1),
         "ETH",
         "30000000000000000",
         Some("60".to_string()),
@@ -95,7 +96,7 @@ async fn integration_multi_currency_payment_aggregation() {
     let usdc_payment = test_payment_with_credit(
         &invoice.id,
         Some(usdc_po.id.0),
-        1,
+        &ChainId::evm(1),
         "USDC",
         "40000000",
         Some("40".to_string()),
@@ -172,7 +173,7 @@ async fn integration_same_asset_payment_no_conversion() {
     // Create ETH payment option (no rate - same asset)
     let eth_po = test_payment_option_with_rate(
         &invoice.id,
-        1,
+        &ChainId::evm(1),
         "ETH",
         None,
         18,
@@ -188,7 +189,7 @@ async fn integration_same_asset_payment_no_conversion() {
     let payment = test_payment_with_credit(
         &invoice.id,
         Some(eth_po.id.0),
-        1,
+        &ChainId::evm(1),
         "ETH",
         "1500000000000000000",
         Some("1.5".to_string()),
@@ -230,7 +231,7 @@ async fn integration_payment_without_credit_not_counted() {
     let payment = test_payment_with_credit(
         &invoice.id,
         None,
-        1,
+        &ChainId::evm(1),
         "ETH",
         "50000000000000000",
         None, // No credited_amount - conversion failed
@@ -281,7 +282,7 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
     // Create payment option
     let eth_po = test_payment_option_with_rate(
         &invoice.id,
-        1,
+        &ChainId::evm(1),
         "ETH",
         None,
         18,
@@ -296,7 +297,7 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
     let payment1 = test_payment_with_credit(
         &invoice.id,
         Some(eth_po.id.0),
-        1,
+        &ChainId::evm(1),
         "ETH",
         "30000000000000000",
         Some("60".to_string()),
@@ -313,7 +314,7 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
     let mut payment2 = test_payment_with_credit(
         &invoice.id,
         Some(eth_po.id.0),
-        1,
+        &ChainId::evm(1),
         "ETH",
         "25000000000000000",
         Some("50".to_string()),
@@ -330,9 +331,14 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
     assert_amount_eq(&fetched.amount_received, "110", "before reorg");
 
     // Reorg: payment1 gets invalidated
-    PaymentWriter::mark_reorged(&service, &invoice.id, 1, payment1.block_number.unwrap())
-        .await
-        .unwrap();
+    PaymentWriter::mark_reorged(
+        &service,
+        &invoice.id,
+        &ChainId::evm(1),
+        payment1.block_number.unwrap(),
+    )
+    .await
+    .unwrap();
 
     // Verify amount_received is now only $50
     let fetched = InvoiceReader::get(&service, &invoice.id)
@@ -368,7 +374,7 @@ async fn integration_multi_chain_payment_aggregation() {
     // ETH payment option on Ethereum mainnet
     let eth_po = test_payment_option_with_rate(
         &invoice.id,
-        1,
+        &ChainId::evm(1),
         "ETH",
         None,
         18,
@@ -382,7 +388,7 @@ async fn integration_multi_chain_payment_aggregation() {
     // POL payment option on Polygon
     let pol_po = test_payment_option_with_rate(
         &invoice.id,
-        137,
+        &ChainId::evm(137),
         "POL",
         None,
         18,
@@ -397,7 +403,7 @@ async fn integration_multi_chain_payment_aggregation() {
     let eth_payment = test_payment_with_credit(
         &invoice.id,
         Some(eth_po.id.0),
-        1,
+        &ChainId::evm(1),
         "ETH",
         "25000000000000000",
         Some("50".to_string()),
@@ -409,7 +415,7 @@ async fn integration_multi_chain_payment_aggregation() {
     let pol_payment = test_payment_with_credit(
         &invoice.id,
         Some(pol_po.id.0),
-        137,
+        &ChainId::evm(137),
         "POL",
         "100000000000000000000",
         Some("50".to_string()),
@@ -432,9 +438,15 @@ async fn integration_multi_chain_payment_aggregation() {
     let payments = PaymentReader::get_for_invoice(&service, &invoice.id)
         .await
         .unwrap();
-    let chains: HashSet<_> = payments.iter().map(|p| p.chain_id).collect();
-    assert!(chains.contains(&1), "Should have payment on Ethereum");
-    assert!(chains.contains(&137), "Should have payment on Polygon");
+    let chains: HashSet<_> = payments.iter().map(|p| p.chain_id.clone()).collect();
+    assert!(
+        chains.contains(&ChainId::evm(1)),
+        "Should have payment on Ethereum"
+    );
+    assert!(
+        chains.contains(&ChainId::evm(137)),
+        "Should have payment on Polygon"
+    );
 }
 
 /// E2E test: Fractional credited amounts aggregate correctly
@@ -458,7 +470,7 @@ async fn integration_fractional_amounts_aggregate() {
     // Create payment option
     let eth_po = test_payment_option_with_rate(
         &invoice.id,
-        1,
+        &ChainId::evm(1),
         "ETH",
         None,
         18,
@@ -474,7 +486,7 @@ async fn integration_fractional_amounts_aggregate() {
         let payment = test_payment_with_credit(
             &invoice.id,
             Some(eth_po.id.0),
-            1,
+            &ChainId::evm(1),
             "ETH",
             &format!("{}0000000000000", 16665 + i), // Arbitrary wei amounts
             Some(amount.to_string()),

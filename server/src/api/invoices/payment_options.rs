@@ -77,9 +77,9 @@ async fn build_one_payment_option<A: SessionService>(
         invoice_id: invoice.id.clone(),
         payment_method_id: PaymentMethodId::new(
             &payment_method.asset_symbol,
-            payment_method.chain_id,
+            &payment_method.chain_id,
         ),
-        chain_id: payment_method.chain_id,
+        chain_id: payment_method.chain_id.clone(),
         asset_symbol: payment_method.asset_symbol.clone(),
         token_address: payment_method.token_address.clone(),
         decimals: payment_method.decimals,
@@ -112,7 +112,7 @@ async fn build_one_payment_option<A: SessionService>(
         &*state.data_service,
         &payment_address,
         &payment_option.id,
-        payment_method.chain_id,
+        &payment_method.chain_id,
         token_address_str,
     )
     .await
@@ -140,7 +140,7 @@ async fn build_one_payment_option<A: SessionService>(
         state,
         &invoice.id.0,
         &payment_address,
-        payment_method.chain_id,
+        &payment_method.chain_id,
         token_address_str,
         address,
         expected_amount,

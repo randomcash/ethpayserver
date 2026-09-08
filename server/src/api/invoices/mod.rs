@@ -344,11 +344,11 @@ pub(crate) fn apply_token_policy_filter(
     policy: &data_service::StoreTokenPolicyWithEntries,
 ) {
     payment_methods.retain(|pm| {
-        let chain_id = pm.chain_id as i64;
+        let chain_id = &pm.chain_id;
         let matches_entry = policy
             .entries
             .iter()
-            .any(|e| e.chain_id == chain_id && e.token_address == pm.token_address);
+            .any(|e| &e.chain_id == chain_id && e.token_address == pm.token_address);
         match policy.mode {
             ::types::TokenPolicyMode::Allowlist => matches_entry,
             ::types::TokenPolicyMode::Blocklist => !matches_entry,
@@ -385,16 +385,34 @@ pub(crate) fn extract_customer_email(metadata: &Option<serde_json::Value>) -> Op
 
 /// Notify the EVM monitor to watch an address, then mark it as notified in the DB.
 /// Logs warnings on failure but never errors out — the retry service picks up misses.
+/// The EIP-155 number this monitor needs, or `None` with a log line.
+///
+/// The monitor talks to EVM RPCs; a non-EVM chain cannot be watched by it at
+/// all, and silently skipping would leave an invoice that never detects payment.
+fn eip155_for_watch(chain_id: &::types::ChainId) -> Option<u64> {
+    match chain_id.evm_chain_id() {
+        Some(eip155) => Some(eip155),
+        None => {
+            tracing::error!(%chain_id, "not an EVM chain; cannot watch this address");
+            None
+        }
+    }
+}
+
 pub(crate) async fn notify_evm_watch<A: SessionService>(
     state: &PgAppState<A>,
     invoice_id_str: &str,
     payment_address: &str,
-    chain_id: u64,
+    chain_id: &::types::ChainId,
     token_address: Option<&str>,
     address: evm::Address,
     expected_amount: Option<evm::U256>,
     token_contract: Option<evm::Address>,
 ) {
+    let Some(eip155) = eip155_for_watch(chain_id) else {
+        return;
+    };
+
     let Some(ref monitor) = state.evm_monitor else {
         return;
     };
@@ -405,7 +423,8 @@ pub(crate) async fn notify_evm_watch<A: SessionService>(
 
     match monitor
         .watch_address_by_chain_id(
-            chain_id,
+            // The monitor is EVM-only and its RPCs take EIP-155 numbers.
+            eip155,
             address,
             invoice_uuid,
             expected_amount,

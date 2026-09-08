@@ -8,6 +8,7 @@ use crate::{PayoutReader, PayoutWriter, RepositoryResult, sqlx_to_repo_error};
 use types::{PayoutData, PayoutStatus, StoreId};
 
 use super::PgDataService;
+use super::conversions::chain_id_from_row;
 
 fn db_to_payout_status(s: &str) -> PayoutStatus {
     s.parse().unwrap_or(PayoutStatus::Failed)
@@ -25,9 +26,7 @@ fn try_row_to_payout(row: &sqlx::postgres::PgRow) -> RepositoryResult<PayoutData
         destination_address: row
             .try_get("destination_address")
             .map_err(sqlx_to_repo_error)?,
-        chain_id: row
-            .try_get::<i64, _>("chain_id")
-            .map_err(sqlx_to_repo_error)? as u64,
+        chain_id: chain_id_from_row(row, "chain_id"),
         asset_type: row.try_get("asset_type").map_err(sqlx_to_repo_error)?,
         asset_symbol: row.try_get("asset_symbol").map_err(sqlx_to_repo_error)?,
         token_address: row.try_get("token_address").map_err(sqlx_to_repo_error)?,
@@ -113,7 +112,7 @@ impl PayoutWriter for PgDataService {
         .bind(payout.store_id.0)
         .bind(&invoice_ids_json)
         .bind(&payout.destination_address)
-        .bind(payout.chain_id as i64)
+        .bind(payout.chain_id.as_str())
         .bind(&payout.asset_type)
         .bind(&payout.asset_symbol)
         .bind(&payout.token_address)

@@ -617,7 +617,7 @@ pub struct RotationEntry {
     /// Payment method that was rotated.
     pub payment_method_id: Uuid,
     /// Chain ID of the rotated payment method.
-    pub chain_id: u64,
+    pub chain_id: String,
     /// Asset symbol of the rotated payment method.
     pub asset_symbol: String,
     /// Previous xpub (masked).
@@ -736,7 +736,7 @@ where
             payment_method_id: rotation.payment_method_id,
             chain_id: by_id
                 .get(&rotation.payment_method_id)
-                .map_or(0, |m| m.chain_id),
+                .map_or_else(String::new, |m| m.chain_id.to_string()),
             asset_symbol: by_id
                 .get(&rotation.payment_method_id)
                 .map_or_else(String::new, |m| m.asset_symbol.clone()),

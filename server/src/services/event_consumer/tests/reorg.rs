@@ -6,6 +6,7 @@ use evm::B256;
 use evm::monitor::bridge::MemoryBridge;
 use evm::monitor::events::ReorgDetected;
 use std::sync::Arc;
+use types::ChainId;
 use types::{
     InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentData,
     PaymentReader, PaymentWriter, StoreId,
@@ -44,7 +45,7 @@ async fn test_handle_reorg_detected() {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         asset_type: types::AssetType::Native,
         amount: "500000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
@@ -108,7 +109,7 @@ async fn test_handle_reorg_with_remaining_valid_payments() {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         asset_type: types::AssetType::Native,
         amount: "500000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
@@ -131,7 +132,7 @@ async fn test_handle_reorg_with_remaining_valid_payments() {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
         asset_type: types::AssetType::Native,
         amount: "500000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),

@@ -2,6 +2,7 @@
 
 use crate::api::{AdminUserInfo, EvmApiClient, UpdateServerSettingsRequest, UpdateUserRoleRequest};
 use leptos::prelude::*;
+use types::ChainId;
 
 use super::IconShield;
 
@@ -14,7 +15,7 @@ pub fn AdminTab() -> impl IntoView {
     let (default_confirmations, set_default_confirmations) = signal("3".to_string());
     let (invoice_expiry, set_invoice_expiry) = signal("60".to_string());
     let (rate_limit, set_rate_limit) = signal("100".to_string());
-    let (enabled_chain_ids, set_enabled_chain_ids) = signal(Vec::<i64>::new());
+    let (enabled_chain_ids, set_enabled_chain_ids) = signal(Vec::<ChainId>::new());
     let (settings_status, set_settings_status) = signal(String::new());
 
     // User list state
@@ -23,19 +24,21 @@ pub fn AdminTab() -> impl IntoView {
     let (user_status, set_user_status) = signal(String::new());
 
     // All available networks
-    let all_networks: Vec<(i64, &'static str)> = vec![
-        (1, "Ethereum"),
-        (10, "Optimism"),
-        (137, "Polygon"),
-        (42161, "Arbitrum"),
-        (8453, "Base"),
-        (56, "BSC"),
-        (43114, "Avalanche"),
-        (250, "Fantom"),
-        (100, "Gnosis"),
-        (324, "zkSync Era"),
-        (59144, "Linea"),
-        (534352, "Scroll"),
+    // EVM chains this server can be told to enable. The name is carried
+    // alongside because a CAIP-2 identifier does not imply one.
+    let all_networks: Vec<(ChainId, &'static str)> = vec![
+        (ChainId::evm(1), "Ethereum"),
+        (ChainId::evm(10), "Optimism"),
+        (ChainId::evm(137), "Polygon"),
+        (ChainId::evm(42161), "Arbitrum"),
+        (ChainId::evm(8453), "Base"),
+        (ChainId::evm(56), "BSC"),
+        (ChainId::evm(43114), "Avalanche"),
+        (ChainId::evm(250), "Fantom"),
+        (ChainId::evm(100), "Gnosis"),
+        (ChainId::evm(324), "zkSync Era"),
+        (ChainId::evm(59144), "Linea"),
+        (ChainId::evm(534352), "Scroll"),
     ];
 
     // Load settings and users on mount
@@ -80,10 +83,10 @@ pub fn AdminTab() -> impl IntoView {
     };
 
     // Toggle network handler
-    let toggle_network = move |chain_id: i64| {
+    let toggle_network = move |chain_id: ChainId| {
         set_enabled_chain_ids.update(|ids| {
             if ids.contains(&chain_id) {
-                ids.retain(|&id| id != chain_id);
+                ids.retain(|id| id != &chain_id);
             } else {
                 ids.push(chain_id);
             }
@@ -271,17 +274,20 @@ pub fn AdminTab() -> impl IntoView {
                     </p>
                     <div class="admin-networks-grid">
                         {all_networks.into_iter().map(|(chain_id, name)| {
+                            let for_class = chain_id.clone();
+                            let for_checked = chain_id.clone();
+                            let for_toggle = chain_id.clone();
                             view! {
-                                <div class=move || if enabled_chain_ids.get().contains(&chain_id) { "admin-network-item enabled" } else { "admin-network-item" }>
+                                <div class=move || if enabled_chain_ids.get().contains(&for_class) { "admin-network-item enabled" } else { "admin-network-item" }>
                                     <div class="admin-network-info">
                                         <span class="admin-network-name">{name}</span>
-                                        <span class="admin-network-chain-id">"Chain ID: "{chain_id}</span>
+                                        <span class="admin-network-chain-id">"Chain: "{chain_id.to_string()}</span>
                                     </div>
                                     <label class="toggle">
                                         <input
                                             type="checkbox"
-                                            prop:checked=move || enabled_chain_ids.get().contains(&chain_id)
-                                            on:change=move |_| toggle_network(chain_id)
+                                            prop:checked=move || enabled_chain_ids.get().contains(&for_checked)
+                                            on:change=move |_| toggle_network(for_toggle.clone())
                                         />
                                         <span class="toggle-slider"></span>
                                     </label>

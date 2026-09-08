@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
-use types::{InvoiceData, InvoiceId, InvoiceStatus, Network, PaymentData, StoreId};
+use types::{ChainId, InvoiceData, InvoiceId, InvoiceStatus, PaymentData, StoreId};
 
 use super::PgDataService;
 
@@ -140,7 +140,7 @@ pub(super) fn test_payment(invoice_id: &InvoiceId) -> PaymentData {
         id: Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id: None,
-        chain_id: 1,
+        chain_id: ChainId::evm(1),
         asset_type: types::AssetType::Native,
         amount: "1000000000000000000".to_string(),
         asset_symbol: "ETH".to_string(),
@@ -166,35 +166,7 @@ pub(super) fn unique_address() -> String {
 // Unit tests for conversions
 // =========================================================================
 
-use super::conversions::{status_to_db, try_db_to_network, try_db_to_status, try_network_to_db};
-
-#[test]
-fn test_network_conversion_success() {
-    assert_eq!(try_network_to_db(Network::Ethereum).unwrap(), "ethereum");
-    assert_eq!(try_network_to_db(Network::Polygon).unwrap(), "polygon");
-    assert_eq!(
-        try_network_to_db(Network::BinanceSmartChain).unwrap(),
-        "binance_smart_chain"
-    );
-
-    assert_eq!(try_db_to_network("ethereum").unwrap(), Network::Ethereum);
-    assert_eq!(try_db_to_network("polygon").unwrap(), Network::Polygon);
-    assert_eq!(
-        try_db_to_network("binance_smart_chain").unwrap(),
-        Network::BinanceSmartChain
-    );
-}
-
-#[test]
-fn test_network_conversion_errors() {
-    // Bitcoin networks should fail
-    assert!(try_network_to_db(Network::BitcoinMainnet).is_err());
-    assert!(try_network_to_db(Network::BitcoinLightning).is_err());
-
-    // Unknown database values should fail
-    assert!(try_db_to_network("bitcoin").is_err());
-    assert!(try_db_to_network("unknown_network").is_err());
-}
+use super::conversions::{status_to_db, try_db_to_status};
 
 #[test]
 fn test_status_conversion() {

@@ -172,6 +172,7 @@ pub(super) fn IconWebhook() -> impl IntoView {
 mod tests {
     use super::*;
     use crate::util::chain_name;
+    use types::ChainId;
 
     // =========================================================================
     // chain_name
@@ -179,29 +180,35 @@ mod tests {
 
     #[test]
     fn test_chain_name_mainnets() {
-        assert_eq!(chain_name(1), "Ethereum");
-        assert_eq!(chain_name(137), "Polygon");
-        assert_eq!(chain_name(42161), "Arbitrum");
-        assert_eq!(chain_name(10), "Optimism");
-        assert_eq!(chain_name(8453), "Base");
-        assert_eq!(chain_name(56), "BSC");
-        assert_eq!(chain_name(43114), "Avalanche");
-        assert_eq!(chain_name(324), "zkSync");
-        assert_eq!(chain_name(59144), "Linea");
-        assert_eq!(chain_name(534352), "Scroll");
-        assert_eq!(chain_name(100), "Gnosis");
-        assert_eq!(chain_name(250), "Fantom");
+        assert_eq!(chain_name(&ChainId::evm(1)), "Ethereum");
+        assert_eq!(chain_name(&ChainId::evm(137)), "Polygon");
+        assert_eq!(chain_name(&ChainId::evm(42161)), "Arbitrum");
+        assert_eq!(chain_name(&ChainId::evm(10)), "Optimism");
+        assert_eq!(chain_name(&ChainId::evm(8453)), "Base");
+        assert_eq!(chain_name(&ChainId::evm(56)), "BSC");
+        assert_eq!(chain_name(&ChainId::evm(43114)), "Avalanche");
+        assert_eq!(chain_name(&ChainId::evm(324)), "zkSync");
+        assert_eq!(chain_name(&ChainId::evm(59144)), "Linea");
+        assert_eq!(chain_name(&ChainId::evm(534352)), "Scroll");
+        assert_eq!(chain_name(&ChainId::evm(100)), "Gnosis");
+        assert_eq!(chain_name(&ChainId::evm(250)), "Fantom");
     }
 
     #[test]
     fn test_chain_name_testnet() {
-        assert_eq!(chain_name(11155111), "Sepolia");
+        assert_eq!(chain_name(&ChainId::evm(11155111)), "Sepolia");
     }
 
     #[test]
     fn test_chain_name_unknown() {
-        assert_eq!(chain_name(0), "Unknown");
-        assert_eq!(chain_name(999999), "Unknown");
+        // Unnamed chains fall back to the identifier, not to "Unknown".
+        assert_eq!(chain_name(&ChainId::evm(0)), "eip155:0");
+        assert_eq!(chain_name(&ChainId::evm(999_999)), "eip155:999999");
+
+        // Including one from a family this table has never heard of, which the
+        // old `u64`-keyed version could not even express.
+        let tron = ChainId::parse("tron:728126428").unwrap();
+        assert_eq!(chain_name(&tron), "tron:728126428");
     }
 
     // =========================================================================

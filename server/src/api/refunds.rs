@@ -37,7 +37,7 @@ pub struct RefundResponse {
     pub invoice_id: String,
     pub payment_id: Uuid,
     pub to_address: String,
-    pub chain_id: u64,
+    pub chain_id: String,
     pub asset_type: String,
     pub asset_symbol: String,
     pub amount: String,
@@ -57,7 +57,7 @@ impl From<RefundData> for RefundResponse {
             invoice_id: r.invoice_id.0,
             payment_id: r.payment_id,
             to_address: r.to_address,
-            chain_id: r.chain_id,
+            chain_id: r.chain_id.to_string(),
             asset_type: r.asset_type,
             asset_symbol: r.asset_symbol,
             amount: r.amount,
@@ -145,7 +145,7 @@ where
         payment_id: payment.id,
         store_id: invoice.store_id,
         to_address,
-        chain_id: payment.chain_id,
+        chain_id: payment.chain_id.clone(),
         asset_type: payment.asset_type.to_string(),
         asset_symbol: payment.asset_symbol.clone(),
         token_address: payment.token_address.clone(),
@@ -166,7 +166,7 @@ where
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    metrics::record_refund_initiated(payment.chain_id, &payment.asset_symbol);
+    metrics::record_refund_initiated(&payment.chain_id, &payment.asset_symbol);
     tracing::info!(
         refund_id = %refund.id,
         invoice_id = %id.0,

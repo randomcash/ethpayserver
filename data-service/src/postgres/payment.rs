@@ -294,7 +294,7 @@ impl PaymentWriter for PgDataService {
         .bind(payment.id)
         .bind(payment.invoice_id.as_str())
         .bind(payment.payment_option_id)
-        .bind(payment.chain_id as i64)
+        .bind(payment.chain_id.as_str())
         .bind(asset_type_to_db(payment.asset_type))
         .bind(&payment.amount)
         .bind(&payment.asset_symbol)
@@ -342,7 +342,7 @@ impl PaymentWriter for PgDataService {
     async fn mark_reorged(
         &self,
         invoice_id: &InvoiceId,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         fork_block: u64,
     ) -> RepositoryResult<u64> {
         let result = sqlx::query(
@@ -356,7 +356,7 @@ impl PaymentWriter for PgDataService {
             "#,
         )
         .bind(invoice_id.as_str())
-        .bind(chain_id as i64)
+        .bind(chain_id.as_str())
         .bind(fork_block as i64)
         .execute(&self.pool)
         .await
@@ -376,7 +376,7 @@ impl PgDataService {
     /// Uses the UNIQUE constraint on (tx_hash, chain_id) for efficient lookup.
     pub async fn get_payment_by_tx_hash(
         &self,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         tx_hash: &str,
     ) -> RepositoryResult<Option<PaymentData>> {
         let query = format!(
@@ -384,7 +384,7 @@ impl PgDataService {
             PAYMENT_SELECT_COLS
         );
         let row = sqlx::query(&query)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(tx_hash)
             .fetch_optional(&self.pool)
             .await
@@ -399,7 +399,7 @@ impl PgDataService {
 
 /// Convert a database row to PaymentData.
 fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentData> {
-    let chain_id: i64 = row.get("chain_id");
+    let chain_id = chain_id_from_row(row, "chain_id");
     let block_number: Option<i64> = row.get("block_number");
     let asset_type_str: String = row.get("asset_type");
 
@@ -407,7 +407,7 @@ fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentDa
         id: row.get("id"),
         invoice_id: InvoiceId::from_string(row.get("invoice_id")),
         payment_option_id: row.get("payment_option_id"),
-        chain_id: chain_id as u64,
+        chain_id,
         asset_type: db_to_asset_type(&asset_type_str),
         amount: row.get("amount"),
         asset_symbol: row.get("asset_symbol"),
@@ -463,6 +463,7 @@ impl PaymentEventWriter for PgDataService {
 // Payment Analytics (RCS-225)
 // =============================================================================
 
+use super::conversions::chain_id_from_row;
 use crate::analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
 
 #[async_trait]

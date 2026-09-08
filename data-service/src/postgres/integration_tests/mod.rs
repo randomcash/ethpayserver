@@ -34,13 +34,13 @@ use super::tests::{
 /// Create a basic payment option for testing.
 pub(crate) fn test_payment_option(
     invoice_id: &types::InvoiceId,
-    chain_id: u64,
+    chain_id: &types::ChainId,
 ) -> PaymentOptionData {
     PaymentOptionData {
         id: PaymentOptionId::new(),
         invoice_id: invoice_id.clone(),
         payment_method_id: PaymentMethodId::new("ETH", chain_id),
-        chain_id,
+        chain_id: chain_id.clone(),
         asset_symbol: "ETH".to_string(),
         token_address: None,
         decimals: 18,
@@ -58,7 +58,7 @@ pub(crate) fn test_payment_option(
 /// Create a payment option with specific asset, rate, and decimals.
 pub(crate) fn test_payment_option_with_rate(
     invoice_id: &types::InvoiceId,
-    chain_id: u64,
+    chain_id: &types::ChainId,
     asset_symbol: &str,
     token_address: Option<String>,
     decimals: u8,
@@ -69,7 +69,7 @@ pub(crate) fn test_payment_option_with_rate(
         id: PaymentOptionId::new(),
         invoice_id: invoice_id.clone(),
         payment_method_id: PaymentMethodId::new(asset_symbol, chain_id),
-        chain_id,
+        chain_id: chain_id.clone(),
         asset_symbol: asset_symbol.to_string(),
         token_address,
         decimals,
@@ -88,7 +88,7 @@ pub(crate) fn test_payment_option_with_rate(
 pub(crate) fn test_payment_with_credit(
     invoice_id: &types::InvoiceId,
     payment_option_id: Option<uuid::Uuid>,
-    chain_id: u64,
+    chain_id: &types::ChainId,
     asset_symbol: &str,
     amount: &str,
     credited_amount: Option<String>,
@@ -99,7 +99,7 @@ pub(crate) fn test_payment_with_credit(
         id: uuid::Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id,
-        chain_id,
+        chain_id: chain_id.clone(),
         asset_type: types::AssetType::Native,
         amount: amount.to_string(),
         asset_symbol: asset_symbol.to_string(),
