@@ -32,16 +32,16 @@
 import { appendFileSync } from 'node:fs';
 
 import { test, expect } from '@playwright/test';
-import { createPublicClient, createWalletClient, formatEther, http, parseEther } from 'viem';
+import { createPublicClient, createWalletClient, formatEther, http } from 'viem';
 import { HDKey, mnemonicToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import { mnemonicToSeedSync } from '@scure/bip39';
 
 import { api, wsUrl } from '../fixtures/api';
 import {
-  MAX_INVOICE_AMOUNT_WEI,
   randomInvoiceAmountWei,
   remainingBudgetMs,
+  worstCaseRunCostWei,
 } from '../fixtures/synthetic-payment';
 import { WebhookSink, verifySignature } from '../fixtures/webhook-sink';
 
@@ -63,13 +63,6 @@ const SPENDER_ACCOUNT_INDEX = 9;
  * against the job cap as well as ETH.
  */
 const PAYMENT_COUNT = 3;
-/**
- * Headroom over each invoice amount for gas.
- *
- * Per payment, not per run — a Sepolia transfer is well under this, and the
- * balance guard multiplies it up.
- */
-const GAS_MARGIN_ETH = '0.0005';
 const PAID_TIMEOUT_MS = 5 * 60_000;
 const WEBHOOK_TIMEOUT_MS = 2 * 60_000;
 // Sepolia inclusion is the one step whose latency we do not control. It is
@@ -96,25 +89,29 @@ const PAYMENTS_BUDGET_MS = 18 * 60_000;
 /** Everything before the first broadcast: the sink's tunnel, store, invoices. */
 const SETUP_BUDGET_MS = 5 * 60_000;
 /**
- * The most one run can cost the wallet.
+ * The least clock a payment may be started with.
  *
- * The maximum draw, not the average: the amount is random per invoice now, and
- * a guard sized on the average passes a wallet that a run of high draws then
- * drains mid-flight — three invoices in, two paid, one address left holding a
- * partial payment. `MAX_INVOICE_AMOUNT_WEI` is the ceiling the generator is
- * clamped to, so this figure is an upper bound and not a hope.
+ * Clamping a wait to the remaining budget degrades gracefully right up to the
+ * point where it does not: with seconds left, `remainingBudgetMs` returns its
+ * 1s floor, the transaction is broadcast anyway, and the 1s wait then reports
+ * that the invoice never went paid. That reads as a chain monitor that is not
+ * connected — which the scheduled workflow opens an issue about — for a run
+ * that simply ran out of clock, having spent real ETH on a payment it could
+ * never have verified. Below this, fail before broadcasting and say so.
+ *
+ * Two minutes is inclusion in a Sepolia block or two plus a detection round
+ * trip: not comfortable, but honestly attemptable.
  */
-const WORST_CASE_RUN_COST_WEI =
-  BigInt(PAYMENT_COUNT) * (MAX_INVOICE_AMOUNT_WEI + parseEther(GAS_MARGIN_ETH));
+const MIN_PAYMENT_BUDGET_MS = 2 * 60_000;
 /**
  * Warn once the spender holds less than this many runs' worth (RCS-202).
  *
  * The hard guard below only trips when the wallet is already short for the
  * *current* run — a cliff, not a warning, whose first notice is a red nightly.
- * Counted in runs rather than in ETH deliberately: at a worst case of ~0.00195
- * per run (three payments of up to 0.00015 plus a 0.0005 gas margin each) this
- * is ~0.039 SepoliaETH, and it stays three weeks of nightly notice whatever the
- * amounts and the payment count become.
+ * Counted in runs rather than in ETH deliberately: at a quiet-gas worst case of
+ * ~0.00195 per run (three payments of up to 0.00015 plus a 0.0005 gas floor
+ * each) this is ~0.039 SepoliaETH, and it stays three weeks of nightly notice
+ * whatever the amounts, the gas price and the payment count become.
  */
 const LOW_BALANCE_RUNS = 20;
 
@@ -141,7 +138,22 @@ interface Invoice {
 
 interface PaymentMethod {
   id: string;
+  /**
+   * Next index the *resolved wallet* will issue, not the method's own.
+   *
+   * RCS-234 moved the counter off `store_payment_methods` onto `wallets`, and
+   * this field became a read through the resolution chain (pin, store
+   * override, account primary). It is null when that chain runs out, which is
+   * a method that cannot be paid at all.
+   */
+  derivation_index: number | null;
+}
+
+/** `GET /stores/{id}/wallet` — the wallet the store actually derives from. */
+interface StoreWallet {
+  id: string;
   derivation_index: number;
+  is_override: boolean;
 }
 
 interface Checkout {
@@ -223,6 +235,15 @@ async function waitForPaid(
  */
 let createdStoreId: string | null = null;
 let apiToken: string | null = null;
+/**
+ * The sink, exposed to `afterEach`.
+ *
+ * The `finally` below stops it on any throw, but a Playwright *timeout* is not
+ * a throw the test body sees: the worker is torn down mid-await and the
+ * `finally` never runs, leaving a listening server and a cloudflared tunnel
+ * behind. Hooks still run, so the hook is the only place a timeout is covered.
+ */
+let activeSink: WebhookSink | null = null;
 
 test.describe('Synthetic payment (live testnet)', () => {
   // A retry would broadcast a second set of transactions and leave the first
@@ -260,6 +281,19 @@ test.describe('Synthetic payment (live testnet)', () => {
    * stay readable for the post-mortem; the store only leaves the store list.
    */
   test.afterEach(async ({}, testInfo) => {
+    // First, because it holds a port and a tunnel process. Only reached when a
+    // Playwright timeout skipped the test body's own `finally`.
+    if (activeSink) {
+      const sink = activeSink;
+      activeSink = null;
+      try {
+        await sink.stop();
+        console.log('stopped the webhook sink from afterEach — the test body was cut short');
+      } catch (err) {
+        console.log(`::warning title=Webhook sink not stopped::${err}`);
+      }
+    }
+
     const storeId = createdStoreId;
     createdStoreId = null;
     if (!storeId || !apiToken) return;
@@ -286,6 +320,13 @@ test.describe('Synthetic payment (live testnet)', () => {
 
   test('three invoices → distinct addresses → on-chain tx → paid → webhook', async () => {
     test.setTimeout(SETUP_BUDGET_MS + PAYMENTS_BUDGET_MS);
+    // Anchored where `test.setTimeout` is anchored. The payments deadline used
+    // to be taken after setup, so the two clocks measured from different
+    // origins and their sum could exceed the test timeout: setup overran, the
+    // clamp went on promising a full payments budget, and Playwright killed the
+    // test mid-wait — no invoice named, and the `finally` that stops the sink
+    // never reached. Everything below measures from here.
+    const runStartedAt = Date.now();
 
     const mnemonic = requireEnv('E2E_TEST_MNEMONIC', 'BIP39 phrase for the merchant xpub + spender');
     const token = requireEnv('E2E_API_TOKEN', 'API key (ak_...) that may create stores and invoices');
@@ -309,7 +350,11 @@ test.describe('Synthetic payment (live testnet)', () => {
     // payment and not the third fails halfway through, having already sent
     // money to an address whose invoice will now expire unpaid.
     const balance = await publicClient.getBalance({ address: spender.address });
-    const needed = WORST_CASE_RUN_COST_WEI;
+    const gasPrice = await publicClient.getGasPrice();
+    const needed = worstCaseRunCostWei(PAYMENT_COUNT, gasPrice);
+    console.log(
+      `gas price ${gasPrice} wei — reserving ${formatEther(needed)} SepoliaETH for the run`,
+    );
     expect(
       balance >= needed,
       `Test wallet ${spender.address} holds ${formatEther(balance)} SepoliaETH, ` +
@@ -336,6 +381,7 @@ test.describe('Synthetic payment (live testnet)', () => {
     }
 
     const sink = await WebhookSink.start();
+    activeSink = sink;
     try {
       console.log(`webhook sink listening on :${sink.port}, public at ${sink.publicUrl}`);
 
@@ -371,6 +417,23 @@ test.describe('Synthetic payment (live testnet)', () => {
         },
       });
 
+      // The starting point for the counter assertion, read from the wallet the
+      // store resolves to. A fresh store on a fresh xpub starts at 0, but read
+      // rather than assumed: the xpub comes from a mnemonic the account may
+      // have used on a previous night, and RCS-234 makes the wallet remember
+      // that across stores. Asserting a delta from whatever it is now is the
+      // only form that holds either way.
+      const storeWallet = await api<StoreWallet>(`/stores/${store.id}/wallet`, { token });
+      expect(
+        (method as PaymentMethod).derivation_index,
+        `the new payment method resolves to no wallet at all — it cannot derive ` +
+          `an address, and every invoice below would fail without saying why`,
+      ).not.toBeNull();
+      console.log(
+        `store ${store.id} derives from wallet ${storeWallet.id} at index ` +
+          `${storeWallet.derivation_index} (override: ${storeWallet.is_override})`,
+      );
+
       const webhook = await api<{ webhook_secret: string | null }>(
         `/stores/${store.id}/webhook`,
         { method: 'PUT', token, body: { webhook_url: sink.publicUrl, enabled: true } },
@@ -381,11 +444,20 @@ test.describe('Synthetic payment (live testnet)', () => {
       // ETH-denominated invoices: currency matches the asset, so no exchange
       // rate is involved and the test does not depend on the rate provider.
       //
-      // A random amount per invoice, not the fixed 0.0001 this used to pay: a
-      // constant is matched by a constant, and any part of the pipeline that
-      // happened to hard-code it — or that matched a payment to an invoice by
-      // amount rather than by address — would pass every night regardless. The
-      // draw is exact in wei and renders as a plain decimal string
+      // A random amount per invoice, not the fixed 0.0001 this used to pay.
+      // What that buys is narrow and worth stating precisely: anything in the
+      // pipeline that hard-codes the old constant now fails, and the decimal
+      // round trip (wei -> `formatEther` -> API -> quoted wei) is exercised
+      // across the whole band instead of at one point that happens to work.
+      //
+      // What it does NOT buy is catching attribution by amount. Three
+      // *distinct* amounts are exactly what a server matching payments to
+      // invoices by amount gets right; three identical ones are what would
+      // expose it. Address-based attribution is covered by the distinct-address
+      // assertion below and by paying one invoice at a time and checking the
+      // others stay unpaid.
+      //
+      // The draw is exact in wei and renders as a plain decimal string
       // (`fixtures/synthetic-payment.ts`).
       const targets: Target[] = [];
       for (let i = 0; i < PAYMENT_COUNT; i++) {
@@ -443,19 +515,37 @@ test.describe('Synthetic payment (live testnet)', () => {
       // per payment option, from one counter per xpub (RCS-234). Asserted as a
       // delta, because whether the stored index is "last used" or "next free"
       // is the server's business — three invoices consume three either way.
-      // `next_derivation_index` is an UPDATE … SET derivation_index + 1 on this
-      // row (`data-service/src/postgres/store_payment_method.rs`); if the
-      // counter ever moves off it, this is the assertion that says so rather
-      // than the addresses quietly repeating.
+      //
+      // Read from the wallet, which is where the counter lives since RCS-234
+      // (`data-service/src/postgres/wallet.rs`, `next_derivation_index`). The
+      // payment method reports the same number through the resolution chain,
+      // but reading it there would keep passing if a second counter ever
+      // reappeared per method — the exact bug this whole run exists to catch.
+      // One store, one xpub, so the wallet's delta is the run's whole draw.
+      const wallet = await api<StoreWallet>(`/stores/${store.id}/wallet`, { token });
+      expect(
+        wallet.id,
+        `the store resolved to wallet ${wallet.id} before the invoices and ` +
+          `${storeWallet.id} after — the counter below would be measured across two keys`,
+      ).toBe(storeWallet.id);
+      expect(
+        wallet.derivation_index - storeWallet.derivation_index,
+        `derivation index on wallet ${wallet.id} moved ` +
+          `${storeWallet.derivation_index} → ${wallet.derivation_index} for ` +
+          `${PAYMENT_COUNT} invoices (RCS-234)`,
+      ).toBe(PAYMENT_COUNT);
+
+      // The method must agree with the wallet it resolves to. A method
+      // reporting its own number again is a second counter on one key.
       const methods = await api<PaymentMethod[]>(`/stores/${store.id}/payment-methods`, { token });
       const current = methods.find((m) => m.id === method.id);
       expect(current, `payment method ${method.id} vanished from store ${store.id}`).toBeDefined();
       expect(
-        (current as PaymentMethod).derivation_index - method.derivation_index,
-        `derivation index moved ${method.derivation_index} → ` +
-          `${(current as PaymentMethod).derivation_index} for ${PAYMENT_COUNT} invoices ` +
-          `(RCS-234)`,
-      ).toBe(PAYMENT_COUNT);
+        (current as PaymentMethod).derivation_index,
+        `payment method ${method.id} reports index ` +
+          `${(current as PaymentMethod).derivation_index} while the wallet it ` +
+          `derives from is at ${wallet.derivation_index} (RCS-234)`,
+      ).toBe(wallet.derivation_index);
 
       /**
        * Pay them one at a time, never concurrently:
@@ -473,11 +563,33 @@ test.describe('Synthetic payment (live testnet)', () => {
        *
        * The cost is wall clock, which is what the shared budget is for.
        */
-      const deadline = Date.now() + PAYMENTS_BUDGET_MS;
+      // Setup is expected to fit its own budget; if it did not, say so here
+      // rather than letting the overrun surface as a payment that timed out.
+      const setupMs = Date.now() - runStartedAt;
+      expect(
+        setupMs <= SETUP_BUDGET_MS,
+        `setup (sink tunnel, store, ${PAYMENT_COUNT} invoices) took ` +
+          `${Math.round(setupMs / 1000)}s against a ${SETUP_BUDGET_MS / 1000}s budget. ` +
+          `The payments below would be running on borrowed clock.`,
+      ).toBe(true);
+
+      const deadline = runStartedAt + SETUP_BUDGET_MS + PAYMENTS_BUDGET_MS;
       const hashes: string[] = [];
 
       for (const [index, { invoice, option, amountWei }] of targets.entries()) {
         const label = `payment ${index + 1}/${PAYMENT_COUNT}`;
+
+        // Refuse to spend money we cannot then watch. See MIN_PAYMENT_BUDGET_MS.
+        const budgetLeftMs = deadline - Date.now();
+        expect(
+          budgetLeftMs >= MIN_PAYMENT_BUDGET_MS,
+          `${label} (invoice ${invoice.id}) would start with ` +
+            `${Math.round(budgetLeftMs / 1000)}s left of the run budget. ` +
+            `Broadcasting now would send real SepoliaETH to ` +
+            `${option.payment_address} and then report the invoice as never ` +
+            `detected — a monitor outage that did not happen. The earlier ` +
+            `payments are what ran long; look there.`,
+        ).toBe(true);
 
         // Subscribe before broadcasting: the socket only forwards live events,
         // so a fast confirmation must not land while we are still connecting.
@@ -568,6 +680,7 @@ test.describe('Synthetic payment (live testnet)', () => {
       }
     } finally {
       await sink.stop();
+      activeSink = null;
     }
   });
 });

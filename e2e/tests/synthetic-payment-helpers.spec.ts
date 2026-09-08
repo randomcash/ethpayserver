@@ -16,6 +16,7 @@ import {
   MIN_INVOICE_AMOUNT_WEI,
   randomInvoiceAmountWei,
   remainingBudgetMs,
+  worstCaseRunCostWei,
 } from '../fixtures/synthetic-payment';
 
 test.describe('randomInvoiceAmountWei', () => {
@@ -71,5 +72,39 @@ test.describe('remainingBudgetMs', () => {
   test('never waits for zero, or for negative time, on an expired budget', () => {
     expect(remainingBudgetMs(now, 120_000, now)).toBe(1_000);
     expect(remainingBudgetMs(now - 600_000, 120_000, now)).toBe(1_000);
+  });
+});
+
+test.describe('worstCaseRunCostWei', () => {
+  const PAYMENTS = 3;
+  const GAS_FLOOR_PER_PAYMENT = parseEther('0.0005');
+
+  // Sepolia at rest. The floor dominates, and the figure is the one the
+  // LOW_BALANCE_RUNS comment quotes.
+  test('uses the constant floor while gas is cheap', () => {
+    const cost = worstCaseRunCostWei(PAYMENTS, 1_000_000_000n); // 1 gwei
+    expect(cost).toBe(BigInt(PAYMENTS) * (MAX_INVOICE_AMOUNT_WEI + GAS_FLOOR_PER_PAYMENT));
+    expect(formatEther(cost)).toBe('0.00195');
+  });
+
+  // The case the constant alone got wrong: a sustained spike where three
+  // transfers cost more than the margin reserved for them, and the wallet
+  // passes the guard and then drains partway through the run.
+  test('follows the live gas price once it outgrows the floor', () => {
+    const spike = 200_000_000_000n; // 200 gwei
+    const cost = worstCaseRunCostWei(PAYMENTS, spike);
+    const perPaymentGas = spike * 21_000n * 3n;
+    expect(perPaymentGas > GAS_FLOOR_PER_PAYMENT, 'the spike must clear the floor').toBe(true);
+    expect(cost).toBe(BigInt(PAYMENTS) * (MAX_INVOICE_AMOUNT_WEI + perPaymentGas));
+  });
+
+  test('never reserves less than the amounts it is about to send', () => {
+    for (const gwei of [0n, 1n, 25n, 500n]) {
+      const cost = worstCaseRunCostWei(PAYMENTS, gwei * 1_000_000_000n);
+      expect(
+        cost >= BigInt(PAYMENTS) * MAX_INVOICE_AMOUNT_WEI,
+        `at ${gwei} gwei the reserve does not even cover the transfers`,
+      ).toBe(true);
+    }
   });
 });
