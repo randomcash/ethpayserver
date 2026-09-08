@@ -2,10 +2,17 @@
  * Synthetic payment against the live testnet deployment (RCS-112).
  *
  * The one test in the suite that exercises the money path for real: it creates
- * an invoice over the API, broadcasts an actual Sepolia transaction to the
- * address the server derived, waits for `paid` on the public checkout
+ * invoices over the API, broadcasts actual Sepolia transactions to the
+ * addresses the server derived, waits for `paid` on the public checkout
  * WebSocket, and asserts the store webhook fired with a valid signature.
  * Everything else in the repo stops short of an on-chain payment.
+ *
+ * Three invoices, not one, and all on the same store and payment method: the
+ * addresses the server hands out come from one xpub and one counter, and when
+ * that counter was wrong two invoices were quoted the same address (RCS-235,
+ * RCS-234). One invoice per run can never see that. The assertions below are
+ * therefore as much about *which* invoice each payment paid as about payment
+ * working at all.
  *
  * Run:
  *   E2E_REMOTE=true E2E_SYNTHETIC_PAYMENT=true npx playwright test tests/synthetic-payment.spec.ts
@@ -13,7 +20,9 @@
  * Off by default — it spends real (testnet) ETH and needs secrets, so the
  * in-pipeline `e2e` job must not pick it up. When it *is* switched on, missing
  * configuration is a hard failure rather than a skip: a silently-skipped money
- * path is exactly the gap this ticket exists to close.
+ * path is exactly the gap this ticket exists to close. The pure arithmetic it
+ * leans on lives in `fixtures/synthetic-payment.ts` and is unit-tested in
+ * `synthetic-payment-helpers.spec.ts`, which does run everywhere.
  *
  * Funds are recoverable. The store's xpub is `m/44'/60'/0'` of
  * `E2E_TEST_MNEMONIC`, so every address the server derives (`0/{index}`) is
@@ -29,6 +38,11 @@ import { sepolia } from 'viem/chains';
 import { mnemonicToSeedSync } from '@scure/bip39';
 
 import { api, wsUrl } from '../fixtures/api';
+import {
+  MAX_INVOICE_AMOUNT_WEI,
+  randomInvoiceAmountWei,
+  remainingBudgetMs,
+} from '../fixtures/synthetic-payment';
 import { WebhookSink, verifySignature } from '../fixtures/webhook-sink';
 
 const ENABLED = process.env.E2E_SYNTHETIC_PAYMENT === 'true';
@@ -38,9 +52,23 @@ const CHAIN_ID = 11155111;
 const MERCHANT_PATH = "m/44'/60'/0'";
 /** Kept clear of account 0 so the spender never collides with a receive address. */
 const SPENDER_ACCOUNT_INDEX = 9;
-/** Human units; Sepolia is 3 confirmations at ~12s blocks. */
-const INVOICE_AMOUNT_ETH = '0.0001';
-/** Headroom over the invoice amount for gas; a Sepolia transfer is well under this. */
+/**
+ * Invoices per run, on one store and one payment method (RCS-235, RCS-234).
+ *
+ * Two would already show a collision; three shows it as a *pattern* — a
+ * counter that repeats rather than a single unlucky derivation — and gives the
+ * attribution checks a payment on either side of each invoice. It is also the
+ * ceiling: every extra invoice is another real Sepolia transfer plus gas, every
+ * night, and the payments run one at a time, so each one costs wall clock
+ * against the job cap as well as ETH.
+ */
+const PAYMENT_COUNT = 3;
+/**
+ * Headroom over each invoice amount for gas.
+ *
+ * Per payment, not per run — a Sepolia transfer is well under this, and the
+ * balance guard multiplies it up.
+ */
 const GAS_MARGIN_ETH = '0.0005';
 const PAID_TIMEOUT_MS = 5 * 60_000;
 const WEBHOOK_TIMEOUT_MS = 2 * 60_000;
@@ -48,11 +76,45 @@ const WEBHOOK_TIMEOUT_MS = 2 * 60_000;
 // budgeted separately so the paid-detection window is not eaten by it.
 const RECEIPT_TIMEOUT_MS = 3 * 60_000;
 /**
+ * Wall clock the three payments share.
+ *
+ * The timeouts above are per payment and stay that way: any single payment can
+ * still spend all ten minutes. What three payments cannot do is spend ten
+ * minutes *each* — that is 30 minutes, the whole `timeout-minutes` of the
+ * synthetic-payment job in `.github/workflows/e2e-scheduled.yml`, and a job
+ * killed at its cap uploads no report, names no step and leaves a store behind
+ * because `afterEach` never runs. Every wait below is therefore clamped to what
+ * is left of this budget, so a run that is going to overrun fails inside
+ * Playwright with the invoice it was waiting on.
+ *
+ * 18 minutes against an expected ~5 (three payments at roughly a block for
+ * inclusion plus three confirmations each) leaves the slow-Sepolia case plenty
+ * of room, and 18 + 5 setup is 23 of the job's 30 — enough margin for `npm ci`,
+ * the cloudflared install and the report upload around it.
+ */
+const PAYMENTS_BUDGET_MS = 18 * 60_000;
+/** Everything before the first broadcast: the sink's tunnel, store, invoices. */
+const SETUP_BUDGET_MS = 5 * 60_000;
+/**
+ * The most one run can cost the wallet.
+ *
+ * The maximum draw, not the average: the amount is random per invoice now, and
+ * a guard sized on the average passes a wallet that a run of high draws then
+ * drains mid-flight — three invoices in, two paid, one address left holding a
+ * partial payment. `MAX_INVOICE_AMOUNT_WEI` is the ceiling the generator is
+ * clamped to, so this figure is an upper bound and not a hope.
+ */
+const WORST_CASE_RUN_COST_WEI =
+  BigInt(PAYMENT_COUNT) * (MAX_INVOICE_AMOUNT_WEI + parseEther(GAS_MARGIN_ETH));
+/**
  * Warn once the spender holds less than this many runs' worth (RCS-202).
  *
  * The hard guard below only trips when the wallet is already short for the
  * *current* run — a cliff, not a warning, whose first notice is a red nightly.
- * At ~0.00012 per run this gives weeks of notice instead.
+ * Counted in runs rather than in ETH deliberately: at a worst case of ~0.00195
+ * per run (three payments of up to 0.00015 plus a 0.0005 gas margin each) this
+ * is ~0.039 SepoliaETH, and it stays three weeks of nightly notice whatever the
+ * amounts and the payment count become.
  */
 const LOW_BALANCE_RUNS = 20;
 
@@ -72,11 +134,28 @@ interface PaymentOption {
   amount: string;
 }
 
+interface Invoice {
+  id: string;
+  payment_options: PaymentOption[];
+}
+
+interface PaymentMethod {
+  id: string;
+  derivation_index: number;
+}
+
 interface Checkout {
   status: string;
   amount_received: string;
   is_paid: boolean;
   payments: { tx_hash: string }[];
+}
+
+/** One invoice of the run, with the address and amount it is owed. */
+interface Target {
+  invoice: Invoice;
+  option: PaymentOption;
+  amountWei: bigint;
 }
 
 /**
@@ -146,8 +225,9 @@ let createdStoreId: string | null = null;
 let apiToken: string | null = null;
 
 test.describe('Synthetic payment (live testnet)', () => {
-  // A retry would broadcast a second transaction and leave the first invoice
-  // half-paid, so this suite never retries even when the rest of CI does.
+  // A retry would broadcast a second set of transactions and leave the first
+  // run's invoices half-paid, so this suite never retries even when the rest of
+  // CI does.
   test.describe.configure({ retries: 0 });
   test.skip(
     !ENABLED,
@@ -160,7 +240,9 @@ test.describe('Synthetic payment (live testnet)', () => {
    * Without this the daily schedule left one store behind per day, forever.
    * The case that has to work is the *failing* one — waiting on an on-chain
    * payment is what fails here — so this is a hook rather than anything in the
-   * test body, which a throw skips straight past.
+   * test body, which a throw skips straight past. Three payments only widen
+   * that window: the run now has three chances to die with a store on the
+   * server, and one store still holds all three invoices.
    *
    * `afterEach` rather than `afterAll` because it is the hook that is told
    * whether the test passed, and the suite holds exactly one test, so it still
@@ -174,7 +256,7 @@ test.describe('Synthetic payment (live testnet)', () => {
    * ticket.
    *
    * `DELETE /stores/{id}` archives rather than deletes (`archive_store` in
-   * `server/src/api/stores/crud.rs`), so a failed run's invoice and payments
+   * `server/src/api/stores/crud.rs`), so a failed run's invoices and payments
    * stay readable for the post-mortem; the store only leaves the store list.
    */
   test.afterEach(async ({}, testInfo) => {
@@ -202,8 +284,8 @@ test.describe('Synthetic payment (live testnet)', () => {
     }
   });
 
-  test('invoice → on-chain tx → paid → webhook', async () => {
-    test.setTimeout(RECEIPT_TIMEOUT_MS + PAID_TIMEOUT_MS + WEBHOOK_TIMEOUT_MS + 5 * 60_000);
+  test('three invoices → distinct addresses → on-chain tx → paid → webhook', async () => {
+    test.setTimeout(SETUP_BUDGET_MS + PAYMENTS_BUDGET_MS);
 
     const mnemonic = requireEnv('E2E_TEST_MNEMONIC', 'BIP39 phrase for the merchant xpub + spender');
     const token = requireEnv('E2E_API_TOKEN', 'API key (ak_...) that may create stores and invoices');
@@ -223,12 +305,16 @@ test.describe('Synthetic payment (live testnet)', () => {
     // Against the amount actually needed plus a gas margin — `> 0n` passes with
     // 1 wei, which is exactly the near-drained wallet this guard exists for, and
     // the run would then die inside viem with an insufficient-funds trace.
+    // Sized for the whole run at its worst case: a wallet that covers the first
+    // payment and not the third fails halfway through, having already sent
+    // money to an address whose invoice will now expire unpaid.
     const balance = await publicClient.getBalance({ address: spender.address });
-    const needed = parseEther(INVOICE_AMOUNT_ETH) + parseEther(GAS_MARGIN_ETH);
+    const needed = WORST_CASE_RUN_COST_WEI;
     expect(
       balance >= needed,
       `Test wallet ${spender.address} holds ${formatEther(balance)} SepoliaETH, ` +
-        `needs at least ${formatEther(needed)}. Refill it from a faucet.`,
+        `needs at least ${formatEther(needed)} for ${PAYMENT_COUNT} payments. ` +
+        `Refill it from a faucet.`,
     ).toBe(true);
     console.log(`spender ${spender.address} — ${formatEther(balance)} SepoliaETH`);
 
@@ -254,10 +340,12 @@ test.describe('Synthetic payment (live testnet)', () => {
       console.log(`webhook sink listening on :${sink.port}, public at ${sink.publicUrl}`);
 
       // Fresh store per run: the derivation index advances per payment method,
-      // so reusing one would couple today's run to yesterday's state. The
-      // afterEach hook above removes it again — keep the name on the
-      // `e2e-synthetic-` prefix that `scripts/sweep-e2e-stores.mjs` matches, so
-      // a run that dies before cleanup is still findable (RCS-233).
+      // so reusing one would couple today's run to yesterday's state — and this
+      // run asserts on how far the index moved, which only means anything from
+      // a known starting point. The afterEach hook above removes it again —
+      // keep the name on the `e2e-synthetic-` prefix that
+      // `scripts/sweep-e2e-stores.mjs` matches, so a run that dies before
+      // cleanup is still findable (RCS-233).
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const store = await api<{ id: string }>('/stores', {
         method: 'POST',
@@ -268,7 +356,10 @@ test.describe('Synthetic payment (live testnet)', () => {
       // fails often, and each of those failures used to leak the store.
       createdStoreId = store.id;
 
-      await api(`/stores/${store.id}/payment-methods`, {
+      // One payment method for all three invoices. That is the point: sharing
+      // an xpub is what made two invoices collide on one address (RCS-235), so
+      // a run that gave each invoice its own method would assert nothing.
+      const method = await api<PaymentMethod>(`/stores/${store.id}/payment-methods`, {
         method: 'POST',
         token,
         body: {
@@ -287,63 +378,194 @@ test.describe('Synthetic payment (live testnet)', () => {
       const secret = webhook.webhook_secret;
       expect(secret, 'webhook secret is only returned on upsert — it must be present here').toBeTruthy();
 
-      // ETH-denominated invoice: currency matches the asset, so no exchange
+      // ETH-denominated invoices: currency matches the asset, so no exchange
       // rate is involved and the test does not depend on the rate provider.
-      const invoice = await api<{ id: string; payment_options: PaymentOption[] }>('/invoices', {
-        method: 'POST',
-        token,
-        body: {
-          store_id: store.id,
-          currency: 'ETH',
-          amount: INVOICE_AMOUNT_ETH,
-          expiration_seconds: 1_800,
-          metadata: { source: 'rcs-112-synthetic-payment' },
-        },
-      });
+      //
+      // A random amount per invoice, not the fixed 0.0001 this used to pay: a
+      // constant is matched by a constant, and any part of the pipeline that
+      // happened to hard-code it — or that matched a payment to an invoice by
+      // amount rather than by address — would pass every night regardless. The
+      // draw is exact in wei and renders as a plain decimal string
+      // (`fixtures/synthetic-payment.ts`).
+      const targets: Target[] = [];
+      for (let i = 0; i < PAYMENT_COUNT; i++) {
+        const amountWei = randomInvoiceAmountWei();
+        const amountEth = formatEther(amountWei);
+        const invoice = await api<Invoice>('/invoices', {
+          method: 'POST',
+          token,
+          body: {
+            store_id: store.id,
+            currency: 'ETH',
+            amount: amountEth,
+            expiration_seconds: 1_800,
+            metadata: { source: 'rcs-112-synthetic-payment', sequence: i + 1 },
+          },
+        });
 
-      const option = invoice.payment_options.find(
-        (o) => o.chain_id === CHAIN_ID && o.token_address === null,
-      );
-      expect(option, `no native Sepolia payment option on invoice ${invoice.id}`).toBeDefined();
-      const target = option as PaymentOption;
-      console.log(`invoice ${invoice.id} → ${target.amount} wei to ${target.payment_address}`);
+        const option = invoice.payment_options.find(
+          (o) => o.chain_id === CHAIN_ID && o.token_address === null,
+        );
+        expect(option, `no native Sepolia payment option on invoice ${invoice.id}`).toBeDefined();
+        const target = option as PaymentOption;
+        // The amount survived the round trip through a decimal string and back
+        // into wei. If it did not, the transaction below would underpay by a
+        // rounding error and the invoice would sit at `pending` until the
+        // timeout, reported as a detection failure rather than as this.
+        expect(
+          BigInt(target.amount),
+          `invoice ${invoice.id} was created for ${amountEth} ETH but quotes ${target.amount} wei`,
+        ).toBe(amountWei);
 
-      // Subscribe before broadcasting: the socket only forwards live events, so
-      // a fast confirmation must not land while we are still connecting.
-      // The budget covers inclusion as well as detection: this starts before
-      // the broadcast (deliberately — the socket only forwards live events),
-      // so a slow Sepolia block would otherwise spend most of PAID_TIMEOUT_MS
-      // before the monitors have anything to detect, and the failure would be
-      // reported as "chain monitors are probably not connected".
-      const paidPromise = waitForPaid(invoice.id, RECEIPT_TIMEOUT_MS + PAID_TIMEOUT_MS);
-      // Mark it handled now: if an assertion below throws first, an unobserved
-      // rejection here would take the worker down instead of reporting.
-      paidPromise.catch(() => {});
+        console.log(
+          `invoice ${i + 1}/${PAYMENT_COUNT} ${invoice.id} — ${amountEth} ETH ` +
+            `(${target.amount} wei) to ${target.payment_address}`,
+        );
+        targets.push({ invoice, option: target, amountWei });
+      }
 
-      const hash = await walletClient.sendTransaction({
-        to: target.payment_address as `0x${string}`,
-        value: BigInt(target.amount),
-      });
-      console.log(`sent https://sepolia.etherscan.io/tx/${hash}`);
-      const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT_MS });
-      expect(receipt.status, `transaction ${hash} reverted`).toBe('success');
-
-      const { via, seen } = await paidPromise;
-      console.log(`paid, detected via ${via} — updates: ${seen.join(', ') || 'none'}`);
-
-      const checkout = await api<Checkout>(`/checkout/${invoice.id}`);
-      expect(checkout.is_paid).toBe(true);
-      expect(checkout.payments.map((p) => p.tx_hash.toLowerCase())).toContain(hash.toLowerCase());
-
-      const delivered = await sink.waitFor('payment_confirmed', WEBHOOK_TIMEOUT_MS);
-      expect(delivered.body.invoice_id).toBe(invoice.id);
-      expect(delivered.body.store_id).toBe(store.id);
-      expect(delivered.body.status).toBe('paid');
-      expect(delivered.body.chain_id).toBe(CHAIN_ID);
+      // The assertion the whole exercise is for (RCS-235).
+      //
+      // Three invoices, one payment method, one xpub: the server allocates an
+      // index per payment option and derives `0/{index}`, so the addresses must
+      // differ. When they did not, one address was quoted to two invoices and
+      // the payment that arrived paid whichever the monitor matched first while
+      // the other expired — with a single-invoice test, invisibly.
+      const addresses = targets.map((t) => t.option.payment_address.toLowerCase());
       expect(
-        verifySignature(delivered, secret as string),
-        'X-Webhook-Signature did not match an HMAC-SHA256 of the delivered body',
-      ).toBe(true);
+        new Set(addresses).size,
+        `payment addresses are not distinct — the derivation counter is repeating ` +
+          `(RCS-235): ${addresses.join(', ')}`,
+      ).toBe(PAYMENT_COUNT);
+
+      // …and the counter moved by exactly three. Distinct addresses alone would
+      // also hold if the index jumped about; what the counter owes is one index
+      // per payment option, from one counter per xpub (RCS-234). Asserted as a
+      // delta, because whether the stored index is "last used" or "next free"
+      // is the server's business — three invoices consume three either way.
+      // `next_derivation_index` is an UPDATE … SET derivation_index + 1 on this
+      // row (`data-service/src/postgres/store_payment_method.rs`); if the
+      // counter ever moves off it, this is the assertion that says so rather
+      // than the addresses quietly repeating.
+      const methods = await api<PaymentMethod[]>(`/stores/${store.id}/payment-methods`, { token });
+      const current = methods.find((m) => m.id === method.id);
+      expect(current, `payment method ${method.id} vanished from store ${store.id}`).toBeDefined();
+      expect(
+        (current as PaymentMethod).derivation_index - method.derivation_index,
+        `derivation index moved ${method.derivation_index} → ` +
+          `${(current as PaymentMethod).derivation_index} for ${PAYMENT_COUNT} invoices ` +
+          `(RCS-234)`,
+      ).toBe(PAYMENT_COUNT);
+
+      /**
+       * Pay them one at a time, never concurrently:
+       *
+       * - every transaction is signed by the same spender account, so three in
+       *   flight share one nonce sequence. viem reads the pending nonce per
+       *   call, two calls made together read the same one, and the second
+       *   replaces the first instead of paying its own invoice.
+       * - concurrency *hides* the bug this run exists to catch. If two invoices
+       *   share an address, paying both at once still turns both green; paying
+       *   one and then checking the others are still unpaid is what makes a
+       *   shared address fail.
+       * - the balance guard above read one balance up front. Spends racing each
+       *   other against a single snapshot is a state the guard cannot describe.
+       *
+       * The cost is wall clock, which is what the shared budget is for.
+       */
+      const deadline = Date.now() + PAYMENTS_BUDGET_MS;
+      const hashes: string[] = [];
+
+      for (const [index, { invoice, option, amountWei }] of targets.entries()) {
+        const label = `payment ${index + 1}/${PAYMENT_COUNT}`;
+
+        // Subscribe before broadcasting: the socket only forwards live events,
+        // so a fast confirmation must not land while we are still connecting.
+        // The budget covers inclusion as well as detection: this starts before
+        // the broadcast (deliberately — the socket only forwards live events),
+        // so a slow Sepolia block would otherwise spend most of PAID_TIMEOUT_MS
+        // before the monitors have anything to detect, and the failure would be
+        // reported as "chain monitors are probably not connected".
+        const paidPromise = waitForPaid(
+          invoice.id,
+          remainingBudgetMs(deadline, RECEIPT_TIMEOUT_MS + PAID_TIMEOUT_MS),
+        );
+        // Mark it handled now: if an assertion below throws first, an unobserved
+        // rejection here would take the worker down instead of reporting.
+        paidPromise.catch(() => {});
+
+        const hash = await walletClient.sendTransaction({
+          to: option.payment_address as `0x${string}`,
+          value: BigInt(option.amount),
+        });
+        hashes.push(hash.toLowerCase());
+        console.log(
+          `${label}: ${formatEther(amountWei)} ETH to ${option.payment_address} — ` +
+            `https://sepolia.etherscan.io/tx/${hash}`,
+        );
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash,
+          timeout: remainingBudgetMs(deadline, RECEIPT_TIMEOUT_MS),
+        });
+        expect(receipt.status, `transaction ${hash} reverted`).toBe('success');
+
+        const { via, seen } = await paidPromise;
+        console.log(`${label}: paid, detected via ${via} — updates: ${seen.join(', ') || 'none'}`);
+
+        const checkout = await api<Checkout>(`/checkout/${invoice.id}`);
+        expect(checkout.is_paid, `invoice ${invoice.id} reports ${checkout.status}`).toBe(true);
+        expect(
+          checkout.payments.map((p) => p.tx_hash.toLowerCase()),
+          `invoice ${invoice.id} is paid, but not by the transaction sent to its own address`,
+        ).toContain(hash.toLowerCase());
+
+        // Attribution from the other side: an invoice sharing this one's
+        // address would go `paid` on this transaction, having been sent nothing
+        // (RCS-235). Only the ones not yet paid — the earlier invoices are
+        // checked again after the loop, when every hash is known.
+        for (const other of targets.slice(index + 1)) {
+          const state = await api<Checkout>(`/checkout/${other.invoice.id}`);
+          expect(
+            state.is_paid,
+            `invoice ${other.invoice.id} (${other.option.payment_address}) went paid on ` +
+              `${label}'s transaction ${hash} — it has been sent nothing. Two invoices are ` +
+              `sharing an address (RCS-235).`,
+          ).toBe(false);
+        }
+
+        const delivered = await sink.waitFor(
+          'payment_confirmed',
+          remainingBudgetMs(deadline, WEBHOOK_TIMEOUT_MS),
+          // Filtered on the invoice: unfiltered, every payment after the first
+          // would be handed payment one's delivery and assert against it.
+          (hook) => hook.body.invoice_id === invoice.id,
+        );
+        expect(delivered.body.invoice_id).toBe(invoice.id);
+        expect(delivered.body.store_id).toBe(store.id);
+        expect(delivered.body.status).toBe('paid');
+        expect(delivered.body.chain_id).toBe(CHAIN_ID);
+        expect(
+          verifySignature(delivered, secret as string),
+          'X-Webhook-Signature did not match an HMAC-SHA256 of the delivered body',
+        ).toBe(true);
+      }
+
+      // Final sweep, now that all three transactions are known: each invoice is
+      // paid, and paid by its own transaction only. The in-loop check catches a
+      // later invoice paid by an earlier transaction; this catches the reverse —
+      // an earlier invoice quietly collecting a later payment as well, which is
+      // what an address served twice looks like from the front.
+      for (const [index, { invoice, option }] of targets.entries()) {
+        const checkout = await api<Checkout>(`/checkout/${invoice.id}`);
+        expect(checkout.is_paid, `invoice ${invoice.id} ended at ${checkout.status}`).toBe(true);
+        const paidBy = checkout.payments.map((p) => p.tx_hash.toLowerCase());
+        const strays = paidBy.filter((h) => h !== hashes[index]);
+        expect(
+          strays,
+          `invoice ${invoice.id} (${option.payment_address}) also collected ` +
+            `${strays.join(', ')}, which was sent to another invoice's address (RCS-235)`,
+        ).toEqual([]);
+      }
     } finally {
       await sink.stop();
     }

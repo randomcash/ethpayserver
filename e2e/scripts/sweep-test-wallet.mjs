@@ -2,11 +2,15 @@
 /**
  * Reclaim funds parked by the synthetic-payment test (RCS-202).
  *
- * Each nightly run sends INVOICE_AMOUNT_ETH from the spender
- * (m/44'/60'/9'/0/0) to an address the server derived from the merchant xpub
- * at m/44'/60'/0'/0/{i}. Both come from the same seed, so that principal is
- * never actually spent — only gas is. This walks the derived addresses and
- * sends anything worth moving back to the spender.
+ * Each nightly run sends three payments of a random 0.00005-0.00015 ETH from
+ * the spender (m/44'/60'/9'/0/0) to addresses the server derived from the
+ * merchant xpub at m/44'/60'/0'/0/{i}. Both come from the same seed, so that
+ * principal is never actually spent — only gas is. This walks the derived
+ * addresses and sends anything worth moving back to the spender.
+ *
+ * The store is fresh every run, so its derivation index restarts at 0: the
+ * parked funds pile up on the first few indices rather than marching outwards,
+ * and the default --scan 50 covers them many times over.
  *
  * Deliberately NOT part of the test: a failed sweep must not fail a run whose
  * payment already succeeded, and best-effort cleanup inside an assertion is how
