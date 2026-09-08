@@ -15,7 +15,7 @@ use data_service::{self, StorePaymentMethod, StorePaymentMethodReader, StorePaym
 use evm::validate_xpub;
 
 use super::super::extractors::AuthenticatedUser;
-use super::{mask_xpub, repository_status, require_store_settings_permission};
+use super::{ApiErr, mask_xpub, repository_error, require_store_settings_permission};
 use crate::state::PgAppState;
 
 /// Request to create a payment method.
@@ -127,6 +127,7 @@ where
     request_body = CreatePaymentMethodRequest,
     responses(
         (status = 201, description = "Payment method created", body = PaymentMethodResponse),
+        (status = 409, description = "That xpub is registered to another account"),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
@@ -138,7 +139,7 @@ pub async fn create_payment_method<A>(
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<CreatePaymentMethodRequest>,
-) -> Result<(StatusCode, Json<PaymentMethodResponse>), StatusCode>
+) -> Result<(StatusCode, Json<PaymentMethodResponse>), ApiErr>
 where
     A: SessionService + 'static,
 {
@@ -146,7 +147,7 @@ where
 
     // Validate xpub
     if !validate_xpub(&req.xpub) {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
 
     // Verify store exists
@@ -167,7 +168,7 @@ where
         &req.xpub,
     )
     .await
-    .map_err(repository_status)?;
+    .map_err(repository_error)?;
 
     Ok((StatusCode::CREATED, Json(method.into())))
 }
@@ -225,6 +226,7 @@ where
     request_body = UpdatePaymentMethodRequest,
     responses(
         (status = 200, description = "Payment method updated", body = PaymentMethodResponse),
+        (status = 409, description = "That xpub is registered to another account"),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
@@ -236,7 +238,7 @@ pub async fn update_payment_method<A>(
     State(state): State<PgAppState<A>>,
     Path((store_id, method_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdatePaymentMethodRequest>,
-) -> Result<Json<PaymentMethodResponse>, StatusCode>
+) -> Result<Json<PaymentMethodResponse>, ApiErr>
 where
     A: SessionService + 'static,
 {
@@ -246,7 +248,7 @@ where
     if let Some(ref xpub) = req.xpub
         && !validate_xpub(xpub)
     {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
 
     // Verify method exists and belongs to this store
@@ -256,7 +258,7 @@ where
         .ok_or(StatusCode::NOT_FOUND)?;
 
     if existing.store_id != store_id {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::NOT_FOUND.into());
     }
 
     let method = StorePaymentMethodWriter::update_payment_method(
@@ -266,7 +268,7 @@ where
         req.xpub.as_deref(),
     )
     .await
-    .map_err(repository_status)?;
+    .map_err(repository_error)?;
 
     Ok(Json(method.into()))
 }

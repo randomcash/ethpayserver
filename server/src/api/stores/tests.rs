@@ -705,3 +705,108 @@ fn test_rotate_wallet_response_empty_rotations() {
     assert_eq!(json["methods_rotated"], 0);
     assert!(json["rotations"].as_array().unwrap().is_empty());
 }
+
+// =========================================================================
+// repository_error / ApiErr
+// =========================================================================
+
+use axum::body::to_bytes;
+use axum::response::IntoResponse;
+
+async fn body_of(err: ApiErr) -> (StatusCode, String) {
+    let response = err.into_response();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+/// The refusal has to say what it refused.
+///
+/// The client renders the body after the status (`ApiError::Http`), so a 409
+/// with nothing in it reaches the merchant as the literal "HTTP error 409:" -
+/// which is what the payment-method form showed, and is barely better than the
+/// 500 it replaced. The merchant cannot guess "that key belongs to another
+/// account" from a number.
+#[tokio::test]
+async fn conflict_carries_the_reason_the_caller_needs() {
+    let err = repository_error(data_service::RepositoryError::Conflict(
+        "this xpub is already registered to another account".into(),
+    ));
+
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, "this xpub is already registered to another account");
+}
+
+#[tokio::test]
+async fn not_found_carries_its_reason_too() {
+    let err = repository_error(data_service::RepositoryError::NotFound(
+        "wallet not found".into(),
+    ));
+
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, "wallet not found");
+}
+
+/// Everything that is not `Conflict` or `NotFound` is answered generically.
+///
+/// Those two are written by this codebase for the caller to read. Any other
+/// repository error may be carrying a database error, whose text names columns,
+/// constraints, and - for a connection failure - the host and credentials in
+/// the URL. None of that may reach a response.
+#[tokio::test]
+async fn other_repository_errors_say_nothing_specific() {
+    let err = repository_error(data_service::RepositoryError::Database(
+        "FATAL: password authentication failed for user \"ethpayserver\" at db.internal:5432"
+            .into(),
+    ));
+
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, "internal error");
+    assert!(
+        !body.contains("db.internal"),
+        "the host leaked into a response"
+    );
+    assert!(
+        !body.contains("password"),
+        "the error text leaked into a response"
+    );
+}
+
+/// A bare status stays bare, and is not given a content-type for a body it
+/// does not have.
+///
+/// Most handlers here still return `StatusCode`. Converting those through
+/// `ApiErr` must leave them exactly as they were on the wire - asserting the
+/// empty body alone would not catch that, since a `(status, String::new())`
+/// response is empty too and differs only in its headers.
+#[tokio::test]
+async fn a_plain_status_stays_a_plain_status() {
+    let response = ApiErr::from(StatusCode::NOT_FOUND).into_response();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        response.headers().get("content-type").is_none(),
+        "a reasonless refusal must not claim to carry a body"
+    );
+
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    assert!(bytes.is_empty());
+}
+
+/// ...and a reason does come with one.
+#[tokio::test]
+async fn a_reason_is_sent_as_text() {
+    let response = ApiErr::from((StatusCode::CONFLICT, "nope".to_string())).into_response();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("text/plain"),
+        "unexpected content-type: {content_type}"
+    );
+}
