@@ -394,7 +394,10 @@ test.describe('Auth & Authenticated', () => {
 
     // Close via outside click
     await trigger.click();
-    await scoutPage.locator('.main-header-search').click();
+    // Not `.main-header-search` - RCS-232 removed it. The heading is outside
+    // the menu and is not itself a control. `.dashboard-title` because this
+    // runs on /evm; `.page-header` is a list-page class.
+    await scoutPage.locator('.dashboard-title').click({ timeout: 5_000 });
     await scoutPage.waitForTimeout(300);
     if (await dropdown.evaluate(el => el.classList.contains('open')).catch(() => true)) {
       issue('USER_MENU', 'Did not close on outside click');

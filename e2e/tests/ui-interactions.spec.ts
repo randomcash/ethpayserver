@@ -70,8 +70,14 @@ test.describe('UI Interactions', () => {
       await trigger.click();
       await expect(dropdown).toHaveClass(/open/);
 
-      // Click outside the menu (on the header search area)
-      await page.locator('.main-header-search').click();
+      // Click outside the menu. This used to target `.main-header-search`,
+      // which RCS-232 removed - so the assertion below was testing nothing and
+      // the test simply hung on a locator that would never resolve. The page
+      // heading is a better anchor anyway: it is unambiguously outside the
+      // menu and is not a control, so clicking it cannot do anything else.
+      // `.dashboard-title` specifically: these tests run on /evm, which has no
+      // `.page-header` - that class belongs to the list pages.
+      await page.locator('.dashboard-title').click();
       await expect(dropdown).not.toHaveClass(/open/);
     });
 
