@@ -82,10 +82,11 @@ fn test_store_serialization() {
 fn test_wallet_serialization() {
     let wallet = Wallet {
         id: "wallet_001".to_string(),
-        store_id: "store_001".to_string(),
+        user_id: "user_001".to_string(),
         xpub_masked: "xpub6CUG...Ht4QRnxv".to_string(),
         derivation_index: 3,
         name: Some("Main Wallet".to_string()),
+        is_primary: true,
         created_at: "2024-01-01T00:00:00Z".to_string(),
     };
 
@@ -93,7 +94,10 @@ fn test_wallet_serialization() {
     let parsed: Wallet = serde_json::from_str(&json).unwrap();
 
     assert_eq!(wallet.id, parsed.id);
-    assert_eq!(wallet.store_id, parsed.store_id);
+    // user_id, not store_id: RCS-234 moved wallets to the account. This
+    // assertion is why the DTO change could not pass silently.
+    assert_eq!(wallet.user_id, parsed.user_id);
+    assert_eq!(wallet.is_primary, parsed.is_primary);
     assert_eq!(wallet.xpub_masked, parsed.xpub_masked);
     assert_eq!(wallet.derivation_index, parsed.derivation_index);
     assert_eq!(wallet.name, parsed.name);
