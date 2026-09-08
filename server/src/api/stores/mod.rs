@@ -28,6 +28,11 @@ use auth::repository::UserStoreRepository;
 
 use crate::state::PgAppState;
 
+/// Re-exported so this crate has exactly one masking rule. It used to keep its
+/// own byte-identical copy, so a single `RotateWalletResponse` could have
+/// carried two different rules the moment either changed.
+pub(crate) use api_types::mask_xpub;
+
 /// A status, optionally with a reason the caller can read.
 ///
 /// Handlers in this module mostly return bare `StatusCode`, and that stays
@@ -123,14 +128,6 @@ pub(crate) async fn require_store_settings_permission<A: SessionService>(
     } else {
         Err(StatusCode::FORBIDDEN)
     }
-}
-
-/// Mask an xpub for display (show first 8 and last 8 chars).
-pub(crate) fn mask_xpub(xpub: &str) -> String {
-    if xpub.len() <= 20 {
-        return "****".to_string();
-    }
-    format!("{}...{}", &xpub[..8], &xpub[xpub.len() - 8..])
 }
 
 #[cfg(test)]

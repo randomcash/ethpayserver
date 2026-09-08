@@ -245,12 +245,12 @@ fn test_store_deserialization_from_backend() {
     assert_eq!(store.name, "My Shop");
     assert_eq!(store.website, Some("https://myshop.com".to_string()));
     assert!(!store.archived);
-    // owner_id is ignored by client-side Store (extra fields tolerated by serde default)
+    // owner_id is required and read into the struct.
 }
 
 #[test]
 fn test_store_deserialization_minimal() {
-    // Backend may omit optional fields
+    // Only genuinely optional fields are omitted here; owner_id is required.
     let json = r#"{
         "id": "11111111-1111-4111-8111-111111111111",
         "owner_id": "22222222-2222-4222-8222-222222222222",
@@ -339,23 +339,57 @@ fn test_invoice_status_is_final() {
     assert!(!InvoiceStatus::PartiallyPaid.is_final());
 }
 
+/// `status` is required, and that is deliberate.
+///
+/// Defaulting it to `Pending` would tell a merchant an invoice is unpaid when
+/// the field merely did not arrive. This test previously supplied `status` and
+/// asserted it parsed, which passed whether or not the field was required.
 #[test]
-fn test_invoice_status_is_required() {
-    // Verify that deserializing an Invoice without a status field
-    // defaults to Pending (via the serde default function).
-    let json = r#"{
+fn invoice_status_is_required_not_defaulted() {
+    let without_status = r#"{
         "id": "11111111-1111-4111-8111-111111111111",
         "store_id": "22222222-2222-4222-8222-222222222222",
         "currency": "USD",
-        "status": "pending",
-"amount": "10",
+        "amount": "100.00",
         "amount_received": "0",
         "created_at": "2024-01-01T00:00:00Z",
         "expires_at": "2024-01-02T00:00:00Z",
         "metadata": null
     }"#;
-    let invoice: Invoice = serde_json::from_str(json).unwrap();
-    assert_eq!(invoice.status, InvoiceStatus::Pending);
+    assert!(
+        serde_json::from_str::<Invoice>(without_status).is_err(),
+        "a missing status must fail rather than silently read as Pending"
+    );
+}
+
+/// `owner_id` is required, and arrives.
+///
+/// The client's own copy of this struct did not have the field at all, so it
+/// dropped it on the floor. Nothing asserted it until now.
+#[test]
+fn store_carries_owner_id() {
+    let json = r#"{
+        "id": "11111111-1111-4111-8111-111111111111",
+        "owner_id": "22222222-2222-4222-8222-222222222222",
+        "name": "S",
+        "website": null,
+        "archived": false,
+        "created_at": "2024-01-01T00:00:00Z"
+    }"#;
+    let store: Store = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        store.owner_id.to_string(),
+        "22222222-2222-4222-8222-222222222222"
+    );
+
+    let without_owner = r#"{
+        "id": "11111111-1111-4111-8111-111111111111",
+        "name": "S",
+        "website": null,
+        "archived": false,
+        "created_at": "2024-01-01T00:00:00Z"
+    }"#;
+    assert!(serde_json::from_str::<Store>(without_owner).is_err());
 }
 
 #[test]
@@ -378,7 +412,6 @@ fn test_invoice_status_response_from_backend() {
         "status": "paid",
         "amount": "100.00",
         "amount_received": "100.00",
-        "store_id": "22222222-2222-4222-8222-222222222222",
         "currency": "USD",
 "expires_at": "2024-01-02T00:00:00Z",
         "payment_count": 1,

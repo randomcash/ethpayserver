@@ -65,6 +65,7 @@ where
         (status = 201, description = "Payment method created", body = PaymentMethodResponse),
         (status = 409, description = "That xpub is registered to another account"),
         (status = 400, description = "Invalid request"),
+        (status = 422, description = "Malformed body — e.g. a chain id that is not CAIP-2"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "Store not found"),
@@ -86,9 +87,6 @@ where
         return Err(StatusCode::BAD_REQUEST.into());
     }
 
-    let chain_id = types::ChainId::parse(req.chain_id.as_str())
-        .map_err(|_| ApiErr::from(StatusCode::BAD_REQUEST))?;
-
     // Verify store exists
     let _ = state
         .data_service
@@ -100,7 +98,7 @@ where
     let method = StorePaymentMethodWriter::create_payment_method(
         &*state.data_service,
         store_id,
-        &chain_id,
+        &req.chain_id,
         req.token_address.as_deref(),
         &req.asset_symbol,
         req.decimals,
@@ -167,6 +165,7 @@ where
         (status = 200, description = "Payment method updated", body = PaymentMethodResponse),
         (status = 409, description = "That xpub is registered to another account"),
         (status = 400, description = "Invalid request"),
+        (status = 422, description = "Malformed body — e.g. a chain id that is not CAIP-2"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "Payment method not found"),

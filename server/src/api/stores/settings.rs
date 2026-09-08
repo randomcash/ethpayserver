@@ -98,6 +98,7 @@ where
     responses(
         (status = 200, description = "Settings updated", body = StoreSettingsResponse),
         (status = 400, description = "Validation error"),
+        (status = 422, description = "Malformed body — e.g. a chain id that is not CAIP-2"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "Store not found"),

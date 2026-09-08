@@ -588,7 +588,7 @@ where
                 .map(|m| m.chain_id.clone()),
             asset_symbol: by_id
                 .get(&rotation.payment_method_id)
-                .map_or_else(String::new, |m| m.asset_symbol.clone()),
+                .map(|m| m.asset_symbol.clone()),
             id: rotation.id,
             previous_xpub_masked: mask_xpub(&rotation.previous_xpub),
             previous_derivation_index: rotation.previous_derivation_index,

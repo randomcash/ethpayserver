@@ -100,14 +100,12 @@ where
     let inputs: Vec<TokenPolicyEntryInput> = req
         .entries
         .into_iter()
-        .map(|e| {
-            Ok(TokenPolicyEntryInput {
-                chain_id: e.chain_id,
-                token_address: e.token_address,
-                asset_symbol: e.asset_symbol,
-            })
+        .map(|e| TokenPolicyEntryInput {
+            chain_id: e.chain_id,
+            token_address: e.token_address,
+            asset_symbol: e.asset_symbol,
         })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+        .collect();
 
     let policy =
         StoreTokenPolicyWriter::upsert_token_policy(&*state.data_service, store_id, mode, &inputs)

@@ -108,6 +108,7 @@ where
     responses(
         (status = 200, description = "Role updated"),
         (status = 400, description = "Invalid role or last admin"),
+        (status = 422, description = "Malformed body — e.g. a chain id that is not CAIP-2"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin access required"),
         (status = 404, description = "User not found"),
@@ -298,15 +299,7 @@ where
         default_confirmations: body.default_confirmations,
         invoice_expiry_minutes: body.invoice_expiry_minutes,
         rate_limit_rpm: body.rate_limit_rpm,
-        enabled_chain_ids: body
-            .enabled_chain_ids
-            .iter()
-            .map(|c| types::ChainId::parse(c.as_str()))
-            .collect::<Result<Vec<_>, _>>()
-            // A malformed identifier is the caller's mistake, not a server
-            // fault. The database would reject it anyway via the `caip2`
-            // domain, but a 400 here says so plainly.
-            .map_err(|_| StatusCode::BAD_REQUEST)?,
+        enabled_chain_ids: body.enabled_chain_ids,
     };
 
     state

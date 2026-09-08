@@ -9,8 +9,8 @@ use crate::{
     RepositoryResult, StoreSettings, StoreSettingsReader, StoreSettingsWriter, sqlx_to_repo_error,
 };
 
-fn row_to_settings(row: &sqlx::postgres::PgRow) -> StoreSettings {
-    StoreSettings {
+fn row_to_settings(row: &sqlx::postgres::PgRow) -> RepositoryResult<StoreSettings> {
+    Ok(StoreSettings {
         store_id: row.get("store_id"),
         // Read through the column's own type. This used to be `row.get` into
         // an `Option<i64>` against what RCS-241 made a `caip2` TEXT column -
@@ -26,7 +26,7 @@ fn row_to_settings(row: &sqlx::postgres::PgRow) -> StoreSettings {
         accent_color: row.get("accent_color"),
         notification_prefs: row.get("notification_prefs"),
         updated_at: row.get("updated_at"),
-    }
+    })
 }
 
 #[async_trait]
@@ -38,7 +38,7 @@ impl StoreSettingsReader for PgDataService {
             .await
             .map_err(sqlx_to_repo_error)?;
 
-        Ok(row.as_ref().map(row_to_settings))
+        row.as_ref().map(row_to_settings).transpose()
     }
 }
 
@@ -77,6 +77,6 @@ impl StoreSettingsWriter for PgDataService {
         .await
         .map_err(sqlx_to_repo_error)?;
 
-        Ok(row_to_settings(&row))
+        row_to_settings(&row)
     }
 }

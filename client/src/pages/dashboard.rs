@@ -14,7 +14,7 @@ use crate::pages::payments::format::{
     format_crypto_amount, payment_status, payment_status_class, truncate_hash,
 };
 use crate::services::StatusUpdate;
-use crate::util::{chain_name, relative_time};
+use crate::util::{chain_name, relative_time_at};
 
 /// Dashboard page component.
 #[component]
@@ -615,7 +615,7 @@ fn RecentPayments() -> impl IntoView {
                         <div class="payments-list">
                             {rows.into_iter().map(|payment| {
                                 let tx = truncate_hash(&payment.tx_hash, 8, 6);
-                                let when = relative_time(&payment.detected_at.to_rfc3339(), now_ms)
+                                let when = relative_time_at(payment.detected_at, now_ms)
                                     .unwrap_or_else(|| payment.detected_at.to_rfc3339());
                                 let amount = format!(
                                     "{} {}",
