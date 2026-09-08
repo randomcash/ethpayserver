@@ -121,6 +121,8 @@ fn test_payment_option(
         token_address: None,
         decimals: 18,
         payment_address: address.to_string(),
+        wallet_id: None,
+        derivation_index: None,
         amount: amount_wei.to_string(),
         rate: Some(rate.to_string()),
         rate_at: Some(Utc::now()),
@@ -490,6 +492,8 @@ async fn test_erc20_payment_detection_event_consumer() {
         token_address: Some(token_address_str.clone()),
         decimals: 6,
         payment_address: payment_address_str.clone(),
+        wallet_id: None,
+        derivation_index: None,
         amount: "100000000".to_string(), // 100 USDT
         rate: None,                      // same-asset (USD-denominated invoice, USDT payment)
         rate_at: None,

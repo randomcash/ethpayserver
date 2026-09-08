@@ -416,13 +416,17 @@ sqlx migrate revert --source data-service/migrations/postgres
 - `users` - User accounts
 - `sessions` - Active sessions
 - `devices` - Registered devices/passkeys
-- `wallets` - Linked Ethereum wallets
+- `wallet_credentials` - Ethereum wallets linked for login
+
+**Wallet Tables:**
+- `wallets` - Account receiving wallets: one xpub and its single
+  derivation counter (RCS-234)
 
 **Store Tables:**
 - `stores` - Merchant stores
 - `store_roles` - Role definitions (Owner, Manager, Employee, Guest)
 - `user_stores` - User-store membership
-- `store_wallets` - Store xpub keys for address derivation
+- `store_wallets` - Per-store wallet override (absent = account primary)
 - `store_webhooks` - Webhook configuration
 
 **Payment Tables:**

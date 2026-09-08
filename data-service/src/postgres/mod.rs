@@ -16,9 +16,9 @@ mod refund;
 mod store_payment_method;
 mod store_settings;
 mod store_token_policy;
-mod store_wallet;
 mod store_webhook;
 mod token;
+mod wallet;
 mod wallet_rotation;
 mod watched_address;
 

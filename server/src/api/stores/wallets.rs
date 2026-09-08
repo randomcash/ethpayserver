@@ -1,4 +1,9 @@
-//! Store wallet configuration endpoints: list, get, configure, delete, xpub export, addresses, rotation.
+//! Account wallet endpoints, and the per-store override that points at one.
+//!
+//! Wallets belong to the account, not to a store (RCS-234). A store derives
+//! from its own override if it has been given one, and from the account
+//! primary otherwise; the fallback is resolved in the repository so no handler
+//! can spell it differently.
 
 use axum::{
     Json,
@@ -11,37 +16,85 @@ use uuid::Uuid;
 
 use auth::repository::{StoreRepository, UserStoreRepository};
 use auth::{SessionService, StoreId};
-use data_service::{self, StorePaymentMethodReader, StoreWalletReader, StoreWalletWriter};
+use data_service::{self, StorePaymentMethodReader, WalletReader, WalletWriter};
 use evm::{XpubDeriver, validate_xpub};
 
 use super::super::extractors::AuthenticatedUser;
 use super::{mask_xpub, require_store_settings_permission};
 use crate::state::PgAppState;
 
-/// Request to configure a store wallet.
+/// Request to add a wallet to the account.
 #[derive(Debug, Deserialize, ToSchema)]
-pub struct ConfigureWalletRequest {
+pub struct CreateWalletRequest {
     /// Extended public key (xpub) for address derivation.
     pub xpub: String,
     /// Optional wallet name.
     pub name: Option<String>,
 }
 
-/// Store wallet response.
+/// Request to update a wallet.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateWalletRequest {
+    /// New name. Absent leaves the name alone.
+    pub name: Option<String>,
+    /// Set to `true` to make this the account primary. `false` is ignored:
+    /// an account either has a primary or is choosing a different one, and
+    /// "no primary" is not a state a merchant can usefully ask for.
+    pub is_primary: Option<bool>,
+}
+
+/// Request to point a store at a wallet.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetStoreWalletRequest {
+    /// Wallet to use for this store. Must belong to the same account.
+    pub wallet_id: Uuid,
+}
+
+/// Account wallet response.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct WalletResponse {
     /// Wallet ID.
     pub id: Uuid,
-    /// Store ID.
-    pub store_id: Uuid,
+    /// Owning account.
+    pub user_id: Uuid,
     /// Extended public key (masked for security).
     pub xpub_masked: String,
-    /// Current derivation index.
+    /// Next derivation index this wallet will issue.
     pub derivation_index: i32,
     /// Wallet name.
     pub name: Option<String>,
+    /// Whether stores fall back to this wallet.
+    pub is_primary: bool,
     /// Creation timestamp.
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<data_service::Wallet> for WalletResponse {
+    fn from(w: data_service::Wallet) -> Self {
+        Self {
+            id: w.id,
+            user_id: w.user_id,
+            xpub_masked: mask_xpub(&w.xpub),
+            derivation_index: w.derivation_index,
+            name: w.name,
+            is_primary: w.is_primary,
+            created_at: w.created_at,
+        }
+    }
+}
+
+/// The wallet a store derives from, and how it got there.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StoreWalletResponse {
+    /// Store ID.
+    pub store_id: Uuid,
+    /// The wallet this store's addresses come from.
+    #[serde(flatten)]
+    pub wallet: WalletResponse,
+    /// True when the store is pinned to this wallet, false when it is simply
+    /// following the account primary. The distinction is what tells a merchant
+    /// whether changing their primary will move this store's payouts.
+    pub is_override: bool,
 }
 
 /// Wallet xpub export response (full, unmasked).
@@ -49,11 +102,11 @@ pub struct WalletResponse {
 pub struct WalletXpubResponse {
     /// Wallet ID.
     pub id: Uuid,
-    /// Store ID.
-    pub store_id: Uuid,
+    /// Owning account.
+    pub user_id: Uuid,
     /// Full extended public key (unmasked).
     pub xpub: String,
-    /// Current derivation index.
+    /// Next derivation index this wallet will issue.
     pub derivation_index: i32,
     /// Wallet name.
     pub name: Option<String>,
@@ -79,7 +132,7 @@ pub struct DerivedAddressEntry {
 pub struct WalletAddressesResponse {
     /// Wallet ID.
     pub wallet_id: Uuid,
-    /// Current derivation index (number of addresses assigned so far).
+    /// Next derivation index (number of addresses assigned so far).
     pub derivation_index: i32,
     /// Derived addresses.
     pub addresses: Vec<DerivedAddressEntry>,
@@ -94,14 +147,36 @@ pub struct WalletAddressesQuery {
     pub offset: Option<u32>,
 }
 
-/// List all wallets for stores the user is a member of.
+/// Load a wallet and confirm it belongs to the caller.
+///
+/// Ownership is the whole authorization story for a wallet - there is no
+/// sharing - so a wallet on another account is reported as 404 rather than
+/// 403: confirming it exists would let anyone probe for wallet ids.
+async fn owned_wallet<A: SessionService>(
+    state: &PgAppState<A>,
+    user: &auth::UserInfo,
+    wallet_id: Uuid,
+) -> Result<data_service::Wallet, StatusCode> {
+    let wallet = WalletReader::get_wallet(&*state.data_service, wallet_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if wallet.user_id != user.id.0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(wallet)
+}
+
+/// List the account's wallets.
 #[utoipa::path(
     get,
     path = "/wallets",
     tag = "stores",
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, description = "List of user's wallets", body = Vec<WalletResponse>),
+        (status = 200, description = "The account's wallets", body = Vec<WalletResponse>),
         (status = 401, description = "Unauthorized"),
     )
 )]
@@ -112,50 +187,69 @@ pub async fn list_wallets<A>(
 where
     A: SessionService + 'static,
 {
-    // Get user's stores
-    let stores = state
-        .data_service
-        .get_stores_for_user(user.id)
+    let wallets = WalletReader::list_wallets(&*state.data_service, user.id.0)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut wallets = Vec::new();
-
-    // Fetch wallet for each store
-    for store in stores {
-        if let Ok(Some(wallet)) =
-            StoreWalletReader::get_wallet(&*state.data_service, store.id.0).await
-        {
-            wallets.push(WalletResponse {
-                id: wallet.id,
-                store_id: wallet.store_id,
-                xpub_masked: mask_xpub(&wallet.xpub),
-                derivation_index: wallet.derivation_index,
-                name: wallet.name,
-                created_at: wallet.created_at,
-            });
-        }
-    }
-
-    Ok(Json(wallets))
+    Ok(Json(wallets.into_iter().map(Into::into).collect()))
 }
 
-/// Get a wallet by ID.
+/// Add a wallet to the account.
 ///
-/// User must be a member of the wallet's store.
+/// Adding an xpub the account already holds returns the existing wallet rather
+/// than a duplicate: two rows on one key would be two derivation counters on
+/// it, and that is exactly the collision the account-level model removes.
+#[utoipa::path(
+    post,
+    path = "/wallets",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    request_body = CreateWalletRequest,
+    responses(
+        (status = 201, description = "Wallet added", body = WalletResponse),
+        (status = 400, description = "Invalid xpub"),
+        (status = 401, description = "Unauthorized"),
+        (status = 409, description = "Another account already holds this xpub"),
+    )
+)]
+pub async fn create_wallet<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Json(req): Json<CreateWalletRequest>,
+) -> Result<(StatusCode, Json<WalletResponse>), StatusCode>
+where
+    A: SessionService + 'static,
+{
+    if !validate_xpub(&req.xpub) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let wallet = WalletWriter::create_wallet(
+        &*state.data_service,
+        user.id.0,
+        &req.xpub,
+        req.name.as_deref(),
+    )
+    .await
+    .map_err(|e| match e {
+        data_service::RepositoryError::Conflict(_) => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    })?;
+
+    Ok((StatusCode::CREATED, Json(wallet.into())))
+}
+
+/// Get one of the account's wallets.
 #[utoipa::path(
     get,
     path = "/wallets/{wallet_id}",
     tag = "stores",
     security(("bearer_auth" = [])),
-    params(
-        ("wallet_id" = Uuid, Path, description = "Wallet ID")
-    ),
+    params(("wallet_id" = Uuid, Path, description = "Wallet ID")),
     responses(
         (status = 200, description = "Wallet details", body = WalletResponse),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not a member of this wallet's store"),
-        (status = 404, description = "Wallet not found"),
+        (status = 404, description = "No such wallet on this account"),
     )
 )]
 pub async fn get_wallet_by_id<A>(
@@ -166,52 +260,99 @@ pub async fn get_wallet_by_id<A>(
 where
     A: SessionService + 'static,
 {
-    let wallet = StoreWalletReader::get_wallet_by_id(&*state.data_service, wallet_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(owned_wallet(&state, &user, wallet_id).await?.into()))
+}
 
-    // Verify user has access to the wallet's store
-    let has_permission = state
-        .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(wallet.store_id),
-            "ethpay.store.canviewstoresettings",
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+/// Rename a wallet, or make it the account primary.
+#[utoipa::path(
+    patch,
+    path = "/wallets/{wallet_id}",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(("wallet_id" = Uuid, Path, description = "Wallet ID")),
+    request_body = UpdateWalletRequest,
+    responses(
+        (status = 200, description = "Updated wallet", body = WalletResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "No such wallet on this account"),
+    )
+)]
+pub async fn update_wallet<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(wallet_id): Path<Uuid>,
+    Json(req): Json<UpdateWalletRequest>,
+) -> Result<Json<WalletResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let mut wallet = owned_wallet(&state, &user, wallet_id).await?;
 
-    if !has_permission {
-        return Err(StatusCode::FORBIDDEN);
+    if req.name.is_some() {
+        wallet = WalletWriter::rename_wallet(&*state.data_service, wallet_id, req.name.as_deref())
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    Ok(Json(WalletResponse {
-        id: wallet.id,
-        store_id: wallet.store_id,
-        xpub_masked: mask_xpub(&wallet.xpub),
-        derivation_index: wallet.derivation_index,
-        name: wallet.name,
-        created_at: wallet.created_at,
-    }))
+    if req.is_primary == Some(true) {
+        wallet = WalletWriter::set_primary_wallet(&*state.data_service, user.id.0, wallet_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    Ok(Json(wallet.into()))
+}
+
+/// Remove a wallet from the account.
+///
+/// Refused while a store or a payment method still points at it. The addresses
+/// it derived are still being watched, and dropping the xpub would leave
+/// incoming payments with no key to attribute them to.
+#[utoipa::path(
+    delete,
+    path = "/wallets/{wallet_id}",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(("wallet_id" = Uuid, Path, description = "Wallet ID")),
+    responses(
+        (status = 204, description = "Wallet deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "No such wallet on this account"),
+        (status = 409, description = "Still in use by a store or payment method"),
+    )
+)]
+pub async fn delete_wallet<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(wallet_id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    owned_wallet(&state, &user, wallet_id).await?;
+
+    WalletWriter::delete_wallet(&*state.data_service, wallet_id)
+        .await
+        .map_err(|e| match e {
+            data_service::RepositoryError::Conflict(_) => StatusCode::CONFLICT,
+            data_service::RepositoryError::NotFound(_) => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Export the full (unmasked) xpub for a wallet.
-///
-/// Requires `canviewstoresettings` permission on the wallet's store.
 #[utoipa::path(
     get,
     path = "/wallets/{wallet_id}/xpub",
     tag = "stores",
     security(("bearer_auth" = [])),
-    params(
-        ("wallet_id" = Uuid, Path, description = "Wallet ID")
-    ),
+    params(("wallet_id" = Uuid, Path, description = "Wallet ID")),
     responses(
         (status = 200, description = "Full xpub export", body = WalletXpubResponse),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not a member of this wallet's store"),
-        (status = 404, description = "Wallet not found"),
+        (status = 404, description = "No such wallet on this account"),
     )
 )]
 pub async fn export_wallet_xpub<A>(
@@ -222,28 +363,11 @@ pub async fn export_wallet_xpub<A>(
 where
     A: SessionService + 'static,
 {
-    let wallet = StoreWalletReader::get_wallet_by_id(&*state.data_service, wallet_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    let has_permission = state
-        .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(wallet.store_id),
-            "ethpay.store.canviewstoresettings",
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if !has_permission {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    let wallet = owned_wallet(&state, &user, wallet_id).await?;
 
     Ok(Json(WalletXpubResponse {
         id: wallet.id,
-        store_id: wallet.store_id,
+        user_id: wallet.user_id,
         xpub: wallet.xpub,
         derivation_index: wallet.derivation_index,
         name: wallet.name,
@@ -253,8 +377,7 @@ where
 
 /// List derived addresses for a wallet.
 ///
-/// Derives addresses from the wallet's xpub at the requested index range.
-/// Addresses below the current `derivation_index` are marked as used.
+/// Addresses below the wallet's current index have been handed out.
 #[utoipa::path(
     get,
     path = "/wallets/{wallet_id}/addresses",
@@ -267,8 +390,7 @@ where
     responses(
         (status = 200, description = "Derived addresses", body = WalletAddressesResponse),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Not a member of this wallet's store"),
-        (status = 404, description = "Wallet not found"),
+        (status = 404, description = "No such wallet on this account"),
         (status = 500, description = "Address derivation failed"),
     )
 )]
@@ -281,24 +403,7 @@ pub async fn list_wallet_addresses<A>(
 where
     A: SessionService + 'static,
 {
-    let wallet = StoreWalletReader::get_wallet_by_id(&*state.data_service, wallet_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    let has_permission = state
-        .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(wallet.store_id),
-            "ethpay.store.canviewstoresettings",
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if !has_permission {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    let wallet = owned_wallet(&state, &user, wallet_id).await?;
 
     let limit = query.limit.unwrap_or(20).min(100);
     let offset = query.offset.unwrap_or(0);
@@ -307,7 +412,7 @@ where
         XpubDeriver::from_xpub(&wallet.xpub).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut addresses = Vec::with_capacity(limit as usize);
-    for i in offset..offset + limit {
+    for i in offset..offset.saturating_add(limit) {
         let address = deriver
             .derive_address(i)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -315,8 +420,8 @@ where
         addresses.push(DerivedAddressEntry {
             address: address.to_string(),
             index: i,
-            derivation_path: format!("m/44'/60'/0'/0/{}", i),
-            used: (i as i32) < wallet.derivation_index,
+            derivation_path: format!("m/44'/60'/0'/0/{i}"),
+            used: (i as i64) < wallet.derivation_index as i64,
         });
     }
 
@@ -327,31 +432,28 @@ where
     }))
 }
 
-/// Get wallet configuration for a store.
+/// Get the wallet a store derives from.
 #[utoipa::path(
     get,
     path = "/stores/{store_id}/wallet",
     tag = "stores",
     security(("bearer_auth" = [])),
-    params(
-        ("store_id" = Uuid, Path, description = "Store ID")
-    ),
+    params(("store_id" = Uuid, Path, description = "Store ID")),
     responses(
-        (status = 200, description = "Wallet configuration", body = WalletResponse),
+        (status = 200, description = "Resolved wallet", body = StoreWalletResponse),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
-        (status = 404, description = "Store or wallet not found"),
+        (status = 404, description = "Store has no wallet and the account has no primary"),
     )
 )]
 pub async fn get_store_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
-) -> Result<Json<WalletResponse>, StatusCode>
+) -> Result<Json<StoreWalletResponse>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    // Check permission
     let has_permission = state
         .data_service
         .user_has_store_permission(
@@ -366,71 +468,49 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let wallet = StoreWalletReader::get_wallet(&*state.data_service, store_id)
+    let wallet = WalletReader::resolve_store_wallet(&*state.data_service, store_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(WalletResponse {
-        id: wallet.id,
-        store_id: wallet.store_id,
-        xpub_masked: mask_xpub(&wallet.xpub),
-        derivation_index: wallet.derivation_index,
-        name: wallet.name,
-        created_at: wallet.created_at,
+    let is_override = WalletReader::get_store_wallet_override(&*state.data_service, store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_some();
+
+    Ok(Json(StoreWalletResponse {
+        store_id,
+        wallet: wallet.into(),
+        is_override,
     }))
 }
 
-/// Configure wallet for a store.
-///
-/// Provide an extended public key (xpub) to enable payment address derivation.
+/// Pin a store to one of the account's wallets.
 #[utoipa::path(
     put,
     path = "/stores/{store_id}/wallet",
     tag = "stores",
     security(("bearer_auth" = [])),
-    params(
-        ("store_id" = Uuid, Path, description = "Store ID")
-    ),
-    request_body = ConfigureWalletRequest,
+    params(("store_id" = Uuid, Path, description = "Store ID")),
+    request_body = SetStoreWalletRequest,
     responses(
-        (status = 200, description = "Wallet configured", body = WalletResponse),
-        (status = 400, description = "Invalid xpub"),
+        (status = 200, description = "Override set", body = StoreWalletResponse),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
-        (status = 404, description = "Store not found"),
+        (status = 404, description = "Store or wallet not found"),
     )
 )]
 pub async fn configure_store_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
-    Json(req): Json<ConfigureWalletRequest>,
-) -> Result<Json<WalletResponse>, StatusCode>
+    Json(req): Json<SetStoreWalletRequest>,
+) -> Result<Json<StoreWalletResponse>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    // Check permission
-    let has_permission = state
-        .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(store_id),
-            "ethpay.store.canmodifystoresettings",
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    require_store_settings_permission(&state, &user, store_id).await?;
 
-    if !has_permission {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    // Validate xpub
-    if !validate_xpub(&req.xpub) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Verify store exists
     let _ = state
         .data_service
         .get_store(StoreId(store_id))
@@ -438,39 +518,43 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let wallet = StoreWalletWriter::upsert_wallet(
-        &*state.data_service,
-        store_id,
-        &req.xpub,
-        req.name.as_deref(),
-    )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // The repository refuses a wallet belonging to another account, so no
+    // ownership check is duplicated here.
+    WalletWriter::set_store_wallet(&*state.data_service, store_id, req.wallet_id)
+        .await
+        .map_err(|e| match e {
+            data_service::RepositoryError::NotFound(_) => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
 
-    Ok(Json(WalletResponse {
-        id: wallet.id,
-        store_id: wallet.store_id,
-        xpub_masked: mask_xpub(&wallet.xpub),
-        derivation_index: wallet.derivation_index,
-        name: wallet.name,
-        created_at: wallet.created_at,
+    let wallet = WalletReader::get_wallet(&*state.data_service, req.wallet_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(StoreWalletResponse {
+        store_id,
+        wallet: wallet.into(),
+        is_override: true,
     }))
 }
 
-/// Delete wallet configuration for a store.
+/// Drop a store's override so it follows the account primary again.
+///
+/// This no longer deletes a wallet - it only stops pinning one. The xpub, its
+/// counter and the addresses derived from it are untouched, which is the point:
+/// under the old per-store wallet, "delete" destroyed the counter and the next
+/// configuration started again at index 0.
 #[utoipa::path(
     delete,
     path = "/stores/{store_id}/wallet",
     tag = "stores",
     security(("bearer_auth" = [])),
-    params(
-        ("store_id" = Uuid, Path, description = "Store ID")
-    ),
+    params(("store_id" = Uuid, Path, description = "Store ID")),
     responses(
-        (status = 204, description = "Wallet deleted"),
+        (status = 204, description = "Override cleared"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
-        (status = 404, description = "Wallet not found"),
     )
 )]
 pub async fn delete_store_wallet<A>(
@@ -481,27 +565,11 @@ pub async fn delete_store_wallet<A>(
 where
     A: SessionService + 'static,
 {
-    // Check permission
-    let has_permission = state
-        .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(store_id),
-            "ethpay.store.canmodifystoresettings",
-        )
+    require_store_settings_permission(&state, &user, store_id).await?;
+
+    WalletWriter::clear_store_wallet(&*state.data_service, store_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if !has_permission {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    StoreWalletWriter::delete_wallet(&*state.data_service, store_id)
-        .await
-        .map_err(|e| match e {
-            data_service::RepositoryError::NotFound(_) => StatusCode::NOT_FOUND,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -551,19 +619,23 @@ pub struct RotateWalletResponse {
     pub rotations: Vec<RotationEntry>,
 }
 
-/// Rotate wallet xpub for a store.
+/// Rotate the xpub a store's payment methods derive from.
 ///
-/// Replaces the xpub on all payment methods for this store, resetting derivation
-/// indices to zero. Old addresses remain watched until their parent invoices
-/// resolve. A rotation history record is kept for each payment method.
+/// Points every payment method for this store at the account wallet holding
+/// the new xpub, creating it if the account does not already have it. Old
+/// addresses remain watched until their parent invoices resolve, and a
+/// rotation record is kept per payment method.
+///
+/// Note what no longer happens: derivation indices are not reset to zero. The
+/// destination wallet carries its own position, so an xpub the account has
+/// used before resumes where it left off instead of re-issuing addresses that
+/// may already hold funds (RCS-234).
 #[utoipa::path(
     post,
     path = "/stores/{store_id}/wallet/rotate",
     tag = "stores",
     security(("bearer_auth" = [])),
-    params(
-        ("store_id" = Uuid, Path, description = "Store ID")
-    ),
+    params(("store_id" = Uuid, Path, description = "Store ID")),
     request_body = RotateWalletRequest,
     responses(
         (status = 200, description = "Wallet rotated", body = RotateWalletResponse),

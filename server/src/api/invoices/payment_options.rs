@@ -68,7 +68,7 @@ async fn build_one_payment_option<A: SessionService>(
     rate_str: Option<String>,
     rate_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<PaymentOptionData, (StatusCode, Json<serde_json::Value>)> {
-    let address = derive_payment_address(state, payment_method).await?;
+    let (address, derivation_index) = derive_payment_address(state, payment_method).await?;
     let payment_address = address.to_string();
 
     // Create payment option with calculated amount and rate
@@ -84,6 +84,11 @@ async fn build_one_payment_option<A: SessionService>(
         token_address: payment_method.token_address.clone(),
         decimals: payment_method.decimals,
         payment_address: payment_address.clone(),
+        // Record which key produced this address and at what index (RCS-234).
+        // The address alone no longer implies a wallet now that stores can
+        // share one.
+        wallet_id: Some(payment_method.wallet_id),
+        derivation_index: Some(derivation_index),
         amount: crypto_amount,
         rate: rate_str,
         rate_at,
@@ -152,11 +157,15 @@ async fn build_one_payment_option<A: SessionService>(
 /// Kept separate from `build_one_payment_option` so index allocation and key
 /// derivation — the two steps that must not silently reuse an address — read
 /// as one unit.
+///
+/// Returns the address and the index it came from; the index is recorded on
+/// the payment option so the pairing can be audited later (RCS-234).
 async fn derive_payment_address<A: SessionService>(
     state: &PgAppState<A>,
     payment_method: &data_service::StorePaymentMethod,
-) -> Result<Address, (StatusCode, Json<serde_json::Value>)> {
-    // Get and increment derivation index for this payment method
+) -> Result<(Address, i32), (StatusCode, Json<serde_json::Value>)> {
+    // Take the next index from the method's wallet. The counter lives there,
+    // so two methods on one xpub cannot both be handed the same one.
     let index =
         StorePaymentMethodWriter::next_derivation_index(&*state.data_service, payment_method.id)
             .await
@@ -184,5 +193,5 @@ async fn derive_payment_address<A: SessionService>(
         )
     })?;
 
-    Ok(address)
+    Ok((address, index))
 }

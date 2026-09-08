@@ -105,11 +105,6 @@ pub use types::{
     StoreTokenPolicyRepository,
     StoreTokenPolicyWithEntries,
     StoreTokenPolicyWriter,
-    // Store Wallet (deprecated)
-    StoreWallet,
-    StoreWalletReader,
-    StoreWalletRepository,
-    StoreWalletWriter,
     // Store Webhook
     StoreWebhook,
     StoreWebhookReader,
@@ -123,6 +118,11 @@ pub use types::{
     TokenReader,
     TokenRepository,
     TokenWriter,
+    // Account Wallet (RCS-234)
+    Wallet,
+    WalletReader,
+    WalletRepository,
+    WalletWriter,
     WatchedAddressReader,
     WatchedAddressRepository,
     WatchedAddressWriter,

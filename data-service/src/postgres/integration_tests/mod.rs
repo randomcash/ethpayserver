@@ -9,11 +9,15 @@
 //! - `watched_address`: Watched address management tests
 //! - `aggregation`: Multi-currency payment aggregation E2E tests
 //! - `analytics`: Dashboard payment-volume aggregation (RCS-225)
+//! - `wallet`: Account wallet derivation and store resolution (RCS-234)
+//! - `wallet_migration`: the RCS-234 migration run over old-shape data
 
 mod aggregation;
 mod analytics;
 mod invoice;
 mod payment;
+mod wallet;
+mod wallet_migration;
 mod watched_address;
 
 use chrono::Utc;
@@ -41,6 +45,8 @@ pub(crate) fn test_payment_option(
         token_address: None,
         decimals: 18,
         payment_address: format!("0x{:040x}", uuid::Uuid::new_v4().as_u128()),
+        wallet_id: None,
+        derivation_index: None,
         amount: "1000000000000000000".to_string(),
         rate: None,
         rate_at: None,
@@ -68,6 +74,8 @@ pub(crate) fn test_payment_option_with_rate(
         token_address,
         decimals,
         payment_address: format!("0x{:040x}", uuid::Uuid::new_v4().as_u128()),
+        wallet_id: None,
+        derivation_index: None,
         amount: amount.to_string(),
         rate,
         rate_at: Some(Utc::now()),

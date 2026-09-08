@@ -65,7 +65,10 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::delete_store_wallet,
         stores::rotate_store_wallet,
         stores::list_wallets,
+        stores::create_wallet,
         stores::get_wallet_by_id,
+        stores::update_wallet,
+        stores::delete_wallet,
         stores::export_wallet_xpub,
         stores::list_wallet_addresses,
         stores::get_store_webhook,
@@ -121,7 +124,10 @@ pub use extractors::{AdminAuth, AuthenticatedUser};
         stores::AddMemberRequest,
         stores::UpdateMemberRequest,
         stores::MemberResponse,
-        stores::ConfigureWalletRequest,
+        stores::CreateWalletRequest,
+        stores::UpdateWalletRequest,
+        stores::SetStoreWalletRequest,
+        stores::StoreWalletResponse,
         stores::WalletResponse,
         stores::WalletXpubResponse,
         stores::DerivedAddressEntry,
@@ -279,7 +285,10 @@ where
     // Wallet endpoints (cross-store)
     let wallet_routes = Router::new()
         .route("/", get(stores::list_wallets::<A>))
+        .route("/", post(stores::create_wallet::<A>))
         .route("/{wallet_id}", get(stores::get_wallet_by_id::<A>))
+        .route("/{wallet_id}", patch(stores::update_wallet::<A>))
+        .route("/{wallet_id}", delete(stores::delete_wallet::<A>))
         .route("/{wallet_id}/xpub", get(stores::export_wallet_xpub::<A>))
         .route(
             "/{wallet_id}/addresses",

@@ -153,6 +153,8 @@ impl EthpayMcpServer {
                 token_address: pm.token_address.clone(),
                 decimals: pm.decimals,
                 payment_address: payment_address.clone(),
+                wallet_id: Some(pm.wallet_id),
+                derivation_index: Some(index),
                 amount: crypto_amount,
                 rate: rate_str,
                 rate_at,
