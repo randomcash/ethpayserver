@@ -8,7 +8,7 @@ use crate::api::EvmApiClient;
 use crate::components::CreateInvoiceSignal;
 use crate::services::ConnectionState;
 
-use super::icons::{IconBell, IconLogout, IconMenu, IconSearch, IconSettings, IconUser};
+use super::icons::{IconBell, IconLogout, IconMenu, IconSettings, IconUser};
 
 /// Main header with search and actions.
 #[component]
@@ -64,10 +64,6 @@ where
                     <button class="mobile-menu-toggle" on:click=on_menu_click>
                         <IconMenu />
                     </button>
-                    <div class="main-header-search">
-                        <IconSearch />
-                        <input type="text" placeholder="Search invoices, payments..." />
-                    </div>
                 </div>
 
                 <div class="main-header-actions">
