@@ -2,8 +2,10 @@
 //!
 //! Wallets belong to the account, not to a store (RCS-234). A store derives
 //! from its own override if it has been given one, and from the account
-//! primary otherwise; the fallback is resolved in the repository so no handler
-//! can spell it differently.
+//! primary otherwise. That resolution is not cosmetic: it is the same
+//! expression address allocation evaluates, spelled once in the repository, so
+//! what these endpoints report is by construction where the next payment will
+//! actually be collected.
 
 use axum::{
     Json,
@@ -486,6 +488,14 @@ where
 }
 
 /// Pin a store to one of the account's wallets.
+///
+/// This moves where the store's money goes. Its payment methods stop deriving
+/// from whatever key each was configured with and follow this wallet, so the
+/// next invoice is paid to an address derived from it. Addresses already issued
+/// are untouched and stay watched - in-flight invoices still resolve.
+///
+/// Nothing is reset: the destination wallet keeps its own counter, so no
+/// address it has already produced is issued again.
 #[utoipa::path(
     put,
     path = "/stores/{store_id}/wallet",
@@ -545,6 +555,9 @@ where
 /// counter and the addresses derived from it are untouched, which is the point:
 /// under the old per-store wallet, "delete" destroyed the counter and the next
 /// configuration started again at index 0.
+///
+/// Like `PUT`, this moves where money goes: the store's payment methods are
+/// released, so the next invoice derives from the account primary.
 #[utoipa::path(
     delete,
     path = "/stores/{store_id}/wallet",
@@ -679,14 +692,17 @@ where
     }
 
     // Reject if all methods already use this xpub (pointless rotation)
-    if methods.iter().all(|m| m.xpub == req.xpub) {
+    if methods
+        .iter()
+        .all(|m| m.xpub.as_deref() == Some(req.xpub.as_str()))
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Rotate each payment method that has a different xpub
     let mut rotations = Vec::new();
     for method in &methods {
-        if method.xpub == req.xpub {
+        if method.xpub.as_deref() == Some(req.xpub.as_str()) {
             continue;
         }
 

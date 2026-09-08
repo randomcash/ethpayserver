@@ -65,7 +65,12 @@ impl PgDataService {
             r#"
             SELECT w.id AS wallet_id, w.xpub, w.derivation_index
             FROM store_payment_methods pm
-            JOIN wallets w ON w.id = pm.wallet_id
+            JOIN stores s ON s.id = pm.store_id
+            JOIN wallets w ON w.id = COALESCE(
+                pm.wallet_id,
+                (SELECT sw.wallet_id FROM store_wallets sw WHERE sw.store_id = s.id),
+                (SELECT p.id FROM wallets p WHERE p.user_id = s.owner_id AND p.is_primary)
+            )
             WHERE pm.id = $1 AND pm.store_id = $2
             FOR UPDATE OF w
             "#,
@@ -79,31 +84,16 @@ impl PgDataService {
         let current = current
             .ok_or_else(|| crate::RepositoryError::NotFound("payment method not found".into()))?;
 
+        let previous_wallet_id: Uuid = current.get("wallet_id");
         let previous_xpub: String = current.get("xpub");
         let previous_derivation_index: i32 = current.get("derivation_index");
 
-        // Find or create the account wallet for the new key. Same find-or-
-        // create as configuring a method: rotating two methods onto one new
-        // xpub must land them on one wallet, not two counters.
-        let new_wallet = sqlx::query(
-            r#"
-            INSERT INTO wallets (user_id, xpub, is_primary)
-            SELECT s.owner_id, $2, NOT EXISTS (
-                SELECT 1 FROM wallets WHERE user_id = s.owner_id
-            )
-            FROM stores s WHERE s.id = $1
-            ON CONFLICT (user_id, xpub) DO UPDATE SET xpub = EXCLUDED.xpub
-            RETURNING id
-            "#,
-        )
-        .bind(store_id)
-        .bind(new_xpub)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(sqlx_to_repo_error)?
-        .ok_or_else(|| crate::RepositoryError::NotFound("store not found".into()))?;
-
-        let new_wallet_id: Uuid = new_wallet.get("id");
+        // Find or create the account wallet for the new key, through the same
+        // path that configuring a method uses - so rotating two methods onto
+        // one new xpub lands them on one wallet, and rotating onto a key
+        // another account already holds is refused rather than silently
+        // creating a second counter on it.
+        let new_wallet_id = self.wallet_for_store_xpub(store_id, new_xpub).await?;
 
         // Insert rotation record
         let rotation_row = sqlx::query(
@@ -135,6 +125,26 @@ impl PgDataService {
         )
         .bind(new_wallet_id)
         .bind(payment_method_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        // Move the store's override too, if it still names the key being
+        // rotated away from. Leaving it behind points the store at the xpub
+        // that was just declared compromised, so any method that is not pinned
+        // - and every method becomes unpinned the moment someone uses
+        // `PUT /stores/{id}/wallet` - would resolve straight back to it. The
+        // rotation would look complete and change nothing.
+        sqlx::query(
+            r#"
+            UPDATE store_wallets
+            SET wallet_id = $1
+            WHERE store_id = $2 AND wallet_id = $3
+            "#,
+        )
+        .bind(new_wallet_id)
+        .bind(store_id)
+        .bind(previous_wallet_id)
         .execute(&mut *tx)
         .await
         .map_err(sqlx_to_repo_error)?;

@@ -55,10 +55,12 @@ pub struct PaymentMethodResponse {
     pub token_address: Option<String>,
     /// Asset symbol.
     pub asset_symbol: String,
-    /// Extended public key (masked).
-    pub xpub_masked: String,
-    /// Current derivation index.
-    pub derivation_index: i32,
+    /// Extended public key of the wallet this method resolves to (masked).
+    /// Null when nothing resolves - no pin, no store override, no account
+    /// primary - which means the method cannot be paid yet.
+    pub xpub_masked: Option<String>,
+    /// Next derivation index on the resolved wallet. Null for the same reason.
+    pub derivation_index: Option<i32>,
     /// Whether the payment method is enabled.
     pub enabled: bool,
     /// Creation timestamp.
@@ -73,7 +75,7 @@ impl From<StorePaymentMethod> for PaymentMethodResponse {
             chain_id: pm.chain_id,
             token_address: pm.token_address,
             asset_symbol: pm.asset_symbol,
-            xpub_masked: mask_xpub(&pm.xpub),
+            xpub_masked: pm.xpub.as_deref().map(mask_xpub),
             derivation_index: pm.derivation_index,
             enabled: pm.enabled,
             created_at: pm.created_at,

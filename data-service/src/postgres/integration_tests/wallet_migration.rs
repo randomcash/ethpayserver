@@ -471,3 +471,161 @@ async fn down_migration_reverses_when_no_wallet_is_shared() {
 
     drop_db(pool, &name, &server).await;
 }
+
+/// One xpub spread across two accounts must not produce two counters that
+/// overlap.
+///
+/// Ownership of a shared key cannot be arbitrated, so each account keeps its
+/// own wallet row. If each of those started at its own owner's high-water mark,
+/// the lower one would issue straight through the range the other has already
+/// spent - collisions the migration itself created, on top of any it inherited.
+#[tokio::test]
+#[ignore]
+async fn migration_does_not_create_new_collisions_across_accounts() {
+    let Some((pool, name, server)) = pre_migration_db("crossaccount").await else {
+        return;
+    };
+
+    const SHARED: &str = "xpub-two-owners";
+    let (_owner_a, store_a) = seed_store(&pool, "a").await;
+    let (_owner_b, store_b) = seed_store(&pool, "b").await;
+
+    // Owner A is far along on the key; owner B has barely used it.
+    seed_method(&pool, store_a, 1, None, "ETH", SHARED, 9).await;
+    seed_method(&pool, store_b, 1, None, "ETH", SHARED, 3).await;
+
+    pool.execute(migration_sql(MIGRATION).as_str())
+        .await
+        .expect("apply RCS-234");
+
+    let indices: Vec<i32> = sqlx::query(
+        "SELECT derivation_index FROM wallets WHERE xpub = $1 ORDER BY derivation_index",
+    )
+    .bind(SHARED)
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| r.get("derivation_index"))
+    .collect();
+
+    assert_eq!(
+        indices.len(),
+        2,
+        "a key shared by two accounts stays two wallets - there is no correct \
+         owner to award it to"
+    );
+    assert_eq!(
+        indices,
+        vec![9, 9],
+        "both wallets must start at the global high-water mark for the key. \
+         Leaving owner B at 3 makes it issue 3..9, every one of which owner A \
+         has already given to a customer"
+    );
+
+    drop_db(pool, &name, &server).await;
+}
+
+/// The down migration refuses when a counter has nowhere to land.
+///
+/// A wallet at a non-zero index whose payment method was deleted passes a guard
+/// that only looks at sharing. Dropping it loses the counter, and re-adding the
+/// xpub starts at 0 and re-issues everything it already produced.
+#[tokio::test]
+#[ignore]
+async fn down_migration_refuses_to_strand_a_counter() {
+    let Some((pool, name, server)) = pre_migration_db("downstranded").await else {
+        return;
+    };
+
+    let (_, store) = seed_store(&pool, "s").await;
+    let method = seed_method(&pool, store, 1, None, "ETH", "xpub-stranded", 50).await;
+
+    pool.execute(migration_sql(MIGRATION).as_str())
+        .await
+        .expect("apply RCS-234");
+
+    // The method goes away; the wallet and its counter remain.
+    sqlx::query("DELETE FROM store_wallets WHERE store_id = $1")
+        .bind(store)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM store_payment_methods WHERE id = $1")
+        .bind(method)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let down = std::fs::read_to_string(migrations_dir().join(format!("{MIGRATION}.down.sql")))
+        .expect("read down migration");
+    let err = pool
+        .execute(down.as_str())
+        .await
+        .expect_err("a counter with nowhere to land must stop the reversal");
+    assert!(
+        err.to_string().contains("no payment method to carry"),
+        "the refusal must name the reason: {err}"
+    );
+
+    drop_db(pool, &name, &server).await;
+}
+
+/// Duplicate native-asset methods are collapsed, and their rotation history
+/// survives on the row that remains.
+#[tokio::test]
+#[ignore]
+async fn migration_collapses_duplicate_native_methods_keeping_audit() {
+    let Some((pool, name, server)) = pre_migration_db("native").await else {
+        return;
+    };
+
+    let (_, store) = seed_store(&pool, "n").await;
+    // Two ETH-on-mainnet rows: impossible to prevent before RCS-234, because
+    // token_address is NULL and the composite unique index cannot see them.
+    let older = seed_method(&pool, store, 1, None, "ETH", "xpub-native-a", 4).await;
+    let newer = seed_method(&pool, store, 1, None, "ETH", "xpub-native-b", 2).await;
+
+    sqlx::query(
+        "INSERT INTO wallet_rotations \
+         (store_id, previous_xpub, new_xpub, payment_method_id, previous_derivation_index) \
+         VALUES ($1, 'old', 'new', $2, 1)",
+    )
+    .bind(store)
+    .bind(newer)
+    .execute(&pool)
+    .await
+    .expect("seed rotation history on the row that will be collapsed");
+
+    pool.execute(migration_sql(MIGRATION).as_str())
+        .await
+        .expect("apply RCS-234");
+
+    let surviving: Vec<uuid::Uuid> = sqlx::query(
+        "SELECT id FROM store_payment_methods WHERE store_id = $1 AND token_address IS NULL",
+    )
+    .bind(store)
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| r.get("id"))
+    .collect();
+    assert_eq!(surviving, vec![older], "the oldest row survives");
+
+    let audit: i64 =
+        sqlx::query("SELECT COUNT(*) AS c FROM wallet_rotations WHERE payment_method_id = $1")
+            .bind(older)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("c");
+    assert_eq!(
+        audit, 1,
+        "rotation history must be repointed onto the survivor - the FK is ON \
+         DELETE CASCADE, so deleting the duplicate outright destroys the audit \
+         trail of a key that was rotated for a reason"
+    );
+
+    drop_db(pool, &name, &server).await;
+}

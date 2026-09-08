@@ -100,10 +100,10 @@ fn test_payment_method_response_native() {
         chain_id: 1,
         token_address: None,
         asset_symbol: "ETH".to_string(),
-        wallet_id: Uuid::new_v4(),
+        wallet_id: Some(Uuid::new_v4()),
         decimals: 18,
-        xpub: "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string(),
-        derivation_index: 5,
+        xpub: Some("xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string()),
+        derivation_index: Some(5),
         enabled: true,
         created_at: Utc::now(),
     };
@@ -112,9 +112,9 @@ fn test_payment_method_response_native() {
     assert_eq!(response.chain_id, 1);
     assert_eq!(response.asset_symbol, "ETH");
     assert!(response.token_address.is_none());
-    assert_eq!(response.derivation_index, 5);
+    assert_eq!(response.derivation_index, Some(5));
     assert!(response.enabled);
-    assert!(response.xpub_masked.contains("..."));
+    assert!(response.xpub_masked.unwrap().contains("..."));
 }
 
 #[test]
@@ -126,10 +126,10 @@ fn test_payment_method_response_erc20() {
         chain_id: 137,
         token_address: Some(token_addr.clone()),
         asset_symbol: "USDC".to_string(),
-        wallet_id: Uuid::new_v4(),
+        wallet_id: Some(Uuid::new_v4()),
         decimals: 6,
-        xpub: "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string(),
-        derivation_index: 0,
+        xpub: Some("xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string()),
+        derivation_index: Some(0),
         enabled: false,
         created_at: Utc::now(),
     };

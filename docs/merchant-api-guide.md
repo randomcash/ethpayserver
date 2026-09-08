@@ -166,6 +166,16 @@ curl -X PUT https://your-instance.example.com/stores/{store_id}/wallet \
 primary again. It does not delete the wallet, and no derivation counter is
 reset.
 
+Both calls change where money actually goes: the store's payment methods are
+released from whatever key they were configured with and follow the store from
+then on, so the next invoice is paid to an address derived from the wallet you
+named. Addresses already issued keep working - in-flight invoices still resolve
+on them.
+
+An xpub can belong to only one account. Registering one another merchant has
+already added returns `409 Conflict`, because two accounts deriving from one
+key would hand the same addresses to both their customers.
+
 The xpub must be at the BIP-44 account level (`m/44'/60'/0'`). Payment
 addresses are derived at `m/44'/60'/0'/0/{index}`.
 

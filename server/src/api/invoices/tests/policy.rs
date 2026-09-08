@@ -10,10 +10,10 @@ fn make_pm(chain_id: u64, token_address: Option<&str>) -> data_service::StorePay
         chain_id,
         token_address: token_address.map(String::from),
         asset_symbol: "TEST".to_string(),
-        wallet_id: uuid::Uuid::new_v4(),
+        wallet_id: Some(uuid::Uuid::new_v4()),
         decimals: 18,
-        xpub: "xpub_test".to_string(),
-        derivation_index: 0,
+        xpub: Some("xpub_test".to_string()),
+        derivation_index: Some(0),
         enabled: true,
         created_at: chrono::Utc::now(),
     }

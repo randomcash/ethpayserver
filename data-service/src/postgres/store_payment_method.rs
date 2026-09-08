@@ -5,23 +5,36 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::PgDataService;
+use super::wallet::STORE_WALLET_RESOLUTION;
 use crate::{RepositoryError, RepositoryResult, sqlx_to_repo_error};
-use types::StorePaymentMethod;
+use types::{DerivationAllocation, StorePaymentMethod};
 use types::{StorePaymentMethodReader, StorePaymentMethodWriter};
 
 /// The projection every read uses.
 ///
-/// `xpub` and `derivation_index` come from `wallets`, not from the payment
-/// method: since RCS-234 the method only points at a wallet. Reading them
-/// through this join is what keeps `StorePaymentMethod` the same shape for
-/// callers while making it impossible for two methods on one key to disagree
-/// about how far the counter has got.
+/// `wallet_id`, `xpub` and `derivation_index` are the *resolved* wallet's, not
+/// the method's: since RCS-234 the method holds at most a pin, and the key it
+/// actually derives from is found by walking pin, store override, account
+/// primary. Reading through that walk is what stops a caller rendering one key
+/// while payments are collected on another.
 const METHOD_COLUMNS: &str = "pm.id, pm.store_id, pm.chain_id, pm.token_address, \
-     pm.asset_symbol, pm.decimals, pm.wallet_id, w.xpub, w.derivation_index, \
+     pm.asset_symbol, pm.decimals, w.id AS wallet_id, w.xpub, w.derivation_index, \
      pm.enabled, pm.created_at";
 
-/// `FROM` clause pairing a payment method with its wallet.
-const METHOD_FROM: &str = "FROM store_payment_methods pm JOIN wallets w ON w.id = pm.wallet_id";
+/// `FROM` clause resolving a payment method to the wallet it derives from.
+///
+/// LEFT JOIN, not JOIN: a method whose chain runs out - no pin, no store
+/// override, no account primary - must still be listed. It exists and simply
+/// cannot be paid yet, which is a state the settings UI has to be able to show.
+/// An inner join would silently hide it, and a merchant would be left looking
+/// for a payment method they can see they created.
+fn method_from() -> String {
+    format!(
+        "FROM store_payment_methods pm \
+         JOIN stores s ON s.id = pm.store_id \
+         LEFT JOIN wallets w ON w.id = COALESCE(pm.wallet_id, {STORE_WALLET_RESOLUTION})"
+    )
+}
 
 fn row_to_payment_method(row: &sqlx::postgres::PgRow) -> StorePaymentMethod {
     let decimals: i16 = row.get("decimals");
@@ -47,8 +60,8 @@ impl StorePaymentMethodReader for PgDataService {
         store_id: Uuid,
     ) -> RepositoryResult<Vec<StorePaymentMethod>> {
         let rows = sqlx::query(&format!(
-            "SELECT {METHOD_COLUMNS} {METHOD_FROM} \
-             WHERE pm.store_id = $1 ORDER BY pm.created_at"
+            "SELECT {METHOD_COLUMNS} {} WHERE pm.store_id = $1 ORDER BY pm.created_at",
+            method_from()
         ))
         .bind(store_id)
         .fetch_all(&self.pool)
@@ -63,8 +76,9 @@ impl StorePaymentMethodReader for PgDataService {
         store_id: Uuid,
     ) -> RepositoryResult<Vec<StorePaymentMethod>> {
         let rows = sqlx::query(&format!(
-            "SELECT {METHOD_COLUMNS} {METHOD_FROM} \
-             WHERE pm.store_id = $1 AND pm.enabled = true ORDER BY pm.created_at"
+            "SELECT {METHOD_COLUMNS} {} \
+             WHERE pm.store_id = $1 AND pm.enabled = true ORDER BY pm.created_at",
+            method_from()
         ))
         .bind(store_id)
         .fetch_all(&self.pool)
@@ -76,7 +90,8 @@ impl StorePaymentMethodReader for PgDataService {
 
     async fn get_payment_method(&self, id: Uuid) -> RepositoryResult<Option<StorePaymentMethod>> {
         let row = sqlx::query(&format!(
-            "SELECT {METHOD_COLUMNS} {METHOD_FROM} WHERE pm.id = $1"
+            "SELECT {METHOD_COLUMNS} {} WHERE pm.id = $1",
+            method_from()
         ))
         .bind(id)
         .fetch_optional(&self.pool)
@@ -95,8 +110,9 @@ impl StorePaymentMethodReader for PgDataService {
         let row = match token_address {
             Some(addr) => {
                 sqlx::query(&format!(
-                    "SELECT {METHOD_COLUMNS} {METHOD_FROM} \
-                     WHERE pm.store_id = $1 AND pm.chain_id = $2 AND pm.token_address = $3"
+                    "SELECT {METHOD_COLUMNS} {} \
+                     WHERE pm.store_id = $1 AND pm.chain_id = $2 AND pm.token_address = $3",
+                    method_from()
                 ))
                 .bind(store_id)
                 .bind(chain_id as i64)
@@ -106,8 +122,9 @@ impl StorePaymentMethodReader for PgDataService {
             }
             None => {
                 sqlx::query(&format!(
-                    "SELECT {METHOD_COLUMNS} {METHOD_FROM} \
-                     WHERE pm.store_id = $1 AND pm.chain_id = $2 AND pm.token_address IS NULL"
+                    "SELECT {METHOD_COLUMNS} {} \
+                     WHERE pm.store_id = $1 AND pm.chain_id = $2 AND pm.token_address IS NULL",
+                    method_from()
                 ))
                 .bind(store_id)
                 .bind(chain_id as i64)
@@ -126,9 +143,10 @@ impl StorePaymentMethodReader for PgDataService {
         asset_symbol: &str,
     ) -> RepositoryResult<Vec<StorePaymentMethod>> {
         let rows = sqlx::query(&format!(
-            "SELECT {METHOD_COLUMNS} {METHOD_FROM} \
+            "SELECT {METHOD_COLUMNS} {} \
              WHERE pm.store_id = $1 AND pm.asset_symbol = $2 AND pm.enabled = true \
-             ORDER BY pm.created_at"
+             ORDER BY pm.created_at",
+            method_from()
         ))
         .bind(store_id)
         .bind(asset_symbol)
@@ -153,30 +171,46 @@ impl StorePaymentMethodWriter for PgDataService {
     ) -> RepositoryResult<StorePaymentMethod> {
         let wallet_id = self.wallet_for_store_xpub(store_id, xpub).await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO store_payment_methods
-                (store_id, chain_id, token_address, asset_symbol, decimals, wallet_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (store_id, chain_id, token_address) DO UPDATE
-            SET wallet_id = $6, asset_symbol = $4, decimals = $5, enabled = true
-            RETURNING id
-            "#,
-        )
-        .bind(store_id)
-        .bind(chain_id as i64)
-        .bind(token_address)
-        .bind(asset_symbol)
-        .bind(decimals as i16)
-        .bind(wallet_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
+        // Two conflict targets, because the table needs both. The composite
+        // unique index cannot see native assets - token_address is NULL and
+        // NULL is distinct from NULL - so those rely on the partial index
+        // added by RCS-234. Naming the wrong one silently inserts a duplicate
+        // instead of updating, which is how one store ended up with several
+        // ETH methods, each formerly with its own counter.
+        let sql = if token_address.is_some() {
+            "INSERT INTO store_payment_methods
+                 (store_id, chain_id, token_address, asset_symbol, decimals, wallet_id)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (store_id, chain_id, token_address) DO UPDATE
+             SET wallet_id = $6, asset_symbol = $4, decimals = $5, enabled = true
+             RETURNING id"
+        } else {
+            "INSERT INTO store_payment_methods
+                 (store_id, chain_id, token_address, asset_symbol, decimals, wallet_id)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (store_id, chain_id) WHERE token_address IS NULL DO UPDATE
+             SET wallet_id = $6, asset_symbol = $4, decimals = $5, enabled = true
+             RETURNING id"
+        };
 
-        // Re-read through the join rather than RETURNING the inserted row: the
-        // xpub and index the caller expects live on `wallets`, and INSERT ...
-        // RETURNING cannot reach across to them.
-        self.get_payment_method_by_chain(store_id, chain_id, token_address)
+        let id: Uuid = sqlx::query(sql)
+            .bind(store_id)
+            .bind(chain_id as i64)
+            .bind(token_address)
+            .bind(asset_symbol)
+            .bind(decimals as i16)
+            .bind(wallet_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?
+            .get("id");
+
+        // Re-read by the id the write returned, not by (store, chain, token).
+        // The xpub and index the caller expects come from `wallets` and
+        // `INSERT ... RETURNING` cannot reach across the join - but looking the
+        // row back up by its natural key could return a different row than the
+        // one just written wherever that key is not actually unique.
+        self.get_payment_method(id)
             .await?
             .ok_or_else(|| RepositoryError::NotFound("payment method not found".into()))
     }
@@ -200,10 +234,11 @@ impl StorePaymentMethodWriter for PgDataService {
             None => None,
         };
 
-        // Repointing at a different wallet does NOT reset a counter, unlike
-        // the old per-method xpub swap: the new wallet already knows how far
+        // Setting an xpub pins the method to that wallet, overriding whatever
+        // the store resolves to. It does NOT reset a counter, unlike the old
+        // per-method xpub swap: the destination wallet already knows how far
         // its own key has been used, which is the whole reason the counter
-        // moved (RCS-234). Resetting anything here would re-issue addresses.
+        // moved (RCS-234). Resetting here would re-issue addresses.
         sqlx::query(
             r#"
             UPDATE store_payment_methods
@@ -238,63 +273,47 @@ impl StorePaymentMethodWriter for PgDataService {
         Ok(())
     }
 
-    async fn next_derivation_index(&self, id: Uuid) -> RepositoryResult<i32> {
-        // The counter is on the wallet, so the lock is taken on the wallet.
-        // Two payment methods of the same store - ETH and USDC on one xpub,
-        // the ordinary configuration - now contend for one row and get
-        // distinct indices. Before RCS-234 each held its own counter and both
-        // happily returned the same number, which is how one address ended up
-        // serving several methods.
+    async fn allocate_derivation(&self, id: Uuid) -> RepositoryResult<DerivationAllocation> {
+        // Resolve, lock, advance and read the key back - one statement.
         //
-        // Still a single `UPDATE ... RETURNING`: atomic, and never a SELECT
-        // followed by an UPDATE.
-        let row = sqlx::query(
+        // The resolution is inside the UPDATE rather than done first, so the
+        // wallet whose counter moves is by construction the wallet whose xpub
+        // is returned. Reading the method (and its xpub) and then allocating
+        // separately is a duplicate-address bug: a rotation or an override
+        // change committing in between pairs one wallet's key with an index
+        // consumed from another, and the first wallet never advances past that
+        // index, so it hands the same address out again later.
+        //
+        // The row lock `UPDATE` takes on `wallets` also serialises concurrent
+        // allocations, so two invoices on one wallet get different indices.
+        let row = sqlx::query(&format!(
             r#"
             UPDATE wallets w
             SET derivation_index = w.derivation_index + 1
             FROM store_payment_methods pm
-            WHERE pm.id = $1 AND w.id = pm.wallet_id
-            RETURNING w.derivation_index - 1 AS current_index
-            "#,
-        )
+            JOIN stores s ON s.id = pm.store_id
+            WHERE pm.id = $1
+              AND w.id = COALESCE(pm.wallet_id, {STORE_WALLET_RESOLUTION})
+            RETURNING w.id AS wallet_id, w.xpub, w.derivation_index - 1 AS current_index
+            "#
+        ))
         .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;
 
         match row {
-            Some(r) => Ok(r.get("current_index")),
-            None => Err(RepositoryError::NotFound("payment method not found".into())),
+            Some(r) => Ok(DerivationAllocation {
+                wallet_id: r.get("wallet_id"),
+                xpub: r.get("xpub"),
+                index: r.get("current_index"),
+            }),
+            // Either the method is gone, or resolution found nothing: no pin,
+            // no store override, no account primary. Both mean there is no key
+            // to derive from, and inventing one is not an option.
+            None => Err(RepositoryError::NotFound(
+                "payment method has no wallet to derive from".into(),
+            )),
         }
-    }
-}
-
-impl PgDataService {
-    /// Find or create the account wallet holding `xpub` for the store's owner.
-    ///
-    /// Payment methods are still configured by pasting an xpub, so this is
-    /// where that xpub becomes a wallet. Find-or-create, never create blindly:
-    /// a second row for a key the account already holds would be a second
-    /// counter on it (RCS-234).
-    async fn wallet_for_store_xpub(&self, store_id: Uuid, xpub: &str) -> RepositoryResult<Uuid> {
-        let row = sqlx::query(
-            r#"
-            INSERT INTO wallets (user_id, xpub, is_primary)
-            SELECT s.owner_id, $2, NOT EXISTS (
-                SELECT 1 FROM wallets WHERE user_id = s.owner_id
-            )
-            FROM stores s WHERE s.id = $1
-            ON CONFLICT (user_id, xpub) DO UPDATE SET xpub = EXCLUDED.xpub
-            RETURNING id
-            "#,
-        )
-        .bind(store_id)
-        .bind(xpub)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
-        row.map(|r| r.get("id"))
-            .ok_or_else(|| RepositoryError::NotFound("store not found".into()))
     }
 }

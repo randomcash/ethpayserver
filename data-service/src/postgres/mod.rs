@@ -18,7 +18,7 @@ mod store_settings;
 mod store_token_policy;
 mod store_webhook;
 mod token;
-mod wallet;
+pub(crate) mod wallet;
 mod wallet_rotation;
 mod watched_address;
 
