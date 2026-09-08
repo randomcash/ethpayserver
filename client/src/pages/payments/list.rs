@@ -267,8 +267,13 @@ pub fn PaymentsPage() -> impl IntoView {
                                     match new_status.as_str() {
                                         "confirmed" => {
                                             if payment.confirmed_at.is_none() {
+                                                // The websocket patch says
+                                                // "confirmed" without a
+                                                // timestamp; now() is the
+                                                // closest true value, and the
+                                                // next list refresh replaces it.
                                                 payment.confirmed_at =
-                                                    Some(String::new());
+                                                    Some(chrono::Utc::now());
                                             }
                                             payment.reorged = false;
                                         }
@@ -387,7 +392,7 @@ fn PaymentRow(payment: Payment, show_store: bool) -> impl IntoView {
     let network = chain_name(&payment.chain_id).to_string();
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
-    let date_display = format_date(&payment.detected_at);
+    let date_display = format_date(&payment.detected_at.to_rfc3339());
     let invoice_id = truncate_hash(&payment.invoice_id, 8, 4);
     let invoice_link = payment.invoice_id.clone();
     let payment_link = payment.id.clone();
@@ -452,7 +457,7 @@ fn PaymentCard(payment: Payment, show_store: bool) -> impl IntoView {
     let network = chain_name(&payment.chain_id).to_string();
     let status = payment_status(&payment);
     let status_class = payment_status_class(&payment);
-    let date_display = format_date(&payment.detected_at);
+    let date_display = format_date(&payment.detected_at.to_rfc3339());
     let invoice_id = truncate_hash(&payment.invoice_id, 8, 4);
     let invoice_link = payment.invoice_id.clone();
     let payment_link = payment.id.clone();
@@ -521,7 +526,7 @@ mod tests {
             token_address: None,
             block_number: None,
             from_address: None,
-            detected_at: "2024-01-01T00:00:00Z".to_string(),
+            detected_at: "2024-01-01T00:00:00Z".parse().unwrap(),
             confirmed_at: None,
             reorged: false,
             decimals: 18,

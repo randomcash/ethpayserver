@@ -15,6 +15,10 @@ path = "src/main.rs"
 [dependencies]
 # Shared UI components
 ui-kit = { workspace = true, features = ["auth"] }
+# `clock`/`wasmbind` for `Utc::now()` in the browser; nothing else. Default
+# features pull more into a bundle this workspace deliberately keeps small.
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "wasmbind"] }
+api-types = { workspace = true }
 types = { workspace = true }
 
 # Leptos framework

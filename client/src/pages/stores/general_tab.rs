@@ -12,7 +12,7 @@ pub fn GeneralTab(store: Store) -> impl IntoView {
     let api = use_context::<Signal<EvmApiClient>>().expect("EvmApiClient must be provided");
     let store_ctx = use_context::<StoreContext>().expect("StoreContext must be provided");
     let navigate = use_navigate();
-    let store_id = store.id.clone();
+    let store_id = store.id;
 
     let (name, set_name) = signal(store.name.clone());
     let (website, set_website) = signal(store.website.clone().unwrap_or_default());
@@ -20,12 +20,12 @@ pub fn GeneralTab(store: Store) -> impl IntoView {
     let (save_message, set_save_message) = signal(None::<(bool, String)>); // (is_success, message)
     let (deleting, set_deleting) = signal(false);
 
-    let store_id_save = store_id.clone();
+    let store_id_save = store_id;
     let on_save = {
         let store_ctx = store_ctx.clone();
         move |_| {
             let api = api.get();
-            let id = store_id_save.clone();
+            let id = store_id_save;
             let new_name = name.get_untracked();
             let new_website = website.get_untracked();
             let store_ctx = store_ctx.clone();
@@ -40,7 +40,7 @@ pub fn GeneralTab(store: Store) -> impl IntoView {
                         new_website
                     }),
                 };
-                match api.update_store(&id, &req).await {
+                match api.update_store(&id.to_string(), &req).await {
                     Ok(_) => {
                         set_save_message.set(Some((true, "Changes saved".to_string())));
                         store_ctx.refetch_stores();
@@ -52,7 +52,7 @@ pub fn GeneralTab(store: Store) -> impl IntoView {
         }
     };
 
-    let store_id_delete = store_id.clone();
+    let store_id_delete = store_id;
     let on_delete = move |_| {
         let confirmed = web_sys::window()
             .and_then(|w| {
@@ -66,12 +66,12 @@ pub fn GeneralTab(store: Store) -> impl IntoView {
             return;
         }
         let api = api.get();
-        let id = store_id_delete.clone();
+        let id = store_id_delete;
         let navigate = navigate.clone();
         let store_ctx = store_ctx.clone();
         set_deleting.set(true);
         leptos::task::spawn_local(async move {
-            match api.delete_store(&id).await {
+            match api.delete_store(&id.to_string()).await {
                 Ok(_) => {
                     store_ctx.refetch_stores();
                     navigate("/evm/stores", Default::default());

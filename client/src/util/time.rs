@@ -1,9 +1,13 @@
 //! Timestamp parsing and relative-time rendering for API rows.
 //!
-//! The client has no date library — `chrono` is not in the WASM dependency
-//! set — so the two things the UI actually needs from an API timestamp are
-//! implemented here instead of pulling one in. Both are pure functions taking
-//! "now" as an argument so they can be tested without a clock.
+//! Hand-rolled ISO-8601 parsing, kept for the values that still arrive as
+//! text - recovery timestamps, API-key expiry - and for the `js_sys::Date`
+//! interop the countdown needs.
+//!
+//! RCS-242 added `chrono` to this crate, so response fields now arrive already
+//! typed and most callers do not parse at all. Replacing what remains with
+//! `DateTime::parse_from_rfc3339` is a reasonable follow-up; it is left alone
+//! here because these functions are covered by tests this PR does not touch.
 
 /// Parse an RFC 3339 / ISO 8601 timestamp into milliseconds since the Unix
 /// epoch.
@@ -211,4 +215,14 @@ mod tests {
     fn unparseable_input_has_no_relative_form() {
         assert_eq!(relative_time("whenever", 0.0), None);
     }
+}
+
+/// `relative_time` for a value that is already a timestamp.
+///
+/// Since the API contract moved to `api-types`, response fields arrive as
+/// `DateTime<Utc>` rather than ISO strings. The `&str` form stays for the
+/// places that genuinely still hold text (recovery, API-key expiry).
+#[must_use]
+pub fn relative_time_at(at: chrono::DateTime<chrono::Utc>, now_ms: f64) -> Option<String> {
+    relative_time(&at.to_rfc3339(), now_ms)
 }

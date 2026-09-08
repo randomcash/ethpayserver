@@ -20,6 +20,7 @@ crypto = { workspace = true }
 data-service = { path = "../data-service" }
 evm = { path = "../evm", features = ["api", "redis", "sentry-scrub"] }
 rates = { workspace = true }
+api-types = { workspace = true, features = ["openapi"] }
 types = { workspace = true, features = ["openapi"] }
 
 # Web framework

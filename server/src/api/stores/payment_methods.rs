@@ -5,83 +5,19 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::repository::StoreRepository;
 use auth::{SessionService, StoreId};
-use data_service::{self, StorePaymentMethod, StorePaymentMethodReader, StorePaymentMethodWriter};
+use data_service::{self, StorePaymentMethodReader, StorePaymentMethodWriter};
 use evm::validate_xpub;
 
 use super::super::extractors::AuthenticatedUser;
-use super::{ApiErr, mask_xpub, repository_error, require_store_settings_permission};
+use super::{ApiErr, repository_error, require_store_settings_permission};
 use crate::state::PgAppState;
-
-/// Request to create a payment method.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct CreatePaymentMethodRequest {
-    /// Chain ID (e.g., 1 for Ethereum, 137 for Polygon, 11155111 for Sepolia).
-    pub chain_id: String,
-    /// Token address for ERC20 tokens, null for native asset.
-    pub token_address: Option<String>,
-    /// Asset symbol (e.g., ETH, USDC).
-    pub asset_symbol: String,
-    /// Number of decimals for this asset (18 for ETH, 6 for USDC/USDT).
-    pub decimals: u8,
-    /// Extended public key for address derivation.
-    pub xpub: String,
-}
-
-/// Request to update a payment method.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdatePaymentMethodRequest {
-    /// Enable or disable the payment method.
-    pub enabled: Option<bool>,
-    /// Update the xpub.
-    pub xpub: Option<String>,
-}
-
-/// Payment method response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct PaymentMethodResponse {
-    /// Payment method ID.
-    pub id: Uuid,
-    /// Store ID.
-    pub store_id: Uuid,
-    /// Chain ID.
-    pub chain_id: String,
-    /// Token address (null for native asset).
-    pub token_address: Option<String>,
-    /// Asset symbol.
-    pub asset_symbol: String,
-    /// Extended public key of the wallet this method resolves to (masked).
-    /// Null when nothing resolves - no pin, no store override, no account
-    /// primary - which means the method cannot be paid yet.
-    pub xpub_masked: Option<String>,
-    /// Next derivation index on the resolved wallet. Null for the same reason.
-    pub derivation_index: Option<i32>,
-    /// Whether the payment method is enabled.
-    pub enabled: bool,
-    /// Creation timestamp.
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl From<StorePaymentMethod> for PaymentMethodResponse {
-    fn from(pm: StorePaymentMethod) -> Self {
-        Self {
-            id: pm.id,
-            store_id: pm.store_id,
-            chain_id: pm.chain_id.to_string(),
-            token_address: pm.token_address,
-            asset_symbol: pm.asset_symbol,
-            xpub_masked: pm.xpub.as_deref().map(mask_xpub),
-            derivation_index: pm.derivation_index,
-            enabled: pm.enabled,
-            created_at: pm.created_at,
-        }
-    }
-}
+pub use api_types::{
+    CreatePaymentMethodRequest, PaymentMethodResponse, UpdatePaymentMethodRequest,
+};
 
 /// List payment methods for a store.
 #[utoipa::path(
@@ -129,6 +65,7 @@ where
         (status = 201, description = "Payment method created", body = PaymentMethodResponse),
         (status = 409, description = "That xpub is registered to another account"),
         (status = 400, description = "Invalid request"),
+        (status = 422, description = "Malformed body — e.g. a chain id that is not CAIP-2"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "Store not found"),
@@ -150,9 +87,6 @@ where
         return Err(StatusCode::BAD_REQUEST.into());
     }
 
-    let chain_id = types::ChainId::parse(req.chain_id.as_str())
-        .map_err(|_| ApiErr::from(StatusCode::BAD_REQUEST))?;
-
     // Verify store exists
     let _ = state
         .data_service
@@ -164,7 +98,7 @@ where
     let method = StorePaymentMethodWriter::create_payment_method(
         &*state.data_service,
         store_id,
-        &chain_id,
+        &req.chain_id,
         req.token_address.as_deref(),
         &req.asset_symbol,
         req.decimals,
@@ -231,6 +165,7 @@ where
         (status = 200, description = "Payment method updated", body = PaymentMethodResponse),
         (status = 409, description = "That xpub is registered to another account"),
         (status = 400, description = "Invalid request"),
+        (status = 422, description = "Malformed body — e.g. a chain id that is not CAIP-2"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "Payment method not found"),

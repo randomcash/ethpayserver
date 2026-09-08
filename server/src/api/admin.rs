@@ -8,9 +8,8 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use chrono::Utc;
+use serde::Deserialize;
 
 use auth::{
     Role, ServerSettings, ServerSettingsRepository, SessionService, UserId, UserRepository,
@@ -18,61 +17,20 @@ use auth::{
 
 use super::extractors::AdminAuth;
 use crate::state::PgAppState;
+pub use api_types::{
+    AdminUserInfo, ServerSettingsResponse, UpdateRoleRequest, UpdateServerSettingsRequest,
+    UserListResponse,
+};
 
 // ============================================================================
 // Types
 // ============================================================================
-
-/// Paginated user list response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct UserListResponse {
-    pub users: Vec<AdminUserInfo>,
-    pub total: i64,
-    pub offset: i64,
-    pub limit: i64,
-}
-
-/// User info for admin views (excludes sensitive key material).
-#[derive(Debug, Serialize, ToSchema)]
-pub struct AdminUserInfo {
-    pub id: String,
-    pub email: Option<String>,
-    pub primary_wallet_address: Option<String>,
-    pub role: String,
-    pub created_at: DateTime<Utc>,
-    pub last_login_at: Option<DateTime<Utc>>,
-    pub locked_until: Option<DateTime<Utc>>,
-}
 
 /// Query params for user listing.
 #[derive(Debug, Deserialize)]
 pub struct ListUsersParams {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-}
-
-/// Request body for role update.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateRoleRequest {
-    pub role: String,
-}
-
-/// Server settings response (returns defaults if no row).
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ServerSettingsResponse {
-    pub default_confirmations: i32,
-    pub invoice_expiry_minutes: i32,
-    pub rate_limit_rpm: i32,
-    pub enabled_chain_ids: Vec<String>,
-}
-
-/// Request body for updating server settings.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateServerSettingsRequest {
-    pub default_confirmations: i32,
-    pub invoice_expiry_minutes: i32,
-    pub rate_limit_rpm: i32,
-    pub enabled_chain_ids: Vec<String>,
 }
 
 // ============================================================================
@@ -150,6 +108,7 @@ where
     responses(
         (status = 200, description = "Role updated"),
         (status = 400, description = "Invalid role or last admin"),
+        (status = 422, description = "Malformed body — e.g. a chain id that is not CAIP-2"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin access required"),
         (status = 404, description = "User not found"),
@@ -311,11 +270,7 @@ where
         default_confirmations: settings.default_confirmations,
         invoice_expiry_minutes: settings.invoice_expiry_minutes,
         rate_limit_rpm: settings.rate_limit_rpm,
-        enabled_chain_ids: settings
-            .enabled_chain_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
+        enabled_chain_ids: settings.enabled_chain_ids,
     }))
 }
 
@@ -344,15 +299,7 @@ where
         default_confirmations: body.default_confirmations,
         invoice_expiry_minutes: body.invoice_expiry_minutes,
         rate_limit_rpm: body.rate_limit_rpm,
-        enabled_chain_ids: body
-            .enabled_chain_ids
-            .iter()
-            .map(|c| types::ChainId::parse(c.as_str()))
-            .collect::<Result<Vec<_>, _>>()
-            // A malformed identifier is the caller's mistake, not a server
-            // fault. The database would reject it anyway via the `caip2`
-            // domain, but a 400 here says so plainly.
-            .map_err(|_| StatusCode::BAD_REQUEST)?,
+        enabled_chain_ids: body.enabled_chain_ids,
     };
 
     state
@@ -368,6 +315,7 @@ where
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use types::ChainId;
 
     #[test]
     fn test_user_list_response_serialization() {
@@ -396,7 +344,7 @@ mod tests {
             default_confirmations: 3,
             invoice_expiry_minutes: 60,
             rate_limit_rpm: 100,
-            enabled_chain_ids: vec!["eip155:1".to_string(), "eip155:137".to_string()],
+            enabled_chain_ids: vec![ChainId::evm(1), ChainId::evm(137)],
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["default_confirmations"], 3);

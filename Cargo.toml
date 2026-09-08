@@ -17,11 +17,12 @@ resolver = "3"
 # `scripts/commons.sh link`, which writes an uncommitted `.cargo/config.toml`
 # patch. To move the pin, `scripts/commons.sh pin <rev>`.
 [workspace.dependencies]
-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "eada8a8580811e4a9dc441abc1dedbc3f6863b96" }
-auth = { git = "https://github.com/randomcash/payserver-commons.git", rev = "eada8a8580811e4a9dc441abc1dedbc3f6863b96" }
-crypto = { git = "https://github.com/randomcash/payserver-commons.git", rev = "eada8a8580811e4a9dc441abc1dedbc3f6863b96" }
-rates = { git = "https://github.com/randomcash/payserver-commons.git", rev = "eada8a8580811e4a9dc441abc1dedbc3f6863b96" }
-ui-kit = { git = "https://github.com/randomcash/payserver-commons.git", rev = "eada8a8580811e4a9dc441abc1dedbc3f6863b96" }
+api-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "50dc9e10d017cf7343d0138b6bbd191f327c93de" }
+types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "50dc9e10d017cf7343d0138b6bbd191f327c93de" }
+auth = { git = "https://github.com/randomcash/payserver-commons.git", rev = "50dc9e10d017cf7343d0138b6bbd191f327c93de" }
+crypto = { git = "https://github.com/randomcash/payserver-commons.git", rev = "50dc9e10d017cf7343d0138b6bbd191f327c93de" }
+rates = { git = "https://github.com/randomcash/payserver-commons.git", rev = "50dc9e10d017cf7343d0138b6bbd191f327c93de" }
+ui-kit = { git = "https://github.com/randomcash/payserver-commons.git", rev = "50dc9e10d017cf7343d0138b6bbd191f327c93de" }
 
 # Size-optimize the WASM client only. Scoped to this package (not a
 # workspace-wide `[profile.release]`) so the server / monitor / migrate

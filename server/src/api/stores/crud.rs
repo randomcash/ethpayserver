@@ -5,8 +5,6 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::repository::{StoreRepository, StoreRoleRepository, UserStoreRepository};
@@ -15,52 +13,22 @@ use auth::{SessionService, Store, StoreId};
 use super::super::extractors::AuthenticatedUser;
 use crate::metrics;
 use crate::state::PgAppState;
+pub use api_types::{CreateStoreRequest, StoreResponse, UpdateStoreRequest};
 
-/// Request to create a new store.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct CreateStoreRequest {
-    /// Store name.
-    pub name: String,
-    /// Optional website URL.
-    pub website: Option<String>,
-}
-
-/// Request to update a store.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateStoreRequest {
-    /// New store name.
-    pub name: Option<String>,
-    /// New website URL.
-    pub website: Option<String>,
-}
-
-/// Store response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct StoreResponse {
-    /// Store ID.
-    pub id: Uuid,
-    /// Store name.
-    pub name: String,
-    /// Website URL.
-    pub website: Option<String>,
-    /// Owner user ID.
-    pub owner_id: Uuid,
-    /// Whether the store is archived.
-    pub archived: bool,
-    /// Creation timestamp.
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl From<Store> for StoreResponse {
-    fn from(store: Store) -> Self {
-        Self {
-            id: store.id.0,
-            name: store.name,
-            website: store.website,
-            owner_id: store.owner_id.0,
-            archived: store.archived,
-            created_at: store.created_at,
-        }
+/// Build the wire shape from the `auth` domain type.
+///
+/// A free function rather than a `From` impl: `Store` belongs to `auth` and
+/// `StoreResponse` to `api-types`, so neither is local here. `api-types` does not
+/// depend on `auth` deliberately - it is compiled into the browser bundle and
+/// `auth` is a server-side crate.
+pub(crate) fn store_response(store: Store) -> StoreResponse {
+    StoreResponse {
+        id: store.id.0,
+        name: store.name,
+        website: store.website,
+        owner_id: store.owner_id.0,
+        archived: store.archived,
+        created_at: store.created_at,
     }
 }
 
@@ -88,7 +56,7 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(stores.into_iter().map(|s| s.into()).collect()))
+    Ok(Json(stores.into_iter().map(store_response).collect()))
 }
 
 /// Create a new store.
@@ -144,7 +112,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     metrics::record_store_created();
-    Ok((StatusCode::CREATED, Json(store.into())))
+    Ok((StatusCode::CREATED, Json(store_response(store))))
 }
 
 /// Get a store by ID.
@@ -193,7 +161,7 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    Ok(Json(store.into()))
+    Ok(Json(store_response(store)))
 }
 
 /// Update a store.
@@ -259,7 +227,7 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(store.into()))
+    Ok(Json(store_response(store)))
 }
 
 /// Delete (archive) a store.

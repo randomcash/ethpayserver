@@ -26,14 +26,15 @@ use std::str::FromStr;
 use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-use utoipa::{IntoParams, ToSchema};
+use serde::Deserialize;
+use utoipa::IntoParams;
 
 use auth::{SessionService, repository::StoreRepository};
 use data_service::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
 
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
+pub use api_types::{AssetVolume, DailyVolume, DashboardAnalytics};
 
 /// Window used when the caller does not ask for one.
 const DEFAULT_WINDOW_DAYS: u32 = 30;
@@ -50,49 +51,6 @@ const MAX_WINDOW_DAYS: u32 = 90;
 pub struct AnalyticsQuery {
     /// Size of the window in days, ending today (UTC). 1..=90, default 30.
     pub days: Option<u32>,
-}
-
-/// One day of volume for a single asset.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
-pub struct DailyVolume {
-    /// UTC calendar day.
-    pub date: NaiveDate,
-    /// Volume for the day in whole units of the asset (e.g. `"0.75"` ETH).
-    pub amount: String,
-    /// Payments received that day.
-    pub payment_count: i64,
-}
-
-/// Volume for one asset over the whole window.
-#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-pub struct AssetVolume {
-    /// Asset symbol as recorded on the payments (e.g. `ETH`).
-    pub asset_symbol: String,
-    /// Window total in whole units of this asset. Only comparable to other
-    /// values of the same `asset_symbol`.
-    pub total_amount: String,
-    /// Payments received in this asset over the window.
-    pub payment_count: i64,
-    /// This asset's share of the window's payment *count*, 0.0..=100.0.
-    pub share_percent: f64,
-    /// One entry per day of the window, ascending, zero-filled.
-    pub daily: Vec<DailyVolume>,
-}
-
-/// Payment analytics for the authenticated user's stores.
-#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-pub struct DashboardAnalytics {
-    /// Window size actually used.
-    pub days: u32,
-    /// First day of the window (UTC, inclusive).
-    pub start_date: NaiveDate,
-    /// Last day of the window (UTC, inclusive).
-    pub end_date: NaiveDate,
-    /// Payments received across all assets in the window.
-    pub total_payments: i64,
-    /// Per-asset series, busiest asset first. Empty when nothing was received
-    /// — an account with no payments gets `[]`, never a fabricated series.
-    pub assets: Vec<AssetVolume>,
 }
 
 /// Get per-day, per-asset payment volume for the authenticated user's stores.

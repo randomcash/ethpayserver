@@ -46,7 +46,7 @@ pub fn StoreDetailPage() -> impl IntoView {
                 {move || store_resource.get().map(|result| match &*result {
                     Ok(store) => {
                         let store_name = store.name.clone();
-                        let created_display = format_date(&store.created_at);
+                        let created_display = format_date(&store.created_at.to_rfc3339());
                         let store_for_tabs = store.clone();
 
                         view! {
@@ -64,7 +64,7 @@ pub fn StoreDetailPage() -> impl IntoView {
                                         })}
                                     </div>
                                     <p class="store-detail-subtitle">
-                                        <code class="store-detail-id">{store.id.clone()}</code>
+                                        <code class="store-detail-id">{store.id.to_string()}</code>
                                         " · Created "{created_display}
                                     </p>
                                 </div>
@@ -104,9 +104,9 @@ pub fn StoreDetailPage() -> impl IntoView {
                             <div class="store-tab-content">
                                 {move || match active_tab.get().as_str() {
                                     "general" => view! { <GeneralTab store=store_for_tabs.clone() /> }.into_any(),
-                                    "payment_methods" => view! { <PaymentMethodsTab store_id=store_for_tabs.id.clone() /> }.into_any(),
-                                    "webhooks" => view! { <WebhooksTab store_id=store_for_tabs.id.clone() /> }.into_any(),
-                                    "settings" => view! { <SettingsTab store_id=store_for_tabs.id.clone() /> }.into_any(),
+                                    "payment_methods" => view! { <PaymentMethodsTab store_id=store_for_tabs.id.to_string() /> }.into_any(),
+                                    "webhooks" => view! { <WebhooksTab store_id=store_for_tabs.id.to_string() /> }.into_any(),
+                                    "settings" => view! { <SettingsTab store_id=store_for_tabs.id.to_string() /> }.into_any(),
                                     _ => view! { <GeneralTab store=store_for_tabs.clone() /> }.into_any(),
                                 }}
                             </div>

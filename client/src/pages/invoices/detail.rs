@@ -69,8 +69,8 @@ pub fn InvoiceDetailPage() -> impl IntoView {
 fn InvoiceDetailContent(invoice: Invoice, payments: Vec<Payment>) -> impl IntoView {
     let order_id = get_metadata_field(&invoice, "order_id");
     let buyer_email = get_metadata_field(&invoice, "buyer_email");
-    let created_display = format_date(&invoice.created_at);
-    let expires_display = format_date(&invoice.expires_at);
+    let created_display = format_date(&invoice.created_at.to_rfc3339());
+    let expires_display = format_date(&invoice.expires_at.to_rfc3339());
     let confirmed_count = confirmed_payment_count(&payments);
     let payment_count = payments.len();
     let is_paid = invoice.status == types::InvoiceStatus::Paid;
@@ -280,7 +280,7 @@ fn InvoiceDetailContent(invoice: Invoice, payments: Vec<Payment>) -> impl IntoVi
                                 </div>
                             })}
                             {payments.iter().map(|p| {
-                                let timestamp = format_date(&p.detected_at);
+                                let timestamp = format_date(&p.detected_at.to_rfc3339());
                                 let desc = format!("{} payment received", p.asset_symbol);
                                 view! {
                                     <div class="timeline-item">

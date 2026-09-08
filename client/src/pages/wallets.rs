@@ -127,13 +127,13 @@ fn WalletsEmpty() -> impl IntoView {
 /// Wallet card component.
 #[component]
 fn WalletCard(wallet: Wallet) -> impl IntoView {
-    let wallet_link = wallet.id.clone();
+    let wallet_link = wallet.id;
     let wallet_name = wallet
         .name
         .clone()
         .unwrap_or_else(|| "Unnamed Wallet".to_string());
     let xpub_display = truncate_address(&wallet.xpub_masked);
-    let created_display = format_date(&wallet.created_at);
+    let created_display = format_date(&wallet.created_at.to_rfc3339());
 
     view! {
         <A href=format!("/evm/wallets/{}", wallet_link) attr:class="wallet-card">
@@ -198,7 +198,7 @@ pub fn WalletDetailPage() -> impl IntoView {
                             Ok(wallet) => {
                                 let wallet = wallet.clone();
                                 let wallet_name = wallet.name.clone().unwrap_or_else(|| "Unnamed Wallet".to_string());
-                                let created_display = format_date(&wallet.created_at);
+                                let created_display = format_date(&wallet.created_at.to_rfc3339());
 
                                 view! {
                                     <div>
@@ -213,7 +213,7 @@ pub fn WalletDetailPage() -> impl IntoView {
                                                     <h1 class="wallet-detail-title">{wallet_name}</h1>
                                                 </div>
                                                 <p class="wallet-detail-subtitle">
-                                                    <code class="wallet-detail-id">{wallet.id.clone()}</code>
+                                                    <code class="wallet-detail-id">{wallet.id.to_string()}</code>
                                                     " · Created "{created_display}
                                                 </p>
                                             </div>

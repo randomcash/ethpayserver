@@ -179,10 +179,13 @@ pub fn ApiKeysTab() -> impl IntoView {
 
             // Show rotated key (plaintext shown once)
             {move || rotated_key.get().map(|key| {
-                let grace_line = key.old_key_grace_expires_at
-                    .as_deref()
-                    .map(|exp| format!("The old key remains valid until {exp}."))
-                    .unwrap_or_else(|| "The old key remains valid during the grace period.".to_string());
+                // Always sent by the server, so there is no "unknown" branch to
+                // render - the client used to model this as optional and carry
+                // a fallback that could never fire.
+                let grace_line = format!(
+                    "The old key remains valid until {}.",
+                    key.old_key_grace_expires_at.to_rfc3339()
+                );
                 view! {
                 <div class="detail-card" style="margin-bottom: 16px; border-color: var(--color-warning);">
                     <div class="detail-card-body">
@@ -219,7 +222,7 @@ pub fn ApiKeysTab() -> impl IntoView {
                                                 // Surface the actual expiry rather than a
                                                 // static "Deprecated" — users need to know
                                                 // when the grace window ends.
-                                                let label = match key.deprecation_expires_at.as_deref() {
+                                                let label = match key.deprecation_expires_at.map(|d| d.to_rfc3339()).as_deref() {
                                                     Some(exp) => format!("Deprecated — expires {exp}"),
                                                     None => "Deprecated".to_string(),
                                                 };
@@ -229,8 +232,8 @@ pub fn ApiKeysTab() -> impl IntoView {
                                             };
                                             let is_active = key.is_active;
                                             let is_deprecated = key.deprecated_at.is_some();
-                                            let revoke_handler = make_revoke_handler(key.id.clone());
-                                            let rotate_handler = make_rotate_handler(key.id.clone());
+                                            let revoke_handler = make_revoke_handler(key.id.to_string());
+                                            let rotate_handler = make_rotate_handler(key.id.to_string());
 
                                             view! {
                                                 <div class="api-key-item">
@@ -240,7 +243,7 @@ pub fn ApiKeysTab() -> impl IntoView {
                                                             <span class=status_class>{status_label}</span>
                                                         </div>
                                                         <code class="api-key-value">{key.key_prefix}</code>
-                                                        <span class="api-key-created">"Created "{key.created_at}</span>
+                                                        <span class="api-key-created">"Created "{key.created_at.to_rfc3339()}</span>
                                                     </div>
                                                     <div class="api-key-actions">
                                                         {(is_active && !is_deprecated).then(|| view! {

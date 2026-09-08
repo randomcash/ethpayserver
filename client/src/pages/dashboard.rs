@@ -14,7 +14,7 @@ use crate::pages::payments::format::{
     format_crypto_amount, payment_status, payment_status_class, truncate_hash,
 };
 use crate::services::StatusUpdate;
-use crate::util::{chain_name, relative_time};
+use crate::util::{chain_name, relative_time_at};
 
 /// Dashboard page component.
 #[component]
@@ -397,8 +397,8 @@ fn VolumeChart(
                         .max(f64::MIN_POSITIVE);
                     let color = asset_color(&asset.asset_symbol);
                     let last = asset.daily.len().saturating_sub(1);
-                    let first_label = asset.daily.first().map(|d| d.date.clone()).unwrap_or_default();
-                    let last_label = asset.daily.last().map(|d| d.date.clone()).unwrap_or_default();
+                    let first_label = asset.daily.first().map(|d| d.date.to_string()).unwrap_or_default();
+                    let last_label = asset.daily.last().map(|d| d.date.to_string()).unwrap_or_default();
                     let footer = format!(
                         "{} {} from {} payments",
                         asset.total_amount, asset.asset_symbol, asset.payment_count,
@@ -615,8 +615,8 @@ fn RecentPayments() -> impl IntoView {
                         <div class="payments-list">
                             {rows.into_iter().map(|payment| {
                                 let tx = truncate_hash(&payment.tx_hash, 8, 6);
-                                let when = relative_time(&payment.detected_at, now_ms)
-                                    .unwrap_or_else(|| payment.detected_at.clone());
+                                let when = relative_time_at(payment.detected_at, now_ms)
+                                    .unwrap_or_else(|| payment.detected_at.to_rfc3339());
                                 let amount = format!(
                                     "{} {}",
                                     format_crypto_amount(&payment.amount, payment.decimals),

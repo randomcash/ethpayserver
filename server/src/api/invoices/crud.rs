@@ -363,7 +363,7 @@ where
         store_id: invoice.store_id.0.to_string(),
         store_name: None,
         currency: invoice.currency,
-        status: invoice.status.to_string(),
+        status: invoice.status,
         amount: invoice.amount,
         amount_received: invoice.amount_received,
         created_at: invoice.created_at,

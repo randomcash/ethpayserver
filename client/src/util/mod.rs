@@ -8,4 +8,4 @@ pub mod time;
 pub use chain::chain_name;
 pub use search::{normalize_search, use_debounced_search};
 pub use store::short_store_id;
-pub use time::relative_time;
+pub use time::{relative_time, relative_time_at};

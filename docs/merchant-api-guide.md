@@ -719,3 +719,29 @@ Store members have role-based permissions:
 
 Interactive API documentation is available at `/swagger-ui` when enabled on
 your instance. The OpenAPI spec is served at `/api-docs/openapi.json`.
+
+
+## Chain identifiers (RCS-241, RCS-242)
+
+Every field naming a chain is a [CAIP-2](https://standards.chainagnostic.org/CAIPs/caip-2)
+identifier — a string like `eip155:1`, not a number. That includes
+`chain_id` on invoices, payments, payment options and payment methods, and
+`default_chain_id` on store settings.
+
+**Breaking changes to be aware of:**
+
+| endpoint | before | now |
+| -- | -- | -- |
+| `PATCH /stores/{id}/settings` | `{"default_chain_id": 1}` | `{"default_chain_id": "eip155:1"}` |
+| `GET /stores/{id}/settings` | `"default_chain_id": 1` | `"default_chain_id": "eip155:1"` |
+| `POST /stores/{id}/payment-methods` | `{"chain_id": 1}` | `{"chain_id": "eip155:1"}` |
+| webhook payloads | `"chain_id": 1` | `"chain_id": "eip155:1"`, absent on invoice-level events |
+| `payment_method_id` | `ETH-1` | `ETH@eip155:1` |
+
+A malformed identifier is rejected by the request parser as **422**, not 400 —
+the shape is wrong, not the value.
+
+Only `eip155` and `tron` references are numbers. Solana, Monero and Bitcoin use
+truncated genesis hashes, so nothing may infer a chain's name from its
+identifier; `GET /health/chains` and the chain configuration carry the display
+names.

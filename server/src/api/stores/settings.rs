@@ -5,8 +5,6 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::repository::StoreRepository;
@@ -15,28 +13,7 @@ use auth::{SessionService, StoreId};
 use super::super::extractors::AuthenticatedUser;
 use super::require_store_settings_permission;
 use crate::state::PgAppState;
-
-/// Store settings response.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct StoreSettingsResponse {
-    pub store_id: Uuid,
-    pub default_chain_id: Option<i64>,
-    pub default_display_currency: Option<String>,
-    pub logo_url: Option<String>,
-    pub accent_color: Option<String>,
-    pub notification_prefs: serde_json::Value,
-    pub updated_at: String,
-}
-
-/// Request to update store settings (PATCH -- all fields optional).
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateStoreSettingsRequest {
-    pub default_chain_id: Option<i64>,
-    pub default_display_currency: Option<String>,
-    pub logo_url: Option<String>,
-    pub accent_color: Option<String>,
-    pub notification_prefs: Option<serde_json::Value>,
-}
+pub use api_types::{StoreSettingsResponse, UpdateStoreSettingsRequest};
 
 /// Known webhook event types for notification_prefs validation.
 pub(crate) const VALID_NOTIFICATION_EVENTS: &[&str] = &[
@@ -121,6 +98,7 @@ where
     responses(
         (status = 200, description = "Settings updated", body = StoreSettingsResponse),
         (status = 400, description = "Validation error"),
+        (status = 422, description = "Malformed body — e.g. a chain id that is not CAIP-2"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "Store not found"),
@@ -146,9 +124,13 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Validate default_chain_id
-    if let Some(chain_id) = req.default_chain_id
-        && evm::get_any_chain_config(chain_id as u64).is_none()
+    // Validate default_chain_id. This server only serves EVM chains, so a
+    // well-formed identifier from another family is still not one it can quote.
+    if let Some(ref chain_id) = req.default_chain_id
+        && chain_id
+            .evm_chain_id()
+            .and_then(evm::get_any_chain_config)
+            .is_none()
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -198,7 +180,7 @@ where
     let empty_prefs = serde_json::json!({});
     let (chain_id, display_currency, logo, color, prefs) = match existing {
         Some(ref e) => (
-            req.default_chain_id.or(e.default_chain_id),
+            req.default_chain_id.clone().or(e.default_chain_id.clone()),
             req.default_display_currency
                 .as_deref()
                 .or(e.default_display_currency.as_deref()),
@@ -220,7 +202,7 @@ where
     let settings = data_service::StoreSettingsWriter::upsert_store_settings(
         &*state.data_service,
         store_id,
-        chain_id,
+        chain_id.as_ref(),
         display_currency,
         logo,
         color,

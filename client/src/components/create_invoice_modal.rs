@@ -97,7 +97,7 @@ pub fn CreateInvoiceModal() -> impl IntoView {
     // first), but the user gets an opaque 403 instead of a disabled button.
     let store_selection_valid = move || {
         let id = store_id.get();
-        !id.is_empty() && stores.get().iter().any(|store| store.id == id)
+        !id.is_empty() && stores.get().iter().any(|store| store.id.to_string() == id)
     };
 
     let close = move || modal_signal.set_show.set(false);
@@ -159,7 +159,15 @@ pub fn CreateInvoiceModal() -> impl IntoView {
         let exp_seconds = exp_min.parse::<u64>().ok().map(|m| m * 60);
 
         let request = CreateInvoiceRequest {
-            store_id: store_id_val,
+            // The select holds the id as text; the contract wants the Uuid.
+            store_id: match store_id_val.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    set_error.set(Some("Select a store".to_string()));
+                    set_submitting.set(false);
+                    return;
+                }
+            },
             currency: currency_val,
             amount: amount_val,
             expiration_seconds: exp_seconds,
@@ -242,8 +250,8 @@ pub fn CreateInvoiceModal() -> impl IntoView {
                                 // store seeded before the fetch landed still ends up
                                 // selected once its option exists.
                                 {move || stores.get().into_iter().map(|store| {
-                                    let selected = store_id.get_untracked() == store.id;
-                                    view! { <option value=store.id selected=selected>{store.name}</option> }
+                                    let selected = store_id.get_untracked() == store.id.to_string();
+                                    view! { <option value=store.id.to_string() selected=selected>{store.name}</option> }
                                 }).collect_view()}
                             </select>
                         </div>

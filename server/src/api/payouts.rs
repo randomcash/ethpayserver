@@ -10,7 +10,6 @@ use axum::{
     http::StatusCode,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use alloy_primitives::U256;
@@ -21,69 +20,7 @@ use types::{PayoutData, PayoutStatus, StoreId};
 use super::extractors::AuthenticatedUser;
 use crate::metrics;
 use crate::state::PgAppState;
-
-/// Request body for creating a payout.
-#[derive(Debug, Deserialize)]
-pub struct CreatePayoutRequest {
-    /// Invoice IDs to include in this payout.
-    /// If empty, sweeps all settled invoices.
-    pub invoice_ids: Vec<String>,
-    /// Destination wallet address.
-    pub destination_address: String,
-    /// EIP-155 chain ID to sweep from.
-    pub chain_id: String,
-    /// Asset symbol to sweep (e.g., "ETH", "USDC").
-    pub asset_symbol: String,
-    /// Token contract address (required for ERC20 payouts).
-    pub token_address: Option<String>,
-}
-
-/// Payout response.
-#[derive(Debug, Serialize)]
-pub struct PayoutResponse {
-    pub id: Uuid,
-    pub store_id: Uuid,
-    pub invoice_ids: Vec<String>,
-    pub destination_address: String,
-    pub chain_id: String,
-    pub asset_type: String,
-    pub asset_symbol: String,
-    pub amount: String,
-    pub tx_hash: Option<String>,
-    pub status: String,
-    pub fee_amount: Option<String>,
-    pub error_message: Option<String>,
-    pub created_at: chrono::DateTime<Utc>,
-    pub confirmed_at: Option<chrono::DateTime<Utc>>,
-}
-
-impl From<PayoutData> for PayoutResponse {
-    fn from(p: PayoutData) -> Self {
-        Self {
-            id: p.id,
-            store_id: p.store_id.0,
-            invoice_ids: p.invoice_ids,
-            destination_address: p.destination_address,
-            chain_id: p.chain_id.to_string(),
-            asset_type: p.asset_type,
-            asset_symbol: p.asset_symbol,
-            amount: p.amount,
-            tx_hash: p.tx_hash,
-            status: p.status.to_string(),
-            fee_amount: p.fee_amount,
-            error_message: p.error_message,
-            created_at: p.created_at,
-            confirmed_at: p.confirmed_at,
-        }
-    }
-}
-
-/// Payout list response with pagination.
-#[derive(Debug, Serialize)]
-pub struct PayoutListResponse {
-    pub total: i64,
-    pub payouts: Vec<PayoutResponse>,
-}
+pub use api_types::{CreatePayoutRequest, PayoutListResponse, PayoutResponse};
 
 /// Initiate a payout — sweep funds from derived addresses to merchant wallet.
 ///
@@ -144,7 +81,6 @@ where
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let chain_id = types::ChainId::parse(&body.chain_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let asset_type = if body.token_address.is_some() {
         "erc20"
     } else {
@@ -160,7 +96,7 @@ where
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        total_amount += sum_payable(&payments, &chain_id, &body.asset_symbol);
+        total_amount += sum_payable(&payments, &body.chain_id, &body.asset_symbol);
     }
 
     if total_amount.is_zero() {
@@ -173,7 +109,7 @@ where
         store_id,
         invoice_ids: body.invoice_ids,
         destination_address: body.destination_address,
-        chain_id: chain_id.clone(),
+        chain_id: body.chain_id.clone(),
         asset_type,
         asset_symbol: body.asset_symbol.clone(),
         token_address: body.token_address,
@@ -193,7 +129,7 @@ where
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    metrics::record_payout_initiated(&chain_id, &body.asset_symbol);
+    metrics::record_payout_initiated(&body.chain_id, &body.asset_symbol);
 
     tracing::info!(
         payout_id = %payout.id,

@@ -29,13 +29,23 @@ impl ServerSettingsRepository for PgDataService {
             // altered out from under us - treated like any other schema
             // mismatch rather than silently dropping a chain the server is
             // meant to be serving.
+            // Skipping a malformed element would silently narrow the set of
+            // chains this server believes it serves, so an unparseable one is
+            // dropped from the list rather than panicking the connection - and
+            // logged, because it means the column was altered underneath us.
             enabled_chain_ids: r
                 .get::<Vec<String>, _>("enabled_chain_ids")
                 .into_iter()
-                .map(|id| {
-                    types::ChainId::parse(id.as_str()).unwrap_or_else(|e| {
-                        panic!("server_settings.enabled_chain_ids holds `{id}`, not a CAIP-2 chain id ({e})")
-                    })
+                .filter_map(|id| match types::ChainId::parse(id.as_str()) {
+                    Ok(chain) => Some(chain),
+                    Err(e) => {
+                        tracing::error!(
+                            value = %id,
+                            error = %e,
+                            "server_settings.enabled_chain_ids holds a value that is not a CAIP-2 chain id"
+                        );
+                        None
+                    }
                 })
                 .collect(),
         }))

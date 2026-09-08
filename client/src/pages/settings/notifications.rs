@@ -245,13 +245,13 @@ pub fn NotificationsTab() -> impl IntoView {
                                         // which would otherwise re-render the
                                         // matrix from under the merchant.
                                         if loaded_store.get_untracked().as_deref()
-                                            != Some(s.store_id.as_str())
+                                            != Some(s.store_id.to_string().as_str())
                                         {
                                             cells.set(read_matrix(&s.notification_prefs));
                                             receipts.set(
                                                 customer_receipts_enabled(&s.notification_prefs),
                                             );
-                                            set_loaded_store.set(Some(s.store_id.clone()));
+                                            set_loaded_store.set(Some(s.store_id.to_string()));
                                         }
                                         view! { <NotificationMatrix cells receipts /> }.into_any()
                                     }

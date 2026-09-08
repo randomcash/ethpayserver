@@ -59,11 +59,11 @@ fn PaymentDetailView(payment: Payment) -> impl IntoView {
         format_crypto_amount(&payment.amount, payment.decimals),
         payment.asset_symbol
     );
-    let detected_display = format_date(&payment.detected_at);
+    let detected_display = format_date(&payment.detected_at.to_rfc3339());
     let confirmed_display = payment
         .confirmed_at
         .as_ref()
-        .map(|d| format_date(d))
+        .map(|d| format_date(&d.to_rfc3339()))
         .unwrap_or_else(|| "Pending".to_string());
     let from_address = payment
         .from_address

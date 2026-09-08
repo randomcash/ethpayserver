@@ -3,8 +3,6 @@
 //! Returns aggregated stats for the authenticated user's stores.
 
 use axum::{Json, extract::State, http::StatusCode};
-use serde::Serialize;
-use utoipa::ToSchema;
 
 use auth::{SessionService, repository::StoreRepository};
 use data_service::{InvoiceQueryParams, InvoiceReader, PaymentQueryParams, PaymentReader};
@@ -12,23 +10,7 @@ use types::InvoiceStatus;
 
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
-
-/// Dashboard statistics response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DashboardStats {
-    /// Total number of invoices across all user stores.
-    pub total_invoices: i64,
-    /// Number of pending invoices.
-    pub pending_invoices: i64,
-    /// Number of paid invoices.
-    pub paid_invoices: i64,
-    /// Number of expired invoices.
-    pub expired_invoices: i64,
-    /// Total number of payments received.
-    pub total_payments: i64,
-    /// Number of stores the user has access to.
-    pub total_stores: u32,
-}
+pub use api_types::DashboardStats;
 
 /// Get dashboard statistics for the authenticated user.
 #[utoipa::path(

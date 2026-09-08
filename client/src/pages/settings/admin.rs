@@ -178,7 +178,7 @@ pub fn AdminTab() -> impl IntoView {
                                         }))
                                         .unwrap_or_else(|| user.id.get(..8).unwrap_or(user.id.as_str()).to_string());
                                     let current_role = user.role.clone();
-                                    let created_date = user.created_at.get(..10).unwrap_or(&user.created_at).to_string();
+                                    let created_date = user.created_at.format("%Y-%m-%d").to_string();
                                     view! {
                                         <tr class=if is_locked { "user-row locked" } else { "user-row" }>
                                             <td class="user-cell">

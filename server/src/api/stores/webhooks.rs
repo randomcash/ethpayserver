@@ -5,8 +5,6 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::repository::StoreRepository;
@@ -16,40 +14,7 @@ use types::{StoreWebhookReader, StoreWebhookWriter};
 use super::super::extractors::AuthenticatedUser;
 use super::require_store_settings_permission;
 use crate::state::PgAppState;
-
-/// Request to configure a webhook.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct ConfigureWebhookRequest {
-    /// Webhook URL to receive notifications.
-    pub webhook_url: String,
-    /// Whether the webhook is enabled.
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-fn default_enabled() -> bool {
-    true
-}
-
-/// Webhook response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct WebhookResponse {
-    /// Webhook ID.
-    pub id: Uuid,
-    /// Store ID.
-    pub store_id: Uuid,
-    /// Webhook URL.
-    pub webhook_url: String,
-    /// Webhook secret (for signature verification).
-    /// Only shown once when created/updated.
-    pub webhook_secret: Option<String>,
-    /// Whether the webhook is enabled.
-    pub enabled: bool,
-    /// Creation timestamp.
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Last update timestamp.
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
+pub use api_types::{ConfigureWebhookRequest, WebhookResponse};
 
 /// Get webhook configuration for a store.
 #[utoipa::path(
