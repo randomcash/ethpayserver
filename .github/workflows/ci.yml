@@ -378,6 +378,7 @@ jobs:
       packages: write
     outputs:
       sha_tag: ${{ steps.tag.outputs.sha_tag }}
+      client_image: ${{ steps.tag.outputs.client_image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -404,6 +405,15 @@ jobs:
           # server reports on /health — so a running container can be matched
           # to the image it came from.
           echo "sha_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+          # The frontend is built and tagged in payserver-client, so it has no
+          # tag of ours to derive. Read the pin here, in a job that checks the
+          # repo out, and hand it to deploy - which runs on the self-hosted box
+          # with no checkout at all, so it cannot read this file itself.
+          CLIENT_IMAGE="$(grep -v '^[[:space:]]*#' ops/client-image.pin | tr -d '[:space:]')"
+          [ -n "$CLIENT_IMAGE" ] || { echo "::error::ops/client-image.pin is empty"; exit 1; }
+          echo "client_image=$CLIENT_IMAGE" >> "$GITHUB_OUTPUT"
+
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
@@ -473,6 +483,7 @@ jobs:
       - name: Deploy via local docker compose
         env:
           SHA_TAG: ${{ needs.docker.outputs.sha_tag }}
+          CLIENT_IMAGE: ${{ needs.docker.outputs.client_image }}
         run: |
           set -e
           # Deploy the immutable per-commit tag, not the moving one (RCS-190).
@@ -482,18 +493,18 @@ jobs:
           [ -n "$SHA_TAG" ] || { echo "::error::docker job produced no sha tag"; exit 1; }
 
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          # The frontend is versioned independently now, so it does not follow
+          # $SHA_TAG - it is pinned, and that pin is what E2E just ran against.
+          # It arrives as a job output because this job has no checkout to read
+          # ops/client-image.pin from.
+          [ -n "$CLIENT_IMAGE" ] || { echo "::error::docker job produced no client image"; exit 1; }
+          export CLIENT_IMAGE
+
           cd ~/deploy/ethpayserver/testnet
 
           export SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:$SHA_TAG
           export MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:$SHA_TAG
-          # The frontend is versioned independently now, so it does not follow
-          # $SHA_TAG - it is pinned, and that pin is what E2E just ran against.
-          CLIENT_IMAGE="$(grep -v '^[[:space:]]*#' ops/client-image.pin | tr -d '[:space:]')"
-          [ -n "$CLIENT_IMAGE" ] || { echo "::error::ops/client-image.pin is empty"; exit 1; }
-          export CLIENT_IMAGE
-          # Steps do not share a shell, so hand it to the verification step the
-          # same way PREV is handed over below.
-          echo "CLIENT_IMAGE=$CLIENT_IMAGE" >> "$GITHUB_ENV"
 
           # Whatever is live right now becomes the rollback target, but only
           # once this deploy has actually come up.
@@ -516,6 +527,7 @@ jobs:
       - name: Verify deploy is actually configured (RCS-187)
         env:
           SHA_TAG: ${{ needs.docker.outputs.sha_tag }}
+          CLIENT_IMAGE: ${{ needs.docker.outputs.client_image }}
         run: |
           set -e
           cd ~/deploy/ethpayserver/testnet
