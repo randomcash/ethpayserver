@@ -20,6 +20,9 @@ ui-kit = { workspace = true, features = ["auth"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "wasmbind"] }
 api-types = { workspace = true }
 types = { workspace = true }
+# Secret/PII redaction, shared with the payservers. Zero dependencies and
+# hand-written scanners rather than regexes: `regex` costs ~1 MB of WASM.
+scrub = { workspace = true }
 
 # Leptos framework
 leptos = { version = "0.7", features = ["csr"] }
@@ -71,12 +74,6 @@ uuid = { version = "1.0", features = ["v4", "js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
-
-# Native tests only (`evm` pulls in alloy/sqlx and does not build for wasm32).
-# Used by the scrubber parity test in src/telemetry/scrub.rs; dev-dependencies
-# are never built into the WASM bundle.
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-evm = { path = "../evm", features = ["sentry-scrub"] }
 
 [features]
 default = ["standalone"]

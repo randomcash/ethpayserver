@@ -11,6 +11,17 @@
 //! `server` and `evmmonitor` binaries share one audited implementation. It is
 //! gated behind the `sentry-scrub` feature so the scrubber and its `sentry` /
 //! `regex` dependencies are only compiled where Sentry is actually used.
+//!
+//! # Relationship to the `scrub` crate
+//!
+//! The same rules exist a second time in payserver-commons `scrub`, as
+//! hand-written scanners with no dependencies, because the browser client
+//! needs them and `regex` costs ~1 MB of WASM. This regex table stays the
+//! audited reference, and `parity_with_shared_scrubber` below asserts the two
+//! agree across a corpus — so changing the rules here fails the build until
+//! `scrub` follows. That check lives here because this is the only crate
+//! where both implementations compile: `evm` pulls in alloy/sqlx and does not
+//! build for `wasm32`, which is the whole reason there are two.
 
 use std::sync::OnceLock;
 
@@ -391,5 +402,48 @@ mod tests {
         assert!(!scrubbed.message.unwrap().contains("4c0883a6"));
         let extra = scrubbed.extra.get("ctx").and_then(Value::as_str).unwrap();
         assert!(!extra.contains("supersecret"), "extra leaked: {extra}");
+    }
+
+    /// Asserts the dependency-free scanners in payserver-commons `scrub` produce
+    /// byte-identical output to the regex table above, across a corpus chosen to
+    /// hit every rule plus the boundaries between them (rule ordering, adjacent
+    /// matches, non-ASCII neighbours, empty and truncated inputs).
+    ///
+    /// This is the only place both can be compiled. If it fails, the two
+    /// implementations have diverged and the browser is redacting differently
+    /// from the servers — fix `scrub`, do not delete the case.
+    #[test]
+    fn parity_with_shared_scrubber() {
+        const CORPUS: &[&str] = &[
+            "",
+            "plain message with no secrets",
+            "failed to fetch /api/invoices/inv_001: HTTP 502",
+            "auth failed for eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc-_123 (401)",
+            "eyJ.a.b eyJa..b eyJa.b.c",
+            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e paid 0x1234",
+            "tx 4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 mined",
+            "zz4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318zz",
+            "GET https://eth-mainnet.g.alchemy.com/v2/9f8e7d6c5b4a3210zz failed",
+            "wss://polygon-mainnet.infura.io:443/ws/v3/0123456789abcdefzz closed",
+            "https://api.coingecko.com/api/v3/simple/price?ids=ethereum",
+            "https://errex.example.internal/api/random.cash/envelope/",
+            "no store for merchant@example.com or a@b.co.uk or bad@b.c",
+            "Authorization: Bearer rc_live_opaque123",
+            "authorization=eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig; token: abc, secret = \"s3cr3t\"",
+            "api-key: k1 apikey:k2 API_KEY = k3 private-key k4 passwd:\tk5",
+            "secretariat: not a secret keyword",
+            "seed abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            "twelve plain lowercase words here really do trip the mnemonic rule ok now",
+            "façade ↔ merchant@example.com ↔ 0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+            "token",
+            "token=",
+        ];
+        for input in CORPUS {
+            assert_eq!(
+                redact_secrets(input),
+                scrub::redact_secrets(input),
+                "shared `scrub` diverged from the audited regex table on: {input}"
+            );
+        }
     }
 }
