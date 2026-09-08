@@ -22,6 +22,15 @@ not use either: it runs the server binary it just built and the published
 payserver-client image pinned in `ops/client-image.pin`, so the suite exercises
 the real nginx routing rather than the dev server's proxy.
 
+## What is not here
+
+Layout regression tests moved to
+[payserver-client](https://github.com/randomcash/payserver-client) with the
+frontend. They inject `styles.css` into a blank page and assert computed style —
+no server, no auth — so they belong with the stylesheet they test, and a CSS
+specificity regression now fails the repository that owns the CSS instead of
+this one.
+
 ## Remote mode
 
 Runs the same suite against a deployed environment (e.g. testnet) without
