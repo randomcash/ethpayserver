@@ -968,3 +968,190 @@ async fn re_adding_a_native_asset_updates_rather_than_duplicating() {
         1
     );
 }
+
+/// Rotating a whole store records one rotation per method and no fabricated
+/// ones.
+///
+/// Rotating method by method moved the store override on the first iteration,
+/// so every inheriting method after it resolved to the NEW wallet and recorded
+/// a rotation from the new key to itself. `wallet_rotations` is the table the
+/// migration trusts to tell an honest provenance stamp from a guess, and those
+/// rows are neither honest nor harmless.
+#[tokio::test]
+#[ignore]
+async fn rotating_a_store_records_no_rotation_from_a_key_to_itself() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let xpub_a = unique_xpub("a");
+    let xpub_b = unique_xpub("b");
+    let user = seed_user(&service).await;
+    let store = seed_store_for(&service, user).await;
+
+    for (chain, token, symbol) in [
+        (1u64, None, "ETH"),
+        (1, Some("0xtok"), "USDC"),
+        (137, None, "MATIC"),
+    ] {
+        StorePaymentMethodWriter::create_payment_method(
+            &service, store, chain, token, symbol, 18, &xpub_a,
+        )
+        .await
+        .unwrap();
+    }
+
+    // Hand the store its own wallet, which unpins all three methods - the
+    // state that made every iteration after the first record a self-rotation.
+    let wallet_a = WalletReader::resolve_store_wallet(&service, store)
+        .await
+        .unwrap()
+        .unwrap();
+    WalletWriter::set_store_wallet(&service, store, wallet_a.id)
+        .await
+        .unwrap();
+
+    let rotations = service
+        .rotate_store_xpub(store, &xpub_b, Some("compromise"))
+        .await
+        .expect("rotate the store");
+
+    assert_eq!(rotations.len(), 3, "every method rotates exactly once");
+    for rotation in &rotations {
+        assert_eq!(
+            rotation.previous_xpub, xpub_a,
+            "a rotation from the new key to itself is a fabricated audit row"
+        );
+    }
+
+    let history = service.get_rotation_history(store).await.unwrap();
+    assert_eq!(
+        history.len(),
+        3,
+        "the audit trail must hold one row per method, not one per method plus \
+         one per method the override overtook"
+    );
+
+    let resolved = WalletReader::resolve_store_wallet(&service, store)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolved.xpub, xpub_b,
+        "the store must end up deriving from the new key"
+    );
+}
+
+/// Rotating one store does not move any other store on the account.
+///
+/// A store with no override follows the account primary. Rotating it by
+/// changing that primary would silently repoint every sibling store; the
+/// rotated store gets an override of its own instead.
+#[tokio::test]
+#[ignore]
+async fn rotating_one_store_leaves_its_siblings_where_they_were() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let xpub_a = unique_xpub("a");
+    let xpub_b = unique_xpub("b");
+    let user = seed_user(&service).await;
+    let rotated = seed_store_for(&service, user).await;
+    let sibling = seed_store_for(&service, user).await;
+
+    // Both stores derive from the same account primary, neither pinned.
+    StorePaymentMethodWriter::create_payment_method(&service, rotated, 1, None, "ETH", 18, &xpub_a)
+        .await
+        .unwrap();
+    StorePaymentMethodWriter::create_payment_method(&service, sibling, 1, None, "ETH", 18, &xpub_a)
+        .await
+        .unwrap();
+    WalletWriter::clear_store_wallet(&service, rotated)
+        .await
+        .unwrap();
+    WalletWriter::clear_store_wallet(&service, sibling)
+        .await
+        .unwrap();
+
+    service
+        .rotate_store_xpub(rotated, &xpub_b, Some("compromise"))
+        .await
+        .expect("rotate one store");
+
+    let moved = WalletReader::resolve_store_wallet(&service, rotated)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(moved.xpub, xpub_b, "the rotated store moves");
+
+    let untouched = WalletReader::resolve_store_wallet(&service, sibling)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        untouched.xpub, xpub_a,
+        "rotating one store must not repoint every other store on the account - \
+         that is what changing the account primary would have done"
+    );
+}
+
+/// Rotating onto a key another account holds is refused, and changes nothing.
+///
+/// The refusal already existed for `POST /wallets`; the point here is that the
+/// whole-store rotation is one transaction, so a rejection partway through
+/// leaves no method moved. A per-method loop left the store split across the
+/// compromised key and the new one.
+#[tokio::test]
+#[ignore]
+async fn a_refused_rotation_leaves_the_store_entirely_unmoved() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let mine = unique_xpub("mine");
+    let theirs = unique_xpub("theirs");
+
+    let other_user = seed_user(&service).await;
+    WalletWriter::create_wallet(&service, other_user, &theirs, None)
+        .await
+        .unwrap();
+
+    let user = seed_user(&service).await;
+    let store = seed_store_for(&service, user).await;
+    for (chain, symbol) in [(1u64, "ETH"), (137, "MATIC")] {
+        StorePaymentMethodWriter::create_payment_method(
+            &service, store, chain, None, symbol, 18, &mine,
+        )
+        .await
+        .unwrap();
+    }
+
+    let err = service
+        .rotate_store_xpub(store, &theirs, Some("compromise"))
+        .await
+        .expect_err("another account holds that key");
+    assert!(
+        matches!(err, crate::RepositoryError::Conflict(_)),
+        "the caller has to be able to tell this from a server fault: {err:?}"
+    );
+
+    let methods = StorePaymentMethodReader::get_payment_methods(&service, store)
+        .await
+        .unwrap();
+    assert_eq!(methods.len(), 2);
+    for method in &methods {
+        assert_eq!(
+            method.xpub.as_deref(),
+            Some(mine.as_str()),
+            "a refused rotation must leave every method where it was, not some \
+             of them on the key the merchant just declared compromised"
+        );
+    }
+
+    assert!(
+        service
+            .get_rotation_history(store)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing moved, so nothing is recorded as having moved"
+    );
+}

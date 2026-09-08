@@ -125,6 +125,15 @@ ALTER TABLE store_payment_methods
 -- at MAX (5) is the only choice that never re-issues an address; MIN or a
 -- per-row copy hands out an address a customer already has.
 --
+-- `store_payment_methods` alone is not that union. Rotation used to write
+-- `xpub = $new, derivation_index = 0` onto the method, so a key rotated away
+-- from left no trace on the table at all - and a method rotated X -> Y -> X
+-- sits at index 0 while holding X, having already issued from it. The only
+-- surviving record of how far a rotated-away key got is
+-- `wallet_rotations.previous_derivation_index`, which carries the same meaning
+-- (next index to issue) as the column it was copied from. Both sources are
+-- unioned, or the wallet starts below addresses the key has already handed out.
+--
 -- The max is taken over the whole table, NOT per owner, even though the
 -- wallets themselves are per owner. Ownership of a shared key cannot be
 -- arbitrated - two accounts pasting one xpub is either co-custody or a
@@ -133,26 +142,37 @@ ALTER TABLE store_payment_methods
 -- own owner's max, the lower one would then issue straight through the range
 -- the other has already spent: owner A at 9 and owner B at 3 means B issues
 -- 3..9, every one of which A has already given to a customer. Those would be
--- collisions the migration itself created, not ones it inherited. Every wallet
--- on a shared key therefore starts at the global high-water mark, and the
--- rows advance independently from there without ever colliding backwards.
+-- collisions the migration itself created, not ones it inherited.
 --
--- The cost is skipped indices, which is free - the path has 2^31 of them and
--- gaps are unobservable.
---
--- What this cannot undo: rows that already shared a key have already issued
--- the same low addresses more than once. Those collisions are in the data
--- before this migration runs and are a deploy-time cleanup, not a schema fix.
+-- Starting them all at the same global mark trades that for a worse one: their
+-- FIRST allocations are then the same index, so the collision is immediate
+-- rather than six allocations away. Two independent counters on one key always
+-- collide eventually and no starting value fixes that - the structural fix is
+-- that `reject_if_another_account_holds` refuses any NEW cross-account share,
+-- so this is a closed, legacy set. What the migration can do is push the
+-- collision far enough out to be cleaned up by hand: each account after the
+-- first on a shared key starts a stride above the last, giving every one of
+-- them 100k allocations of clear air. The stride is spent from a 2^31 path, so
+-- it costs nothing observable.
 INSERT INTO wallets (user_id, xpub, derivation_index)
-SELECT s.owner_id, pm.xpub, high_water.max_index
-FROM store_payment_methods pm
-JOIN stores s ON s.id = pm.store_id
-JOIN (
-    SELECT xpub, MAX(derivation_index) AS max_index
-    FROM store_payment_methods
-    GROUP BY xpub
-) AS high_water ON high_water.xpub = pm.xpub
-GROUP BY s.owner_id, pm.xpub, high_water.max_index;
+SELECT owner_id,
+       xpub,
+       max_index + (ROW_NUMBER() OVER (PARTITION BY xpub ORDER BY owner_id) - 1) * 100000
+FROM (
+    SELECT DISTINCT s.owner_id, pm.xpub, high_water.max_index
+    FROM store_payment_methods pm
+    JOIN stores s ON s.id = pm.store_id
+    JOIN (
+        SELECT xpub, MAX(next_index) AS max_index
+        FROM (
+            SELECT xpub, derivation_index AS next_index FROM store_payment_methods
+            UNION ALL
+            SELECT previous_xpub AS xpub, previous_derivation_index AS next_index
+            FROM wallet_rotations
+        ) AS issued
+        GROUP BY xpub
+    ) AS high_water ON high_water.xpub = pm.xpub
+) AS owners;
 
 UPDATE store_payment_methods pm
 SET wallet_id = w.id
@@ -195,7 +215,85 @@ COMMENT ON COLUMN store_payment_methods.wallet_id IS
     'the wallet (RCS-234).';
 
 -- ---------------------------------------------------------------------------
--- 4. Elect a primary per account
+-- 4. Close the NULL gap in the payment-method uniqueness constraint
+-- ---------------------------------------------------------------------------
+--
+-- `UNIQUE(store_id, chain_id, token_address)` does not constrain native assets
+-- at all: token_address is NULL for them, and NULL is distinct from NULL in a
+-- unique index. So every "add ETH on mainnet" inserted another row rather than
+-- updating the existing one - the `ON CONFLICT` in `create_payment_method`
+-- could never match - and one store accumulated several ETH methods, each
+-- previously with its own xpub and counter.
+--
+-- That is the same duplicate-counter shape RCS-234 removes everywhere else,
+-- reached through a constraint that silently does not apply. Left alone it
+-- also makes "which wallet does this store use" ambiguous, since the answer is
+-- picked from whichever duplicate sorts first.
+--
+-- This runs BEFORE the primary election and the store_wallets backfill, and
+-- the order is load-bearing. Both of those count payment methods to decide
+-- which wallet an account or a store is really using; counting rows that are
+-- about to be deleted elects a wallet that ends up backing nothing. A store
+-- with one ETH method on wallet W1 and two duplicates on W2 would hand the
+-- store an override naming W2, then lose both W2 rows here - leaving the
+-- endpoints reporting W2 while every surviving method derives from W1. That
+-- contradiction is exactly what the module doc promises cannot happen.
+--
+-- Collapse duplicates deterministically before constraining: the oldest row
+-- per (store, chain) survives, because it is the one whose addresses have been
+-- in circulation longest and is most likely referenced by existing invoices.
+-- Rotation history is repointed onto the survivor first - `wallet_rotations`
+-- is ON DELETE CASCADE, so deleting a duplicate outright would silently
+-- destroy the audit trail of a key that was rotated for a reason.
+
+-- Which (store, chain) pairs had duplicates, recorded before they are removed.
+-- Section 7 matches historical payment options back to a method through
+-- (store, chain, token) and needs to know where that key was never unique: on
+-- those pairs the surviving method is not necessarily the one that issued a
+-- given address, and stamping its wallet would assert a provenance that is
+-- merely plausible. ON COMMIT DROP - the whole migration is one transaction.
+CREATE TEMP TABLE rcs234_ambiguous_native ON COMMIT DROP AS
+SELECT store_id, chain_id
+FROM store_payment_methods
+WHERE token_address IS NULL
+GROUP BY store_id, chain_id
+HAVING COUNT(*) > 1;
+
+UPDATE wallet_rotations wr
+SET payment_method_id = survivor.id
+FROM (
+    SELECT DISTINCT ON (store_id, chain_id) id, store_id, chain_id
+    FROM store_payment_methods
+    WHERE token_address IS NULL
+    ORDER BY store_id, chain_id, created_at, id
+) AS survivor
+JOIN store_payment_methods dup
+  ON dup.store_id = survivor.store_id
+ AND dup.chain_id = survivor.chain_id
+ AND dup.token_address IS NULL
+ AND dup.id <> survivor.id
+WHERE wr.payment_method_id = dup.id;
+
+DELETE FROM store_payment_methods dup
+USING (
+    SELECT DISTINCT ON (store_id, chain_id) id, store_id, chain_id
+    FROM store_payment_methods
+    WHERE token_address IS NULL
+    ORDER BY store_id, chain_id, created_at, id
+) AS survivor
+WHERE dup.token_address IS NULL
+  AND dup.store_id = survivor.store_id
+  AND dup.chain_id = survivor.chain_id
+  AND dup.id <> survivor.id;
+
+-- The constraint the table always meant to have. Partial, because it only
+-- needs to cover the rows the composite unique index cannot see.
+CREATE UNIQUE INDEX idx_store_payment_methods_native
+    ON store_payment_methods(store_id, chain_id)
+    WHERE token_address IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- 5. Elect a primary per account
 -- ---------------------------------------------------------------------------
 --
 -- The wallet backing the most payment methods, because that is the one the
@@ -211,7 +309,7 @@ WHERE id IN (
 );
 
 -- ---------------------------------------------------------------------------
--- 5. Preserve today's routing exactly
+-- 6. Preserve today's routing exactly
 -- ---------------------------------------------------------------------------
 --
 -- Before this migration every store derived from the xpub on its own payment
@@ -230,7 +328,7 @@ GROUP BY pm.store_id, pm.wallet_id
 ORDER BY pm.store_id, COUNT(*) DESC, pm.wallet_id;
 
 -- ---------------------------------------------------------------------------
--- 6. Provenance on payment options
+-- 7. Provenance on payment options
 -- ---------------------------------------------------------------------------
 --
 -- RCS-234 asked for `invoices.wallet_id`. That is the wrong grain: an invoice
@@ -272,6 +370,19 @@ WHERE po.invoice_id = i.id
       SELECT 1 FROM wallet_rotations wr
       WHERE wr.payment_method_id = pm.id
         AND wr.rotated_at > po.created_at
+  )
+  -- Skip stores where this join key was never unique. Section 4 collapsed
+  -- duplicate native methods onto one survivor, but a native option created
+  -- while several existed could have been served by any of them, each formerly
+  -- with its own xpub. The survivor's wallet is a plausible answer, not a known
+  -- one, and the rule two lines up applies with equal force: a wrong stamp is
+  -- worse than the NULL that honestly says "unknown".
+  AND NOT (
+      po.token_address IS NULL
+      AND EXISTS (
+          SELECT 1 FROM rcs234_ambiguous_native a
+          WHERE a.store_id = i.store_id AND a.chain_id = po.chain_id
+      )
   );
 
 -- `derivation_index` is deliberately left NULL on historical rows: the index
@@ -283,61 +394,11 @@ CREATE INDEX idx_payment_options_wallet ON payment_options(wallet_id)
 
 COMMENT ON COLUMN payment_options.wallet_id IS
     'Wallet whose xpub produced payment_address. NULL for options created '
-    'before RCS-234 whose method could not be matched back.';
+    'before RCS-234 whose method could not be matched back, and for options '
+    'whose wallet has since been deleted (ON DELETE SET NULL).';
 COMMENT ON COLUMN payment_options.derivation_index IS
-    'Index used within wallet_id. NULL means pre-RCS-234 and unknown - not 0.';
+    'Index used within the wallet that issued this address. NULL means '
+    'pre-RCS-234 and unknown - not 0. Survives deletion of that wallet, so a '
+    'populated index alongside a NULL wallet_id means the key is gone from '
+    'this database but the index it used is still known.';
 
--- ---------------------------------------------------------------------------
--- 7. Close the NULL gap in the payment-method uniqueness constraint
--- ---------------------------------------------------------------------------
---
--- `UNIQUE(store_id, chain_id, token_address)` does not constrain native assets
--- at all: token_address is NULL for them, and NULL is distinct from NULL in a
--- unique index. So every "add ETH on mainnet" inserted another row rather than
--- updating the existing one - the `ON CONFLICT` in `create_payment_method`
--- could never match - and one store accumulated several ETH methods, each
--- previously with its own xpub and counter.
---
--- That is the same duplicate-counter shape RCS-234 removes everywhere else,
--- reached through a constraint that silently does not apply. Left alone it
--- also makes "which wallet does this store use" ambiguous, since the answer is
--- picked from whichever duplicate sorts first.
---
--- Collapse duplicates deterministically before constraining: the oldest row
--- per (store, chain) survives, because it is the one whose addresses have been
--- in circulation longest and is most likely referenced by existing invoices.
--- Rotation history is repointed onto the survivor first - `wallet_rotations`
--- is ON DELETE CASCADE, so deleting a duplicate outright would silently
--- destroy the audit trail of a key that was rotated for a reason.
-UPDATE wallet_rotations wr
-SET payment_method_id = survivor.id
-FROM (
-    SELECT DISTINCT ON (store_id, chain_id) id, store_id, chain_id
-    FROM store_payment_methods
-    WHERE token_address IS NULL
-    ORDER BY store_id, chain_id, created_at, id
-) AS survivor
-JOIN store_payment_methods dup
-  ON dup.store_id = survivor.store_id
- AND dup.chain_id = survivor.chain_id
- AND dup.token_address IS NULL
- AND dup.id <> survivor.id
-WHERE wr.payment_method_id = dup.id;
-
-DELETE FROM store_payment_methods dup
-USING (
-    SELECT DISTINCT ON (store_id, chain_id) id, store_id, chain_id
-    FROM store_payment_methods
-    WHERE token_address IS NULL
-    ORDER BY store_id, chain_id, created_at, id
-) AS survivor
-WHERE dup.token_address IS NULL
-  AND dup.store_id = survivor.store_id
-  AND dup.chain_id = survivor.chain_id
-  AND dup.id <> survivor.id;
-
--- The constraint the table always meant to have. Partial, because it only
--- needs to cover the rows the composite unique index cannot see.
-CREATE UNIQUE INDEX idx_store_payment_methods_native
-    ON store_payment_methods(store_id, chain_id)
-    WHERE token_address IS NULL;

@@ -49,7 +49,7 @@ fn row_to_wallet(row: &sqlx::postgres::PgRow) -> Wallet {
 /// index it was not conflicting against, surfacing as a bare unique violation.
 /// That is reachable from the ordinary "enable ETH, enable USDC" flow, so it is
 /// locked rather than retried.
-async fn lock_account(conn: &mut PgConnection, user_id: Uuid) -> RepositoryResult<()> {
+pub(super) async fn lock_account(conn: &mut PgConnection, user_id: Uuid) -> RepositoryResult<()> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('rcs234:user'), hashtext($1::text))")
         .bind(user_id)
         .execute(conn)
@@ -68,13 +68,33 @@ async fn lock_account(conn: &mut PgConnection, user_id: Uuid) -> RepositoryResul
 ///
 /// Always taken AFTER `lock_account`, so the two never deadlock against each
 /// other.
-async fn lock_xpub(conn: &mut PgConnection, xpub: &str) -> RepositoryResult<()> {
+pub(super) async fn lock_xpub(conn: &mut PgConnection, xpub: &str) -> RepositoryResult<()> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('rcs234:xpub'), hashtext($1))")
         .bind(xpub)
         .execute(conn)
         .await
         .map_err(sqlx_to_repo_error)?;
     Ok(())
+}
+
+/// Take the account lock for whoever owns `store_id`.
+///
+/// Everything that changes where an account's money is collected takes this
+/// lock first, so those writers are ordered against each other rather than
+/// against whichever row they happen to touch first. Rotation writes payment
+/// methods then the override; setting an override writes the override then the
+/// payment methods. Without a lock in front, those two orders deadlock - which
+/// Postgres does detect and abort, but as a 500 on a request that had nothing
+/// wrong with it.
+async fn lock_store_account(conn: &mut PgConnection, store_id: Uuid) -> RepositoryResult<()> {
+    let owner = sqlx::query("SELECT owner_id FROM stores WHERE id = $1")
+        .bind(store_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(sqlx_to_repo_error)?
+        .ok_or_else(|| RepositoryError::NotFound("store not found".into()))?;
+
+    lock_account(conn, owner.get("owner_id")).await
 }
 
 /// Refuse an xpub that another account already holds.
@@ -85,7 +105,7 @@ async fn lock_xpub(conn: &mut PgConnection, xpub: &str) -> RepositoryResult<()> 
 /// account `idx_account_wallets_user_xpub` makes it impossible; across accounts
 /// this is the enforcement, and it only holds because the caller is holding
 /// `lock_xpub`.
-async fn reject_if_another_account_holds(
+pub(super) async fn reject_if_another_account_holds(
     conn: &mut PgConnection,
     user_id: Uuid,
     xpub: &str,
@@ -107,7 +127,7 @@ async fn reject_if_another_account_holds(
 
 /// Find or create the wallet holding `xpub` for `user_id`, inside a caller's
 /// transaction that already holds both locks.
-async fn upsert_wallet(
+pub(super) async fn upsert_wallet(
     conn: &mut PgConnection,
     user_id: Uuid,
     xpub: &str,
@@ -341,6 +361,7 @@ impl WalletWriter for PgDataService {
 
     async fn set_store_wallet(&self, store_id: Uuid, wallet_id: Uuid) -> RepositoryResult<()> {
         let mut tx = self.pool.begin().await.map_err(sqlx_to_repo_error)?;
+        lock_store_account(&mut tx, store_id).await?;
 
         // The wallet has to belong to the store's owner. Enforced in the
         // predicate rather than by a prior SELECT so there is no window in
@@ -390,6 +411,7 @@ impl WalletWriter for PgDataService {
 
     async fn clear_store_wallet(&self, store_id: Uuid) -> RepositoryResult<()> {
         let mut tx = self.pool.begin().await.map_err(sqlx_to_repo_error)?;
+        lock_store_account(&mut tx, store_id).await?;
 
         // Idempotent: no override is the state the caller asked for, so
         // clearing twice is not an error.

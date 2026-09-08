@@ -27,6 +27,22 @@ use auth::repository::UserStoreRepository;
 
 use crate::state::PgAppState;
 
+/// Map a repository error onto the status that describes it.
+///
+/// `Conflict` in particular has to survive the trip: since RCS-234 an xpub
+/// already registered to another account is refused, and that refusal is
+/// reachable from the ordinary payment-method form, not just from
+/// `POST /wallets`. Collapsing every repository error into a 500 turned a
+/// merchant pasting the wrong key into an opaque server error with nothing to
+/// act on.
+pub(crate) fn repository_status(err: data_service::RepositoryError) -> StatusCode {
+    match err {
+        data_service::RepositoryError::Conflict(_) => StatusCode::CONFLICT,
+        data_service::RepositoryError::NotFound(_) => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 /// Check if user can modify store settings (admin or has permission).
 pub(crate) async fn require_store_settings_permission<A: SessionService>(
     state: &PgAppState<A>,

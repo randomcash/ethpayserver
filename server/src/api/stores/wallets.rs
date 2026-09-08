@@ -7,6 +7,8 @@
 //! what these endpoints report is by construction where the next payment will
 //! actually be collected.
 
+use std::collections::HashMap;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -18,11 +20,13 @@ use uuid::Uuid;
 
 use auth::repository::{StoreRepository, UserStoreRepository};
 use auth::{SessionService, StoreId};
-use data_service::{self, StorePaymentMethodReader, WalletReader, WalletWriter};
+use data_service::{
+    self, StorePaymentMethod, StorePaymentMethodReader, WalletReader, WalletWriter,
+};
 use evm::{XpubDeriver, validate_xpub};
 
 use super::super::extractors::AuthenticatedUser;
-use super::{mask_xpub, require_store_settings_permission};
+use super::{mask_xpub, repository_status, require_store_settings_permission};
 use crate::state::PgAppState;
 
 /// Request to add a wallet to the account.
@@ -233,10 +237,7 @@ where
         req.name.as_deref(),
     )
     .await
-    .map_err(|e| match e {
-        data_service::RepositoryError::Conflict(_) => StatusCode::CONFLICT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    })?;
+    .map_err(repository_status)?;
 
     Ok((StatusCode::CREATED, Json(wallet.into())))
 }
@@ -307,9 +308,21 @@ where
 
 /// Remove a wallet from the account.
 ///
-/// Refused while a store or a payment method still points at it. The addresses
-/// it derived are still being watched, and dropping the xpub would leave
-/// incoming payments with no key to attribute them to.
+/// Refused while a store or a payment method still points at it - those are
+/// live routing, and dropping the key underneath them would leave the next
+/// invoice with nothing to derive from.
+///
+/// Not refused by history. `payment_options.wallet_id` is ON DELETE SET NULL,
+/// so options this wallet issued addresses for keep their `payment_address`
+/// and lose only the provenance stamp; their `derivation_index` is left in
+/// place, since it is still true of an xpub the merchant holds a copy of.
+/// Pinning a wallet forever because it once issued an address was the
+/// alternative, and it makes every wallet permanently undeletable.
+///
+/// A monitored address outlives the wallet, then. That is survivable - the
+/// address is recorded literally and attribution is keyed on it, not on the
+/// wallet - but it does mean deleting a wallet with invoices still open costs
+/// the answer to "which key produced this address".
 #[utoipa::path(
     delete,
     path = "/wallets/{wallet_id}",
@@ -335,11 +348,7 @@ where
 
     WalletWriter::delete_wallet(&*state.data_service, wallet_id)
         .await
-        .map_err(|e| match e {
-            data_service::RepositoryError::Conflict(_) => StatusCode::CONFLICT,
-            data_service::RepositoryError::NotFound(_) => StatusCode::NOT_FOUND,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        })?;
+        .map_err(repository_status)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -643,6 +652,13 @@ pub struct RotateWalletResponse {
 /// destination wallet carries its own position, so an xpub the account has
 /// used before resumes where it left off instead of re-issuing addresses that
 /// may already hold funds (RCS-234).
+///
+/// Scope is the store, not the account. A method pinned to a wallet is
+/// repointed; a method that was inheriting stays inheriting, and what moves
+/// instead is the store's override - written here even if the store had none
+/// and was following the account primary. Rotating one store must not move
+/// every other store on the account, so the rotated store acquires an override
+/// of its own. To rotate the account, change the primary.
 #[utoipa::path(
     post,
     path = "/stores/{store_id}/wallet/rotate",
@@ -652,10 +668,11 @@ pub struct RotateWalletResponse {
     request_body = RotateWalletRequest,
     responses(
         (status = 200, description = "Wallet rotated", body = RotateWalletResponse),
-        (status = 400, description = "Invalid xpub or same as current"),
+        (status = 400, description = "Invalid xpub, or every method already uses it"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "No payment methods found for store"),
+        (status = 409, description = "That xpub is registered to another account"),
     )
 )]
 pub async fn rotate_store_wallet<A>(
@@ -691,37 +708,44 @@ where
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Reject if all methods already use this xpub (pointless rotation)
-    if methods
-        .iter()
-        .all(|m| m.xpub.as_deref() == Some(req.xpub.as_str()))
-    {
+    // One call, one transaction. Rotating method by method meant a failure
+    // partway through left the store half moved - some methods on the key the
+    // merchant just declared compromised, some on the new one - and the 500
+    // said nothing about where it stopped.
+    let rotations = state
+        .data_service
+        .rotate_store_xpub(store_id, &req.xpub, req.reason.as_deref())
+        .await
+        .map_err(repository_status)?;
+
+    // Nothing moved means every method was already deriving from this key.
+    if rotations.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Rotate each payment method that has a different xpub
-    let mut rotations = Vec::new();
-    for method in &methods {
-        if method.xpub.as_deref() == Some(req.xpub.as_str()) {
-            continue;
-        }
+    // Chain and asset are cosmetic labels on the response, and they come from
+    // the snapshot above rather than from the rotation, which records only what
+    // it changed. A method created between the snapshot and the rotation would
+    // be rotated without a label; it is still counted and still identified by
+    // id, which is what a caller acts on.
+    let by_id: HashMap<Uuid, &StorePaymentMethod> = methods.iter().map(|m| (m.id, m)).collect();
 
-        let rotation = state
-            .data_service
-            .rotate_payment_method_xpub(store_id, method.id, &req.xpub, req.reason.as_deref())
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        rotations.push(RotationEntry {
+    let rotations: Vec<RotationEntry> = rotations
+        .into_iter()
+        .map(|rotation| RotationEntry {
+            payment_method_id: rotation.payment_method_id,
+            chain_id: by_id
+                .get(&rotation.payment_method_id)
+                .map_or(0, |m| m.chain_id),
+            asset_symbol: by_id
+                .get(&rotation.payment_method_id)
+                .map_or_else(String::new, |m| m.asset_symbol.clone()),
             id: rotation.id,
-            payment_method_id: method.id,
-            chain_id: method.chain_id,
-            asset_symbol: method.asset_symbol.clone(),
             previous_xpub_masked: mask_xpub(&rotation.previous_xpub),
             previous_derivation_index: rotation.previous_derivation_index,
             rotated_at: rotation.rotated_at,
-        });
-    }
+        })
+        .collect();
 
     Ok(Json(RotateWalletResponse {
         store_id,

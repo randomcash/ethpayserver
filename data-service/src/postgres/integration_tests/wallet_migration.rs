@@ -473,12 +473,15 @@ async fn down_migration_reverses_when_no_wallet_is_shared() {
 }
 
 /// One xpub spread across two accounts must not produce two counters that
-/// overlap.
+/// overlap, and must not produce two that collide on their very first
+/// allocation either.
 ///
 /// Ownership of a shared key cannot be arbitrated, so each account keeps its
 /// own wallet row. If each of those started at its own owner's high-water mark,
 /// the lower one would issue straight through the range the other has already
 /// spent - collisions the migration itself created, on top of any it inherited.
+/// Starting both at the shared mark fixes that and introduces a worse one: the
+/// same first index for both. They are staggered by a 100k stride instead.
 #[tokio::test]
 #[ignore]
 async fn migration_does_not_create_new_collisions_across_accounts() {
@@ -517,10 +520,11 @@ async fn migration_does_not_create_new_collisions_across_accounts() {
     );
     assert_eq!(
         indices,
-        vec![9, 9],
-        "both wallets must start at the global high-water mark for the key. \
-         Leaving owner B at 3 makes it issue 3..9, every one of which owner A \
-         has already given to a customer"
+        vec![9, 100_009],
+        "both wallets must start at or above the global high-water mark for the \
+         key - leaving owner B at 3 makes it issue 3..9, every one of which \
+         owner A has already given to a customer - and they must not start at \
+         the SAME mark either, or their first allocations are one address"
     );
 
     drop_db(pool, &name, &server).await;
@@ -625,6 +629,282 @@ async fn migration_collapses_duplicate_native_methods_keeping_audit() {
         "rotation history must be repointed onto the survivor - the FK is ON \
          DELETE CASCADE, so deleting the duplicate outright destroys the audit \
          trail of a key that was rotated for a reason"
+    );
+
+    drop_db(pool, &name, &server).await;
+}
+
+/// A key that was rotated away from still counts towards its high-water mark.
+///
+/// The old rotation wrote `xpub = $new, derivation_index = 0` onto the method,
+/// so a method rotated X -> Y -> X holds X at index 0 while having already
+/// issued from it. `store_payment_methods` alone therefore under-reports the
+/// key, and a wallet started from that number re-issues addresses X has
+/// already produced. `wallet_rotations.previous_derivation_index` is the only
+/// surviving record of how far it got.
+#[tokio::test]
+#[ignore]
+async fn migration_counts_a_rotated_away_key_towards_its_high_water_mark() {
+    let Some((pool, name, server)) = pre_migration_db("rotatedaway").await else {
+        return;
+    };
+
+    const KEY: &str = "xpub-came-back";
+    let (_, store) = seed_store(&pool, "r").await;
+
+    // Where the method landed after being rotated back onto KEY: index 0.
+    let method = seed_method(&pool, store, 1, None, "ETH", KEY, 0).await;
+
+    // What KEY had issued before it was rotated away.
+    sqlx::query(
+        "INSERT INTO wallet_rotations \
+         (store_id, previous_xpub, new_xpub, payment_method_id, previous_derivation_index) \
+         VALUES ($1, $2, 'xpub-interlude', $3, 20)",
+    )
+    .bind(store)
+    .bind(KEY)
+    .bind(method)
+    .execute(&pool)
+    .await
+    .expect("seed the rotation that took KEY out of service");
+
+    pool.execute(migration_sql(MIGRATION).as_str())
+        .await
+        .expect("apply RCS-234");
+
+    let index: i32 = sqlx::query("SELECT derivation_index FROM wallets WHERE xpub = $1")
+        .bind(KEY)
+        .fetch_one(&pool)
+        .await
+        .expect("the key has a wallet")
+        .get("derivation_index");
+
+    assert_eq!(
+        index, 20,
+        "the wallet must start above every index this key has issued, including \
+         the range it issued before being rotated away. Starting at the \
+         method's 0 re-derives 0..19 - addresses customers already hold"
+    );
+
+    drop_db(pool, &name, &server).await;
+}
+
+/// Duplicate native methods are collapsed BEFORE the primary is elected and
+/// the store override is written, so neither can name a wallet that ends up
+/// backing nothing.
+///
+/// Ordering is the whole test. Counting methods first elects W2 (two rows to
+/// W1's one), then deletes both of W2's rows as duplicates - leaving the
+/// account primary and the store override pointing at a wallet no surviving
+/// method derives from, while the one method left collects on W1.
+#[tokio::test]
+#[ignore]
+async fn migration_elects_a_primary_that_survives_duplicate_collapse() {
+    let Some((pool, name, server)) = pre_migration_db("electorder").await else {
+        return;
+    };
+
+    let (owner, store) = seed_store(&pool, "e").await;
+
+    // The oldest ETH row, and the one that survives the collapse.
+    seed_method(&pool, store, 1, None, "ETH", "xpub-survivor", 4).await;
+    // Two more ETH-on-mainnet rows on a second key: a majority by count, and
+    // duplicates that are about to be deleted.
+    seed_method(&pool, store, 1, None, "ETH", "xpub-doomed", 2).await;
+    seed_method(&pool, store, 1, None, "ETH", "xpub-doomed", 3).await;
+
+    pool.execute(migration_sql(MIGRATION).as_str())
+        .await
+        .expect("apply RCS-234");
+
+    let primary_xpub: String =
+        sqlx::query("SELECT xpub FROM wallets WHERE user_id = $1 AND is_primary")
+            .bind(owner)
+            .fetch_one(&pool)
+            .await
+            .expect("exactly one primary")
+            .get("xpub");
+    assert_eq!(
+        primary_xpub, "xpub-survivor",
+        "the primary must be elected from the methods that survive, not from \
+         duplicates the same migration is about to delete"
+    );
+
+    let override_xpub: String = sqlx::query(
+        "SELECT w.xpub FROM store_wallets sw JOIN wallets w ON w.id = sw.wallet_id \
+         WHERE sw.store_id = $1",
+    )
+    .bind(store)
+    .fetch_one(&pool)
+    .await
+    .expect("the store keeps an explicit override")
+    .get("xpub");
+
+    let derived_xpub: String = sqlx::query(
+        "SELECT w.xpub FROM store_payment_methods pm JOIN wallets w ON w.id = pm.wallet_id \
+         WHERE pm.store_id = $1",
+    )
+    .bind(store)
+    .fetch_one(&pool)
+    .await
+    .expect("one method survives")
+    .get("xpub");
+
+    assert_eq!(
+        override_xpub, derived_xpub,
+        "what the store reports and what it derives from have to be the same \
+         key - that equality is the promise the wallet endpoints make"
+    );
+
+    drop_db(pool, &name, &server).await;
+}
+
+/// Provenance is left NULL where the join key was never unique.
+///
+/// A native option is matched back to a method through (store, chain, token),
+/// and token is NULL for native assets - so while duplicates existed that key
+/// named several methods, each formerly with its own xpub. The survivor's
+/// wallet is a plausible answer, not a known one, and the migration's own rule
+/// is that a wrong stamp is worse than an honest NULL.
+#[tokio::test]
+#[ignore]
+async fn migration_leaves_provenance_null_where_the_method_was_never_unique() {
+    let Some((pool, name, server)) = pre_migration_db("ambiguous").await else {
+        return;
+    };
+
+    let (_, store) = seed_store(&pool, "p").await;
+    seed_method(&pool, store, 1, None, "ETH", "xpub-amb-a", 4).await;
+    seed_method(&pool, store, 1, None, "ETH", "xpub-amb-b", 2).await;
+    // A token method on the same store, where the key IS unique.
+    seed_method(&pool, store, 1, Some("0xtok"), "USDC", "xpub-amb-c", 1).await;
+
+    let (_, native_option) =
+        seed_invoice_with_option(&pool, store, 1, None, "ETH", "0xnative").await;
+    let (_, token_option) =
+        seed_invoice_with_option(&pool, store, 1, Some("0xtok"), "USDC", "0xtoken").await;
+
+    pool.execute(migration_sql(MIGRATION).as_str())
+        .await
+        .expect("apply RCS-234");
+
+    let native_wallet: Option<Uuid> =
+        sqlx::query("SELECT wallet_id FROM payment_options WHERE id = $1")
+            .bind(native_option)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("wallet_id");
+    assert!(
+        native_wallet.is_none(),
+        "the native option could have been served by either duplicate, so its \
+         provenance is unknown and must stay NULL rather than name the row \
+         that happened to survive"
+    );
+
+    let token_wallet: Option<Uuid> =
+        sqlx::query("SELECT wallet_id FROM payment_options WHERE id = $1")
+            .bind(token_option)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("wallet_id");
+    assert!(
+        token_wallet.is_some(),
+        "the token option's method was unique all along - skipping it too would \
+         throw away provenance that is actually known"
+    );
+
+    drop_db(pool, &name, &server).await;
+}
+
+/// The down migration refuses a wallet shared by methods that INHERIT it.
+///
+/// `store_payment_methods.wallet_id` is NULL on every inheriting method, so a
+/// guard that reads only that column sees no sharing at all and lets the
+/// reversal copy one index onto all of them - the exact merge it exists to
+/// refuse. Using the per-store override is what produces this state:
+/// `set_store_wallet` NULLs every method in the store.
+#[tokio::test]
+#[ignore]
+async fn down_migration_refuses_a_wallet_shared_by_inheriting_methods() {
+    let Some((pool, name, server)) = pre_migration_db("downinherit").await else {
+        return;
+    };
+
+    let (_, store) = seed_store(&pool, "di").await;
+    seed_method(&pool, store, 1, None, "ETH", "xpub-inherit", 5).await;
+    seed_method(&pool, store, 137, None, "MATIC", "xpub-inherit-2", 2).await;
+
+    pool.execute(migration_sql(MIGRATION).as_str())
+        .await
+        .expect("apply RCS-234");
+
+    // What `PUT /stores/{id}/wallet` leaves behind: one override, no pins.
+    sqlx::query("UPDATE store_payment_methods SET wallet_id = NULL WHERE store_id = $1")
+        .bind(store)
+        .execute(&pool)
+        .await
+        .expect("unpin every method, as setting an override does");
+
+    let down = std::fs::read_to_string(migrations_dir().join(format!("{MIGRATION}.down.sql")))
+        .expect("read down migration");
+    let err = pool
+        .execute(down.as_str())
+        .await
+        .expect_err("two inheriting methods on one wallet is still a merge");
+    assert!(
+        err.to_string().contains("cannot be split back"),
+        "the refusal must name the merge, not fail on a NOT NULL later: {err}"
+    );
+
+    drop_db(pool, &name, &server).await;
+}
+
+/// ... and does NOT refuse a wallet reached only through a store override.
+///
+/// A wallet with no pinned method still has somewhere to land its counter if a
+/// store resolves to it. Refusing that case blocks a rollback the migration can
+/// in fact perform losslessly.
+#[tokio::test]
+#[ignore]
+async fn down_migration_reverses_a_wallet_reached_only_through_an_override() {
+    let Some((pool, name, server)) = pre_migration_db("downoverride").await else {
+        return;
+    };
+
+    let (_, store) = seed_store(&pool, "do").await;
+    seed_method(&pool, store, 1, None, "ETH", "xpub-only-override", 7).await;
+
+    pool.execute(migration_sql(MIGRATION).as_str())
+        .await
+        .expect("apply RCS-234");
+
+    sqlx::query("UPDATE store_payment_methods SET wallet_id = NULL WHERE store_id = $1")
+        .bind(store)
+        .execute(&pool)
+        .await
+        .expect("unpin, leaving the override as the only route to the wallet");
+
+    let down = std::fs::read_to_string(migrations_dir().join(format!("{MIGRATION}.down.sql")))
+        .expect("read down migration");
+    pool.execute(down.as_str())
+        .await
+        .expect("a counter with an override to land on is not stranded");
+
+    let restored: (String, i32) =
+        sqlx::query("SELECT xpub, derivation_index FROM store_payment_methods WHERE store_id = $1")
+            .bind(store)
+            .fetch_one(&pool)
+            .await
+            .map(|r| (r.get("xpub"), r.get("derivation_index")))
+            .expect("old columns are back");
+
+    assert_eq!(
+        restored,
+        ("xpub-only-override".to_string(), 7),
+        "the inherited key and its counter come back onto the method that was \
+         in fact using them"
     );
 
     drop_db(pool, &name, &server).await;

@@ -24,12 +24,36 @@
 -- restore from a backup taken before the up migration. Any in-place split is a
 -- guess.
 
+-- Which wallet each payment method actually derives from, resolved once.
+--
+-- Both guards and the reversal itself need this, and an earlier version had
+-- them disagree: the guards looked only at `store_payment_methods.wallet_id`
+-- while the reversal also walked the store override and the account primary.
+-- A wallet shared by three INHERITING methods therefore passed the "shared"
+-- guard - that column is NULL on all three - and the reversal then copied one
+-- index onto all three, which is the precise outcome the guard exists to
+-- refuse. `set_store_wallet` NULLs every method in a store, so that is not an
+-- exotic state; it is what using the per-store override at all produces.
+--
+-- ON COMMIT DROP: the migration is one transaction, and the connection is
+-- pooled and reused.
+CREATE TEMP TABLE rcs234_down_effective ON COMMIT DROP AS
+SELECT pm.id AS payment_method_id,
+       COALESCE(
+           pm.wallet_id,
+           (SELECT sw.wallet_id FROM store_wallets sw WHERE sw.store_id = pm.store_id),
+           (SELECT p.id FROM wallets p WHERE p.user_id = s.owner_id AND p.is_primary)
+       ) AS wallet_id
+FROM store_payment_methods pm
+JOIN stores s ON s.id = pm.store_id;
+
 DO $$
 DECLARE shared INTEGER;
 DECLARE stranded INTEGER;
+DECLARE unresolved INTEGER;
 BEGIN
     SELECT COUNT(*) INTO shared FROM (
-        SELECT wallet_id FROM store_payment_methods
+        SELECT wallet_id FROM rcs234_down_effective
         WHERE wallet_id IS NOT NULL
         GROUP BY wallet_id HAVING COUNT(*) > 1
     ) AS merged;
@@ -45,18 +69,21 @@ BEGIN
 
     -- A counter with nowhere to land is just as dangerous as a merged one, and
     -- less obvious. The reversal below copies each wallet's index back onto the
-    -- payment method that points at it; a wallet at index 50 whose method was
-    -- deleted, or which only a store override or a pinned-nowhere row refers
-    -- to, has no method to copy onto. It would be dropped with the table,
-    -- taking the counter with it, and the next time that xpub is added it
-    -- starts at 0 and re-issues 0..49 - addresses that may already hold funds.
+    -- payment method that derives from it; a wallet at index 50 whose method
+    -- was deleted has none, would be dropped with the table, and the next time
+    -- that xpub is added it starts at 0 and re-issues 0..49 - addresses that
+    -- may already hold funds.
+    --
+    -- Resolved, not pinned. A wallet reached only through a store override has
+    -- somewhere perfectly good to land, and refusing it would block a rollback
+    -- this migration can in fact perform losslessly.
     --
     -- Wallets still at 0 have issued nothing and are safe to lose.
     SELECT COUNT(*) INTO stranded
     FROM wallets w
     WHERE w.derivation_index > 0
       AND NOT EXISTS (
-          SELECT 1 FROM store_payment_methods pm WHERE pm.wallet_id = w.id
+          SELECT 1 FROM rcs234_down_effective e WHERE e.wallet_id = w.id
       );
 
     IF stranded > 0 THEN
@@ -66,6 +93,22 @@ BEGIN
             'drop the counter, and re-adding the xpub would start at 0 and '
             're-issue every address it has already produced. Restore from a '
             'pre-migration backup instead.', stranded;
+    END IF;
+
+    -- The mirror image: a method whose resolution chain runs out. It is pinned
+    -- to nothing, its store has no override, and its account has no primary -
+    -- reachable by deleting a primary wallet that nothing referenced. There is
+    -- no xpub to put back, and the old schema had the column NOT NULL, so this
+    -- would surface as a bare constraint violation several statements later.
+    SELECT COUNT(*) INTO unresolved
+    FROM rcs234_down_effective WHERE wallet_id IS NULL;
+
+    IF unresolved > 0 THEN
+        RAISE EXCEPTION
+            'RCS-234 down: % payment method(s) resolve to no wallet at all, so '
+            'there is no xpub to restore onto them. The old schema requires '
+            'one. Give the account a primary wallet, or restore from a '
+            'pre-migration backup.', unresolved;
     END IF;
 END $$;
 
@@ -86,25 +129,14 @@ ALTER TABLE payment_options DROP COLUMN IF EXISTS wallet_id;
 ALTER TABLE store_payment_methods ADD COLUMN xpub VARCHAR(120);
 ALTER TABLE store_payment_methods ADD COLUMN derivation_index INTEGER NOT NULL DEFAULT 0;
 
+-- One statement, through the same resolution the guards checked - pinned
+-- methods and inheriting ones alike. Two statements with two spellings of the
+-- chain is how the guards and the reversal drifted apart in the first place.
 UPDATE store_payment_methods pm
 SET xpub = w.xpub, derivation_index = w.derivation_index
-FROM wallets w
-WHERE w.id = pm.wallet_id;
-
--- A method that was inheriting rather than pinned has no wallet_id, so the
--- copy above left its xpub NULL. Resolve it the same way derivation does -
--- store override, then account primary - because that is the key it was in
--- fact using. The guard above has already established that no counter is lost
--- in the process.
-UPDATE store_payment_methods pm
-SET xpub = w.xpub, derivation_index = w.derivation_index
-FROM stores s, wallets w
-WHERE pm.wallet_id IS NULL
-  AND s.id = pm.store_id
-  AND w.id = COALESCE(
-      (SELECT sw.wallet_id FROM store_wallets sw WHERE sw.store_id = pm.store_id),
-      (SELECT p.id FROM wallets p WHERE p.user_id = s.owner_id AND p.is_primary)
-  );
+FROM rcs234_down_effective e
+JOIN wallets w ON w.id = e.wallet_id
+WHERE pm.id = e.payment_method_id;
 
 DROP INDEX IF EXISTS idx_store_payment_methods_native;
 

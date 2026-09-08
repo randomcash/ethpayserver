@@ -15,7 +15,7 @@ use data_service::{self, StorePaymentMethod, StorePaymentMethodReader, StorePaym
 use evm::validate_xpub;
 
 use super::super::extractors::AuthenticatedUser;
-use super::{mask_xpub, require_store_settings_permission};
+use super::{mask_xpub, repository_status, require_store_settings_permission};
 use crate::state::PgAppState;
 
 /// Request to create a payment method.
@@ -167,7 +167,7 @@ where
         &req.xpub,
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(repository_status)?;
 
     Ok((StatusCode::CREATED, Json(method.into())))
 }
@@ -266,7 +266,7 @@ where
         req.xpub.as_deref(),
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(repository_status)?;
 
     Ok(Json(method.into()))
 }
