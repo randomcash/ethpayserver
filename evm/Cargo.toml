@@ -94,4 +94,7 @@ too_many_lines = { level = "deny", priority = -1 }
 cognitive_complexity = "deny"
 
 [dev-dependencies]
+# The shared hand-written scrubber, asserted here to match the regex table
+# below. Test-only: the binaries run the regex implementation.
+scrub = { workspace = true }
 tokio = { version = "1.42", features = ["full", "test-util"] }

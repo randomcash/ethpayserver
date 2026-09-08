@@ -29,12 +29,11 @@
 //! Panics (via the panic hook), uncaught JS errors and unhandled promise
 //! rejections: a message, a raw stack trace (errex has no source maps yet) and
 //! the route path. Never cookies, request bodies, user identity or query
-//! strings — see the `event` module for the full payload and `scrub` for the
-//! redaction shared with `evm::telemetry`.
+//! strings — see the `event` module for the full payload, and the `scrub`
+//! crate in payserver-commons for the redaction every payserver also runs.
 
 mod dsn;
 mod event;
-mod scrub;
 
 use std::cell::{Cell, RefCell};
 

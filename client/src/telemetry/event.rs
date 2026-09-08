@@ -10,7 +10,7 @@
 
 use serde_json::json;
 
-use super::scrub::redact_secrets;
+use scrub::redact_secrets;
 
 /// One captured client-side failure.
 pub struct Report<'a> {
