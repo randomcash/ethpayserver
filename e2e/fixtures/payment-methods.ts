@@ -102,14 +102,28 @@ export async function addPaymentMethod(page: Page, method: PaymentMethod = {}): 
 
   await form.locator('.form-actions .btn-primary').click();
 
-  // Say what went wrong when the form refuses to close. Without this the report
-  // is "locator resolved to <div class=detail-card>" nine times over, and the
-  // actual cause - an error rendered inside the form - is only visible by
-  // downloading the trace.
-  await expect(form, await addMethodFailure(form)).not.toBeVisible();
+  // Read the error only AFTER the wait has run out, never as an argument to the
+  // assertion. `expect(form, await ...)` evaluates the message first, which
+  // snapshots the form the instant the click returns - before the server has
+  // answered - so a 409 that renders a second later is missed and the report
+  // says "showed no error". It also costs a second per call on the happy path,
+  // waiting for an error locator that will never resolve because the form
+  // closed.
+  try {
+    await expect(form).not.toBeVisible();
+  } catch (err) {
+    throw new Error(`${await addMethodFailure(form)}\n\n${(err as Error).message}`);
+  }
 }
 
-/** Explain a form that would not close, using whatever error it is showing. */
+/**
+ * Explain a form that would not close, using whatever error it is showing.
+ *
+ * Called only on the failure path, once the assertion above has already given
+ * the response every chance to arrive. Without this the report is "locator
+ * resolved to <div class=detail-card>" nine times over, and the actual cause is
+ * only visible by downloading the trace.
+ */
 async function addMethodFailure(form: ReturnType<Page['locator']>): Promise<string> {
   const text = await form
     .locator('.form-error, .error-message, .alert-error')

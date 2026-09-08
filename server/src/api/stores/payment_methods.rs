@@ -127,6 +127,7 @@ where
     request_body = CreatePaymentMethodRequest,
     responses(
         (status = 201, description = "Payment method created", body = PaymentMethodResponse),
+        (status = 409, description = "That xpub is registered to another account"),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
@@ -225,6 +226,7 @@ where
     request_body = UpdatePaymentMethodRequest,
     responses(
         (status = 200, description = "Payment method updated", body = PaymentMethodResponse),
+        (status = 409, description = "That xpub is registered to another account"),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),

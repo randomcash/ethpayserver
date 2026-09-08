@@ -775,14 +775,38 @@ async fn other_repository_errors_say_nothing_specific() {
     );
 }
 
-/// A bare status stays bare.
+/// A bare status stays bare, and is not given a content-type for a body it
+/// does not have.
 ///
-/// Most handlers here still return `StatusCode`, and converting those into an
-/// empty-bodied `ApiErr` must not start appending a trailing colon to every
-/// ordinary 404 the client renders.
+/// Most handlers here still return `StatusCode`. Converting those through
+/// `ApiErr` must leave them exactly as they were on the wire - asserting the
+/// empty body alone would not catch that, since a `(status, String::new())`
+/// response is empty too and differs only in its headers.
 #[tokio::test]
-async fn a_plain_status_gets_no_body() {
-    let (status, body) = body_of(StatusCode::NOT_FOUND.into()).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body, "");
+async fn a_plain_status_stays_a_plain_status() {
+    let response = ApiErr::from(StatusCode::NOT_FOUND).into_response();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        response.headers().get("content-type").is_none(),
+        "a reasonless refusal must not claim to carry a body"
+    );
+
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    assert!(bytes.is_empty());
+}
+
+/// ...and a reason does come with one.
+#[tokio::test]
+async fn a_reason_is_sent_as_text() {
+    let response = ApiErr::from((StatusCode::CONFLICT, "nope".to_string())).into_response();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("text/plain"),
+        "unexpected content-type: {content_type}"
+    );
 }

@@ -39,9 +39,16 @@ pub struct ApiErr(StatusCode, String);
 
 impl IntoResponse for ApiErr {
     fn into_response(self) -> Response {
-        // An empty reason stays a bare status. Sending "" as a body would make
-        // the client render "HTTP error 404: " with a trailing colon on every
-        // ordinary not-found.
+        // An empty reason stays a bare status, which is what every handler here
+        // returned before and what `From<StatusCode>` produces.
+        //
+        // Note what this does NOT fix: both branches send an empty body, so the
+        // client still Displays a reasonless error as "HTTP error 404: ",
+        // trailing colon and all. The difference is only that the bare branch
+        // sends no `content-type` for a body that does not exist. Filling the
+        // reason is what removes the colon, and that is the caller's job - see
+        // `repository_error`, which does it for the two variants that have
+        // something worth saying.
         if self.1.is_empty() {
             self.0.into_response()
         } else {
