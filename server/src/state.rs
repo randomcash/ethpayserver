@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use auth::StoreRoleRepository;
 use data_service::{
     InvoiceReader, InvoiceWriter, PaymentReader, PaymentWriter, PayoutReader, PayoutWriter,
-    RefundReader, RefundWriter, StoreWalletReader, StoreWalletWriter, StoreWebhookReader,
-    TokenReader, TokenWriter, WatchedAddressReader, WatchedAddressWriter,
+    RefundReader, RefundWriter, StoreWebhookReader, TokenReader, TokenWriter, WalletReader,
+    WalletWriter, WatchedAddressReader, WatchedAddressWriter,
 };
 use evm::api::EvmDataService;
 use rates::RateProvider;
@@ -23,7 +23,7 @@ pub trait AppDataServiceReader:
     + PaymentReader
     + TokenReader
     + WatchedAddressReader
-    + StoreWalletReader
+    + WalletReader
     + StoreWebhookReader
     + StoreRoleRepository
     + RefundReader
@@ -45,7 +45,7 @@ pub trait AppDataService:
     + PaymentWriter
     + TokenWriter
     + WatchedAddressWriter
-    + StoreWalletWriter
+    + WalletWriter
     + RefundWriter
     + PayoutWriter
     + EvmDataService

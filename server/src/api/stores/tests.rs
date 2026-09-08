@@ -100,9 +100,10 @@ fn test_payment_method_response_native() {
         chain_id: 1,
         token_address: None,
         asset_symbol: "ETH".to_string(),
+        wallet_id: Some(Uuid::new_v4()),
         decimals: 18,
-        xpub: "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string(),
-        derivation_index: 5,
+        xpub: Some("xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string()),
+        derivation_index: Some(5),
         enabled: true,
         created_at: Utc::now(),
     };
@@ -111,9 +112,9 @@ fn test_payment_method_response_native() {
     assert_eq!(response.chain_id, 1);
     assert_eq!(response.asset_symbol, "ETH");
     assert!(response.token_address.is_none());
-    assert_eq!(response.derivation_index, 5);
+    assert_eq!(response.derivation_index, Some(5));
     assert!(response.enabled);
-    assert!(response.xpub_masked.contains("..."));
+    assert!(response.xpub_masked.unwrap().contains("..."));
 }
 
 #[test]
@@ -125,9 +126,10 @@ fn test_payment_method_response_erc20() {
         chain_id: 137,
         token_address: Some(token_addr.clone()),
         asset_symbol: "USDC".to_string(),
+        wallet_id: Some(Uuid::new_v4()),
         decimals: 6,
-        xpub: "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string(),
-        derivation_index: 0,
+        xpub: Some("xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt".to_string()),
+        derivation_index: Some(0),
         enabled: false,
         created_at: Utc::now(),
     };
@@ -266,9 +268,10 @@ fn test_member_response_json() {
 fn test_wallet_response_json() {
     let response = WalletResponse {
         id: Uuid::nil(),
-        store_id: Uuid::nil(),
+        user_id: Uuid::nil(),
         xpub_masked: "xpub6CUG...3fDVmz".to_string(),
         derivation_index: 42,
+        is_primary: false,
         name: Some("Main Wallet".to_string()),
         created_at: Utc::now(),
     };
@@ -322,21 +325,23 @@ fn test_list_wallets_response_serialization() {
     let wallets = vec![
         WalletResponse {
             id: Uuid::nil(),
-            store_id: Uuid::nil(),
+            user_id: Uuid::nil(),
             xpub_masked: mask_xpub(
                 "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt",
             ),
             derivation_index: 0,
+            is_primary: false,
             name: Some("ETH Wallet".to_string()),
             created_at: Utc::now(),
         },
         WalletResponse {
             id: Uuid::new_v4(),
-            store_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
             xpub_masked: mask_xpub(
                 "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5",
             ),
             derivation_index: 5,
+            is_primary: false,
             name: None,
             created_at: Utc::now(),
         },
@@ -368,9 +373,10 @@ fn test_wallet_by_id_response_masks_xpub() {
     let xpub = "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
     let response = WalletResponse {
         id: Uuid::new_v4(),
-        store_id: Uuid::new_v4(),
+        user_id: Uuid::new_v4(),
         xpub_masked: mask_xpub(xpub),
         derivation_index: 7,
+        is_primary: false,
         name: Some("Hot Wallet".to_string()),
         created_at: Utc::now(),
     };
@@ -387,9 +393,10 @@ fn test_wallet_by_id_response_masks_xpub() {
 fn test_wallet_by_id_response_without_name() {
     let response = WalletResponse {
         id: Uuid::nil(),
-        store_id: Uuid::nil(),
+        user_id: Uuid::nil(),
         xpub_masked: "xpub6CUG...3fDVmz".to_string(),
         derivation_index: 0,
+        is_primary: false,
         name: None,
         created_at: Utc::now(),
     };
@@ -400,19 +407,20 @@ fn test_wallet_by_id_response_without_name() {
 }
 
 #[test]
-fn test_wallet_by_id_response_contains_store_id() {
-    let store_id = Uuid::new_v4();
+fn test_wallet_by_id_response_contains_user_id() {
+    let user_id = Uuid::new_v4();
     let response = WalletResponse {
         id: Uuid::new_v4(),
-        store_id,
+        user_id,
         xpub_masked: "xpub6D4B...cLW5".to_string(),
         derivation_index: 3,
+        is_primary: false,
         name: Some("Cold Storage".to_string()),
         created_at: Utc::now(),
     };
 
     let json = serde_json::to_value(&response).unwrap();
-    assert_eq!(json["store_id"].as_str().unwrap(), store_id.to_string());
+    assert_eq!(json["user_id"].as_str().unwrap(), user_id.to_string());
 }
 
 // =========================================================================
@@ -424,7 +432,7 @@ fn test_xpub_export_response_contains_full_xpub() {
     let xpub = "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
     let response = WalletXpubResponse {
         id: Uuid::new_v4(),
-        store_id: Uuid::new_v4(),
+        user_id: Uuid::new_v4(),
         xpub: xpub.to_string(),
         derivation_index: 5,
         name: Some("Main Wallet".to_string()),
@@ -442,7 +450,7 @@ fn test_xpub_export_response_contains_full_xpub() {
 fn test_xpub_export_response_without_name() {
     let response = WalletXpubResponse {
         id: Uuid::nil(),
-        store_id: Uuid::nil(),
+        user_id: Uuid::nil(),
         xpub: "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5".to_string(),
         derivation_index: 0,
         name: None,

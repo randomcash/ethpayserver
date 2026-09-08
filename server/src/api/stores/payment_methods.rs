@@ -15,7 +15,7 @@ use data_service::{self, StorePaymentMethod, StorePaymentMethodReader, StorePaym
 use evm::validate_xpub;
 
 use super::super::extractors::AuthenticatedUser;
-use super::{mask_xpub, require_store_settings_permission};
+use super::{mask_xpub, repository_status, require_store_settings_permission};
 use crate::state::PgAppState;
 
 /// Request to create a payment method.
@@ -55,10 +55,12 @@ pub struct PaymentMethodResponse {
     pub token_address: Option<String>,
     /// Asset symbol.
     pub asset_symbol: String,
-    /// Extended public key (masked).
-    pub xpub_masked: String,
-    /// Current derivation index.
-    pub derivation_index: i32,
+    /// Extended public key of the wallet this method resolves to (masked).
+    /// Null when nothing resolves - no pin, no store override, no account
+    /// primary - which means the method cannot be paid yet.
+    pub xpub_masked: Option<String>,
+    /// Next derivation index on the resolved wallet. Null for the same reason.
+    pub derivation_index: Option<i32>,
     /// Whether the payment method is enabled.
     pub enabled: bool,
     /// Creation timestamp.
@@ -73,7 +75,7 @@ impl From<StorePaymentMethod> for PaymentMethodResponse {
             chain_id: pm.chain_id,
             token_address: pm.token_address,
             asset_symbol: pm.asset_symbol,
-            xpub_masked: mask_xpub(&pm.xpub),
+            xpub_masked: pm.xpub.as_deref().map(mask_xpub),
             derivation_index: pm.derivation_index,
             enabled: pm.enabled,
             created_at: pm.created_at,
@@ -165,7 +167,7 @@ where
         &req.xpub,
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(repository_status)?;
 
     Ok((StatusCode::CREATED, Json(method.into())))
 }
@@ -264,7 +266,7 @@ where
         req.xpub.as_deref(),
     )
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(repository_status)?;
 
     Ok(Json(method.into()))
 }

@@ -82,10 +82,11 @@ fn test_store_serialization() {
 fn test_wallet_serialization() {
     let wallet = Wallet {
         id: "wallet_001".to_string(),
-        store_id: "store_001".to_string(),
+        user_id: "user_001".to_string(),
         xpub_masked: "xpub6CUG...Ht4QRnxv".to_string(),
         derivation_index: 3,
         name: Some("Main Wallet".to_string()),
+        is_primary: true,
         created_at: "2024-01-01T00:00:00Z".to_string(),
     };
 
@@ -93,7 +94,10 @@ fn test_wallet_serialization() {
     let parsed: Wallet = serde_json::from_str(&json).unwrap();
 
     assert_eq!(wallet.id, parsed.id);
-    assert_eq!(wallet.store_id, parsed.store_id);
+    // user_id, not store_id: RCS-234 moved wallets to the account. This
+    // assertion is why the DTO change could not pass silently.
+    assert_eq!(wallet.user_id, parsed.user_id);
+    assert_eq!(wallet.is_primary, parsed.is_primary);
     assert_eq!(wallet.xpub_masked, parsed.xpub_masked);
     assert_eq!(wallet.derivation_index, parsed.derivation_index);
     assert_eq!(wallet.name, parsed.name);
@@ -408,8 +412,8 @@ fn test_store_payment_method_serialization() {
         chain_id: 1,
         token_address: None,
         asset_symbol: "ETH".to_string(),
-        xpub_masked: "xpub12...pub123".to_string(),
-        derivation_index: 0,
+        xpub_masked: Some("xpub12...pub123".to_string()),
+        derivation_index: Some(0),
         enabled: true,
         created_at: "2024-01-01T00:00:00Z".to_string(),
     };
@@ -429,8 +433,8 @@ fn test_store_payment_method_erc20() {
         chain_id: 137,
         token_address: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
         asset_symbol: "USDC".to_string(),
-        xpub_masked: "xpub45...pub456".to_string(),
-        derivation_index: 5,
+        xpub_masked: Some("xpub45...pub456".to_string()),
+        derivation_index: Some(5),
         enabled: false,
         created_at: "2024-01-01T00:00:00Z".to_string(),
     };
@@ -475,8 +479,9 @@ fn test_store_payment_method_from_backend_json() {
     assert_eq!(pm.id, "550e8400-e29b-41d4-a716-446655440000");
     assert_eq!(pm.chain_id, 11155111);
     assert_eq!(pm.asset_symbol, "ETH");
-    assert_eq!(pm.xpub_masked, "xpub6CUG...Ht4QRnxv");
-    assert_eq!(pm.derivation_index, 3);
+    // Option since RCS-234: a payment method can resolve to no wallet.
+    assert_eq!(pm.xpub_masked.as_deref(), Some("xpub6CUG...Ht4QRnxv"));
+    assert_eq!(pm.derivation_index, Some(3));
     assert!(pm.enabled);
     assert!(pm.token_address.is_none());
 }

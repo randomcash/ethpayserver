@@ -3,8 +3,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ::types::{
-    PaymentMethodId, PaymentOptionData, PaymentOptionId, StorePaymentMethodWriter,
-    WatchedAddressWriter, traits::InvoiceData,
+    DerivationAllocation, PaymentMethodId, PaymentOptionData, PaymentOptionId,
+    StorePaymentMethodWriter, WatchedAddressWriter, traits::InvoiceData,
 };
 use auth::SessionService;
 use evm::{Address, U256, XpubDeriver};
@@ -68,7 +68,7 @@ async fn build_one_payment_option<A: SessionService>(
     rate_str: Option<String>,
     rate_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<PaymentOptionData, (StatusCode, Json<serde_json::Value>)> {
-    let address = derive_payment_address(state, payment_method).await?;
+    let (address, allocation) = derive_payment_address(state, payment_method).await?;
     let payment_address = address.to_string();
 
     // Create payment option with calculated amount and rate
@@ -84,6 +84,11 @@ async fn build_one_payment_option<A: SessionService>(
         token_address: payment_method.token_address.clone(),
         decimals: payment_method.decimals,
         payment_address: payment_address.clone(),
+        // Record which key produced this address and at what index (RCS-234).
+        // The address alone no longer implies a wallet now that stores can
+        // share one.
+        wallet_id: Some(allocation.wallet_id),
+        derivation_index: Some(allocation.index),
         amount: crypto_amount,
         rate: rate_str,
         rate_at,
@@ -152,13 +157,22 @@ async fn build_one_payment_option<A: SessionService>(
 /// Kept separate from `build_one_payment_option` so index allocation and key
 /// derivation — the two steps that must not silently reuse an address — read
 /// as one unit.
+///
+/// Returns the address and the allocation it came from; both the wallet and
+/// the index are recorded on the payment option so the pairing can be audited
+/// later (RCS-234).
 async fn derive_payment_address<A: SessionService>(
     state: &PgAppState<A>,
     payment_method: &data_service::StorePaymentMethod,
-) -> Result<Address, (StatusCode, Json<serde_json::Value>)> {
-    // Get and increment derivation index for this payment method
-    let index =
-        StorePaymentMethodWriter::next_derivation_index(&*state.data_service, payment_method.id)
+) -> Result<(Address, DerivationAllocation), (StatusCode, Json<serde_json::Value>)> {
+    // One call takes the index and returns the key it was taken from. The
+    // xpub on `payment_method` is deliberately NOT used here: it was read
+    // earlier, and a rotation or an override change committing since would
+    // make it a different wallet's key than the one whose counter just moved -
+    // deriving from the pair would burn an index on one wallet while handing
+    // out an address the other will issue again later.
+    let allocation =
+        StorePaymentMethodWriter::allocate_derivation(&*state.data_service, payment_method.id)
             .await
             .map_err(|_| {
                 invoice_error(
@@ -168,21 +182,22 @@ async fn derive_payment_address<A: SessionService>(
                 )
             })?;
 
-    // Derive payment address from the payment method's xpub
-    let deriver = XpubDeriver::from_xpub(&payment_method.xpub).map_err(|_| {
+    let deriver = XpubDeriver::from_xpub(&allocation.xpub).map_err(|_| {
         invoice_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
             "Failed to derive payment address",
         )
     })?;
-    let address = deriver.derive_address(index as u32).map_err(|_| {
-        invoice_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "Failed to derive payment address",
-        )
-    })?;
+    let address = deriver
+        .derive_address(allocation.index as u32)
+        .map_err(|_| {
+            invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to derive payment address",
+            )
+        })?;
 
-    Ok(address)
+    Ok((address, allocation))
 }

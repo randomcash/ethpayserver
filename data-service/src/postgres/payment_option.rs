@@ -16,8 +16,9 @@ impl PaymentOptionReader for PgDataService {
             r#"
             SELECT
                 id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                token_address, decimals, payment_address, amount::text,
-                rate::text, rate_at, is_active, created_at
+                token_address, decimals, payment_address, wallet_id,
+                derivation_index, amount::text, rate::text, rate_at, is_active,
+                created_at
             FROM payment_options
             WHERE id = $1
             "#,
@@ -41,8 +42,9 @@ impl PaymentOptionReader for PgDataService {
             r#"
             SELECT
                 id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                token_address, decimals, payment_address, amount::text,
-                rate::text, rate_at, is_active, created_at
+                token_address, decimals, payment_address, wallet_id,
+                derivation_index, amount::text, rate::text, rate_at, is_active,
+                created_at
             FROM payment_options
             WHERE invoice_id = $1
             ORDER BY created_at ASC
@@ -65,8 +67,9 @@ impl PaymentOptionReader for PgDataService {
             r#"
             SELECT
                 id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                token_address, decimals, payment_address, amount::text,
-                rate::text, rate_at, is_active, created_at
+                token_address, decimals, payment_address, wallet_id,
+                derivation_index, amount::text, rate::text, rate_at, is_active,
+                created_at
             FROM payment_options
             WHERE invoice_id = $1 AND payment_method_id = $2
             "#,
@@ -91,8 +94,9 @@ impl PaymentOptionReader for PgDataService {
             r#"
             SELECT
                 id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                token_address, decimals, payment_address, amount::text,
-                rate::text, rate_at, is_active, created_at
+                token_address, decimals, payment_address, wallet_id,
+                derivation_index, amount::text, rate::text, rate_at, is_active,
+                created_at
             FROM payment_options
             WHERE invoice_id = $1 AND is_active = TRUE
             ORDER BY created_at ASC
@@ -117,8 +121,9 @@ impl PaymentOptionReader for PgDataService {
                 r#"
                     SELECT
                         id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                        token_address, decimals, payment_address, amount::text,
-                        rate::text, rate_at, is_active, created_at
+                        token_address, decimals, payment_address, wallet_id,
+                        derivation_index, amount::text, rate::text, rate_at,
+                        is_active, created_at
                     FROM payment_options
                     WHERE payment_address = $1 AND chain_id = $2 AND token_address = $3
                     "#,
@@ -133,8 +138,9 @@ impl PaymentOptionReader for PgDataService {
                 r#"
                     SELECT
                         id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                        token_address, decimals, payment_address, amount::text,
-                        rate::text, rate_at, is_active, created_at
+                        token_address, decimals, payment_address, wallet_id,
+                        derivation_index, amount::text, rate::text, rate_at,
+                        is_active, created_at
                     FROM payment_options
                     WHERE payment_address = $1 AND chain_id = $2 AND token_address IS NULL
                     "#,
@@ -167,11 +173,12 @@ impl PaymentOptionWriter for PgDataService {
             r#"
             INSERT INTO payment_options (
                 id, invoice_id, payment_method_id, chain_id, asset_type,
-                asset_symbol, token_address, decimals, payment_address, amount,
-                rate, rate_at, is_active, created_at
+                asset_symbol, token_address, decimals, payment_address,
+                wallet_id, derivation_index, amount, rate, rate_at, is_active,
+                created_at
             ) VALUES (
-                $1, $2, $3, $4, $5::asset_type, $6, $7, $8, $9, $10::numeric,
-                $11::numeric, $12, $13, $14
+                $1, $2, $3, $4, $5::asset_type, $6, $7, $8, $9, $10, $11,
+                $12::numeric, $13::numeric, $14, $15, $16
             )
             "#,
         )
@@ -184,6 +191,8 @@ impl PaymentOptionWriter for PgDataService {
         .bind(&option.token_address)
         .bind(option.decimals as i16)
         .bind(&option.payment_address)
+        .bind(option.wallet_id)
+        .bind(option.derivation_index)
         .bind(&option.amount)
         .bind(&option.rate)
         .bind(option.rate_at)
@@ -267,6 +276,8 @@ fn row_to_payment_option(row: &sqlx::postgres::PgRow) -> PaymentOptionData {
         token_address: row.get("token_address"),
         decimals: decimals as u8,
         payment_address: row.get("payment_address"),
+        wallet_id: row.get("wallet_id"),
+        derivation_index: row.get("derivation_index"),
         amount: row.get("amount"),
         rate: row.get("rate"),
         rate_at: row.get("rate_at"),
