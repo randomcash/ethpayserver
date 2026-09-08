@@ -1,13 +1,46 @@
+import { randomBytes } from 'node:crypto';
+
 import { expect, type Page } from '@playwright/test';
+import { HDKey } from 'viem/accounts';
+
 import { createStoreAndOpen, selectStore } from './stores';
 
+/** Account-level path the server expects an xpub at (`evm/src/wallet.rs`). */
+const ACCOUNT_PATH = "m/44'/60'/0'";
+
 /**
- * Account-level xpub (`m/44'/60'/0'`) used by the Rust test suites — see
- * `server/src/api/stores/tests.rs`. Watch-only by construction: an xpub derives
- * receive addresses and cannot spend.
+ * One xpub per account, generated, rather than one constant for the whole suite.
+ *
+ * This used to be a shared `TEST_XPUB` constant, and RCS-234 made that invalid:
+ * an xpub may now belong to exactly one account, because two accounts deriving
+ * from one key issue the same addresses to different merchants' customers.
+ * `registeredPage` creates a fresh account per test, so from the second test
+ * onwards every add-method call got `409 Conflict` and the form never closed.
+ *
+ * It did not show up as a failure. Playwright restarts the worker after a
+ * failed test, `beforeAll` re-runs `resetDatabase()`, and the retry - now the
+ * only account in an empty database - passes. Five tests were reported "flaky"
+ * while in fact failing every time, for a real and entirely reproducible
+ * reason. Do not put the constant back.
+ *
+ * Keyed by `Page`, not per call, so one account's methods share one key: that
+ * is the realistic shape (paste the same xpub for ETH and USDC) and it is what
+ * exercises the one-counter-per-key path RCS-234 exists for. A WeakMap, so
+ * pages are not retained after their test ends.
+ *
+ * Watch-only by construction: an xpub derives receive addresses and cannot
+ * spend. The seed is random per account and never leaves the test process.
  */
-export const TEST_XPUB =
-  'xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt';
+const xpubByPage = new WeakMap<Page, string>();
+
+export function testXpubFor(page: Page): string {
+  const existing = xpubByPage.get(page);
+  if (existing) return existing;
+
+  const xpub = HDKey.fromMasterSeed(randomBytes(64)).derive(ACCOUNT_PATH).publicExtendedKey;
+  xpubByPage.set(page, xpub);
+  return xpub;
+}
 
 /** Sepolia — the chain the add-method form defaults to. */
 export const SEPOLIA = '11155111';
@@ -18,6 +51,12 @@ export interface PaymentMethod {
   /** Empty means the chain's native asset. */
   tokenAddress?: string;
   decimals?: string;
+  /**
+   * Override the account's key. Only for tests that are *about* the xpub -
+   * anything else should take the per-account default, or it risks
+   * reintroducing the cross-account collision described above.
+   */
+  xpub?: string;
 }
 
 /**
@@ -36,7 +75,13 @@ export async function openPaymentMethodsTab(page: Page): Promise<void> {
 
 /** Add a payment method to the open store, from its Payment Methods tab. */
 export async function addPaymentMethod(page: Page, method: PaymentMethod = {}): Promise<void> {
-  const { chainId = SEPOLIA, symbol = 'ETH', tokenAddress = '', decimals = '18' } = method;
+  const {
+    chainId = SEPOLIA,
+    symbol = 'ETH',
+    tokenAddress = '',
+    decimals = '18',
+    xpub = testXpubFor(page),
+  } = method;
 
   // "Add method" *toggles* `show_create_form`, so clicking it blindly closes an
   // already-open form (e.g. on a retry after a failed create) and the wait below
@@ -53,10 +98,28 @@ export async function addPaymentMethod(page: Page, method: PaymentMethod = {}): 
     await form.getByPlaceholder(/leave empty for native/i).fill(tokenAddress);
   }
   await form.locator('input[type="number"]').fill(decimals);
-  await form.getByPlaceholder('xpub...').fill(TEST_XPUB);
+  await form.getByPlaceholder('xpub...').fill(xpub);
 
   await form.locator('.form-actions .btn-primary').click();
-  await expect(form).not.toBeVisible();
+
+  // Say what went wrong when the form refuses to close. Without this the report
+  // is "locator resolved to <div class=detail-card>" nine times over, and the
+  // actual cause - an error rendered inside the form - is only visible by
+  // downloading the trace.
+  await expect(form, await addMethodFailure(form)).not.toBeVisible();
+}
+
+/** Explain a form that would not close, using whatever error it is showing. */
+async function addMethodFailure(form: ReturnType<Page['locator']>): Promise<string> {
+  const text = await form
+    .locator('.form-error, .error-message, .alert-error')
+    .first()
+    .textContent({ timeout: 1_000 })
+    .catch(() => null);
+
+  return text?.trim()
+    ? `the add-method form stayed open: ${text.trim()}`
+    : 'the add-method form stayed open and showed no error';
 }
 
 /**

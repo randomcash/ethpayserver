@@ -705,3 +705,84 @@ fn test_rotate_wallet_response_empty_rotations() {
     assert_eq!(json["methods_rotated"], 0);
     assert!(json["rotations"].as_array().unwrap().is_empty());
 }
+
+// =========================================================================
+// repository_error / ApiErr
+// =========================================================================
+
+use axum::body::to_bytes;
+use axum::response::IntoResponse;
+
+async fn body_of(err: ApiErr) -> (StatusCode, String) {
+    let response = err.into_response();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+/// The refusal has to say what it refused.
+///
+/// The client renders the body after the status (`ApiError::Http`), so a 409
+/// with nothing in it reaches the merchant as the literal "HTTP error 409:" -
+/// which is what the payment-method form showed, and is barely better than the
+/// 500 it replaced. The merchant cannot guess "that key belongs to another
+/// account" from a number.
+#[tokio::test]
+async fn conflict_carries_the_reason_the_caller_needs() {
+    let err = repository_error(data_service::RepositoryError::Conflict(
+        "this xpub is already registered to another account".into(),
+    ));
+
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, "this xpub is already registered to another account");
+}
+
+#[tokio::test]
+async fn not_found_carries_its_reason_too() {
+    let err = repository_error(data_service::RepositoryError::NotFound(
+        "wallet not found".into(),
+    ));
+
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, "wallet not found");
+}
+
+/// Everything that is not `Conflict` or `NotFound` is answered generically.
+///
+/// Those two are written by this codebase for the caller to read. Any other
+/// repository error may be carrying a database error, whose text names columns,
+/// constraints, and - for a connection failure - the host and credentials in
+/// the URL. None of that may reach a response.
+#[tokio::test]
+async fn other_repository_errors_say_nothing_specific() {
+    let err = repository_error(data_service::RepositoryError::Database(
+        "FATAL: password authentication failed for user \"ethpayserver\" at db.internal:5432"
+            .into(),
+    ));
+
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, "internal error");
+    assert!(
+        !body.contains("db.internal"),
+        "the host leaked into a response"
+    );
+    assert!(
+        !body.contains("password"),
+        "the error text leaked into a response"
+    );
+}
+
+/// A bare status stays bare.
+///
+/// Most handlers here still return `StatusCode`, and converting those into an
+/// empty-bodied `ApiErr` must not start appending a trailing colon to every
+/// ordinary 404 the client renders.
+#[tokio::test]
+async fn a_plain_status_gets_no_body() {
+    let (status, body) = body_of(StatusCode::NOT_FOUND.into()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, "");
+}

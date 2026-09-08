@@ -26,7 +26,7 @@ use data_service::{
 use evm::{XpubDeriver, validate_xpub};
 
 use super::super::extractors::AuthenticatedUser;
-use super::{mask_xpub, repository_status, require_store_settings_permission};
+use super::{ApiErr, mask_xpub, repository_error, require_store_settings_permission};
 use crate::state::PgAppState;
 
 /// Request to add a wallet to the account.
@@ -222,12 +222,12 @@ pub async fn create_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Json(req): Json<CreateWalletRequest>,
-) -> Result<(StatusCode, Json<WalletResponse>), StatusCode>
+) -> Result<(StatusCode, Json<WalletResponse>), ApiErr>
 where
     A: SessionService + 'static,
 {
     if !validate_xpub(&req.xpub) {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
 
     let wallet = WalletWriter::create_wallet(
@@ -237,7 +237,7 @@ where
         req.name.as_deref(),
     )
     .await
-    .map_err(repository_status)?;
+    .map_err(repository_error)?;
 
     Ok((StatusCode::CREATED, Json(wallet.into())))
 }
@@ -340,7 +340,7 @@ pub async fn delete_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Path(wallet_id): Path<Uuid>,
-) -> Result<StatusCode, StatusCode>
+) -> Result<StatusCode, ApiErr>
 where
     A: SessionService + 'static,
 {
@@ -348,7 +348,7 @@ where
 
     WalletWriter::delete_wallet(&*state.data_service, wallet_id)
         .await
-        .map_err(repository_status)?;
+        .map_err(repository_error)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -680,7 +680,7 @@ pub async fn rotate_store_wallet<A>(
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<RotateWalletRequest>,
-) -> Result<Json<RotateWalletResponse>, StatusCode>
+) -> Result<Json<RotateWalletResponse>, ApiErr>
 where
     A: SessionService + 'static,
 {
@@ -688,7 +688,7 @@ where
 
     // Validate the new xpub
     if !validate_xpub(&req.xpub) {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
 
     // Verify store exists
@@ -705,7 +705,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if methods.is_empty() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::NOT_FOUND.into());
     }
 
     // One call, one transaction. Rotating method by method meant a failure
@@ -716,11 +716,11 @@ where
         .data_service
         .rotate_store_xpub(store_id, &req.xpub, req.reason.as_deref())
         .await
-        .map_err(repository_status)?;
+        .map_err(repository_error)?;
 
     // Nothing moved means every method was already deriving from this key.
     if rotations.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::BAD_REQUEST.into());
     }
 
     // Chain and asset are cosmetic labels on the response, and they come from
