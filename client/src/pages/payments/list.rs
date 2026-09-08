@@ -53,7 +53,15 @@ pub fn PaymentsPage() -> impl IntoView {
         let _ = active_filter.get();
         let _ = search_param.get();
         let _ = store_ctx.selected_store_id.get();
-        set_current_offset.set(0);
+        // Guarded, because a signal write notifies even when the value does
+        // not change. Unconditional, this fired the resource a second time for
+        // every search keystroke that settled - two identical requests per
+        // search, measured against testnet - since the offset is already 0 in
+        // the common case. `get_untracked` so reading it here does not make the
+        // effect depend on the value it sets (RCS-231).
+        if current_offset.get_untracked() != 0 {
+            set_current_offset.set(0);
+        }
     });
 
     // Refresh counter for manual re-fetch
