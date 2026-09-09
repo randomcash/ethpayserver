@@ -31,7 +31,7 @@ ETHPayServer is a free, open-source payment processor that enables merchants to 
 
 ```bash
 # Clone the repository
-git clone git@gitlab.com:random.cash/ethpayserver.git
+git clone git@github.com:randomcash/ethpayserver.git
 cd ethpayserver
 ```
 

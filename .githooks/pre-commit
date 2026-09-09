@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pre-commit hook: runs the same fmt + clippy checks as .gitlab-ci.yml lint stage.
+# Pre-commit hook: runs the same fmt + clippy checks as the CI lint job.
 # Skipped when no Rust sources are staged.
 #
 # Install (run once per clone): git config core.hooksPath .githooks

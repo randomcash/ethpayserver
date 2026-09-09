@@ -98,8 +98,8 @@ Every CI pipeline tags container images with both the short commit SHA
 and a branch-latest tag:
 
 ```
-registry.gitlab.com/random.cash/ethpayserver:<short_sha>
-registry.gitlab.com/random.cash/ethpayserver:<branch>-latest
+ghcr.io/randomcash/ethpayserver:sha-<short_sha>
+ghcr.io/randomcash/ethpayserver:<branch>-latest
 ```
 
 The SHA tag is immutable and deterministic — it is the tag used for
@@ -125,8 +125,8 @@ docker inspect ethpayserver_server --format='{{.Config.Image}}'
 cd /path/to/ethpayserver/docker
 
 # Update the image tag in .env or docker-compose override:
-export SERVER_IMAGE=registry.gitlab.com/random.cash/ethpayserver:<previous_sha>
-export MONITOR_IMAGE=registry.gitlab.com/random.cash/ethpayserver/evmmonitor:<previous_sha>
+export SERVER_IMAGE=ghcr.io/randomcash/ethpayserver:<previous_sha>
+export MONITOR_IMAGE=ghcr.io/randomcash/ethpayserver/evmmonitor:<previous_sha>
 # The frontend is versioned separately and does not follow <previous_sha>.
 # Use the tag pinned at that commit: git show <previous_sha>:ops/client-image.pin
 export CLIENT_IMAGE=ghcr.io/randomcash/payserver-client:<pinned_tag>
