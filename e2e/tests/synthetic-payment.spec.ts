@@ -47,7 +47,11 @@ import { WebhookSink, verifySignature } from '../fixtures/webhook-sink';
 
 const ENABLED = process.env.E2E_SYNTHETIC_PAYMENT === 'true';
 
-const CHAIN_ID = 11155111;
+// CAIP-2, not the bare EIP-155 integer (RCS-241). The API rejects the integer
+// outright — `422 chain_id: invalid type: integer, expected a string` — and this
+// spec kept sending one for a day because it only runs on the nightly against
+// live testnet, never in PR CI.
+const CHAIN_ID = 'eip155:11155111';
 /** Account-level path the server expects an xpub at (`evm/src/wallet.rs`). */
 const MERCHANT_PATH = "m/44'/60'/0'";
 /** Kept clear of account 0 so the spender never collides with a receive address. */
@@ -124,7 +128,7 @@ function requireEnv(name: string, why: string): string {
 }
 
 interface PaymentOption {
-  chain_id: number;
+  chain_id: string;
   asset_symbol: string;
   token_address: string | null;
   payment_address: string;
