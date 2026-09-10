@@ -430,4 +430,30 @@ mod tests {
         assert!(!validate_xpub("invalid-xpub"));
         assert!(!validate_xpub(""));
     }
+
+    /// A private key must never be accepted where a public one is asked for.
+    ///
+    /// The whole custody story rests on this: a merchant hands over an xpub, the
+    /// server derives receive addresses from it, and nothing here can move their
+    /// funds because nothing here can sign. An `xprv` pasted into the same
+    /// field, by a merchant who does not know the difference or who copied the
+    /// wrong line out of their wallet, would put a spending key in our database
+    /// and silently make us custodial.
+    ///
+    /// `xpub_from_base58` rejects it on the version-byte prefix (0x0488ADE4 for
+    /// private, 0x0488B21E for public). That is a property of the decoder rather
+    /// than a check anyone wrote here, which is exactly why it deserves a test:
+    /// nothing in this file would notice if it stopped being true.
+    #[test]
+    fn an_xprv_is_never_accepted_as_an_xpub() {
+        // BIP-32 test vector 1 master keys - a real pair, same seed.
+        const XPRV: &str = "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi";
+        const XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+
+        assert!(validate_xpub(XPUB), "a valid xpub must be accepted");
+        assert!(
+            !validate_xpub(XPRV),
+            "an xprv was accepted as an xpub: the server would be holding a spending key"
+        );
+    }
 }
