@@ -232,7 +232,9 @@ The web frontend is **not** here. It lives in
 [payserver-client](https://github.com/randomcash/payserver-client), because it
 is meant to serve every payserver — EVM, Tron, Solana, Monero — rather than this
 one. The image tag deployed alongside this server is pinned in
-`ops/client-image.pin`.
+`ops/client-image.pin` — which is the version E2E runs against, not the one
+in production: since RCS-245 the frontend deploys on its own cadence from
+payserver-client via central-infrastructure.
 
 ### Crates
 
