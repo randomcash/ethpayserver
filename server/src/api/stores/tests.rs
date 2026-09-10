@@ -586,6 +586,151 @@ fn test_store_settings_response_defaults() {
     assert!(json["logo_url"].is_null());
 }
 
+// =========================================================================
+// notification_prefs: validation and merge
+//
+// The bug these pin: `customer_receipts_enabled` shares the notification_prefs
+// blob with the five event keys, but validation knew only about the events, so
+// any payload containing it was a 400. A client could therefore only save
+// notification preferences by dropping the key - and the update replaced the
+// blob wholesale, so dropping it removed it. `receipts_disabled_for_store`
+// reads absent as ENABLED, so a merchant who had switched customer emails off
+// started sending them again by saving an unrelated preference.
+// =========================================================================
+
+#[test]
+fn switch_key_is_accepted() {
+    // The exact payload that used to 400.
+    assert!(
+        validate_notification_prefs(&serde_json::json!({"customer_receipts_enabled": false}))
+            .is_ok()
+    );
+    assert!(
+        validate_notification_prefs(&serde_json::json!({"customer_receipts_enabled": true}))
+            .is_ok()
+    );
+}
+
+#[test]
+fn event_and_switch_can_be_sent_together() {
+    assert!(
+        validate_notification_prefs(&serde_json::json!({
+            "payment_confirmed": {"webhook": true},
+            "customer_receipts_enabled": false
+        }))
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_switch_sent_as_a_string_is_refused() {
+    // Would store cleanly and then read as ENABLED: `receipts_disabled_for_store`
+    // matches Bool(false) exactly, so "false" is not off.
+    assert!(
+        validate_notification_prefs(&serde_json::json!({"customer_receipts_enabled": "false"}))
+            .is_err()
+    );
+    assert!(
+        validate_notification_prefs(&serde_json::json!({"customer_receipts_enabled": 0})).is_err()
+    );
+}
+
+#[test]
+fn an_event_sent_as_a_bool_is_refused() {
+    // Events carry a channel map; a bare bool would silently disable nothing.
+    assert!(validate_notification_prefs(&serde_json::json!({"payment_confirmed": true})).is_err());
+}
+
+#[test]
+fn unknown_keys_are_still_refused() {
+    assert!(validate_notification_prefs(&serde_json::json!({"not_a_real_key": true})).is_err());
+}
+
+#[test]
+fn a_non_object_blob_is_refused() {
+    assert!(validate_notification_prefs(&serde_json::json!("nope")).is_err());
+    assert!(validate_notification_prefs(&serde_json::json!([])).is_err());
+}
+
+#[test]
+fn saving_an_unrelated_preference_leaves_receipts_off() {
+    // THE regression. Receipts explicitly off; the merchant saves a webhook
+    // preference, which is a payload that does not mention receipts at all.
+    let stored = serde_json::json!({
+        "customer_receipts_enabled": false,
+        "payment_detected": {"webhook": true}
+    });
+    let patch = serde_json::json!({"payment_confirmed": {"webhook": true}});
+
+    let merged = merge_notification_prefs(&stored, &patch);
+
+    assert_eq!(
+        merged["customer_receipts_enabled"],
+        serde_json::Value::Bool(false),
+        "saving an unrelated preference must not resume emailing the merchant's customers"
+    );
+    assert_eq!(
+        merged["payment_detected"],
+        serde_json::json!({"webhook": true})
+    );
+    assert_eq!(
+        merged["payment_confirmed"],
+        serde_json::json!({"webhook": true})
+    );
+}
+
+#[test]
+fn a_patch_overrides_the_stored_value() {
+    let stored = serde_json::json!({"customer_receipts_enabled": false});
+    let merged = merge_notification_prefs(
+        &stored,
+        &serde_json::json!({"customer_receipts_enabled": true}),
+    );
+    assert_eq!(
+        merged["customer_receipts_enabled"],
+        serde_json::Value::Bool(true)
+    );
+}
+
+#[test]
+fn an_explicit_null_removes_a_key() {
+    // Merging means an omitted key is kept, so there has to be a way to unset.
+    let stored =
+        serde_json::json!({"customer_receipts_enabled": false, "late_paid": {"webhook": true}});
+    let merged = merge_notification_prefs(&stored, &serde_json::json!({"late_paid": null}));
+    assert!(merged.get("late_paid").is_none());
+    assert_eq!(
+        merged["customer_receipts_enabled"],
+        serde_json::Value::Bool(false)
+    );
+}
+
+#[test]
+fn an_empty_patch_changes_nothing() {
+    let stored =
+        serde_json::json!({"customer_receipts_enabled": false, "late_paid": {"webhook": true}});
+    let merged = merge_notification_prefs(&stored, &serde_json::json!({}));
+    assert_eq!(merged, stored);
+}
+
+#[test]
+fn merging_onto_an_empty_blob_keeps_the_patch() {
+    let merged = merge_notification_prefs(
+        &serde_json::json!({}),
+        &serde_json::json!({"customer_receipts_enabled": false}),
+    );
+    assert_eq!(
+        merged["customer_receipts_enabled"],
+        serde_json::Value::Bool(false)
+    );
+}
+
+#[test]
+fn test_valid_notification_switches_list() {
+    assert_eq!(VALID_NOTIFICATION_SWITCHES.len(), 1);
+    assert!(VALID_NOTIFICATION_SWITCHES.contains(&"customer_receipts_enabled"));
+}
+
 #[test]
 fn test_valid_notification_events_list() {
     assert_eq!(VALID_NOTIFICATION_EVENTS.len(), 5);

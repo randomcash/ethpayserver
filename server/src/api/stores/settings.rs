@@ -16,6 +16,9 @@ use crate::state::PgAppState;
 pub use api_types::{StoreSettingsResponse, UpdateStoreSettingsRequest};
 
 /// Known webhook event types for notification_prefs validation.
+///
+/// These carry an object value (`{"webhook": true}`) describing the channels
+/// for that event.
 pub(crate) const VALID_NOTIFICATION_EVENTS: &[&str] = &[
     "payment_detected",
     "payment_confirmed",
@@ -23,6 +26,76 @@ pub(crate) const VALID_NOTIFICATION_EVENTS: &[&str] = &[
     "invoice_cancelled",
     "late_paid",
 ];
+
+/// Channel switches that share the `notification_prefs` blob with the events
+/// above but are plain booleans, not per-event channel maps.
+///
+/// `customer_receipts_enabled` used to be missing from validation entirely, so
+/// `PUT /stores/{id}/settings` answered 400 to any payload carrying it. A
+/// client could therefore only save notification preferences by dropping the
+/// key - and since the update replaced the blob wholesale, dropping it turned
+/// customer receipt emails back ON for a merchant who had switched them off.
+/// `receipts_disabled_for_store` treats absent as enabled.
+pub(crate) const VALID_NOTIFICATION_SWITCHES: &[&str] = &["customer_receipts_enabled"];
+
+/// Check every key and value in a `notification_prefs` payload.
+///
+/// The blob holds two shapes: per-event channel maps (`{"webhook": true}`) and
+/// plain boolean switches. Validation used to know only about the events, so
+/// any payload carrying `customer_receipts_enabled` was a 400 - see
+/// [`VALID_NOTIFICATION_SWITCHES`].
+///
+/// Values are checked too, not just keys: a switch sent as the string `"false"`
+/// would store cleanly and then read as enabled, because
+/// `receipts_disabled_for_store` matches on `Bool(false)` exactly. `null` is
+/// accepted for either shape and means "remove this key" once merged.
+pub(crate) fn validate_notification_prefs(prefs: &serde_json::Value) -> Result<(), StatusCode> {
+    let Some(obj) = prefs.as_object() else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    for (key, value) in obj {
+        let ok = if VALID_NOTIFICATION_EVENTS.contains(&key.as_str()) {
+            value.is_object() || value.is_null()
+        } else if VALID_NOTIFICATION_SWITCHES.contains(&key.as_str()) {
+            value.is_boolean() || value.is_null()
+        } else {
+            false
+        };
+        if !ok {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    Ok(())
+}
+
+/// Merge an incoming `notification_prefs` patch over what is stored.
+///
+/// Top-level keys only, which matches the blob's shape: events map to a channel
+/// object, switches to a boolean. An omitted key keeps its stored value; an
+/// explicit `null` removes it.
+///
+/// This replaces a wholesale swap of the blob. Under that, saving any single
+/// preference dropped every key the client had not sent - and a dropped
+/// `customer_receipts_enabled` reads as enabled, so a merchant who had turned
+/// customer emails off started sending them again by saving something else.
+/// Allowing the key through validation fixes that one instance; merging is what
+/// stops the next field from repeating it.
+pub(crate) fn merge_notification_prefs(
+    stored: &serde_json::Value,
+    patch: &serde_json::Value,
+) -> serde_json::Value {
+    let mut out = stored.as_object().cloned().unwrap_or_default();
+    if let Some(patch) = patch.as_object() {
+        for (key, value) in patch {
+            if value.is_null() {
+                out.remove(key);
+            } else {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
 
 /// Get store settings.
 #[utoipa::path(
@@ -158,17 +231,8 @@ where
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Validate notification_prefs keys
     if let Some(ref prefs) = req.notification_prefs {
-        if let Some(obj) = prefs.as_object() {
-            for key in obj.keys() {
-                if !VALID_NOTIFICATION_EVENTS.contains(&key.as_str()) {
-                    return Err(StatusCode::BAD_REQUEST);
-                }
-            }
-        } else {
-            return Err(StatusCode::BAD_REQUEST);
-        }
+        validate_notification_prefs(prefs)?;
     }
 
     // Merge with existing settings for partial update
@@ -186,16 +250,20 @@ where
                 .or(e.default_display_currency.as_deref()),
             req.logo_url.as_deref().or(e.logo_url.as_deref()),
             req.accent_color.as_deref().or(e.accent_color.as_deref()),
-            req.notification_prefs
-                .as_ref()
-                .unwrap_or(&e.notification_prefs),
+            req.notification_prefs.as_ref().map_or_else(
+                || e.notification_prefs.clone(),
+                |patch| merge_notification_prefs(&e.notification_prefs, patch),
+            ),
         ),
         None => (
             req.default_chain_id,
             req.default_display_currency.as_deref(),
             req.logo_url.as_deref(),
             req.accent_color.as_deref(),
-            req.notification_prefs.as_ref().unwrap_or(&empty_prefs),
+            req.notification_prefs.as_ref().map_or_else(
+                || empty_prefs.clone(),
+                |patch| merge_notification_prefs(&empty_prefs, patch),
+            ),
         ),
     };
 
@@ -206,7 +274,7 @@ where
         display_currency,
         logo,
         color,
-        prefs,
+        &prefs,
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
