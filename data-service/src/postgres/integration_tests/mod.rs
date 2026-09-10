@@ -11,7 +11,9 @@
 //! - `analytics`: Dashboard payment-volume aggregation
 //! - `wallet`: Account wallet derivation and store resolution
 //! - `wallet_migration`: the account-wallets migration run over old-shape data
+//! - `account_deletion`: what blocks deleting an account, against the real FKs
 
+mod account_deletion;
 mod aggregation;
 mod analytics;
 mod invoice;

@@ -321,6 +321,10 @@ where
 
     // User endpoints (API keys)
     let user_routes = Router::new()
+        // Refuses while the account's stores hold payments, payouts or refunds:
+        // `users` cascades through `stores` into `invoices` and `payments`, so
+        // deleting a merchant who traded would erase their financial history.
+        .route("/me", delete(users::delete_account::<A>))
         .route("/api-keys", get(users::list_api_keys::<A>))
         .route("/api-keys", post(users::create_api_key::<A>))
         .route("/api-keys/{id}", delete(users::revoke_api_key::<A>))
