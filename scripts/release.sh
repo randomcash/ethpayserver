@@ -102,10 +102,14 @@ if echo "$LIMITS" | grep -qE 'Known gap, with the ticket|What a user should not 
     die "$NOTES still contains template placeholder text under 'Not ready for'."
 fi
 
-if ! echo "$LIMITS" | grep -qE '(RCS-[0-9]+|#[0-9]+)'; then
-    echo "warning: no ticket references under 'Not ready for'." >&2
-    echo "         'Recovery has no UI' is checkable; 'some features" >&2
-    echo "         are incomplete' is noise. Continuing anyway." >&2
+# Public references only. The tracker is private, so an id from it is a pointer
+# no reader of these notes can follow; a GitHub issue or PR number is one they
+# can. A gap with no public reference is still worth naming - hence a warning
+# rather than a die.
+if ! echo "$LIMITS" | grep -qE '#[0-9]+'; then
+    echo "warning: no public references (#123) under 'Not ready for'." >&2
+    echo "         Name each gap concretely enough that a reader can check it" >&2
+    echo "         against the running software. Continuing anyway." >&2
 fi
 
 # --- 3. pre-release unless the version is exactly vX.Y.Z ----------------------

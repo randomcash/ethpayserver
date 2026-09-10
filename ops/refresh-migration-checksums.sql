@@ -1,26 +1,51 @@
 -- Refresh `_sqlx_migrations` checksums after the ticket-id sweep.
 --
--- The sweep edited comments inside migration files that are already applied on
--- testnet. sqlx checksums the whole file - SHA-384 of its bytes, see
--- `Migration::new` in sqlx-core - and refuses to run when a stored checksum no
--- longer matches (`migrator.rs`, VersionMismatch). So `migrate` would fail on
--- the next deploy even though not one statement changed, and `server` would
--- never start behind it.
+-- The sweep edited comments inside migration files that are already applied.
+-- sqlx checksums the whole file - SHA-384 of its bytes, see `Migration::new` in
+-- sqlx-core - and refuses to run when a stored checksum no longer matches
+-- (`migrator.rs`, VersionMismatch). So `migrate` would fail on the next deploy
+-- even though not one statement changed, and `server` would never start behind
+-- it.
 --
 -- Nothing here alters schema or data. It re-records the checksum, and the
 -- description sqlx now derives from the filename, for migrations that have
 -- already run. Against a database where they have not run, every UPDATE matches
 -- nothing and this is a no-op.
 --
+-- ============================================================================
+-- THIS IS ONE-WAY. Read before running.
+-- ============================================================================
+--
+-- `sqlx::migrate!` bakes the checksums into the binary at compile time, so a
+-- previously built image carries the OLD ones. Once this script has run, that
+-- image's `migrate` exits with VersionMismatch and `server` never starts behind
+-- it - which means **rolling back to any image built before this change stops
+-- working**, and rollback is otherwise just a `compose up` with an older tag.
+--
+-- Run it only together with deploying an image built from a tree that contains
+-- the edited migrations. To go back afterwards you must restore the previous
+-- checksums as well; take the rows first:
+--
+--   psql "$DATABASE_URL" -c "\copy (SELECT version, encode(checksum,'hex') \
+--     FROM _sqlx_migrations ORDER BY version) TO 'checksums-before.csv' CSV"
+--
+-- Run it in EVERY environment whose database has these migrations applied, not
+-- just the one you are deploying now. Nine of them date back to April 2026, so
+-- any long-lived database has them. Nothing in CI runs this for you.
+--
 -- Look first:
 --   psql "$DATABASE_URL" -c 'SELECT version, description FROM _sqlx_migrations ORDER BY version'
 --
--- Then:
---   psql "$DATABASE_URL" -1 -f ops/refresh-migration-checksums.sql
+-- Then (no -1: the transaction is below, and ON_ERROR_STOP makes a failure
+-- exit non-zero instead of reporting success over a rolled-back batch):
+--   psql "$DATABASE_URL" -f ops/refresh-migration-checksums.sql
 --
--- The values below were verified against sqlx itself, not just recomputed:
--- every checksum matches what the embedded `sqlx::migrate!` migrator reports
--- for the same file.
+-- The values below were verified three ways: recomputed from the files, checked
+-- against what the embedded `sqlx::migrate!` migrator reports, and compared
+-- against the 17 untouched rows in the live testnet database, which match
+-- byte-for-byte.
+
+\set ON_ERROR_STOP on
 
 BEGIN;
 

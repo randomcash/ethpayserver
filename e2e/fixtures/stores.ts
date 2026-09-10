@@ -35,8 +35,8 @@ export async function createStoreAndOpen(page: Page, name: string): Promise<void
  *
  * The layout auto-selects the first store, but only when the store list is
  * fetched — creating a store from an already-loaded page leaves the selector on
- * "All Stores", and the Create Invoice modal takes whatever is selected
- *, so an invoice opened straight after `createStore` has no store.
+ * "All Stores", and the Create Invoice modal takes whatever is selected,
+ * so an invoice opened straight after `createStore` has no store.
  */
 export async function selectStore(page: Page, name: string): Promise<void> {
   const selector = page.locator('.store-selector');

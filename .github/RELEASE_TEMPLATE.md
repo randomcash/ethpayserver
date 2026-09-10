@@ -12,10 +12,12 @@
      that is for this release before writing anything else. If there isn't
      one, ask whether this needs a release.
 
-  2. NAME GAPS WITH TICKET NUMBERS. "Recovery has no UI" is
-     checkable. "Some features are incomplete" is noise a reader learns to
-     skip, and the first person who hits the gap themselves will stop
-     trusting everything else on the page.
+  2. NAME EVERY GAP CONCRETELY. "Recovery has no UI" is checkable against
+     the running software. "Some features are incomplete" is noise a reader
+     learns to skip, and the first person who hits the gap themselves will
+     stop trusting everything else on the page. Link a GitHub issue or PR
+     where there is one - never a tracker id, which is a pointer a reader of
+     a public release note cannot follow.
 
   No marketing adjectives. For a payment processor the credibility comes from
   being the project that tells you what is broken — anyone can claim fast and
