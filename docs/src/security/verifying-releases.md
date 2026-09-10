@@ -45,7 +45,8 @@ cosign verify \
   ghcr.io/randomcash/payserver-client:$TAG
 ```
 
-The tag deployed alongside this server is pinned in `ops/client-image.pin`.
+The tag this server is **verified against** is pinned in `ops/client-image.pin`.
+The frontend deploys independently, so that is not necessarily what is live.
 
 Tags follow `sha-<short-sha>` (immutable, one per commit) or a release tag.
 `<branch>-latest` moves and nothing should deploy from it.
@@ -98,4 +99,4 @@ or that whoever pushed it was authorised. It binds artifact to pipeline.
 | Build | Per-commit immutable image tags (RCS-190) |
 | Container images | cosign keyless via GitHub Actions OIDC, signed by digest |
 | Transparency | Sigstore Rekor public log |
-| Frontend | Separately built, signed, and pinned by digest-bearing tag in `ops/client-image.pin` |
+| Frontend | Separately built, signed, and deployed on its own cadence; `ops/client-image.pin` records the tag this repo tested against |

@@ -57,7 +57,9 @@ cosign verify \
   ghcr.io/randomcash/payserver-client:$TAG
 ```
 
-The tag this payserver deploys is pinned in `ops/client-image.pin`.
+The tag this payserver **tests against** is pinned in `ops/client-image.pin`.
+It is not necessarily the tag serving production — the frontend deploys
+independently.
 
 ### Pinning the identity harder
 
