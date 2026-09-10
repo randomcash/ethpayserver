@@ -217,9 +217,8 @@ jobs:
   # Removing the flag blocks nothing: the deploy dispatch needs [docker], not
   # this job, and this job is skipped on pull_request (it is gated on
   # refs/heads/*), so a red E2E cannot hold up a deploy or a merge. What it does
-  # is make a
-  # regression show as a red run instead of a green one - which is the whole
-  # point, and was impossible while the flag was set.
+  # is make a regression show as a red run instead of a green one - which is
+  # the whole point, and was impossible while the flag was set.
   #
   # The skip is the synthetic payment spec, which needs a funded wallet.
   #
@@ -432,7 +431,6 @@ jobs:
           # to the image it came from.
           echo "sha_tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
@@ -477,6 +475,14 @@ jobs:
   # also described the deploy host in detail: compose layout, ports, health
   # probes, rollback.
   #
+  # NOTE: removing the job does NOT deregister the runner. `debianbase` (id 22)
+  # is still registered and online on this repository, so any workflow file
+  # saying `runs-on: [self-hosted, debianbase]` still lands on the deploy box -
+  # and now there is no `if:` guarding it, because nothing references it. This
+  # change removes the only current use, not the exposure. Deregistering it
+  # (and removing the runner service on the box) is the step that closes
+  # RCS-246; until then, treat this as half done.
+  #
   # Separate from notify-deploy below because the payload differs: this targets
   # central-infrastructure's deploy-testnet.yml, which takes `sha_tag` and runs
   # docker compose locally on the box. The other targets deploy.yml, which takes
@@ -487,6 +493,11 @@ jobs:
     timeout-minutes: 10
     needs: [docker]
     if: github.ref == 'refs/heads/testnet'
+    # Nothing here uses GITHUB_TOKEN - the dispatch authenticates with
+    # DEPLOY_PAT, which is a different credential. Handing this job the
+    # repository's default token scope while it holds a cross-repo PAT is
+    # scope it has no use for.
+    permissions: {}
     steps:
       - name: Trigger central-infrastructure deploy
         env:
