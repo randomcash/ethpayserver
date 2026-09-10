@@ -817,7 +817,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "api-types"
 version = "0.1.0"
-source = "git+https://github.com/randomcash/payserver-commons.git?rev=5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba#5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba"
+source = "git+https://github.com/randomcash/payserver-commons.git?rev=f85973acb7c3678bc212fa7dd20822c4c7ee1331#f85973acb7c3678bc212fa7dd20822c4c7ee1331"
 dependencies = [
  "chrono",
  "serde",
@@ -1239,7 +1239,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "auth"
 version = "0.1.0"
-source = "git+https://github.com/randomcash/payserver-commons.git?rev=5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba#5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba"
+source = "git+https://github.com/randomcash/payserver-commons.git?rev=f85973acb7c3678bc212fa7dd20822c4c7ee1331#f85973acb7c3678bc212fa7dd20822c4c7ee1331"
 dependencies = [
  "alloy-primitives 0.8.26",
  "async-trait",
@@ -2035,7 +2035,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 [[package]]
 name = "crypto"
 version = "0.1.0"
-source = "git+https://github.com/randomcash/payserver-commons.git?rev=5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba#5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba"
+source = "git+https://github.com/randomcash/payserver-commons.git?rev=f85973acb7c3678bc212fa7dd20822c4c7ee1331#f85973acb7c3678bc212fa7dd20822c4c7ee1331"
 dependencies = [
  "aes",
  "argon2",
@@ -3260,7 +3260,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4822,7 +4822,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4860,7 +4860,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -4991,7 +4991,7 @@ dependencies = [
 [[package]]
 name = "rates"
 version = "0.1.0"
-source = "git+https://github.com/randomcash/payserver-commons.git?rev=5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba#5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba"
+source = "git+https://github.com/randomcash/payserver-commons.git?rev=f85973acb7c3678bc212fa7dd20822c4c7ee1331#f85973acb7c3678bc212fa7dd20822c4c7ee1331"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5637,7 +5637,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "scrub"
 version = "0.1.0"
-source = "git+https://github.com/randomcash/payserver-commons.git?rev=5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba#5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba"
+source = "git+https://github.com/randomcash/payserver-commons.git?rev=f85973acb7c3678bc212fa7dd20822c4c7ee1331#f85973acb7c3678bc212fa7dd20822c4c7ee1331"
 
 [[package]]
 name = "seahash"
@@ -7105,7 +7105,7 @@ checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 [[package]]
 name = "types"
 version = "0.1.0"
-source = "git+https://github.com/randomcash/payserver-commons.git?rev=5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba#5e5dc9539fb8a3eddc8b87cc0e32b2aa5dd888ba"
+source = "git+https://github.com/randomcash/payserver-commons.git?rev=f85973acb7c3678bc212fa7dd20822c4c7ee1331#f85973acb7c3678bc212fa7dd20822c4c7ee1331"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7650,7 +7650,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
