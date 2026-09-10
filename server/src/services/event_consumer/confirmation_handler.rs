@@ -252,7 +252,7 @@ impl<
     /// The address a receipt goes to.
     ///
     /// Prefers the dedicated column, falling back to `metadata` for invoices
-    /// created before it existed (RCS-215). The fallback is not decoration: new
+    /// created before it existed. The fallback is not decoration: new
     /// writes populate the column and no longer put the address in metadata, so
     /// reading metadata alone would have stopped receipts for every new invoice
     /// - silently, since a missing address is a normal, unlogged case here.

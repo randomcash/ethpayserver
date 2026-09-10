@@ -64,7 +64,7 @@ async fn integration_user_crud() {
     let fetched = service.get_user(user.id).await.unwrap().unwrap();
     assert_eq!(fetched.failed_login_attempts, 3);
 
-    // RCS-201: the pinned identifier must survive a round trip, and update_user
+    // The pinned identifier must survive a round trip, and update_user
     // must not be able to move it. Collapsing the COALESCE back to a plain
     // assignment, or swapping two same-typed binds, previously kept CI green and
     // would only surface when a user tried to recover.
@@ -73,7 +73,7 @@ async fn integration_user_crud() {
         "create_user -> get_user must round-trip the pinned identifier"
     );
 
-    // RCS-203: this used to return Ok(()) and discard the change, which reads
+    // This used to return Ok(()) and discard the change, which reads
     // exactly like a successful write. Rejecting it is the point - a caller
     // that assigns this field should find out, not be told it worked.
     let mut tampered = fetched.clone();
@@ -432,7 +432,7 @@ async fn integration_cascade_delete_user() {
     assert!(service.get_wallet(wallet.id).await.unwrap().is_none());
 }
 
-/// The Postgres half of RCS-203.
+/// The Postgres half of the silent-discard fix.
 ///
 /// `kdf_salt_identifier` is pinned at registration and the stored
 /// `recovery_verification_hash` was derived from it, so a change would strand
@@ -463,7 +463,7 @@ async fn integration_kdf_salt_identifier_is_immutable() {
     assert_eq!(stored.kdf_salt_identifier, user.kdf_salt_identifier);
 
     // An update that leaves it alone still works, including one that adds an
-    // email — the case RCS-201 exists for, where recomputing would change it.
+    // email — the case the pin exists for, where recomputing would change it.
     let mut updated = stored;
     updated.failed_login_attempts = 2;
     service.update_user(&updated).await.unwrap();

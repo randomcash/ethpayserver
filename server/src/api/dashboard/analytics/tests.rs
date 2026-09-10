@@ -261,8 +261,8 @@ mod repository {
 
     #[tokio::test]
     async fn no_stores_reads_nothing() {
-        // An empty store list is "no stores", never "every store" — the
-        // RCS-222/RCS-211 failure mode.
+        // An empty store list is "no stores", never "every store" — that
+        // collapse is how a caller reads the whole server.
         let ds = InMemoryDataService::new();
         let now = Utc::now();
         seed(&ds, StoreId::new(), now).await;

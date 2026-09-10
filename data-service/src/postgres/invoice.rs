@@ -52,7 +52,7 @@ impl InvoiceReader for PgDataService {
             conditions.push(format!("store_id = ${}", bind_idx));
             bind_idx += 1;
         }
-        // Membership scoping (RCS-222). Separate from `store_id`, and an empty
+        // Membership scoping. Separate from `store_id`, and an empty
         // list stays a filter that matches nothing rather than becoming no
         // filter at all - a caller who belongs to no store must see no rows,
         // not every row. Every bind block below repeats this in the same order;
@@ -69,7 +69,7 @@ impl InvoiceReader for PgDataService {
             conditions.push(format!("currency = ${}", bind_idx));
             bind_idx += 1;
         }
-        // Free-text search (RCS-231). Two binds, each reused by every column
+        // Free-text search. Two binds, each reused by every column
         // that wants that shape: `${bind_idx}` is the anchored `term%` pattern,
         // `${bind_idx + 1}` the `%term%` one.
         //
@@ -89,8 +89,8 @@ impl InvoiceReader for PgDataService {
                 format!("LOWER(id) LIKE ${}", bind_idx),
                 format!("LOWER(currency) LIKE ${}", bind_idx + 1),
                 format!("amount::text LIKE ${}", bind_idx + 1),
-                // RCS-216 encrypts metadata client-side. Delete this one line
-                // when it lands: the server will hold ciphertext, and matching
+                // TODO: delete this one line when metadata is encrypted
+                // client-side: the server will hold ciphertext, and matching
                 // that is worse than not offering it, because it returns
                 // nothing rather than saying it cannot look.
                 format!("LOWER(metadata::text) LIKE ${}", bind_idx + 1),
@@ -148,7 +148,7 @@ impl InvoiceReader for PgDataService {
         }
         // Same order as the conditions above; the binds are positional, so a
         // filter added here out of order applies the wrong value to the wrong
-        // column and still returns rows (RCS-231).
+        // column and still returns rows.
         if let Some(term) = search {
             count_query = count_query
                 .bind(search_prefix_pattern(term))
@@ -183,7 +183,7 @@ impl InvoiceReader for PgDataService {
         }
         // Same order as the conditions above; the binds are positional, so a
         // filter added here out of order applies the wrong value to the wrong
-        // column and still returns rows (RCS-231).
+        // column and still returns rows.
         if let Some(term) = search {
             data_query = data_query
                 .bind(search_prefix_pattern(term))

@@ -721,7 +721,7 @@ Interactive API documentation is available at `/swagger-ui` when enabled on
 your instance. The OpenAPI spec is served at `/api-docs/openapi.json`.
 
 
-## Chain identifiers (RCS-241, RCS-242)
+## Chain identifiers
 
 Every field naming a chain is a [CAIP-2](https://standards.chainagnostic.org/CAIPs/caip-2)
 identifier — a string like `eip155:1`, not a number. That includes

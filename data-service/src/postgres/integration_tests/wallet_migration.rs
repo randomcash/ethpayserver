@@ -1,4 +1,4 @@
-//! The RCS-234 migration, run against data in the old shape.
+//! The account-wallets migration, run against data in the old shape.
 //!
 //! Every other test here runs against the schema as it is now. This one is the
 //! only place the *transition* is exercised, and the transition is where the
@@ -7,14 +7,14 @@
 //! customer has already been given.
 //!
 //! Each test builds its own database, applies every migration up to but not
-//! including RCS-234, seeds the old shape by hand, then applies RCS-234 and
-//! checks what survived.
+//! including the one under test, seeds the old shape by hand, then applies it
+//! and checks what survived.
 
 use sqlx::{Executor, PgPool, Row};
 use uuid::Uuid;
 
 /// Filename stem of the migration under test.
-const MIGRATION: &str = "20260908120000_rcs-234_account_wallets";
+const MIGRATION: &str = "20260908120000_account_wallets";
 
 fn migrations_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/postgres")
@@ -33,14 +33,15 @@ fn split_url(url: &str) -> (String, String) {
     (format!("{}/postgres", &url[..cut]), db)
 }
 
-/// Create a throwaway database and apply every migration *before* RCS-234.
+/// Create a throwaway database and apply every migration *before* the one
+/// under test.
 ///
 /// Returns `None` when `DATABASE_URL` is unset, matching the other integration
 /// tests, so the suite stays runnable without a database.
 async fn pre_migration_db(suffix: &str) -> Option<(PgPool, String, String)> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let (server_url, base) = split_url(&url);
-    let name = format!("{base}_rcs234_{suffix}");
+    let name = format!("{base}_wallets_{suffix}");
 
     let admin = PgPool::connect(&server_url).await.ok()?;
     admin
@@ -60,7 +61,7 @@ async fn pre_migration_db(suffix: &str) -> Option<(PgPool, String, String)> {
 
     // Apply migrations in filename order, stopping before the one under test.
     // Sorting by stem is exactly what sqlx does, so this reproduces the state a
-    // deployed database is in the instant before RCS-234 runs.
+    // deployed database is in the instant before the migration runs.
     let mut stems: Vec<String> = std::fs::read_dir(migrations_dir())
         .expect("read migrations dir")
         .filter_map(|e| {
@@ -205,8 +206,8 @@ async fn seed_invoice_with_option(
 ///
 /// The seed is the configuration that makes the old shape dangerous - one
 /// store, two payment methods, one xpub, two counters at different positions -
-/// plus a second store on the same key, which is the cross-store case RCS-234
-/// describes.
+/// plus a second store on the same key, which is the cross-store case the
+/// migration has to handle.
 #[tokio::test]
 #[ignore]
 async fn migration_never_re_derives_an_issued_address() {
@@ -233,7 +234,7 @@ async fn migration_never_re_derives_an_issued_address() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     // One wallet for the key, not three.
     let wallets: i64 = sqlx::query("SELECT COUNT(*) AS c FROM wallets WHERE xpub = $1")
@@ -320,7 +321,7 @@ async fn migration_preserves_which_key_each_store_uses() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     let primary: String = sqlx::query("SELECT xpub FROM wallets WHERE user_id = $1 AND is_primary")
         .bind(user)
@@ -367,7 +368,7 @@ async fn migration_leaves_exactly_one_primary_per_account() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     let primaries: i64 =
         sqlx::query("SELECT COUNT(*) AS c FROM wallets WHERE user_id = $1 AND is_primary")
@@ -408,7 +409,7 @@ async fn down_migration_refuses_to_split_a_merged_counter() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     let down = std::fs::read_to_string(migrations_dir().join(format!("{MIGRATION}.down.sql")))
         .expect("read down migration");
@@ -439,7 +440,7 @@ async fn down_migration_reverses_when_no_wallet_is_shared() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     let down = std::fs::read_to_string(migrations_dir().join(format!("{MIGRATION}.down.sql")))
         .expect("read down migration");
@@ -499,7 +500,7 @@ async fn migration_does_not_create_new_collisions_across_accounts() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     let indices: Vec<i32> = sqlx::query(
         "SELECT derivation_index FROM wallets WHERE xpub = $1 ORDER BY derivation_index",
@@ -547,7 +548,7 @@ async fn down_migration_refuses_to_strand_a_counter() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     // The method goes away; the wallet and its counter remain.
     sqlx::query("DELETE FROM store_wallets WHERE store_id = $1")
@@ -585,7 +586,7 @@ async fn migration_collapses_duplicate_native_methods_keeping_audit() {
     };
 
     let (_, store) = seed_store(&pool, "n").await;
-    // Two ETH-on-mainnet rows: impossible to prevent before RCS-234, because
+    // Two ETH-on-mainnet rows: impossible to prevent in the old shape, because
     // token_address is NULL and the composite unique index cannot see them.
     let older = seed_method(&pool, store, 1, None, "ETH", "xpub-native-a", 4).await;
     let newer = seed_method(&pool, store, 1, None, "ETH", "xpub-native-b", 2).await;
@@ -603,7 +604,7 @@ async fn migration_collapses_duplicate_native_methods_keeping_audit() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     let surviving: Vec<uuid::Uuid> = sqlx::query(
         "SELECT id FROM store_payment_methods WHERE store_id = $1 AND token_address IS NULL",
@@ -670,7 +671,7 @@ async fn migration_counts_a_rotated_away_key_towards_its_high_water_mark() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     let index: i32 = sqlx::query("SELECT derivation_index FROM wallets WHERE xpub = $1")
         .bind(KEY)
@@ -715,7 +716,7 @@ async fn migration_elects_a_primary_that_survives_duplicate_collapse() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     let primary_xpub: String =
         sqlx::query("SELECT xpub FROM wallets WHERE user_id = $1 AND is_primary")
@@ -786,7 +787,7 @@ async fn migration_leaves_provenance_null_where_the_method_was_never_unique() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     let native_wallet: Option<Uuid> =
         sqlx::query("SELECT wallet_id FROM payment_options WHERE id = $1")
@@ -838,7 +839,7 @@ async fn down_migration_refuses_a_wallet_shared_by_inheriting_methods() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     // What `PUT /stores/{id}/wallet` leaves behind: one override, no pins.
     sqlx::query("UPDATE store_payment_methods SET wallet_id = NULL WHERE store_id = $1")
@@ -878,7 +879,7 @@ async fn down_migration_reverses_a_wallet_reached_only_through_an_override() {
 
     pool.execute(migration_sql(MIGRATION).as_str())
         .await
-        .expect("apply RCS-234");
+        .expect("apply the migration under test");
 
     sqlx::query("UPDATE store_payment_methods SET wallet_id = NULL WHERE store_id = $1")
         .bind(store)

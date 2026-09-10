@@ -1,5 +1,4 @@
 -- Store token policies: per-store allowlist/blocklist for accepted chain+token pairs.
--- RCS-115
 
 CREATE TABLE IF NOT EXISTS store_token_policies (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),

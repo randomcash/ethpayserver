@@ -94,9 +94,9 @@ impl EthpayMcpServer {
             .unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
         let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
-        // Same treatment as the HTTP create path (RCS-215): customer_email goes
+        // Same treatment as the HTTP create path: customer_email goes
         // in its own column, and a `buyer_email` sent inside metadata is lifted
-        // out rather than left in a blob that becomes ciphertext (RCS-216).
+        // out rather than left in a blob that becomes ciphertext.
         let mut metadata = args.metadata;
         let customer_email = args.customer_email.or_else(|| {
             metadata
@@ -193,7 +193,7 @@ impl EthpayMcpServer {
                 // The monitor is EVM-only and its commands take an EIP-155
                 // number. Skipping silently here would leave a payment option
                 // and a watched_addresses row that nothing is monitoring, with
-                // no trace of why - every other boundary added by RCS-241 logs.
+                // no trace of why - every other CAIP-2 boundary logs.
                 let Some(eip155) = pm.chain_id.evm_chain_id() else {
                     tracing::error!(
                         chain_id = %pm.chain_id,

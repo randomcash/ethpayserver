@@ -147,7 +147,7 @@ fn test_invoice_list_response_serializes() {
 }
 
 // =========================================================================
-// List search (RCS-231)
+// List search
 // =========================================================================
 
 #[test]
@@ -197,7 +197,7 @@ fn blank_search_reaches_the_builder_as_no_filter() {
 /// Search is ANDed onto the store scope, never a replacement for it. The row
 /// level of this is proved against a real database in `data-service`; what is
 /// checked here is that the scope survives the builder at all - dropping it
-/// here is RCS-211 with extra steps.
+/// here is the cross-store leak with extra steps.
 #[test]
 fn search_does_not_displace_the_store_scope() {
     let mine = StoreId(Uuid::new_v4());

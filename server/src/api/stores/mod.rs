@@ -76,7 +76,7 @@ impl From<(StatusCode, String)> for ApiErr {
 
 /// The status a repository error deserves, and a reason the caller can read.
 ///
-/// `Conflict` has to survive the trip: since RCS-234 an xpub already registered
+/// `Conflict` has to survive the trip: an xpub already registered
 /// to another account is refused, and that refusal is reachable from the
 /// ordinary payment-method form, not just from `POST /wallets`. Collapsing
 /// every repository error into a 500 turned a merchant pasting the wrong key

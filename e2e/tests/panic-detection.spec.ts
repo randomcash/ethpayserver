@@ -3,7 +3,7 @@ import { isClientPanic } from '../fixtures/auth';
 
 // Pure unit tests, same style as the compareTiming tests in perf.spec.ts.
 // The point of this predicate is that it fires on Rust panics and on nothing
-// else: too narrow and RCS-220 recurs unnoticed, too broad and the first noisy
+// else: too narrow and a panic recurs unnoticed, too broad and the first noisy
 // 404 gets the whole check disabled.
 test.describe('client panic detection', () => {
   test('catches a release-build trap, which carries no message', () => {

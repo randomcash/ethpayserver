@@ -166,7 +166,7 @@ async fn integration_invoice_with_metadata() {
     assert_eq!(metadata["order_id"], "12345");
 }
 
-/// RCS-222: membership scoping has to be a real WHERE clause, not just a value
+/// Membership scoping has to be a real WHERE clause, not just a value
 /// the handler computed and dropped.
 ///
 /// The gate tests upstream prove the right *scope* comes back; this proves the
@@ -217,7 +217,7 @@ async fn integration_invoice_query_scopes_to_a_set_of_stores() {
     assert!(empty_rows.is_empty(), "no memberships must mean no rows");
 }
 
-/// RCS-231: search has to reach the SQL, and it has to reach *both* queries.
+/// Search has to reach the SQL, and it has to reach *both* queries.
 ///
 /// The pager takes `total` from the count query and the rows from the data
 /// query. They are built separately, so a predicate added to one and not the
@@ -226,7 +226,7 @@ async fn integration_invoice_query_scopes_to_a_set_of_stores() {
 ///
 /// The store-scope half is the other trap: the search predicate is ANDed onto
 /// the scope, never a replacement for it. The term here deliberately matches a
-/// row in a store the caller cannot see (RCS-211, RCS-222).
+/// row in a store the caller cannot see.
 #[tokio::test]
 #[ignore]
 async fn integration_invoice_search_is_scoped_and_counts_what_it_returns() {
@@ -234,7 +234,7 @@ async fn integration_invoice_search_is_scoped_and_counts_what_it_returns() {
 
     // Unique per run: the test database is shared with every other test in the
     // file, so the term has to identify these rows and nothing else.
-    let token = format!("rcs231{}", uuid::Uuid::new_v4().simple());
+    let token = format!("search{}", uuid::Uuid::new_v4().simple());
 
     let mut mine_matching = seeded_test_invoice(&service).await;
     mine_matching.metadata = Some(serde_json::json!({ "order_number": token }));
@@ -303,7 +303,7 @@ async fn integration_invoice_search_is_scoped_and_counts_what_it_returns() {
     assert_eq!(total, 0, "`%` must be escaped, not match every row");
 }
 
-/// RCS-231: the id predicate is anchored, and the currency one is not.
+/// The id predicate is anchored, and the currency one is not.
 ///
 /// Pinned because the difference is a deliberate indexing decision (`%...%` can
 /// never use an index; `term%` can), not an accident of how the SQL was typed.

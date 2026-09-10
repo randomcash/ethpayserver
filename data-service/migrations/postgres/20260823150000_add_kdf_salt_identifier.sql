@@ -1,4 +1,4 @@
--- RCS-201, 1 of 2: add the column only.
+-- Pinned KDF salt identifier, 1 of 2: add the column only.
 --
 -- Deliberately alone in this file. `ADD COLUMN` takes ACCESS EXCLUSIVE on
 -- `users`; Postgres wraps a multi-statement simple Query (which is how sqlx
@@ -17,5 +17,5 @@ ALTER TABLE users
 COMMENT ON COLUMN users.kdf_salt_identifier IS
     'Identifier the recovery KDF was salted with at registration. Immutable: '
     'changing it invalidates recovery_verification_hash and makes the account '
-    'unrecoverable. NULL means pre-RCS-201; readers fall back to the computed '
-    'value (RCS-201).';
+    'unrecoverable. NULL means the row predates this column; readers fall '
+    'back to the computed value.';

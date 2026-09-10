@@ -262,7 +262,7 @@ async fn test_receipt_sent_on_paid_with_email() {
     let store_id = StoreId::new();
 
     // Legacy path: address inside metadata, no column. Covers invoices created
-    // before RCS-215; new writes populate the column instead.
+    // before `customer_email` became a column; new writes populate it instead.
     let invoice = InvoiceData {
         id: invoice_id.clone(),
         store_id,
@@ -398,11 +398,11 @@ async fn test_no_receipt_when_email_absent() {
     assert_eq!(mock_email.call_count(), 0);
 }
 
-/// RCS-215: receipts must read the `customer_email` column, not just metadata.
+/// Receipts must read the `customer_email` column, not just metadata.
 ///
-/// This is the path every invoice created after RCS-215 takes - the address is
+/// This is the path every invoice now takes - the address is
 /// written to its own column and deliberately kept out of `metadata`, which is
-/// slated to become ciphertext (RCS-216). Before the column was threaded
+/// slated to become ciphertext. Before the column was threaded
 /// through, `extract_customer_email` looked only at metadata, so this case
 /// returned None and the receipt was silently skipped: a missing address is a
 /// normal, unlogged outcome there, so nothing would have reported the breakage.

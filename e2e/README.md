@@ -118,14 +118,14 @@ These are operator tools — nothing in CI runs them.
 # fund, and the merchant xpub. Store the phrase as the E2E_TEST_MNEMONIC secret.
 node scripts/new-test-wallet.mjs
 
-# Reclaim funds parked in derived receive addresses (RCS-202). Dry run by
+# Reclaim funds parked in derived receive addresses. Dry run by
 # default; pass --execute to broadcast.
 E2E_TEST_MNEMONIC="..." E2E_SEPOLIA_RPC_URL="https://..." \
   node scripts/sweep-test-wallet.mjs --scan 1000
 ```
 
-`--scan` has to cover the *whole* history, not a window near zero. Before
-RCS-234 the derivation counter lived on the payment method, so a fresh store
+`--scan` has to cover the *whole* history, not a window near zero. The
+derivation counter used to live on the payment method, so a fresh store
 each night restarted at 0 and the parked funds piled up on the first few
 addresses; the counter now lives on an account-level wallet keyed by the xpub,
 so the indices march outwards three per night and never restart. A scan that
@@ -150,7 +150,7 @@ weeks. Sweep it, or fund ~0.1.
 ## Leftover synthetic-payment stores (`scripts/sweep-e2e-stores.mjs`)
 
 The synthetic-payment spec creates a store per run and now removes it again in
-an `afterEach` (RCS-233). This script clears the ones that accumulated before
+an `afterEach`. This script clears the ones that accumulated before
 that landed, and anything a run abandoned by dying outright.
 
 ```bash
@@ -180,11 +180,11 @@ derived, waits for `paid` on the public checkout WebSocket, and asserts the stor
 webhook fired with a valid HMAC signature.
 
 Three invoices per run, on one store and one payment method, paid one at a time.
-That is the regression test for RCS-235: the addresses come from a single xpub
+That is the regression test for address reuse: the addresses come from a single xpub
 and a single counter, and when the counter was wrong two invoices were quoted the
 same address — which one invoice per run can never see. The run asserts the three
 addresses are distinct, that the counter on the wallet the store derives from
-advanced by exactly three (RCS-234), that the payment method agrees with that
+advanced by exactly three, that the payment method agrees with that
 wallet rather than keeping a number of its own, and that each payment paid its
 own invoice and no other.
 

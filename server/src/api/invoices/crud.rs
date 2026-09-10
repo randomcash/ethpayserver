@@ -293,10 +293,10 @@ where
         .unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
     let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
-    // customer_email is stored in its own column, not folded into metadata
-    // (RCS-215). It used to be merged in so a generated Postgres column could
+    // customer_email is stored in its own column, not folded into metadata.
+    // It used to be merged in so a generated Postgres column could
     // derive it back out - which would have silently returned NULL, and stopped
-    // customer receipts, the moment metadata became ciphertext (RCS-216).
+    // customer receipts, the moment metadata became ciphertext.
     //
     // Accept `buyer_email` from metadata as an inbound alias, since integrations
     // already send it that way and the old generated column COALESCEd both. It

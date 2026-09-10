@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Remove the stores the synthetic-payment test left behind (RCS-233).
+ * Remove the stores the synthetic-payment test left behind.
  *
- * The spec creates `e2e-synthetic-<timestamp>` on every scheduled run and, until
- * RCS-233, deleted none of them — testnet gained one per day. The fix in
+ * The spec creates `e2e-synthetic-<timestamp>` on every scheduled run and for
+ * a long time deleted none of them — testnet gained one per day. The fix in
  * `tests/synthetic-payment.spec.ts` stops the bleeding; this clears what had
  * already piled up, and mops up after any run that dies before its cleanup hook.
  *

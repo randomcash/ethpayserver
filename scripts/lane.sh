@@ -2,8 +2,8 @@
 # Create an isolated "lane" for parallel work: a git worktree of this repo with
 # a matching worktree of payserver-commons sitting beside it.
 #
-# A worktree of this repo builds anywhere now - commons is pinned by revision
-# (RCS-218), so nothing depends on directory layout any more. What a lane adds is
+# A worktree of this repo builds anywhere now - commons is pinned by revision,
+# so nothing depends on directory layout any more. What a lane adds is
 # an isolated commons to EDIT.
 #
 # Without it, every worktree links to the one shared ../payserver-commons on one

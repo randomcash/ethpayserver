@@ -1,8 +1,8 @@
-//! Payment analytics integration tests (RCS-225).
+//! Payment analytics integration tests.
 //!
 //! These pin the rules the in-memory double in `test_utils` also implements.
 //! A double that disagrees with Postgres about scoping or the window is the
-//! RCS-203 failure mode, so both sides are asserted against the same
+//! failure mode this guards against, so both sides are asserted against the same
 //! expectations.
 
 use chrono::{Duration, Utc};
@@ -44,8 +44,7 @@ async fn seed_one_eth_payment(service: &PgDataService) -> (types::StoreId, types
 #[ignore]
 async fn integration_analytics_empty_store_list_reads_nothing() {
     // "No stores" must filter everything out. Treating it as "all stores" is
-    // how a user who belongs to no store ends up reading the whole server
-    // (RCS-222, RCS-211).
+    // how a user who belongs to no store ends up reading the whole server.
     let service = create_test_service().await.expect("DATABASE_URL required");
     seed_one_eth_payment(&service).await;
 

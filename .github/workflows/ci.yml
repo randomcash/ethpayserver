@@ -44,7 +44,7 @@ jobs:
       # A committed Cargo.lock that does not carry the pinned revision means
       # someone ran `scripts/commons.sh link` and committed the result. That
       # silently un-pins commons for everyone and restores exactly the
-      # non-reproducible builds RCS-218 removed - and it looks like nothing.
+      # non-reproducible builds the pin removed - and it looks like nothing.
       - name: Commons pin matches the lock file
         run: |
           REV="$(grep -m1 -oP 'rev = "\K[0-9a-f]{40}' Cargo.toml)"
@@ -121,7 +121,7 @@ jobs:
         run: cargo nextest run --workspace --lib --no-fail-fast -j 2
 
       - name: Integration tests
-        # Gating (RCS-186). These were non-blocking and 18 of 27 had been failing
+        # Gating. These were non-blocking and 18 of 27 had been failing
         # unnoticed on an FK the fixtures never satisfied, so CI reported green
         # over dead multi-chain and fractional-amount aggregation coverage.
         run: |
@@ -205,7 +205,7 @@ jobs:
             target/release/evmmonitor
           retention-days: 1
 
-  # Gating as of RCS-192. This job carried `continue-on-error: true` for its
+  # Gating. This job carried `continue-on-error: true` for its
   # whole life, so it could never report a regression, and under that cover the
   # suite rotted: 7/62, then 34/62 once the proxy and reset defects were fixed.
   # The rest was read as selector drift against a UI that moved on. Most of it
@@ -313,8 +313,8 @@ jobs:
       # production routing rules rather than an approximation of them.
       #
       # It is the image this repo pins for testing (ops/client-image.pin). Note
-      # that is no longer the same thing as the image that gets deployed: since
-      # RCS-245 the frontend deploys on its own cadence from payserver-client,
+      # that is no longer the same thing as the image that gets deployed: the
+      # frontend deploys on its own cadence from payserver-client,
       # so this pin says "the client we verified against", not "the client that
       # is live". Moving it is a deliberate act, which is the point.
       - name: Serve frontend
@@ -422,7 +422,7 @@ jobs:
       - name: Compute image tags
         id: tag
         run: |
-          # Two tags per build (RCS-190). The moving one (testnet-latest) is
+          # Two tags per build. The moving one (testnet-latest) is
           # what humans pull; the per-commit one is never reused, so the
           # previous build keeps a name after the next push and rolling back
           # is a `compose up` instead of revert -> rebuild -> redeploy.
@@ -467,7 +467,7 @@ jobs:
           echo "signed $DIGEST" >> "$GITHUB_STEP_SUMMARY"
 
   # staging (main) + production (tags) deploy via SSH push — see central-infrastructure/deploy.yml
-  # testnet deploys by dispatch like every other environment (RCS-246). It used
+  # testnet deploys by dispatch like every other environment. It used
   # to run here, on a self-hosted runner attached to this PUBLIC repository -
   # which GitHub warns against, because a fork PR can execute on it. The only
   # thing standing between that and code execution on the box was one `if:`
@@ -480,8 +480,8 @@ jobs:
   # saying `runs-on: [self-hosted, debianbase]` still lands on the deploy box -
   # and now there is no `if:` guarding it, because nothing references it. This
   # change removes the only current use, not the exposure. Deregistering it
-  # (and removing the runner service on the box) is the step that closes
-  # RCS-246; until then, treat this as half done.
+  # (and removing the runner service on the box) is the step that finishes the
+  # job; until then, treat this as half done.
   #
   # Separate from notify-deploy below because the payload differs: this targets
   # central-infrastructure's deploy-testnet.yml, which takes `sha_tag` and runs

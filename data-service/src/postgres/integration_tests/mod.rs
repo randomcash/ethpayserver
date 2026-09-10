@@ -8,9 +8,9 @@
 //! - `payment`: Payment CRUD and confirmation tests
 //! - `watched_address`: Watched address management tests
 //! - `aggregation`: Multi-currency payment aggregation E2E tests
-//! - `analytics`: Dashboard payment-volume aggregation (RCS-225)
-//! - `wallet`: Account wallet derivation and store resolution (RCS-234)
-//! - `wallet_migration`: the RCS-234 migration run over old-shape data
+//! - `analytics`: Dashboard payment-volume aggregation
+//! - `wallet`: Account wallet derivation and store resolution
+//! - `wallet_migration`: the account-wallets migration run over old-shape data
 
 mod aggregation;
 mod analytics;

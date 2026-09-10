@@ -1,5 +1,5 @@
 /**
- * Synthetic payment against the live testnet deployment (RCS-112).
+ * Synthetic payment against the live testnet deployment.
  *
  * The one test in the suite that exercises the money path for real: it creates
  * invoices over the API, broadcasts actual Sepolia transactions to the
@@ -9,8 +9,8 @@
  *
  * Three invoices, not one, and all on the same store and payment method: the
  * addresses the server hands out come from one xpub and one counter, and when
- * that counter was wrong two invoices were quoted the same address (RCS-235,
- * RCS-234). One invoice per run can never see that. The assertions below are
+ * that counter was wrong two invoices were quoted the same address. One
+ * invoice per run can never see that. The assertions below are
  * therefore as much about *which* invoice each payment paid as about payment
  * working at all.
  *
@@ -47,7 +47,7 @@ import { WebhookSink, verifySignature } from '../fixtures/webhook-sink';
 
 const ENABLED = process.env.E2E_SYNTHETIC_PAYMENT === 'true';
 
-// CAIP-2, not the bare EIP-155 integer (RCS-241). The API rejects the integer
+// CAIP-2, not the bare EIP-155 integer. The API rejects the integer
 // outright — `422 chain_id: invalid type: integer, expected a string` — and this
 // spec kept sending one for a day because it only runs on the nightly against
 // live testnet, never in PR CI.
@@ -57,7 +57,7 @@ const MERCHANT_PATH = "m/44'/60'/0'";
 /** Kept clear of account 0 so the spender never collides with a receive address. */
 const SPENDER_ACCOUNT_INDEX = 9;
 /**
- * Invoices per run, on one store and one payment method (RCS-235, RCS-234).
+ * Invoices per run, on one store and one payment method.
  *
  * Two would already show a collision; three shows it as a *pattern* — a
  * counter that repeats rather than a single unlucky derivation — and gives the
@@ -108,7 +108,7 @@ const SETUP_BUDGET_MS = 5 * 60_000;
  */
 const MIN_PAYMENT_BUDGET_MS = 2 * 60_000;
 /**
- * Warn once the spender holds less than this many runs' worth (RCS-202).
+ * Warn once the spender holds less than this many runs' worth.
  *
  * The hard guard below only trips when the wallet is already short for the
  * *current* run — a cliff, not a warning, whose first notice is a red nightly.
@@ -145,7 +145,7 @@ interface PaymentMethod {
   /**
    * Next index the *resolved wallet* will issue, not the method's own.
    *
-   * RCS-234 moved the counter off `store_payment_methods` onto `wallets`, and
+   * The counter moved off `store_payment_methods` onto `wallets`, and
    * this field became a read through the resolution chain (pin, store
    * override, account primary). It is null when that chain runs out, which is
    * a method that cannot be paid at all.
@@ -223,7 +223,7 @@ async function waitForPaid(
           `WebSocket saw: [${seen.join(', ') || 'nothing'}]. ` +
           `Checkout API reports: ${checkout ? `${checkout.status} (received ${checkout.amount_received})` : 'unreachable'}. ` +
           `If it is stuck at 'pending' the chain monitors are probably not connected — ` +
-          `check evmmonitor:health in Redis (RCS-187).`,
+          `check evmmonitor:health in Redis.`,
       );
     }
     await new Promise((r) => setTimeout(r, 2_000));
@@ -231,7 +231,7 @@ async function waitForPaid(
 }
 
 /**
- * What the cleanup hook needs, published the moment it exists (RCS-233).
+ * What the cleanup hook needs, published the moment it exists.
  *
  * The hook cannot read the test's locals: the run this cleanup matters most
  * for is the one that threw, and by then that scope is gone. Module scope is
@@ -260,7 +260,7 @@ test.describe('Synthetic payment (live testnet)', () => {
   );
 
   /**
-   * Remove the store this run created (RCS-233).
+   * Remove the store this run created.
    *
    * Without this the daily schedule left one store behind per day, forever.
    * The case that has to work is the *failing* one — waiting on an on-chain
@@ -310,7 +310,7 @@ test.describe('Synthetic payment (live testnet)', () => {
       const msg =
         `Failed to clean up synthetic-payment store ${storeId}: ${err}. ` +
         `It is still on the server and will stay there — delete it with ` +
-        `\`node scripts/sweep-e2e-stores.mjs --execute\` (RCS-233).`;
+        `\`node scripts/sweep-e2e-stores.mjs --execute\`.`;
       console.log(`::error title=Synthetic payment store leaked::${msg}`);
       if (process.env.GITHUB_STEP_SUMMARY) {
         appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### \u274c Store leaked\n\n${msg}\n`);
@@ -369,7 +369,7 @@ test.describe('Synthetic payment (live testnet)', () => {
 
     // Advance warning, never a failure: the run is fine, the wallet just needs
     // topping up before it isn't. Surfaces in the Actions summary so it is seen
-    // without anyone reading the log (RCS-202).
+    // without anyone reading the log.
     const lowWater = needed * BigInt(LOW_BALANCE_RUNS);
     if (balance < lowWater) {
       const runsLeft = Number(balance / needed);
@@ -395,7 +395,7 @@ test.describe('Synthetic payment (live testnet)', () => {
       // a known starting point. The afterEach hook above removes it again —
       // keep the name on the `e2e-synthetic-` prefix that
       // `scripts/sweep-e2e-stores.mjs` matches, so a run that dies before
-      // cleanup is still findable (RCS-233).
+      // cleanup is still findable.
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const store = await api<{ id: string }>('/stores', {
         method: 'POST',
@@ -407,7 +407,7 @@ test.describe('Synthetic payment (live testnet)', () => {
       createdStoreId = store.id;
 
       // One payment method for all three invoices. That is the point: sharing
-      // an xpub is what made two invoices collide on one address (RCS-235), so
+      // an xpub is what made two invoices collide on one address, so
       // a run that gave each invoice its own method would assert nothing.
       const method = await api<PaymentMethod>(`/stores/${store.id}/payment-methods`, {
         method: 'POST',
@@ -424,8 +424,8 @@ test.describe('Synthetic payment (live testnet)', () => {
       // The starting point for the counter assertion, read from the wallet the
       // store resolves to. A fresh store on a fresh xpub starts at 0, but read
       // rather than assumed: the xpub comes from a mnemonic the account may
-      // have used on a previous night, and RCS-234 makes the wallet remember
-      // that across stores. Asserting a delta from whatever it is now is the
+      // have used on a previous night, and the wallet remembers that across
+      // stores. Asserting a delta from whatever it is now is the
       // only form that holds either way.
       const storeWallet = await api<StoreWallet>(`/stores/${store.id}/wallet`, { token });
       // `null` when the resolution chain runs out, and `undefined` if the field
@@ -479,7 +479,7 @@ test.describe('Synthetic payment (live testnet)', () => {
             currency: 'ETH',
             amount: amountEth,
             expiration_seconds: 1_800,
-            metadata: { source: 'rcs-112-synthetic-payment', sequence: i + 1 },
+            metadata: { source: 'synthetic-payment', sequence: i + 1 },
           },
         });
 
@@ -504,7 +504,7 @@ test.describe('Synthetic payment (live testnet)', () => {
         targets.push({ invoice, option: target, amountWei });
       }
 
-      // The assertion the whole exercise is for (RCS-235).
+      // The assertion the whole exercise is for.
       //
       // Three invoices, one payment method, one xpub: the server allocates an
       // index per payment option and derives `0/{index}`, so the addresses must
@@ -515,16 +515,16 @@ test.describe('Synthetic payment (live testnet)', () => {
       expect(
         new Set(addresses).size,
         `payment addresses are not distinct — the derivation counter is repeating ` +
-          `(RCS-235): ${addresses.join(', ')}`,
+          `: ${addresses.join(', ')}`,
       ).toBe(PAYMENT_COUNT);
 
       // …and the counter moved by exactly three. Distinct addresses alone would
       // also hold if the index jumped about; what the counter owes is one index
-      // per payment option, from one counter per xpub (RCS-234). Asserted as a
+      // per payment option, from one counter per xpub. Asserted as a
       // delta, because whether the stored index is "last used" or "next free"
       // is the server's business — three invoices consume three either way.
       //
-      // Read from the wallet, which is where the counter lives since RCS-234
+      // Read from the wallet, which is where the counter lives
       // (`data-service/src/postgres/wallet.rs`, `next_derivation_index`). The
       // payment method reports the same number through the resolution chain,
       // but reading it there would keep passing if a second counter ever
@@ -540,7 +540,7 @@ test.describe('Synthetic payment (live testnet)', () => {
         wallet.derivation_index - storeWallet.derivation_index,
         `derivation index on wallet ${wallet.id} moved ` +
           `${storeWallet.derivation_index} → ${wallet.derivation_index} for ` +
-          `${PAYMENT_COUNT} invoices (RCS-234)`,
+          `${PAYMENT_COUNT} invoices`,
       ).toBe(PAYMENT_COUNT);
 
       // The method must agree with the wallet it resolves to. A method
@@ -552,7 +552,7 @@ test.describe('Synthetic payment (live testnet)', () => {
         (current as PaymentMethod).derivation_index,
         `payment method ${method.id} reports index ` +
           `${(current as PaymentMethod).derivation_index} while the wallet it ` +
-          `derives from is at ${wallet.derivation_index} (RCS-234)`,
+          `derives from is at ${wallet.derivation_index}`,
       ).toBe(wallet.derivation_index);
 
       /**
@@ -640,8 +640,8 @@ test.describe('Synthetic payment (live testnet)', () => {
         ).toContain(hash.toLowerCase());
 
         // Attribution from the other side: an invoice sharing this one's
-        // address would go `paid` on this transaction, having been sent nothing
-        // (RCS-235). Only the ones not yet paid — the earlier invoices are
+        // address would go `paid` on this transaction, having been sent nothing.
+        // Only the ones not yet paid — the earlier invoices are
         // checked again after the loop, when every hash is known.
         for (const other of targets.slice(index + 1)) {
           const state = await api<Checkout>(`/checkout/${other.invoice.id}`);
@@ -649,7 +649,7 @@ test.describe('Synthetic payment (live testnet)', () => {
             state.is_paid,
             `invoice ${other.invoice.id} (${other.option.payment_address}) went paid on ` +
               `${label}'s transaction ${hash} — it has been sent nothing. Two invoices are ` +
-              `sharing an address (RCS-235).`,
+              `sharing an address.`,
           ).toBe(false);
         }
 
@@ -683,7 +683,7 @@ test.describe('Synthetic payment (live testnet)', () => {
         expect(
           strays,
           `invoice ${invoice.id} (${option.payment_address}) also collected ` +
-            `${strays.join(', ')}, which was sent to another invoice's address (RCS-235)`,
+            `${strays.join(', ')}, which was sent to another invoice's address`,
         ).toEqual([]);
       }
     } finally {

@@ -2,7 +2,8 @@
 
 //! Authorization-boundary tests for the invoice/payment list store scope.
 //!
-//! Regression coverage for RCS-211. The nil UUID used to be an in-band "all
+//! Regression coverage for the store-scope leak. The nil UUID used to be an
+//! in-band "all
 //! stores" sentinel, so `store_id=00000000-0000-0000-0000-000000000000` took
 //! the `Some` arm of the scope match, skipped the admin check *and* the
 //! membership check, and then dropped the `WHERE store_id` clause - handing any
@@ -22,7 +23,7 @@ use uuid::Uuid;
 
 /// Membership repository stub. `member_of` is every store the user belongs to;
 /// anything else returns "not a member". Both `get_user_store` (single-store
-/// gate) and `get_user_stores` (membership scoping, RCS-222) are exercised.
+/// gate) and `get_user_stores` (membership scoping) are exercised.
 struct StubStores {
     member_of: Vec<Uuid>,
 }
@@ -88,7 +89,7 @@ fn user_with_role(role: Role) -> UserInfo {
 }
 
 // =========================================================================
-// RCS-211: the nil UUID must never mean "every store"
+// The nil UUID must never mean "every store"
 // =========================================================================
 
 /// The exploit, pinned. A non-admin who is a member of exactly one real store
@@ -137,7 +138,7 @@ async fn nil_store_id_is_returned_as_an_ordinary_scoped_filter() {
 // =========================================================================
 
 /// This used to assert a 400, which is what made "All Stores" a dead end for
-/// every merchant (RCS-222). Omitting `store_id` now means "everything I can
+/// every merchant. Omitting `store_id` now means "everything I can
 /// see", and for a non-admin that is their own memberships - the same
 /// authorisation decision the single-store arm makes, applied to a set.
 #[tokio::test]
@@ -163,7 +164,7 @@ async fn non_admin_without_store_id_is_scoped_to_their_memberships() {
 
 /// The trap in the membership arm: an empty list must stay a filter that
 /// matches nothing. If it ever degrades to "no filter", a user who belongs to
-/// no store reads every store on the server - RCS-211 by another route.
+/// no store reads every store on the server - the same leak by another route.
 #[tokio::test]
 async fn non_admin_with_no_stores_is_scoped_to_nothing_not_everything() {
     let repo = StubStores { member_of: vec![] };
@@ -208,7 +209,7 @@ async fn non_admin_querying_their_own_store_is_scoped_to_it() {
     assert_eq!(scope, StoreScope::One(StoreId(own_store)));
 }
 
-/// The intended all-stores path, per the RCS-171 scope decision: admins only,
+/// The intended all-stores path: admins only,
 /// and only by omitting `store_id` entirely.
 #[tokio::test]
 async fn admin_without_store_id_queries_every_store() {
@@ -246,7 +247,7 @@ async fn admin_with_store_id_stays_scoped_to_that_store() {
 // =========================================================================
 
 /// The tests above pin `verify_store_access_for_query`, which was always
-/// correct - the RCS-211 bug was a *second*, sentinel-based copy of the scope
+/// correct - the bug was a *second*, sentinel-based copy of the scope
 /// logic inlined in the two list handlers. Unit tests of the helper therefore
 /// cannot catch that regression class on their own, and there is no handler
 /// harness (`PgAppState` is pinned to the concrete Postgres service, so the
@@ -266,7 +267,7 @@ fn list_handlers_do_not_reintroduce_a_nil_uuid_sentinel() {
             !src.contains("nil()"),
             "{name} references a nil UUID. Store scope must stay an Option \
              resolved by verify_store_access_for_query - an in-band sentinel a \
-             caller can also supply is what RCS-211 was."
+             caller can also supply is what leaked every store."
         );
         assert!(
             src.contains("verify_store_access_for_query"),

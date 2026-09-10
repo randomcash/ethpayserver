@@ -24,7 +24,7 @@ test.beforeAll(async ({ browser }) => {
   scoutPage = await ctx.newPage();
   // A client panic is an issue(), not just a logged line. scout has collected
   // console errors since it was written and only ever PRINTED them, which is
-  // why RCS-220 - two panics on every registration - survived for months in a
+  // why two panics on every registration survived for months in a
   // suite that reported no issues. The summary asserts on non-auth issues, so
   // recording it here is what makes it fail.
   //
@@ -249,7 +249,7 @@ test.describe('Auth & Authenticated', () => {
       issue('REGISTER', `Error after passkey creation: ${errorTexts.join(' | ')}`);
     }
 
-    // Handle the recovery step, which registration now REQUIRES (RCS-214) -
+    // Handle the recovery step, which registration now REQUIRES -
     // "Skip for Now" is gone from the default flow, so the confirm path is the
     // only way through.
     //
@@ -271,7 +271,7 @@ test.describe('Auth & Authenticated', () => {
     // and CI runs this suite against localhost on every push to testnet. 15s is
     // comfortably past the round trip that defeated the old 5s wait.
     //
-    // No "Skip for Now" branch: RCS-214 removed that button, so matching it could
+    // No "Skip for Now" branch: that button is gone, so matching it could
     // only burn the timeout, and its broad `button` selector risked clicking an
     // unrelated button once the dashboard had rendered.
     const savedButton = scoutPage.locator('.ps-button-primary', { hasText: /written it down/i });
@@ -394,7 +394,7 @@ test.describe('Auth & Authenticated', () => {
 
     // Close via outside click
     await trigger.click();
-    // Not `.main-header-search` - RCS-232 removed it. The heading is outside
+    // Not `.main-header-search` - it no longer exists. The heading is outside
     // the menu and is not itself a control. `.dashboard-title` because this
     // runs on /evm; `.page-header` is a list-page class.
     await scoutPage.locator('.dashboard-title').click({ timeout: 5_000 });

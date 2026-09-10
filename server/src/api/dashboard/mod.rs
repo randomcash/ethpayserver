@@ -2,7 +2,7 @@
 //!
 //! - [`stats`] — the invoice/payment counters behind the metric cards.
 //! - [`analytics`] — the per-day, per-asset volume series behind the volume
-//!   chart and the payment-methods breakdown (RCS-225).
+//!   chart and the payment-methods breakdown.
 
 mod analytics;
 mod stats;

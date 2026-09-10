@@ -84,7 +84,7 @@ export class WebhookSink {
    * it: unfiltered this returns the *first* delivery of that type the sink ever
    * took, so the second payment would be handed the first payment's webhook and
    * assert against it — green while attributing every payment to one invoice,
-   * which is precisely the failure the multi-invoice run looks for (RCS-235).
+   * which is precisely the failure the multi-invoice run looks for.
    */
   async waitFor(
     eventType: string,

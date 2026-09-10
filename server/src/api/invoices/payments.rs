@@ -81,12 +81,12 @@ where
 {
     // Resolve the store scope once: one store (membership-checked), the
     // caller's own stores, or the whole server for an admin. The distinction is
-    // load-bearing - a nil-UUID sentinel here was RCS-211.
+    // load-bearing - a nil-UUID sentinel here was once an authorization hole.
     let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
 
     // The same builder the CSV export uses, so the two cannot answer different
     // questions - an export that ignores a filter the list applied downloads
-    // something other than what is on screen (RCS-231). It applies the store
+    // something other than what is on screen. It applies the store
     // scope first and ANDs every filter onto it; only StoreScope::All leaves
     // the query unfiltered, and only an admin gets it.
     let mut params =
@@ -106,7 +106,7 @@ where
 
     // A payment has no store of its own — it inherits its invoice's. With no
     // store filter this page can span stores, so resolve the owning store for
-    // each row so the client can label it (RCS-171). Deduplicated by invoice:
+    // each row so the client can label it. Deduplicated by invoice:
     // several payments against one invoice cost a single lookup.
     // Map each payment to its store.
     //
@@ -118,7 +118,7 @@ where
     // another, so the cost is one round trip of latency instead of N.
     // Only StoreScope::One can skip the lookups: it is the single case where
     // every row is known to share one store. Membership scoping spans stores
-    // just like the admin view, so it has to ask (RCS-222).
+    // just like the admin view, so it has to ask.
     let store_of_invoice: std::collections::HashMap<String, ::types::StoreId> = match &scope {
         StoreScope::One(store_id) => payments
             .iter()

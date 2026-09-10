@@ -1,6 +1,6 @@
 //! Account wallet endpoints, and the per-store override that points at one.
 //!
-//! Wallets belong to the account, not to a store (RCS-234). A store derives
+//! Wallets belong to the account, not to a store. A store derives
 //! from its own override if it has been given one, and from the account
 //! primary otherwise. That resolution is not cosmetic: it is the same
 //! expression address allocation evaluates, spelled once in the repository, so
@@ -500,7 +500,7 @@ where
 /// Note what no longer happens: derivation indices are not reset to zero. The
 /// destination wallet carries its own position, so an xpub the account has
 /// used before resumes where it left off instead of re-issuing addresses that
-/// may already hold funds (RCS-234).
+/// may already hold funds.
 ///
 /// Scope is the store, not the account. A method pinned to a wallet is
 /// repointed; a method that was inheriting stays inheriting, and what moves

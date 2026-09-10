@@ -1,4 +1,4 @@
-//! Dashboard payment analytics (RCS-225).
+//! Dashboard payment analytics.
 //!
 //! Serves both the volume chart and the payment-methods breakdown from one
 //! aggregation, because they are the same grouping read two ways.

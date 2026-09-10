@@ -17,7 +17,7 @@ use super::{PgDataService, search_contains_pattern, search_prefix_pattern};
 /// binds are positional: one list missing a value shifts every later filter
 /// onto the wrong placeholder, which does not fail — it silently answers a
 /// different question. Two hand-maintained copies of the same sequence is how
-/// that happens, so there is now one (RCS-222).
+/// that happens, so there is now one.
 fn bind_payment_filters<'q>(
     mut query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     params: &'q PaymentQueryParams,
@@ -32,7 +32,7 @@ fn bind_payment_filters<'q>(
         query = query.bind(invoice_id.as_str());
     }
     // Free-text search, in the same position the WHERE clause gives it: the
-    // anchored pattern first, then the substring one (RCS-231).
+    // anchored pattern first, then the substring one.
     if let Some(term) = params.search_term() {
         query = query
             .bind(search_prefix_pattern(term))
@@ -150,7 +150,7 @@ impl PaymentReader for PgDataService {
         let mut conditions = Vec::new();
         let mut bind_idx = 1;
         // Either store filter needs the invoices join - payments carry no
-        // store_id of their own (RCS-222).
+        // store_id of their own.
         let needs_join = params.store_id.is_some() || params.store_ids.is_some();
 
         if params.store_id.is_some() {
@@ -168,7 +168,7 @@ impl PaymentReader for PgDataService {
             conditions.push(format!("p.invoice_id = ${}", bind_idx));
             bind_idx += 1;
         }
-        // Free-text search (RCS-231). Two binds, each reused by every column
+        // Free-text search. Two binds, each reused by every column
         // that wants that shape: `${bind_idx}` is the anchored `term%` pattern,
         // `${bind_idx + 1}` the `%term%` one.
         //
@@ -185,7 +185,7 @@ impl PaymentReader for PgDataService {
         //
         // Note this touches only `payments` columns, so it needs no join and
         // cannot widen the store scope: the scope conditions above stay ANDed
-        // on top (RCS-211, RCS-222).
+        // on top.
         if params.search_term().is_some() {
             let matches = [
                 format!("LOWER(p.tx_hash) LIKE ${}", bind_idx),
@@ -460,7 +460,7 @@ impl PaymentEventWriter for PgDataService {
 }
 
 // =============================================================================
-// Payment Analytics (RCS-225)
+// Payment Analytics
 // =============================================================================
 
 use super::conversions::chain_id_from_row;
@@ -475,7 +475,7 @@ impl PaymentAnalyticsReader for PgDataService {
         // `= ANY('{}')` is already false for every row, but short-circuiting
         // keeps the "no stores means no rows" rule visible in both this
         // implementation and the in-memory double rather than resting on a
-        // Postgres detail (RCS-203).
+        // Postgres detail.
         if query.store_ids.is_empty() {
             return Ok(Vec::new());
         }

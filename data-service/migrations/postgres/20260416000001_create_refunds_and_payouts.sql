@@ -1,4 +1,4 @@
--- Refund and payout tables for RCS-74.
+-- Refund and payout tables.
 -- Refunds: send funds back to original payer from derived payment addresses.
 -- Payouts: sweep confirmed funds from derived addresses to merchant wallet.
 

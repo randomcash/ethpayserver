@@ -1,4 +1,4 @@
--- RCS-215: make customer_email a real column instead of one generated from metadata.
+-- Make customer_email a real column instead of one generated from metadata.
 --
 -- It was previously derived by Postgres:
 --
@@ -6,7 +6,7 @@
 --         COALESCE(metadata->>'customer_email', metadata->>'buyer_email')
 --     ) STORED;
 --
--- That cannot survive metadata becoming ciphertext (RCS-216). It would not
+-- That cannot survive metadata becoming ciphertext. It would not
 -- error - it would silently return NULL, and customer receipts would stop
 -- being sent with nothing in the logs explaining why.
 --

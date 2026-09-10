@@ -58,7 +58,7 @@ pub(crate) fn csv_row(fields: &[&str]) -> String {
 ///
 /// Shared by `list_invoices` and the export so the button downloads what is on
 /// screen. The store scope goes on first and every filter is ANDed onto it -
-/// no filter here may ever replace it (RCS-211, RCS-222).
+/// no filter here may ever replace it.
 pub(crate) fn build_invoice_filter_params(
     scope: &StoreScope,
     status: Option<&str>,
@@ -143,7 +143,7 @@ where
     }
 
     // "all" covers both the admin's whole-server export and a merchant's
-    // across-my-stores one; neither names a single store (RCS-222).
+    // across-my-stores one; neither names a single store.
     let store_label = match &scope {
         StoreScope::One(s) => s.0.to_string(),
         _ => "all".to_string(),
@@ -273,7 +273,7 @@ where
     }
 
     // "all" covers both the admin's whole-server export and a merchant's
-    // across-my-stores one; neither names a single store (RCS-222).
+    // across-my-stores one; neither names a single store.
     let store_label = match &scope {
         StoreScope::One(s) => s.0.to_string(),
         _ => "all".to_string(),

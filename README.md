@@ -232,8 +232,8 @@ The web frontend is **not** here. It lives in
 [payserver-client](https://github.com/randomcash/payserver-client), because it
 is meant to serve every payserver — EVM, Tron, Solana, Monero — rather than this
 one. The image tag this server is **tested against** is pinned in
-`ops/client-image.pin`. That is not the tag serving production: since RCS-245
-the frontend deploys on its own cadence from payserver-client via
+`ops/client-image.pin`. That is not the tag serving production: the
+frontend deploys on its own cadence from payserver-client via
 central-infrastructure, so the two can drift.
 
 ### Crates
@@ -274,7 +274,7 @@ sibling directory, so the lock file recorded **no commons revision at all** —
 which version you got was decided by CI shell logic (`git clone -b "$BRANCH" ||
 git clone`) and by whatever `main` happened to be at that minute. Rebuilding last
 week's commit silently picked up this week's commons, and a breaking change to a
-shared crate broke `testnet` the moment it merged (RCS-215, 2026-09-06). It also
+shared crate broke `testnet` the moment it merged (2026-09-06). It also
 meant a commons fix only reached testnet when something unrelated pushed here.
 
 **Working on both repos at once**
@@ -433,7 +433,7 @@ sqlx migrate revert --source data-service/migrations/postgres
 
 **Wallet Tables:**
 - `wallets` - Account receiving wallets: one xpub and its single
-  derivation counter (RCS-234)
+  derivation counter
 
 **Store Tables:**
 - `stores` - Merchant stores

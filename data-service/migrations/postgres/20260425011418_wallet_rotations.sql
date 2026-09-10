@@ -1,4 +1,4 @@
--- Wallet rotation history for xpub key rotation (RCS-117)
+-- Wallet rotation history for xpub key rotation
 -- Tracks each rotation event so archived xpubs are preserved for audit.
 
 CREATE TABLE wallet_rotations (

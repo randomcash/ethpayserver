@@ -21,7 +21,7 @@ export async function setupVirtualAuthenticator(
 
 /**
  * What registration hands the user, and the only things that can recover the
- * account later (RCS-205).
+ * account later.
  *
  * A passkey-only account has no email and no wallet address, so `accountId` is
  * the sole identifier it can present at recovery — the phrase alone is not
@@ -60,7 +60,7 @@ export async function register(page: Page): Promise<RecoveryCredentials> {
   // version allowed, and the wait below then timed out against a page still
   // sitting on the recovery screen.
   //
-  // Two shapes are handled on purpose (RCS-214). "Skip for Now" is being
+  // Two shapes are handled on purpose. "Skip for Now" is being
   // removed from the default registration flow, because skipping strands the
   // account with no recovery route. Accepting either shape keeps this fixture
   // working on both sides of that change, so the ui-kit default can flip
@@ -80,7 +80,7 @@ export async function register(page: Page): Promise<RecoveryCredentials> {
   // means the selectors live in one place.
   const credentials: RecoveryCredentials = { mnemonic: [], accountId: null };
 
-  // `require_recovery` defaults to true (RCS-214), so reaching this screen is
+  // `require_recovery` defaults to true, so reaching this screen is
   // not optional and neither is capturing it. A conditional capture would
   // return an empty phrase on any markup change and let a later recovery test
   // run against nothing - passing silently as coverage, which is the outcome
@@ -194,7 +194,7 @@ export const test = base.extend<AuthFixtures>({
   /**
    * Fail any test whose client panicked.
    *
-   * Nothing in this suite asserted on client panics, and RCS-220 is what that
+   * Nothing in this suite asserted on client panics, and here is what that
    * cost: the deployed client panicked TWICE on every single registration for
    * months while these tests passed, because a panic is invisible unless
    * something reads the console. scout collected console errors and only

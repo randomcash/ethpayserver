@@ -51,7 +51,7 @@ test.describe('Authentication', () => {
     // Assert on the count, never on the array: a failing `toHaveLength` prints
     // the received value, which would put real recovery material into CI logs
     // and the uploaded playwright-report artifact. register_page.rs withholds
-    // Debug from mnemonic_words for the same reason (RCS-193).
+    // Debug from mnemonic_words for the same reason.
     //
     // Word validity is not re-checked here - the fixture already validates the
     // BIP39 checksum and refuses to return a phrase that fails, which catches

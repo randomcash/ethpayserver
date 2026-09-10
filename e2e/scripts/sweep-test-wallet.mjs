@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Reclaim funds parked by the synthetic-payment test (RCS-202).
+ * Reclaim funds parked by the synthetic-payment test.
  *
  * Each nightly run sends three payments of a random 0.00005-0.00015 ETH from
  * the spender (m/44'/60'/9'/0/0) to addresses the server derived from the
@@ -10,7 +10,7 @@
  *
  * The indices march outwards, three per night, and never restart. They used to:
  * the counter lived on the payment method, so a fresh store began at 0 and the
- * parked funds piled up on the first few addresses. RCS-234 moved the counter
+ * parked funds piled up on the first few addresses. The counter moved
  * onto an account-level wallet keyed by the xpub, which is the whole point -
  * one key, one counter, no reuse - so a fresh store now continues wherever that
  * key left off. The scan has to cover the entire history rather than a window

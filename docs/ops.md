@@ -69,3 +69,60 @@ These require a `Bearer` token with server admin privileges:
 
 - `GET /health/chains` — detailed per-chain health from evmmonitor (same data as `/health/deep` RPCs section, but includes watched address counts)
 - `GET /metrics` — Prometheus exposition format for scraping
+
+## Editing a migration that has already run
+
+`sqlx` checksums the **whole migration file** — SHA-384 of its bytes — and
+records it in `_sqlx_migrations`. On the next run it compares, and refuses with
+`VersionMismatch` if the file has changed. A one-word comment edit is enough.
+Because `migrate` runs before `server` in the deploy, that failure keeps the
+whole stack down.
+
+Two facts worth knowing before you touch one:
+
+- **Renaming a migration file is free.** The version is the numeric prefix and
+  the description is stored but never compared, so only the bytes matter.
+- **Editing its contents is not**, whether or not any statement changed.
+
+When an edit is deliberate and the migration has already run somewhere, refresh
+the recorded checksums rather than resetting the database:
+
+```sh
+# 1. Keep the current values — see "this is one-way" below.
+psql "$DATABASE_URL" -c "\copy (SELECT version, encode(checksum,'hex') \
+  FROM _sqlx_migrations ORDER BY version) TO 'checksums-before.csv' CSV"
+
+# 2. Look at what is recorded.
+psql "$DATABASE_URL" -c 'SELECT version, description FROM _sqlx_migrations ORDER BY version'
+
+# 3. Apply.
+psql "$DATABASE_URL" -f ops/refresh-migration-checksums.sql
+```
+
+`ops/refresh-migration-checksums.sql` re-records checksum and description per
+version. It touches no schema and no data, and matches nothing on a database
+where those migrations have not run. Regenerate it whenever a migration file's
+bytes change.
+
+No `-1`: the script carries its own `BEGIN`/`COMMIT` and sets
+`ON_ERROR_STOP`. Without `ON_ERROR_STOP`, psql runs on past a failed `UPDATE`,
+the enclosing transaction is already aborted, `COMMIT` degrades to a rollback —
+and **psql still exits 0**, so a refresh that did nothing reports success and
+the deploy goes down anyway.
+
+### This is one-way
+
+`sqlx::migrate!` bakes checksums into the binary at compile time, so an image
+built before the edit carries the old ones. After the refresh, that image's
+`migrate` exits `VersionMismatch` and `server` never starts behind it — so
+**rolling back to any earlier image stops working**, and rollback is otherwise
+just a `compose up` with an older tag. Run the refresh only alongside deploying
+an image built from a tree that contains the edited migrations, and keep
+`checksums-before.csv` if you might need to go back.
+
+### Every environment, not just the one in front of you
+
+Run it wherever the database has those migrations applied. Nothing in CI does it
+for you, and `main` dispatches staging while tags dispatch production, so an
+edit that only got refreshed on testnet takes the next environment down at the
+first already-applied version it reaches.
