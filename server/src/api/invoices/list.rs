@@ -43,12 +43,12 @@ where
 {
     // Resolve the store scope once: one store (membership-checked), the
     // caller's own stores, or the whole server for an admin. The distinction is
-    // load-bearing - a nil-UUID sentinel here was RCS-211.
+    // load-bearing - a nil-UUID sentinel here was once an authorization hole.
     let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
 
     // The same builder the CSV export uses, so the two cannot answer different
     // questions - an export that ignores a filter the list applied downloads
-    // something other than what is on screen (RCS-231). It applies the store
+    // something other than what is on screen. It applies the store
     // scope first and ANDs every filter onto it; only StoreScope::All leaves
     // the query unfiltered, and only an admin gets it.
     let mut params = build_invoice_filter_params(
@@ -71,7 +71,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Name every row's store: with no store filter this page can span stores,
-    // and the client has no other way to label them (RCS-171).
+    // and the client has no other way to label them.
     let store_names = resolve_store_names(&state, invoices.iter().map(|i| i.store_id)).await;
 
     // Get payment options for each invoice

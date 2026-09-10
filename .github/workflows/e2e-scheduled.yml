@@ -1,7 +1,7 @@
 name: Scheduled E2E (testnet)
 
 # Nothing else in the stack proves the deployed system works. Unit tests, the
-# integration gate (RCS-186) and the deploy health assertion (RCS-187) all stop
+# integration gate and the deploy health assertion all stop
 # short of a browser and of an actual on-chain payment — the client loader
 # overlay (#38) broke the login page for seven weeks and no build could have
 # caught it. This runs the Playwright suite against https://testnet.random.cash
@@ -174,7 +174,7 @@ jobs:
               '',
               'If the synthetic payment timed out waiting for `paid`, check the chain',
               'monitors first — empty RPC URLs in the runner `.env` leave payment',
-              'detection dead (RCS-187):',
+              'detection dead:',
               '',
               '```',
               'docker exec ethpayserver_testnet_redis redis-cli get evmmonitor:health',

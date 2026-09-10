@@ -83,7 +83,7 @@ pub struct WebhookPayload {
 
     /// CAIP-2 chain identifier, e.g. `eip155:1`.
     ///
-    /// Was a JSON number (the EIP-155 id) before RCS-241. Absent entirely on
+    /// Was a JSON number (the EIP-155 id) before CAIP-2. Absent entirely on
     /// invoice-level events, which involve no chain - it previously sent `0`
     /// there, which is not a chain, and briefly sent `""`, which is not an
     /// identifier.
@@ -92,7 +92,8 @@ pub struct WebhookPayload {
 
     /// Human-readable chain name.
     ///
-    /// Always absent since RCS-241. It used to be a name from a closed enum
+    /// Always absent since chain ids became CAIP-2. It used to be a name from
+    /// a closed enum
     /// (`"ethereum"`), and that enum is gone: a CAIP-2 reference is mostly an
     /// opaque genesis hash, so no function can derive a name from one. The
     /// mapping lives in `chain_configs`; until this reads it, sending anything

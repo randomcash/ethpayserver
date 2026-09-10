@@ -56,14 +56,15 @@ impl InMemoryDataService {
 }
 
 // =============================================================================
-// List search (RCS-231)
+// List search
 // =============================================================================
 //
 // These mirror the SQL in `postgres/{invoice,payment}.rs` column for column.
 // The Postgres side lower-cases the term and the column and matches with
 // `LIKE`, anchored (`term%`) or not (`%term%`); these are the Rust spelling of
 // exactly that. A double that disagrees with the real store about a filter is
-// how RCS-203 happened, so if one side changes, both change.
+// how the mock and the store silently diverged before, so if one side
+// changes, both change.
 
 /// `LOWER(col) LIKE 'term%'`.
 fn search_starts_with(haystack: Option<&str>, term: &str) -> bool {
@@ -97,7 +98,8 @@ impl InvoiceReader for InMemoryDataService {
                 }
                 // Membership scoping must behave here exactly as it does in
                 // Postgres, empty list included - a mock that disagrees with
-                // the real store about a scoping rule is how RCS-203 happened.
+                // the real store about a scoping rule is how that divergence
+                // happened before.
                 if let Some(ref store_ids) = params.store_ids
                     && !store_ids.contains(&inv.store_id)
                 {
@@ -115,14 +117,15 @@ impl InvoiceReader for InMemoryDataService {
                 }
                 // Search is ANDed on top of the store scope above, never in
                 // place of it: a term that matches another tenant's invoice
-                // still must not return it (RCS-211, RCS-222).
+                // still must not return it.
                 if let Some(term) = params.search_term() {
                     let term = term.to_lowercase();
                     let metadata = inv.metadata.as_ref().map(ToString::to_string);
                     let matched = search_starts_with(Some(inv.id.0.as_str()), &term)
                         || search_contains(Some(inv.currency.as_str()), &term)
                         || search_contains(Some(inv.amount.as_str()), &term)
-                        // RCS-216: drop this line with its Postgres twin.
+                        // TODO: drop this line with its Postgres twin when
+                        // metadata is encrypted client-side.
                         || search_contains(metadata.as_deref(), &term);
                     if !matched {
                         return false;
@@ -266,7 +269,7 @@ impl PaymentReader for InMemoryDataService {
                         return false;
                     }
                 }
-                // Same rule as Postgres, empty list included (RCS-222). A
+                // Same rule as Postgres, empty list included. A
                 // payment whose invoice is missing belongs to no store the
                 // caller can see, so it is filtered out rather than let through.
                 if let Some(ref store_ids) = params.store_ids {
@@ -283,8 +286,7 @@ impl PaymentReader for InMemoryDataService {
                         return false;
                     }
                 }
-                // ANDed on top of the store scope above, never in place of it
-                // (RCS-211, RCS-222).
+                // ANDed on top of the store scope above, never in place of it.
                 if let Some(term) = params.search_term() {
                     let term = term.to_lowercase();
                     let matched = search_starts_with(Some(p.tx_hash.as_str()), &term)
@@ -964,7 +966,7 @@ pub fn create_test_payment(
 }
 
 // =============================================================================
-// Payment Analytics (RCS-225)
+// Payment Analytics
 // =============================================================================
 
 /// Mirrors the Postgres `payment_volume_by_day` query.
@@ -973,7 +975,7 @@ pub fn create_test_payment(
 /// matches nothing, reorged payments are excluded, the window is
 /// `[since, until)`, decimals fall back to 18 when the payment option is gone,
 /// and `decimals` is part of the group key. A double that quietly disagrees
-/// with the real store about one of those is the RCS-203 failure mode.
+/// with the real store about one of those is the failure mode this guards.
 #[async_trait]
 impl PaymentAnalyticsReader for InMemoryDataService {
     async fn payment_volume_by_day(

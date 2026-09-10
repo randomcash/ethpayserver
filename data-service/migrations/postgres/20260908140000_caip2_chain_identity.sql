@@ -1,4 +1,4 @@
--- RCS-241: chain identity becomes CAIP-2.
+-- Chain identity becomes CAIP-2.
 --
 -- Every chain column here was `BIGINT` holding an EIP-155 chain id. That names
 -- exactly one family of chains. Tron, Solana, Monero and Bitcoin have no
@@ -28,7 +28,7 @@
 -- Enforced in the database, not just in Rust. The Rust type validates on
 -- construction, but this table is also written by migrations and by hand during
 -- incidents, and a bare `1` slipping into a chain column is precisely the
--- pre-RCS-241 state we are leaving. Kept as a reusable domain rather than
+-- pre-CAIP-2 state we are leaving. Kept as a reusable domain rather than
 -- repeating the regex twelve times.
 --
 --   namespace: [-a-z0-9]{3,8}      lowercase only
@@ -39,7 +39,7 @@ CREATE DOMAIN caip2 AS TEXT
 COMMENT ON DOMAIN caip2 IS
     'A CAIP-2 chain identifier, e.g. eip155:1. Namespace is lowercase; the '
     'reference is case-sensitive and mostly opaque - only eip155 and tron '
-    'references are numbers, the rest are truncated genesis hashes (RCS-241).';
+    'references are numbers, the rest are truncated genesis hashes.';
 
 -- ---------------------------------------------------------------------------
 -- 2. Convert every chain column
@@ -109,7 +109,7 @@ ALTER TABLE store_settings
 -- for, and it would fail confusingly. Dropped here, restored below.
 ALTER TABLE server_settings ALTER COLUMN enabled_chain_ids DROP DEFAULT;
 
-CREATE FUNCTION rcs241_to_caip2(ids BIGINT[]) RETURNS caip2[] AS $fn$
+CREATE FUNCTION to_caip2(ids BIGINT[]) RETURNS caip2[] AS $fn$
     SELECT COALESCE(
         array_agg(('eip155:' || id::text)::caip2 ORDER BY ord),
         '{}'::caip2[]
@@ -119,9 +119,9 @@ $fn$ LANGUAGE sql IMMUTABLE;
 
 ALTER TABLE server_settings
     ALTER COLUMN enabled_chain_ids TYPE caip2[]
-    USING rcs241_to_caip2(enabled_chain_ids);
+    USING to_caip2(enabled_chain_ids);
 
-DROP FUNCTION rcs241_to_caip2(BIGINT[]);
+DROP FUNCTION to_caip2(BIGINT[]);
 
 ALTER TABLE server_settings
     ALTER COLUMN enabled_chain_ids SET DEFAULT ARRAY[
@@ -167,7 +167,7 @@ BEGIN
 
     IF stragglers > 0 THEN
         RAISE EXCEPTION
-            'RCS-241: % payment option(s) still carry a pre-CAIP-2 '
+            '% payment option(s) still carry a pre-CAIP-2 '
             'payment_method_id. They would resolve to no chain. Convert them '
             'before continuing.', stragglers;
     END IF;
@@ -180,10 +180,10 @@ END $$;
 COMMENT ON COLUMN chain_configs.chain_id IS
     'CAIP-2 identifier. This table is the mapping from identifier to display '
     'name, symbol, decimals and explorer - most references are opaque genesis '
-    'hashes, so nothing may infer a name from an identifier (RCS-241).';
+    'hashes, so nothing may infer a name from an identifier.';
 COMMENT ON COLUMN payments.chain_id IS 'CAIP-2 identifier of the chain this payment arrived on.';
 COMMENT ON COLUMN payment_options.chain_id IS 'CAIP-2 identifier of the chain this option is payable on.';
 COMMENT ON COLUMN watched_addresses.chain_id IS 'CAIP-2 identifier of the chain this address is watched on.';
 COMMENT ON COLUMN server_settings.enabled_chain_ids IS
     'CAIP-2 identifiers this server serves. Was BIGINT[] of EIP-155 ids, which '
-    'a non-EVM server could not populate (RCS-241).';
+    'a non-EVM server could not populate.';

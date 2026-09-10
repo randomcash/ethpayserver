@@ -16,7 +16,7 @@ pub struct ListPaymentsQuery {
     pub status: Option<String>,
     /// Free-text search over tx hash, invoice id, asset symbol and sender.
     ///
-    /// Applied in SQL so `total` counts the filtered set (RCS-231). Blank is
+    /// Applied in SQL so `total` counts the filtered set. Blank is
     /// no filter.
     pub search: Option<String>,
     /// Maximum number of results.
@@ -36,7 +36,7 @@ pub struct ListInvoicesQuery {
     pub currency: Option<String>,
     /// Free-text search over id, currency, amount and metadata.
     ///
-    /// Applied in SQL so `total` counts the filtered set (RCS-231). Blank is
+    /// Applied in SQL so `total` counts the filtered set. Blank is
     /// no filter.
     pub search: Option<String>,
     /// Maximum number of results.

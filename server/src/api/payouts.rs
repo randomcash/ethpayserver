@@ -30,7 +30,7 @@ pub use api_types::{CreatePayoutRequest, PayoutListResponse, PayoutResponse};
 ///
 /// Reorged and unconfirmed payments are excluded; an unparseable amount is
 /// skipped rather than failing the payout, matching the behaviour before
-/// RCS-241.
+/// chain ids became CAIP-2.
 fn sum_payable(
     payments: &[types::PaymentData],
     chain_id: &types::ChainId,

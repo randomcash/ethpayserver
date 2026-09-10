@@ -25,7 +25,7 @@ pub(super) async fn create_test_service() -> Option<PgDataService> {
 ///
 /// Amount columns are `numeric(78,18)`, so Postgres returns `"60"` as
 /// `"60.000000000000000000"`. Comparing the raw strings makes a correct
-/// round-trip look like a failure (RCS-186). Values reach 37 significant
+/// round-trip look like a failure. Values reach 37 significant
 /// digits (1e18 wei with 18 decimals), past what a fixed-width decimal type
 /// holds, so normalise the text instead of parsing.
 #[track_caller]
@@ -78,7 +78,7 @@ mod amount_tests {
 /// `REFERENCES users(id)`, so any test that writes an invoice must seed both
 /// first. A bare `StoreId::new()` violates `invoices_store_id_fkey` — which is
 /// what silently killed every invoice/payment/watched_address/aggregation
-/// integration test (RCS-186).
+/// integration test.
 pub(super) async fn seed_store(service: &PgDataService) -> StoreId {
     let user_id = Uuid::new_v4();
     sqlx::query(

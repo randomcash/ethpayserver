@@ -11,8 +11,8 @@ const ACCOUNT_PATH = "m/44'/60'/0'";
 /**
  * One xpub per account, generated, rather than one constant for the whole suite.
  *
- * This used to be a shared `TEST_XPUB` constant, and RCS-234 made that invalid:
- * an xpub may now belong to exactly one account, because two accounts deriving
+ * This used to be a shared `TEST_XPUB` constant, which is no longer valid:
+ * an xpub may belong to exactly one account, because two accounts deriving
  * from one key issue the same addresses to different merchants' customers.
  * `registeredPage` creates a fresh account per test, so from the second test
  * onwards every add-method call got `409 Conflict` and the form never closed.
@@ -25,7 +25,7 @@ const ACCOUNT_PATH = "m/44'/60'/0'";
  *
  * Keyed by `Page`, not per call, so one account's methods share one key: that
  * is the realistic shape (paste the same xpub for ETH and USDC) and it is what
- * exercises the one-counter-per-key path RCS-234 exists for. A WeakMap, so
+ * exercises the one-counter-per-key path account wallets exist for. A WeakMap, so
  * pages are not retained after their test ends.
  *
  * Watch-only by construction: an xpub derives receive addresses and cannot

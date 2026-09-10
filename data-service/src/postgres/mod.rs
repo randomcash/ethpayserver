@@ -32,7 +32,7 @@ mod integration_tests;
 mod tests;
 
 // =============================================================================
-// List search (RCS-231)
+// List search
 // =============================================================================
 
 /// Escape the characters `LIKE` treats as wildcards, and lower-case the term.

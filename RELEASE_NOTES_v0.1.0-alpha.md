@@ -47,12 +47,12 @@ nothing proved the deployed system could take a payment.
 
 - Recovery phrases are now real. Registration previously issued **every account
   the same hardcoded phrase** — the first twelve BIP-39 words, in order. Now 24
-  words from `crypto.getRandomValues`, bound to the account (RCS-193).
+  words from `crypto.getRandomValues`, bound to the account.
 - A valid session could be escalated to **permanent account takeover** through
   the recovery-complete endpoint, which verified no recovery secret and accepted
-  a challenge minted by the add-passkey flow. Fixed (RCS-207).
+  a challenge minted by the add-passkey flow. Fixed.
 - The recovery salt identifier is pinned at registration, so an account that
-  gains an email later stays recoverable (RCS-201).
+  gains an email later stays recoverable.
 - RPC endpoints, database and Redis URLs are held in `SecretString` and scrubbed
   from logs, errors and telemetry.
 
@@ -62,12 +62,12 @@ nothing proved the deployed system could take a payment.
 
 - **Account recovery has no user interface.** The server flow exists and works;
   nothing calls it. Save your recovery phrase — it cannot be reissued — but it
-  is not yet a way back into an account (RCS-205).
-- **Testnet only.** Mainnet is gated on a security audit (RCS-123).
+  is not yet a way back into an account.
+- **Testnet only.** Mainnet is gated on a security audit.
 - Some write paths are not transactional and can leave orphaned records on
-  partial failure (RCS-134, RCS-194).
+  partial failure.
 - `/auth/recovery/start` can be driven to lock an account by anyone who knows a
-  merchant's identifier (RCS-204).
+  merchant's identifier.
 
 ## Requirements
 

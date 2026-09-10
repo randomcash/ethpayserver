@@ -12,7 +12,7 @@
      that is for this release before writing anything else. If there isn't
      one, ask whether this needs a release.
 
-  2. NAME GAPS WITH TICKET NUMBERS. "Recovery has no UI (RCS-205)" is
+  2. NAME GAPS WITH TICKET NUMBERS. "Recovery has no UI" is
      checkable. "Some features are incomplete" is noise a reader learns to
      skip, and the first person who hits the gap themselves will stop
      trusting everything else on the page.

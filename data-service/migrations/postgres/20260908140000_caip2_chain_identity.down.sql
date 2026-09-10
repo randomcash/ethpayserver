@@ -1,4 +1,5 @@
--- RCS-241, down. Reversible only while every chain is still an EVM chain.
+-- CAIP-2 chain identity, down. Reversible only while every chain is still an
+-- EVM chain.
 --
 -- A BIGINT column can hold an EIP-155 number and nothing else. `eip155:1` goes
 -- back to `1` losslessly; `tron:728126428` and
@@ -35,7 +36,7 @@ BEGIN
 
     IF foreign_chains IS NOT NULL THEN
         RAISE EXCEPTION
-            'RCS-241 down: these chains have no EIP-155 representation and '
+            'caip2 down: these chains have no EIP-155 representation and '
             'cannot go back into a BIGINT column: %. Note that a numeric '
             'reference does not help - tron:728126428 would cast to a number '
             'and then be read as an EIP-155 id by EVM code. Restore from a '

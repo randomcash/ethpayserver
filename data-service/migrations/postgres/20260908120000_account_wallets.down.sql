@@ -1,4 +1,4 @@
--- RCS-234, down. Reversible only while nothing has been shared yet.
+-- Account wallets, down. Reversible only while nothing has been shared yet.
 --
 -- The up migration consolidated N payment-method counters onto one wallet
 -- counter. Going back means splitting one counter into N, and there is no
@@ -37,7 +37,7 @@
 --
 -- ON COMMIT DROP: the migration is one transaction, and the connection is
 -- pooled and reused.
-CREATE TEMP TABLE rcs234_down_effective ON COMMIT DROP AS
+CREATE TEMP TABLE down_effective ON COMMIT DROP AS
 SELECT pm.id AS payment_method_id,
        COALESCE(
            pm.wallet_id,
@@ -53,15 +53,16 @@ DECLARE stranded INTEGER;
 DECLARE unresolved INTEGER;
 BEGIN
     SELECT COUNT(*) INTO shared FROM (
-        SELECT wallet_id FROM rcs234_down_effective
+        SELECT wallet_id FROM down_effective
         WHERE wallet_id IS NOT NULL
         GROUP BY wallet_id HAVING COUNT(*) > 1
     ) AS merged;
 
     IF shared > 0 THEN
         RAISE EXCEPTION
-            'RCS-234 down: % wallet(s) are shared by more than one payment '
-            'method. Their per-method derivation indices were merged into one '
+            'account wallets down: % wallet(s) are shared by more than one '
+            'payment method. Their per-method derivation indices were merged '
+            'into one '
             'counter and cannot be split back without re-deriving addresses '
             'that have already been issued. Restore from a pre-migration '
             'backup instead.', shared;
@@ -83,13 +84,14 @@ BEGIN
     FROM wallets w
     WHERE w.derivation_index > 0
       AND NOT EXISTS (
-          SELECT 1 FROM rcs234_down_effective e WHERE e.wallet_id = w.id
+          SELECT 1 FROM down_effective e WHERE e.wallet_id = w.id
       );
 
     IF stranded > 0 THEN
         RAISE EXCEPTION
-            'RCS-234 down: % wallet(s) have issued addresses but no payment '
-            'method to carry their derivation index back to. Reverting would '
+            'account wallets down: % wallet(s) have issued addresses but no '
+            'payment method to carry their derivation index back to. Reverting '
+            'would '
             'drop the counter, and re-adding the xpub would start at 0 and '
             're-issue every address it has already produced. Restore from a '
             'pre-migration backup instead.', stranded;
@@ -101,12 +103,13 @@ BEGIN
     -- no xpub to put back, and the old schema had the column NOT NULL, so this
     -- would surface as a bare constraint violation several statements later.
     SELECT COUNT(*) INTO unresolved
-    FROM rcs234_down_effective WHERE wallet_id IS NULL;
+    FROM down_effective WHERE wallet_id IS NULL;
 
     IF unresolved > 0 THEN
         RAISE EXCEPTION
-            'RCS-234 down: % payment method(s) resolve to no wallet at all, so '
-            'there is no xpub to restore onto them. The old schema requires '
+            'account wallets down: % payment method(s) resolve to no wallet at '
+            'all, so there is no xpub to restore onto them. The old schema '
+            'requires '
             'one. Give the account a primary wallet, or restore from a '
             'pre-migration backup.', unresolved;
     END IF;
@@ -134,7 +137,7 @@ ALTER TABLE store_payment_methods ADD COLUMN derivation_index INTEGER NOT NULL D
 -- chain is how the guards and the reversal drifted apart in the first place.
 UPDATE store_payment_methods pm
 SET xpub = w.xpub, derivation_index = w.derivation_index
-FROM rcs234_down_effective e
+FROM down_effective e
 JOIN wallets w ON w.id = e.wallet_id
 WHERE pm.id = e.payment_method_id;
 

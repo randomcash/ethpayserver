@@ -1,5 +1,5 @@
 /**
- * Unit coverage for the pure parts of the synthetic payment run (RCS-235).
+ * Unit coverage for the pure parts of the synthetic payment run.
  *
  * The money-path spec next door is skipped unless `E2E_SYNTHETIC_PAYMENT=true`,
  * which in practice means once a night, on a runner, holding secrets nobody

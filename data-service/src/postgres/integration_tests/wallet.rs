@@ -1,4 +1,4 @@
-//! Account wallet repository behaviour against a real database (RCS-234).
+//! Account wallet repository behaviour against a real database.
 //!
 //! The invariant under test throughout: one xpub has one derivation counter,
 //! and no two allocations from it ever return the same index.
@@ -57,7 +57,7 @@ async fn seed_store_for(service: &PgDataService, user_id: Uuid) -> Uuid {
 
 /// Two payment methods configured with the same xpub must share one counter.
 ///
-/// This is the bug RCS-234 exists to remove, in the shape it actually occurs:
+/// This is the bug account wallets exist to remove, in the shape it actually occurs:
 /// not two merchants, but one store accepting ETH and USDC on the same key.
 /// Under the old schema each row counted independently and both returned 0,
 /// then 1, then 2 - the same three addresses, twice.
@@ -557,7 +557,7 @@ async fn payment_options_record_the_wallet_and_index_they_used() {
 }
 
 // =========================================================================
-// Cross-account exclusivity (RCS-234 review, finding 3)
+// Cross-account exclusivity
 // =========================================================================
 
 /// An xpub another account already holds is refused, not silently duplicated.
@@ -660,7 +660,7 @@ async fn concurrent_first_wallet_creates_do_not_collide_on_primary() {
 }
 
 // =========================================================================
-// The override decides where money goes (RCS-234 review, finding 7)
+// The override decides where money goes
 // =========================================================================
 
 /// Pinning a store to a wallet must change the addresses it derives, not just

@@ -1,6 +1,6 @@
 # The payserver-client image this payserver TESTS AGAINST.
 #
-# Not the one it deploys: since RCS-245 the frontend deploys on its own cadence,
+# Not the one it deploys: the frontend deploys on its own cadence,
 # from payserver-client via central-infrastructure. This pin exists so E2E runs
 # against a known frontend rather than a moving target.
 #
@@ -11,7 +11,7 @@
 #
 # Do NOT point this at `latest`. The whole reason the per-commit tag exists is
 # that a moving tag makes "which frontend is live" unanswerable and a rollback
-# a rebuild. The same argument that produced RCS-190 for the server images
+# a rebuild. The same argument that gave the server images an immutable tag
 # applies here, more so now that the frontend can change without this repo
 # moving at all.
 #

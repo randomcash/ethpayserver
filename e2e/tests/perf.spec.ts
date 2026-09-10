@@ -4,7 +4,7 @@ import { compareTiming, type Baseline } from '../fixtures/perf';
 test.describe('Performance timing infrastructure', () => {
   // `TestInfo` has no `startTime` — the previous version of this test read
   // `testInfo.startTime.getTime()` and threw TypeError on every run, which was
-  // invisible while the E2E job carried `continue-on-error: true` (RCS-112).
+  // invisible while the E2E job carried `continue-on-error: true`.
   // `testInfo.duration` is the field the perf reporter actually consumes, and
   // it is documented as zero until the test finishes, so it is asserted from
   // afterEach rather than from the test body.

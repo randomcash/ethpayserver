@@ -69,3 +69,30 @@ These require a `Bearer` token with server admin privileges:
 
 - `GET /health/chains` — detailed per-chain health from evmmonitor (same data as `/health/deep` RPCs section, but includes watched address counts)
 - `GET /metrics` — Prometheus exposition format for scraping
+
+## Editing a migration that has already run
+
+`sqlx` checksums the **whole migration file** — SHA-384 of its bytes — and
+records it in `_sqlx_migrations`. On the next run it compares, and refuses with
+`VersionMismatch` if the file has changed. A one-word comment edit is enough.
+Because `migrate` runs before `server` in the deploy, that failure keeps the
+whole stack down.
+
+Two facts worth knowing before you touch one:
+
+- **Renaming a migration file is free.** The version is the numeric prefix and
+  the description is stored but never compared, so only the bytes matter.
+- **Editing its contents is not**, whether or not any statement changed.
+
+When an edit is deliberate and the migration has already run somewhere, refresh
+the recorded checksums rather than resetting the database:
+
+```sh
+psql "$DATABASE_URL" -c 'SELECT version, description FROM _sqlx_migrations ORDER BY version'
+psql "$DATABASE_URL" -1 -f ops/refresh-migration-checksums.sql
+```
+
+`ops/refresh-migration-checksums.sql` re-records checksum and description per
+version. It touches no schema and no data, and matches nothing on a database
+where those migrations have not run. Regenerate it whenever a migration file's
+bytes change.

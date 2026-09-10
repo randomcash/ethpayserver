@@ -18,7 +18,8 @@ developer machine is breached, or as part of a scheduled key rotation policy.
    before, rotation resumes where it left off; if the key is new, it starts at
    zero because a new key has issued nothing.
 
-   This changed with RCS-234. Rotation used to write the new xpub onto each
+   This changed when wallets moved to the account. Rotation used to write the
+   new xpub onto each
    payment method and zero that method's counter, which was safe only while a
    method owned its counter outright. A wallet is shared between the methods
    and stores that use its key, so zeroing it would re-issue every address that

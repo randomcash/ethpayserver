@@ -28,7 +28,7 @@ pub(crate) type ValidatedMethod = (
 /// persists the `PaymentOptionData` and its watched address, then best-effort notifies
 /// the EVM monitor. Returns the created options in input order.
 ///
-/// Extracted from `create_invoice` (RCS-176); behavior is unchanged.
+/// Extracted from `create_invoice`; behavior is unchanged.
 pub(crate) async fn build_payment_options<A: SessionService>(
     state: &PgAppState<A>,
     invoice: &InvoiceData,
@@ -84,7 +84,7 @@ async fn build_one_payment_option<A: SessionService>(
         token_address: payment_method.token_address.clone(),
         decimals: payment_method.decimals,
         payment_address: payment_address.clone(),
-        // Record which key produced this address and at what index (RCS-234).
+        // Record which key produced this address and at what index.
         // The address alone no longer implies a wallet now that stores can
         // share one.
         wallet_id: Some(allocation.wallet_id),
@@ -160,7 +160,7 @@ async fn build_one_payment_option<A: SessionService>(
 ///
 /// Returns the address and the allocation it came from; both the wallet and
 /// the index are recorded on the payment option so the pairing can be audited
-/// later (RCS-234).
+/// later.
 async fn derive_payment_address<A: SessionService>(
     state: &PgAppState<A>,
     payment_method: &data_service::StorePaymentMethod,

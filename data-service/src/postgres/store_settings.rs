@@ -13,7 +13,7 @@ fn row_to_settings(row: &sqlx::postgres::PgRow) -> RepositoryResult<StoreSetting
     Ok(StoreSettings {
         store_id: row.get("store_id"),
         // Read through the column's own type. This used to be `row.get` into
-        // an `Option<i64>` against what RCS-241 made a `caip2` TEXT column -
+        // an `Option<i64>` against what is now a `caip2` TEXT column -
         // which compiles, because sqlx is checked at runtime, and fails the
         // first time a store actually sets a default chain.
         default_chain_id: row.get::<Option<String>, _>("default_chain_id").map(|raw| {

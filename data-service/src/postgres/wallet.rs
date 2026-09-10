@@ -1,4 +1,4 @@
-//! Account wallet repository implementation (RCS-234).
+//! Account wallet repository implementation.
 
 use async_trait::async_trait;
 use sqlx::{PgConnection, Row};
@@ -50,7 +50,7 @@ fn row_to_wallet(row: &sqlx::postgres::PgRow) -> Wallet {
 /// That is reachable from the ordinary "enable ETH, enable USDC" flow, so it is
 /// locked rather than retried.
 pub(super) async fn lock_account(conn: &mut PgConnection, user_id: Uuid) -> RepositoryResult<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('rcs234:user'), hashtext($1::text))")
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('wallet:user'), hashtext($1::text))")
         .bind(user_id)
         .execute(conn)
         .await
@@ -69,7 +69,7 @@ pub(super) async fn lock_account(conn: &mut PgConnection, user_id: Uuid) -> Repo
 /// Always taken AFTER `lock_account`, so the two never deadlock against each
 /// other.
 pub(super) async fn lock_xpub(conn: &mut PgConnection, xpub: &str) -> RepositoryResult<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('rcs234:xpub'), hashtext($1))")
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('wallet:xpub'), hashtext($1))")
         .bind(xpub)
         .execute(conn)
         .await
@@ -441,7 +441,7 @@ impl WalletWriter for PgDataService {
         // and each caller sees a distinct index; a SELECT followed by an
         // UPDATE would hand the same index to both under READ COMMITTED.
         //
-        // The pre-RCS-234 code did the same thing on store_payment_methods, so
+        // The old code did the same thing on store_payment_methods, so
         // the statement was never the problem: the counter was. Two methods
         // sharing an xpub were two rows, each perfectly serialised against
         // itself and not at all against the other. Locking the wallet is what

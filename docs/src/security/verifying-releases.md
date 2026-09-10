@@ -96,7 +96,7 @@ or that whoever pushed it was authorised. It binds artifact to pipeline.
 
 | Layer | Mechanism |
 |-------|-----------|
-| Build | Per-commit immutable image tags (RCS-190) |
+| Build | Per-commit immutable image tags |
 | Container images | cosign keyless via GitHub Actions OIDC, signed by digest |
 | Transparency | Sigstore Rekor public log |
 | Frontend | Separately built, signed, and deployed on its own cadence; `ops/client-image.pin` records the tag this repo tested against |

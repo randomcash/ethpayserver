@@ -1,4 +1,5 @@
--- RCS-234: move the xpub and its derivation counter up to the account.
+-- Account wallets: move the xpub and its derivation counter up to the
+-- account.
 --
 -- Until now every `store_payment_methods` row carried its own `xpub` AND its
 -- own `derivation_index`. Address derivation is `m/44'/60'/0'/0/{index}`
@@ -22,8 +23,8 @@
 -- leave a window where `store_payment_methods.wallet_id` is NULL and the
 -- server, mid-deploy, cannot derive an address at all. The tables touched here
 -- are small (payment methods and payment options, not invoices), so holding
--- the lock for the rewrite is cheap - unlike RCS-201, which had to split for
--- exactly the opposite reason.
+-- the lock for the rewrite is cheap - unlike the kdf_salt_identifier pair,
+-- which had to split for exactly the opposite reason.
 
 -- ---------------------------------------------------------------------------
 -- 1. The account wallet
@@ -68,8 +69,7 @@ CREATE UNIQUE INDEX idx_account_wallets_user_xpub ON wallets(user_id, xpub);
 
 COMMENT ON TABLE wallets IS
     'Account-level receiving wallets. One xpub, one derivation counter, per '
-    'row - the pairing that makes duplicate address derivation impossible '
-    '(RCS-234).';
+    'row - the pairing that makes duplicate address derivation impossible.';
 COMMENT ON COLUMN wallets.derivation_index IS
     'Next derivation index to issue. Advanced only by an atomic UPDATE ... '
     'RETURNING; never read-then-written.';
@@ -102,7 +102,7 @@ CREATE INDEX idx_store_wallets_wallet_id ON store_wallets(wallet_id);
 
 COMMENT ON TABLE store_wallets IS
     'Per-store wallet override. No row means the store uses the account '
-    'primary (RCS-234).';
+    'primary.';
 
 -- ---------------------------------------------------------------------------
 -- 3. Point payment methods at wallets
@@ -190,7 +190,7 @@ BEGIN
     SELECT COUNT(*) INTO orphaned FROM store_payment_methods WHERE wallet_id IS NULL;
     IF orphaned > 0 THEN
         RAISE EXCEPTION
-            'RCS-234: % payment method(s) could not be matched to an account '
+            '% payment method(s) could not be matched to an account '
             'wallet. Refusing to continue rather than derive from an unknown '
             'key.', orphaned;
     END IF;
@@ -212,7 +212,7 @@ ALTER TABLE store_payment_methods DROP COLUMN derivation_index;
 COMMENT ON COLUMN store_payment_methods.wallet_id IS
     'Wallet this method is pinned to. NULL means inherit: the store override '
     'if it has one, else the account primary. The xpub and counter live on '
-    'the wallet (RCS-234).';
+    'the wallet.';
 
 -- ---------------------------------------------------------------------------
 -- 4. Close the NULL gap in the payment-method uniqueness constraint
@@ -225,7 +225,8 @@ COMMENT ON COLUMN store_payment_methods.wallet_id IS
 -- could never match - and one store accumulated several ETH methods, each
 -- previously with its own xpub and counter.
 --
--- That is the same duplicate-counter shape RCS-234 removes everywhere else,
+-- That is the same duplicate-counter shape this migration removes everywhere
+-- else,
 -- reached through a constraint that silently does not apply. Left alone it
 -- also makes "which wallet does this store use" ambiguous, since the answer is
 -- picked from whichever duplicate sorts first.
@@ -252,7 +253,7 @@ COMMENT ON COLUMN store_payment_methods.wallet_id IS
 -- those pairs the surviving method is not necessarily the one that issued a
 -- given address, and stamping its wallet would assert a provenance that is
 -- merely plausible. ON COMMIT DROP - the whole migration is one transaction.
-CREATE TEMP TABLE rcs234_ambiguous_native ON COMMIT DROP AS
+CREATE TEMP TABLE ambiguous_native ON COMMIT DROP AS
 SELECT store_id, chain_id
 FROM store_payment_methods
 WHERE token_address IS NULL
@@ -331,7 +332,7 @@ ORDER BY pm.store_id, COUNT(*) DESC, pm.wallet_id;
 -- 7. Provenance on payment options
 -- ---------------------------------------------------------------------------
 --
--- RCS-234 asked for `invoices.wallet_id`. That is the wrong grain: an invoice
+-- An `invoices.wallet_id` would be the wrong grain: an invoice
 -- has one payment option per accepted asset, each with its own address, and
 -- once stores can share wallets those options can even come from different
 -- keys. The column belongs on the option.
@@ -380,25 +381,27 @@ WHERE po.invoice_id = i.id
   AND NOT (
       po.token_address IS NULL
       AND EXISTS (
-          SELECT 1 FROM rcs234_ambiguous_native a
+          SELECT 1 FROM ambiguous_native a
           WHERE a.store_id = i.store_id AND a.chain_id = po.chain_id
       )
   );
 
 -- `derivation_index` is deliberately left NULL on historical rows: the index
 -- an old option used was never recorded anywhere, and inventing one by
--- re-deriving would be a guess dressed up as data. NULL means "issued before
--- RCS-234", and readers must treat it as unknown rather than as zero.
+-- re-deriving would be a guess dressed up as data. NULL means "issued
+-- before account wallets existed", and readers must treat it as unknown
+-- rather than as zero.
 CREATE INDEX idx_payment_options_wallet ON payment_options(wallet_id)
     WHERE wallet_id IS NOT NULL;
 
 COMMENT ON COLUMN payment_options.wallet_id IS
     'Wallet whose xpub produced payment_address. NULL for options created '
-    'before RCS-234 whose method could not be matched back, and for options '
+    'before account wallets existed whose method could not be matched back, and '
+    'for options '
     'whose wallet has since been deleted (ON DELETE SET NULL).';
 COMMENT ON COLUMN payment_options.derivation_index IS
     'Index used within the wallet that issued this address. NULL means '
-    'pre-RCS-234 and unknown - not 0. Survives deletion of that wallet, so a '
+    'unknown, not 0. Survives deletion of that wallet, so a '
     'populated index alongside a NULL wallet_id means the key is gone from '
     'this database but the index it used is still known.';
 

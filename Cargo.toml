@@ -11,7 +11,7 @@ resolver = "3"
 # decided by CI shell logic and by whatever `main` happened to be that minute.
 # Rebuilding last week's commit silently picked up this week's commons, and a
 # breaking change to a shared crate broke `testnet` the moment it merged
-# (RCS-215 did exactly that on 2026-09-06).
+# (that happened on 2026-09-06).
 #
 # To work against a local commons checkout, do NOT edit this. Run
 # `scripts/commons.sh link`, which writes an uncommitted `.cargo/config.toml`

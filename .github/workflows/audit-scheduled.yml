@@ -3,8 +3,8 @@ name: Scheduled audit
 # The in-CI `audit` job only runs when something is pushed. Advisories are
 # published against code that is already merged, so a quiet repo goes stale
 # silently: seven weeks without a push left four RUSTSEC advisories blocking
-# the audit gate, and the first symptom was CI refusing to build (RCS-186 era,
-# 2026-08-19). This runs on a clock instead of on activity, and files an issue
+# the audit gate, and the first symptom was CI refusing to build
+# (2026-08-19). This runs on a clock instead of on activity, and files an issue
 # so the next session sees it without anyone reading a workflow log.
 
 on:

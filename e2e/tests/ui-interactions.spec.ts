@@ -71,7 +71,7 @@ test.describe('UI Interactions', () => {
       await expect(dropdown).toHaveClass(/open/);
 
       // Click outside the menu. This used to target `.main-header-search`,
-      // which RCS-232 removed - so the assertion below was testing nothing and
+      // which no longer exists - so the assertion below was testing nothing and
       // the test simply hung on a locator that would never resolve. The page
       // heading is a better anchor anyway: it is unambiguously outside the
       // menu and is not a control, so clicking it cannot do anything else.

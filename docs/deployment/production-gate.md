@@ -161,7 +161,7 @@ The `/health/deep` endpoint exposes a `build_sha` field that contains the
 short commit SHA baked into the binary at compile time. This allows:
 
 - The health-gate script to confirm the new version is actually running.
-- The verifier pass (RCS-113) to match deployed commits to Linear issues.
+- The verifier pass to match deployed commits to Linear issues.
 - Operators to quickly confirm which version is live.
 
 ```json

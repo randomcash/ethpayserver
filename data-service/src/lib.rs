@@ -118,7 +118,7 @@ pub use types::{
     TokenReader,
     TokenRepository,
     TokenWriter,
-    // Account Wallet (RCS-234)
+    // Account Wallet
     Wallet,
     WalletReader,
     WalletRepository,
@@ -219,7 +219,7 @@ mod tests {
     }
 
     // =====================================================================
-    // List search (RCS-231)
+    // List search
     //
     // The double has to answer these exactly as Postgres does; the same
     // assertions run against a real database in
@@ -282,7 +282,7 @@ mod tests {
 
         // The same term matches a row in each store. Only one of them is the
         // caller's, and a filter that widened the scope would return both -
-        // that is RCS-211 by another route.
+        // that is a cross-store leak by another route.
         let mut ours = create_test_invoice();
         ours.store_id = mine;
         ours.currency = "USDC".to_string();
@@ -334,7 +334,7 @@ mod tests {
             "the id predicate is anchored, so a mid-string run must not match"
         );
 
-        // RCS-216 will encrypt metadata and this assertion goes with it.
+        // TODO: this assertion goes away once metadata is encrypted client-side.
         let (total, _) = InvoiceReader::query(&ds, &InvoiceQueryParams::new().with_search("so-44"))
             .await
             .unwrap();

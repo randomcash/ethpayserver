@@ -209,15 +209,15 @@ pub(crate) async fn get_invoice_with_permission<A: SessionService>(
 /// `store_id=00000000-0000-0000-0000-000000000000` took the `Some` arm, skipped
 /// the admin check *and* the membership check, and then dropped the `WHERE
 /// store_id` clause - handing any authenticated user every invoice and payment
-/// in the deployment (RCS-211). Keep the two cases in the type; do not
+/// in the deployment. Keep the two cases in the type; do not
 /// reintroduce an in-band marker.
 /// Which stores a listing query may read.
 ///
 /// An enum rather than `Option<StoreId>` because there are three answers, and
 /// the two that mean "more than one store" are not interchangeable. Conflating
-/// them is the entire bug class here: a nil-UUID sentinel that meant "all" was
-/// RCS-211, and an empty membership list silently meaning "no filter" would be
-/// the same leak wearing different clothes.
+/// them is the entire bug class here: a nil-UUID sentinel that meant "all"
+/// leaked every store, and an empty membership list silently meaning "no
+/// filter" would be the same leak wearing different clothes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StoreScope {
     /// One store, membership already checked.
@@ -273,8 +273,8 @@ where
         //
         // This used to be a flat 400 for non-admins, which made the "All Stores"
         // sidebar option a dead end on Invoices and Payments - the client asked,
-        // the server refused, and the UI reported it as "pick a store"
-        // (RCS-222). Answering with the caller's own stores is the same
+        // the server refused, and the UI reported it as "pick a store".
+        // Answering with the caller's own stores is the same
         // authorisation decision the `Some` arm makes, applied to a set.
         None => {
             if user.role == auth::Role::ServerAdmin {
@@ -298,7 +298,7 @@ where
 /// The "All Stores" invoice/payment views mix rows from stores the caller may
 /// not have in their sidebar (`GET /stores` only returns the caller's own
 /// memberships, even for admins), so the name has to come from the server or
-/// the row can only show a bare UUID (RCS-171).
+/// the row can only show a bare UUID.
 ///
 /// Deduplicates first: a page is at most `limit` rows but usually spans only a
 /// handful of stores, so this is a few lookups rather than one per row. A store
@@ -358,7 +358,7 @@ pub(crate) fn apply_token_policy_filter(
 
 /// The address receipts go to, for one invoice.
 ///
-/// Prefers the dedicated column and falls back to `metadata` (RCS-215). The
+/// Prefers the dedicated column and falls back to `metadata`. The
 /// fallback is for rows written before the migration: those still carry the
 /// address inside the blob, and dropping it would silently stop their receipts.
 /// New writes populate the column, so the fallback ages out on its own.
@@ -373,7 +373,7 @@ pub(crate) fn customer_email_of(invoice: &InvoiceData) -> Option<String> {
 ///
 /// Only for invoices created before `customer_email` became a column. Do not
 /// call this directly on new code paths - use [`customer_email_of`], which
-/// prefers the column. Once metadata is encrypted (RCS-216) this can only ever
+/// prefers the column. Once metadata is encrypted this can only ever
 /// return `None` for rows written after that point, which is correct.
 pub(crate) fn extract_customer_email(metadata: &Option<serde_json::Value>) -> Option<String> {
     metadata

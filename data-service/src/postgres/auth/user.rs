@@ -109,14 +109,14 @@ impl UserRepository for PgDataService {
             -- kdf_salt_identifier is deliberately absent: it is pinned at
             -- registration and the stored recovery_verification_hash was
             -- derived from it. Updating it would make the account
-            -- unrecoverable, so this statement cannot (RCS-201).
+            -- unrecoverable, so this statement cannot.
             UPDATE users SET
                 -- COALESCE, not assignment: pins the value on first write for
                 -- rows the old binary inserted during a rolling deploy (which
                 -- the one-shot backfill cannot reach), while remaining
                 -- immutable for every row that already has one. Without this
                 -- those rows keep recompute-on-read semantics forever and the
-                -- promised follow-up SET NOT NULL would find NULLs (RCS-201).
+                -- promised follow-up SET NOT NULL would find NULLs.
                 kdf_salt_identifier = COALESCE(users.kdf_salt_identifier, $11),
                 email = $2, primary_wallet_address = $3, kdf_params = $4,
                 encrypted_symmetric_key = $5, recovery_verification_hash = $6,
@@ -126,7 +126,7 @@ impl UserRepository for PgDataService {
               -- Reject a changed identifier instead of silently discarding it.
               -- COALESCE above pins a NULL row, which is why NULL still
               -- matches; anything else must equal what is stored, or no row is
-              -- updated and the caller is told (RCS-203). Without this the
+              -- updated and the caller is told. Without this the
               -- write looked successful and the change simply evaporated.
               AND (users.kdf_salt_identifier IS NULL
                    OR users.kdf_salt_identifier = $11)
@@ -277,7 +277,7 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
         id: UserId(id),
         email: email.clone(),
         primary_wallet_address: primary_wallet_address.clone(),
-        // NULL means the row predates RCS-201's backfill (or was written by the
+        // NULL means the row predates the backfill (or was written by the
         // old binary during a rolling deploy). Fall back to the computed value,
         // which is what such a row was salted with anyway.
         kdf_salt_identifier: row

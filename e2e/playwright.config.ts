@@ -34,7 +34,7 @@ export default defineConfig({
   // Deliberately no `github` reporter. The E2E job is skipped on pull_request
   // (it is gated on refs/heads/*), so annotations could never reach a PR diff,
   // and on testnet pushes the suite is knowingly red under continue-on-error
-  // (RCS-192) - it would stamp ~56 error annotations on every push for failures
+  // - it would stamp ~56 error annotations on every push for failures
   // already tracked. It belongs in the commit that removes continue-on-error.
   reporter: process.env.CI
     ? [['list'], ['html', { open: 'never' }], ['./perf-reporter.ts']]

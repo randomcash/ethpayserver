@@ -1,4 +1,4 @@
-//! Payment analytics reads (RCS-225).
+//! Payment analytics reads.
 //!
 //! These live here rather than in `payserver-commons` because they are a
 //! dashboard concern, not part of the payment-server contract every backend
@@ -9,7 +9,7 @@
 //!
 //! 1. `data-service` has no fixed-point decimal dependency, and doing the
 //!    division in SQL on one backend and in Rust in the in-memory double is
-//!    exactly the mock/store divergence RCS-203 was about.
+//!    exactly the mock/store divergence that has bitten before.
 //! 2. The same `asset_symbol` can arrive with different `decimals` (a token
 //!    listed with the wrong decimals on one chain, a payment whose
 //!    `payment_option` row was deleted). Keeping `decimals` in the group key
@@ -27,8 +27,8 @@ pub struct PaymentVolumeQuery {
     ///
     /// An EMPTY vec means "no stores" and MUST produce an empty result. It is
     /// not "every store": collapsing the two is how a user who belongs to no
-    /// store ends up reading the whole server (RCS-222, and RCS-211 before
-    /// it). There is deliberately no `None`/"all stores" variant here — the
+    /// store ends up reading the whole server. There is deliberately no
+    /// `None`/"all stores" variant here — the
     /// caller always names the stores it is entitled to.
     pub store_ids: Vec<StoreId>,
 

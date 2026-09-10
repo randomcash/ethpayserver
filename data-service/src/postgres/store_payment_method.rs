@@ -14,7 +14,7 @@ use types::{StorePaymentMethodReader, StorePaymentMethodWriter};
 /// The projection every read uses.
 ///
 /// `wallet_id`, `xpub` and `derivation_index` are the *resolved* wallet's, not
-/// the method's: since RCS-234 the method holds at most a pin, and the key it
+/// the method's: the method holds at most a pin, and the key it
 /// actually derives from is found by walking pin, store override, account
 /// primary. Reading through that walk is what stops a caller rendering one key
 /// while payments are collected on another.
@@ -175,7 +175,8 @@ impl StorePaymentMethodWriter for PgDataService {
         // Two conflict targets, because the table needs both. The composite
         // unique index cannot see native assets - token_address is NULL and
         // NULL is distinct from NULL - so those rely on the partial index
-        // added by RCS-234. Naming the wrong one silently inserts a duplicate
+        // added alongside account wallets. Naming the wrong one silently
+        // inserts a duplicate
         // instead of updating, which is how one store ended up with several
         // ETH methods, each formerly with its own counter.
         let sql = if token_address.is_some() {
@@ -239,7 +240,7 @@ impl StorePaymentMethodWriter for PgDataService {
         // the store resolves to. It does NOT reset a counter, unlike the old
         // per-method xpub swap: the destination wallet already knows how far
         // its own key has been used, which is the whole reason the counter
-        // moved (RCS-234). Resetting here would re-issue addresses.
+        // moved. Resetting here would re-issue addresses.
         sqlx::query(
             r#"
             UPDATE store_payment_methods

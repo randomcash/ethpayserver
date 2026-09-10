@@ -120,7 +120,7 @@ async fn integration_payment_upsert_update() {
     assert!(fetched.confirmed_at.is_some());
 }
 
-/// RCS-222, the payments half. Worth its own test rather than trusting the
+/// Membership scoping, the payments half. Worth its own test rather than trusting the
 /// invoice one: payments carry no store_id of their own, so scoping them means
 /// joining invoices, and the join is only added when a store filter is present.
 /// Adding a second store filter without extending that condition would drop the
@@ -169,7 +169,7 @@ async fn integration_payment_query_scopes_to_a_set_of_stores() {
     assert!(empty_rows.is_empty(), "no memberships must mean no rows");
 }
 
-/// RCS-231, the payments half: the search predicate reaches both the count and
+/// Search, the payments half: the search predicate reaches both the count and
 /// the data query, and it is ANDed onto the store scope rather than replacing
 /// it - the term below matches a payment in a store the caller cannot see.
 ///
@@ -225,7 +225,7 @@ async fn integration_payment_search_is_scoped_and_counts_what_it_returns() {
     }
 }
 
-/// RCS-231: the shape of each payment column's predicate, pinned.
+/// The shape of each payment column's predicate, pinned.
 ///
 /// Anchored on `tx_hash` (an identifier someone pastes whole, and the only
 /// shape an index could ever serve), substring on `from_address`. Case-folded

@@ -55,7 +55,7 @@ pub fn chain_id_from_row(row: &sqlx::postgres::PgRow, column: &str) -> types::Ch
         panic!(
             "column `{column}` holds `{raw}`, which is not a CAIP-2 chain id ({e}). \
              The `caip2` domain should have made this impossible - has the column \
-             been altered, or was the RCS-241 migration skipped?"
+             been altered, or was the caip2 migration skipped?"
         )
     })
 }

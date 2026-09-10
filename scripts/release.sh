@@ -104,7 +104,7 @@ fi
 
 if ! echo "$LIMITS" | grep -qE '(RCS-[0-9]+|#[0-9]+)'; then
     echo "warning: no ticket references under 'Not ready for'." >&2
-    echo "         'Recovery has no UI (RCS-205)' is checkable; 'some features" >&2
+    echo "         'Recovery has no UI' is checkable; 'some features" >&2
     echo "         are incomplete' is noise. Continuing anyway." >&2
 fi
 

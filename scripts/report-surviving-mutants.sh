@@ -80,7 +80,7 @@ $line
 This mutation was applied and **no test caught it**. The code change compiled
 and all tests still passed, meaning this code path lacks adequate test coverage.
 
-Source: weekly \`cargo-mutants\` run ([RCS-111](https://linear.app/randomcash/issue/RCS-111))."
+Source: the weekly \`cargo-mutants\` run."
 
   label_array="[]"
   if [ -n "$LABEL_ID" ]; then
