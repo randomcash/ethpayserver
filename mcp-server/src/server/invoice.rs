@@ -9,9 +9,9 @@ use evm::monitor::bridge::EventBridge;
 use rates::is_fiat_currency;
 use types::currency::DEFAULT_INVOICE_EXPIRATION_SECS;
 use types::{
-    InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentMethodId,
-    PaymentOptionData, PaymentOptionId, PaymentOptionReader, PaymentOptionWriter, StoreId,
-    StorePaymentMethodReader, StorePaymentMethodWriter, WatchedAddressWriter, traits::InvoiceData,
+    InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, PaymentMethodId,
+    PaymentOptionData, PaymentOptionId, PaymentOptionReader, StoreId, StorePaymentMethodReader,
+    StorePaymentMethodWriter, WatchedAddressWriter, traits::InvoiceData,
 };
 
 use super::EthpayMcpServer;
@@ -123,12 +123,19 @@ impl EthpayMcpServer {
             extra: None,
         };
 
-        InvoiceWriter::upsert(&*self.data_service, &invoice)
-            .await
-            .map_err(|e| format!("Failed to create invoice: {e}"))?;
-
-        // Create payment options
-        let mut options_json = Vec::new();
+        // Derive every address before writing anything. This used to commit the
+        // invoice, then each payment option, then each watched address, so a
+        // failure on the second asset left a Pending invoice payable in the
+        // first and nothing else - quoting a customer one asset, counting
+        // towards the store's dashboard, and reported by nothing because each
+        // individual write had succeeded.
+        //
+        // The derivation counter is the deliberate exception: `allocate_derivation`
+        // advances it before an address exists, and that stands even when the
+        // rest rolls back. Burning an index costs nothing; returning one risks
+        // issuing the same address twice.
+        let mut options: Vec<PaymentOptionData> = Vec::with_capacity(validated_methods.len());
+        let mut notify: Vec<(usize, evm::Address)> = Vec::with_capacity(validated_methods.len());
 
         for (method_idx, crypto_amount, rate_str, rate_at) in validated_methods {
             let pm = &payment_methods[method_idx];
@@ -146,9 +153,8 @@ impl EthpayMcpServer {
             let address = deriver
                 .derive_address(allocation.index as u32)
                 .map_err(|e| format!("Address derivation failed: {e}"))?;
-            let payment_address = address.to_string();
 
-            let option = PaymentOptionData {
+            options.push(PaymentOptionData {
                 id: PaymentOptionId(Uuid::new_v4()),
                 invoice_id: invoice.id.clone(),
                 payment_method_id: PaymentMethodId::new(&pm.asset_symbol, &pm.chain_id),
@@ -156,7 +162,7 @@ impl EthpayMcpServer {
                 asset_symbol: pm.asset_symbol.clone(),
                 token_address: pm.token_address.clone(),
                 decimals: pm.decimals,
-                payment_address: payment_address.clone(),
+                payment_address: address.to_string(),
                 wallet_id: Some(allocation.wallet_id),
                 derivation_index: Some(allocation.index),
                 amount: crypto_amount,
@@ -164,25 +170,26 @@ impl EthpayMcpServer {
                 rate_at,
                 is_active: true,
                 created_at: Utc::now(),
-            };
+            });
+            notify.push((method_idx, address));
+        }
 
-            PaymentOptionWriter::create(&*self.data_service, &option)
-                .await
-                .map_err(|e| format!("Failed to create payment option: {e}"))?;
+        // The invoice, its options and their watched addresses, or none of them.
+        data_service::InvoiceCreationWriter::create_invoice_with_options(
+            &*self.data_service,
+            &invoice,
+            &options,
+        )
+        .await
+        .map_err(|e| format!("Failed to create invoice: {e}"))?;
 
-            // Save watched address to database
+        // Only now, and best-effort. Announcing an address before the commit
+        // would have the monitor watching for money against a payment option
+        // that might never exist.
+        for (option, (method_idx, address)) in options.iter().zip(notify) {
+            let pm = &payment_methods[method_idx];
             let token_addr_str = pm.token_address.as_deref();
-            WatchedAddressWriter::upsert(
-                &*self.data_service,
-                &payment_address,
-                &option.id,
-                &pm.chain_id,
-                token_addr_str,
-            )
-            .await
-            .map_err(|e| format!("Failed to save watched address: {e}"))?;
 
-            // Notify EVM monitor if available
             if let Some(ref monitor) = self.evm_monitor
                 && let Ok(invoice_uuid) = Uuid::parse_str(&invoice.id.0)
             {
@@ -214,13 +221,13 @@ impl EthpayMcpServer {
                 if let Err(e) = monitor.publish_command(&cmd).await {
                     tracing::warn!(
                         invoice_id = %invoice.id.0,
-                        address = %payment_address,
+                        address = %option.payment_address,
                         error = %e,
                         "Failed to send WatchAddress command, will be retried"
                     );
                 } else if let Err(e) = WatchedAddressWriter::mark_notified(
                     &*self.data_service,
-                    &payment_address,
+                    &option.payment_address,
                     &pm.chain_id,
                     token_addr_str,
                 )
@@ -229,20 +236,30 @@ impl EthpayMcpServer {
                     tracing::warn!(error = %e, "Failed to mark watch as notified");
                 }
             }
-
-            options_json.push(serde_json::json!({
-                "id": option.id.0.to_string(),
-                "payment_method_id": option.payment_method_id.0,
-                "chain_id": option.chain_id,
-                "asset_symbol": option.asset_symbol,
-                "token_address": option.token_address,
-                "decimals": option.decimals,
-                "payment_address": option.payment_address,
-                "amount": option.amount,
-                "rate": option.rate,
-                "is_active": option.is_active,
-            }));
         }
+
+        // Built from every option that was written. The old loop pushed this
+        // inside the notification branch, after a `continue` that fired for a
+        // non-EVM chain - so an option that had been committed was left out of
+        // the response, and the caller never saw an asset the invoice could
+        // actually be paid in.
+        let options_json: Vec<_> = options
+            .iter()
+            .map(|option| {
+                serde_json::json!({
+                    "id": option.id.0.to_string(),
+                    "payment_method_id": option.payment_method_id.0,
+                    "chain_id": option.chain_id,
+                    "asset_symbol": option.asset_symbol,
+                    "token_address": option.token_address,
+                    "decimals": option.decimals,
+                    "payment_address": option.payment_address,
+                    "amount": option.amount,
+                    "rate": option.rate,
+                    "is_active": option.is_active,
+                })
+            })
+            .collect();
 
         let result = serde_json::json!({
             "id": invoice.id.0,

@@ -17,6 +17,7 @@ mod account_deletion;
 mod aggregation;
 mod analytics;
 mod invoice;
+mod invoice_creation;
 mod payment;
 mod wallet;
 mod wallet_migration;

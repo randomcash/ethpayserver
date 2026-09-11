@@ -163,47 +163,11 @@ impl PaymentOptionReader for PgDataService {
 #[async_trait]
 impl PaymentOptionWriter for PgDataService {
     async fn create(&self, option: &PaymentOptionData) -> RepositoryResult<()> {
-        // Derive asset_type from token_address: NULL = native, NOT NULL = erc20
-        let asset_type = if option.token_address.is_some() {
-            "erc20"
-        } else {
-            "native"
-        };
-
-        sqlx::query(
-            r#"
-            INSERT INTO payment_options (
-                id, invoice_id, payment_method_id, chain_id, asset_type,
-                asset_symbol, token_address, decimals, payment_address,
-                wallet_id, derivation_index, amount, rate, rate_at, is_active,
-                created_at
-            ) VALUES (
-                $1, $2, $3, $4, $5::asset_type, $6, $7, $8, $9, $10, $11,
-                $12::numeric, $13::numeric, $14, $15, $16
-            )
-            "#,
-        )
-        .bind(option.id.0)
-        .bind(option.invoice_id.as_str())
-        .bind(&option.payment_method_id.0)
-        .bind(option.chain_id.as_str())
-        .bind(asset_type)
-        .bind(&option.asset_symbol)
-        .bind(&option.token_address)
-        .bind(option.decimals as i16)
-        .bind(&option.payment_address)
-        .bind(option.wallet_id)
-        .bind(option.derivation_index)
-        .bind(&option.amount)
-        .bind(&option.rate)
-        .bind(option.rate_at)
-        .bind(option.is_active)
-        .bind(option.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
-        Ok(())
+        // One copy of the statement, shared with the transactional path in
+        // `invoice_creation`. Two copies drift, and the drift only shows up as
+        // an invoice created through one route behaving unlike another.
+        let mut conn = self.pool.acquire().await.map_err(sqlx_to_repo_error)?;
+        super::invoice_creation::insert_payment_option(&mut conn, option).await
     }
 
     async fn update(&self, option: &PaymentOptionData) -> RepositoryResult<()> {
