@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod auth;
 mod conversions;
 mod invoice;
+mod invoice_creation;
 mod payment;
 mod payment_option;
 mod payout;

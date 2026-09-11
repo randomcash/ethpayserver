@@ -329,18 +329,11 @@ where
         extra: None,
     };
 
-    ::types::InvoiceWriter::upsert(&*state.data_service, &invoice)
-        .await
-        .map_err(|_| {
-            invoice_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "Failed to create invoice",
-            )
-        })?;
-
-    // Create payment options for each validated payment method
-    let created_options = super::payment_options::build_payment_options(
+    // Derive every address first. Nothing is written until they all exist, so a
+    // derivation failure on the third method cannot leave an invoice committed
+    // with the first two - payable in some assets and not others, quoting a
+    // customer an address nobody is watching.
+    let derived = super::payment_options::derive_payment_options(
         &state,
         &invoice,
         &payment_methods,
@@ -350,9 +343,35 @@ where
 
     // Defensive check: should never happen since we pre-validate payment methods
     debug_assert!(
-        !created_options.is_empty(),
+        !derived.is_empty(),
         "Pre-validation should ensure at least one valid method"
     );
+
+    // One transaction: the invoice, its options and their watched addresses, or
+    // none of them.
+    let options: Vec<_> = derived.iter().map(|d| d.option.clone()).collect();
+    data_service::InvoiceCreationWriter::create_invoice_with_options(
+        &*state.data_service,
+        &invoice,
+        &options,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(invoice_id = %invoice.id.0, error = %e, "invoice creation rolled back");
+        invoice_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Failed to create invoice",
+        )
+    })?;
+
+    // Only now, and best-effort. Announcing an address before the commit would
+    // have the monitor watching for money against a payment option that might
+    // never exist; a missed notification is recoverable by the retry service,
+    // an unsent one is not.
+    super::payment_options::notify_monitor_for(&state, &invoice, &derived).await;
+
+    let created_options = options;
 
     // Record metrics
     metrics::record_invoice_created(&invoice.currency);
