@@ -17,8 +17,10 @@
 //! sqlx migrate run --source migrations/postgres
 //! ```
 
+pub mod account_deletion;
 pub mod analytics;
 
+pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
 pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
 
 #[cfg(feature = "postgres")]

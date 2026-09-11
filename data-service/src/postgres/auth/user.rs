@@ -301,3 +301,41 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
         role: role_str.parse().unwrap_or_default(),
     })
 }
+
+#[async_trait::async_trait]
+impl crate::account_deletion::AccountDeletionReader for crate::postgres::PgDataService {
+    async fn account_deletion_blockers(
+        &self,
+        user_id: auth::UserId,
+    ) -> types::RepositoryResult<crate::account_deletion::AccountDeletionBlockers> {
+        // One round trip, three scalar subqueries. Each walks from the owned
+        // stores down the path that `ON DELETE CASCADE` would take, so what is
+        // counted here is exactly what a delete would remove or trip over.
+        let row = sqlx::query(
+            r#"
+            SELECT
+              (SELECT COUNT(*) FROM payments p
+                 JOIN invoices i ON i.id = p.invoice_id
+                 JOIN stores s   ON s.id = i.store_id
+                WHERE s.owner_id = $1)                       AS payments,
+              (SELECT COUNT(*) FROM payouts po
+                 JOIN stores s ON s.id = po.store_id
+                WHERE s.owner_id = $1)                       AS payouts,
+              (SELECT COUNT(*) FROM refunds r
+                 JOIN stores s ON s.id = r.store_id
+                WHERE s.owner_id = $1)                       AS refunds
+            "#,
+        )
+        .bind(user_id.0)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| types::RepositoryError::Database(e.to_string()))?;
+
+        use sqlx::Row;
+        Ok(crate::account_deletion::AccountDeletionBlockers {
+            payments: row.get("payments"),
+            payouts: row.get("payouts"),
+            refunds: row.get("refunds"),
+        })
+    }
+}
