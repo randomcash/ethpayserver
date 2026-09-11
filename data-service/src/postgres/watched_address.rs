@@ -306,83 +306,21 @@ impl WatchedAddressWriter for PgDataService {
             .map(|r| r.get("invoice_id"))
             .unwrap_or_default();
 
-        if let Some(token) = token_address {
-            // For ERC20 tokens, use ON CONFLICT
-            sqlx::query(
-                r#"
-                INSERT INTO watched_addresses (
-                    invoice_id, payment_option_id, chain_id, address, token_address,
-                    is_active, expires_at, monitor_notified
-                ) VALUES (
-                    $1, $2, $3, $4, $5, TRUE, $6, FALSE
-                )
-                ON CONFLICT (address, chain_id, token_address) DO UPDATE
-                SET payment_option_id = $2, is_active = TRUE, expires_at = $6, monitor_notified = FALSE
-                "#,
-            )
-            .bind(&invoice_id)
-            .bind(payment_option_id.0)
-            .bind(chain_id.as_str())
-            .bind(address)
-            .bind(token)
-            .bind(expires_at)
-            .execute(&self.pool)
-            .await
-            .map_err(sqlx_to_repo_error)?;
-        } else {
-            // For native assets, use a transaction to handle NULL token_address
-            let mut tx = self.pool.begin().await.map_err(sqlx_to_repo_error)?;
-
-            let existing = sqlx::query(
-                r#"
-                SELECT id FROM watched_addresses
-                WHERE LOWER(address) = LOWER($1) AND chain_id = $2 AND token_address IS NULL
-                FOR UPDATE
-                "#,
-            )
-            .bind(address)
-            .bind(chain_id.as_str())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(sqlx_to_repo_error)?;
-
-            if existing.is_some() {
-                sqlx::query(
-                    r#"
-                    UPDATE watched_addresses
-                    SET payment_option_id = $1, is_active = TRUE, expires_at = $2, monitor_notified = FALSE
-                    WHERE LOWER(address) = LOWER($3) AND chain_id = $4 AND token_address IS NULL
-                    "#,
-                )
-                .bind(payment_option_id.0)
-                .bind(expires_at)
-                .bind(address)
-                .bind(chain_id.as_str())
-                .execute(&mut *tx)
-                .await
-                .map_err(sqlx_to_repo_error)?;
-            } else {
-                sqlx::query(
-                    r#"
-                    INSERT INTO watched_addresses (
-                        invoice_id, payment_option_id, chain_id, address, is_active, expires_at, monitor_notified
-                    ) VALUES (
-                        $1, $2, $3, $4, TRUE, $5, FALSE
-                    )
-                    "#,
-                )
-                .bind(&invoice_id)
-                .bind(payment_option_id.0)
-                .bind(chain_id.as_str())
-                .bind(address)
-                .bind(expires_at)
-                .execute(&mut *tx)
-                .await
-                .map_err(sqlx_to_repo_error)?;
-            }
-
-            tx.commit().await.map_err(sqlx_to_repo_error)?;
-        }
+        // The branching statements live in `invoice_creation`, shared with the
+        // transactional path. Only the two lookups above are specific to this
+        // caller: inside a transaction the invoice is not committed yet, so
+        // there is nothing to look up and the values are passed in instead.
+        let mut conn = self.pool.acquire().await.map_err(sqlx_to_repo_error)?;
+        super::invoice_creation::upsert_watched_address(
+            &mut conn,
+            &invoice_id,
+            expires_at,
+            address,
+            payment_option_id,
+            chain_id,
+            token_address,
+        )
+        .await?;
 
         Ok(())
     }

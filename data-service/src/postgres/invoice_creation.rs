@@ -1,10 +1,18 @@
 //! The transactional half of [`crate::invoice_creation`].
 //!
-//! Each statement lives in a function taking an executor rather than `&self`,
-//! so the same SQL serves both the standalone trait methods (against the pool)
-//! and the atomic path (against a transaction). Duplicating it would mean two
-//! copies drifting apart, which is how the in-memory double and the real store
-//! disagreed once already.
+//! Each statement lives in a function taking a connection rather than `&self`,
+//! so the same SQL serves both the standalone trait methods (against a
+//! connection from the pool) and the atomic path (against a transaction).
+//! Duplicating it would mean two copies drifting apart, which is how the
+//! in-memory double and the real store disagreed once already.
+//!
+//! `insert_invoice` is the exception, and deliberately so. `InvoiceWriter::upsert`
+//! carries `ON CONFLICT (id) DO UPDATE` because it is also how an invoice's
+//! status and received amount are written as it is paid. Creation must not do
+//! that: an id collision at creation means something is badly wrong, and
+//! quietly overwriting the existing invoice would be the worst available
+//! response. Two callers, two different statements - so this one is not shared,
+//! rather than shared with a flag that makes it silently destructive.
 
 use async_trait::async_trait;
 use sqlx::PgConnection;
@@ -104,13 +112,17 @@ pub(super) async fn insert_payment_option(
 /// whenever the invoice's real expiry differs, and that only never fires today
 /// because the option is committed before the lookup runs. Inside a transaction
 /// there is nothing to look up that the caller does not already hold.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn upsert_watched_address(
     conn: &mut PgConnection,
     invoice_id: &str,
     expires_at: chrono::DateTime<chrono::Utc>,
-    option: &PaymentOptionData,
+    address: &str,
+    payment_option_id: &types::PaymentOptionId,
+    chain_id: &types::ChainId,
+    token_address: Option<&str>,
 ) -> RepositoryResult<()> {
-    match option.token_address.as_deref() {
+    match token_address {
         Some(token) => {
             sqlx::query(
                 r#"
@@ -124,9 +136,9 @@ pub(super) async fn upsert_watched_address(
                 "#,
             )
             .bind(invoice_id)
-            .bind(option.id.0)
-            .bind(option.chain_id.as_str())
-            .bind(&option.payment_address)
+            .bind(payment_option_id.0)
+            .bind(chain_id.as_str())
+            .bind(address)
             .bind(token)
             .bind(expires_at)
             .execute(&mut *conn)
@@ -148,8 +160,8 @@ pub(super) async fn upsert_watched_address(
                 FOR UPDATE
                 "#,
             )
-            .bind(&option.payment_address)
-            .bind(option.chain_id.as_str())
+            .bind(address)
+            .bind(chain_id.as_str())
             .fetch_optional(&mut *conn)
             .await
             .map_err(sqlx_to_repo_error)?;
@@ -164,10 +176,10 @@ pub(super) async fn upsert_watched_address(
                       AND token_address IS NULL
                     "#,
                 )
-                .bind(option.id.0)
+                .bind(payment_option_id.0)
                 .bind(expires_at)
-                .bind(&option.payment_address)
-                .bind(option.chain_id.as_str())
+                .bind(address)
+                .bind(chain_id.as_str())
                 .execute(&mut *conn)
                 .await
                 .map_err(sqlx_to_repo_error)?;
@@ -181,9 +193,9 @@ pub(super) async fn upsert_watched_address(
                     "#,
                 )
                 .bind(invoice_id)
-                .bind(option.id.0)
-                .bind(option.chain_id.as_str())
-                .bind(&option.payment_address)
+                .bind(payment_option_id.0)
+                .bind(chain_id.as_str())
+                .bind(address)
                 .bind(expires_at)
                 .execute(&mut *conn)
                 .await
@@ -206,8 +218,16 @@ impl InvoiceCreationWriter for PgDataService {
         insert_invoice(&mut tx, invoice).await?;
         for option in options {
             insert_payment_option(&mut tx, option).await?;
-            upsert_watched_address(&mut tx, invoice.id.as_str(), invoice.expires_at, option)
-                .await?;
+            upsert_watched_address(
+                &mut tx,
+                invoice.id.as_str(),
+                invoice.expires_at,
+                &option.payment_address,
+                &option.id,
+                &option.chain_id,
+                option.token_address.as_deref(),
+            )
+            .await?;
         }
 
         // Dropping `tx` without this rolls everything back, which is what every
