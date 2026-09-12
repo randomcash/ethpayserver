@@ -54,6 +54,18 @@ export async function register(page: Page): Promise<RecoveryCredentials> {
   // Trigger passkey creation — the virtual authenticator handles the prompt
   await page.locator('.ps-passkey-button').click();
 
+  return finishRegistration(page);
+}
+
+/**
+ * The half of registration that every authentication method shares.
+ *
+ * Whether the account was created with a passkey or a wallet, registration
+ * pauses on the same recovery screen and finishes the same way. Extracted so a
+ * second method does not mean a second copy of the capture-and-validate logic,
+ * which is exactly the kind of duplication that lets one copy silently rot.
+ */
+export async function finishRegistration(page: Page): Promise<RecoveryCredentials> {
   // Registration pauses on the recovery-phrase step before it redirects. Wait
   // for whichever arrives first instead of giving that step a fixed budget: a
   // cold server answers the passkey round trip in more than the 5s an earlier
