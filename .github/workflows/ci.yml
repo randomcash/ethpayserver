@@ -514,33 +514,54 @@ jobs:
             -d "{\"event_type\":\"deploy-testnet\",\"client_payload\":{\"sha_tag\":\"$SHA_TAG\"}}"
           echo "dispatched deploy-testnet $SHA_TAG" >> "$GITHUB_STEP_SUMMARY"
 
+  # Mainnet handles real merchant funds, so it takes release tags and nothing
+  # else. `staging` was dropped with the rename: no staging host exists, and the
+  # `main` branch that fed it has been dormant since April while `testnet` is the
+  # trunk - so the dispatch it sent could only ever have failed on a host with no
+  # such directory.
   notify-deploy:
-    name: Notify Deploy (staging / production)
+    name: Notify Deploy (mainnet)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [docker]
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: Resolve environment + tag
+      - name: Resolve tag, and refuse anything that is not a release
         id: resolve
         run: |
           REF="${{ github.ref }}"
-          if [[ "$REF" == refs/tags/v* ]]; then
-            # release tag -> production, deploy the exact version
-            echo "environment=production" >> "$GITHUB_OUTPUT"
+
+          # `refs/tags/v*` is not a release filter: it matches v1.0.0-beta.1 and
+          # v1.0.0-rc1 exactly as readily as v1.0.0. The only tag this repo has
+          # ever carried is v0.1.0-alpha, so under the old rule the single
+          # existing tag was one push away from deploying to the environment
+          # that holds real funds.
+          #
+          # A release is vMAJOR.MINOR.PATCH and nothing more. Hotfixes are
+          # release tags too, so they pass; prereleases build and publish their
+          # image but stop here.
+          if [[ "$REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "environment=mainnet" >> "$GITHUB_OUTPUT"
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
-            # main -> staging
-            echo "environment=staging" >> "$GITHUB_OUTPUT"
-            echo "tag=main-latest" >> "$GITHUB_OUTPUT"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ github.ref_name }} is a prerelease; image published, mainnet deploy skipped."
+            echo "\`${{ github.ref_name }}\` is a prerelease - image published, mainnet deploy skipped." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Trigger central-infrastructure deploy
+        if: steps.resolve.outputs.deploy == 'true'
         env:
           DEPLOY_PAT: ${{ secrets.DEPLOY_PAT }}
         run: |
-          curl -sf -X POST \
+          set -e
+          # Same guards the testnet dispatch already carries: a missing token or
+          # a silent HTTP failure must not read as a successful deploy.
+          [ -n "$DEPLOY_PAT" ] || { echo "::error::DEPLOY_PAT is not set; images were pushed but nothing will deploy"; exit 1; }
+          curl -sS --fail-with-body -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $DEPLOY_PAT" \
             https://api.github.com/repos/randomcash/central-infrastructure/dispatches \
             -d '{"event_type": "deploy", "client_payload": {"service": "ethpayserver", "environment": "${{ steps.resolve.outputs.environment }}", "sha": "${{ github.sha }}", "tag": "${{ steps.resolve.outputs.tag }}"}}'
+          echo "dispatched mainnet deploy ${{ steps.resolve.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
