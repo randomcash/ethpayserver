@@ -20,11 +20,13 @@
 pub mod account_deletion;
 pub mod analytics;
 pub mod invoice_creation;
+pub mod payout_claims;
 pub mod store_creation;
 
 pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
 pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
 pub use invoice_creation::InvoiceCreationWriter;
+pub use payout_claims::PayoutClaimReader;
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
