@@ -22,6 +22,27 @@ not use either: it runs the server binary it just built and the published
 payserver-client image pinned in `ops/client-image.pin`, so the suite exercises
 the real nginx routing rather than the dev server's proxy.
 
+### Raise the rate limits, or the suite will fail for the wrong reason
+
+Start the server with every limit lifted, exactly as the CI `e2e` job does:
+
+```bash
+RATE_LIMIT_AUTH=10000 RATE_LIMIT_WRITE=10000 \
+RATE_LIMIT_READ=10000 RATE_LIMIT_WS=10000 \
+  cargo run --release --bin ethpayserver
+```
+
+The stock defaults are `auth_rpm: 5`, `write_rpm: 10`, `read_rpm: 60`. A full
+suite run makes far more than ten writes a minute, so against a stock server a
+scattering of tests fails with no obvious pattern — and the rate limiter
+returns 429 **without logging anything** (`server/src/api/rate_limit.rs`), so
+the server logs look perfectly healthy while it happens. Failures land in
+whichever tests happened to be running when the window filled, which makes them
+read like flakiness or like a regression in whatever changed most recently.
+
+Measured on this suite: stock limits produced 9 failures on one run and 20+ on
+another; the same code at CI's limits passes 76/76.
+
 ## What is not here
 
 Layout regression tests moved to
