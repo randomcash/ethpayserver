@@ -20,6 +20,7 @@
 pub mod account_deletion;
 pub mod analytics;
 pub mod invoice_creation;
+pub mod store_creation;
 
 pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
 pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
