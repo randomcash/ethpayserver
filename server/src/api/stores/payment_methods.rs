@@ -82,8 +82,15 @@ where
 {
     require_store_settings_permission(&state, &user, store_id).await?;
 
-    // Validate xpub
-    if !validate_xpub(&req.xpub) {
+    // A key is optional now: omitted means "use the one this store already
+    // resolves to", so a merchant pastes it once rather than per chain, per
+    // token and per store. When one IS given it still has to be a real
+    // extended PUBLIC key - `validate_xpub` refuses an `xprv` on the version
+    // byte, which is what keeps this non-custodial even if someone pastes the
+    // wrong line out of their wallet.
+    if let Some(ref xpub) = req.xpub
+        && !validate_xpub(xpub)
+    {
         return Err(StatusCode::BAD_REQUEST.into());
     }
 
@@ -102,7 +109,7 @@ where
         req.token_address.as_deref(),
         &req.asset_symbol,
         req.decimals,
-        &req.xpub,
+        req.xpub.as_deref(),
     )
     .await
     .map_err(repository_error)?;

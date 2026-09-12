@@ -17,9 +17,9 @@ resolver = "3"
 # `scripts/commons.sh link`, which writes an uncommitted `.cargo/config.toml`
 # patch. To move the pin, `scripts/commons.sh pin <rev>`.
 [workspace.dependencies]
-api-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "f85973acb7c3678bc212fa7dd20822c4c7ee1331" }
-scrub = { git = "https://github.com/randomcash/payserver-commons.git", rev = "f85973acb7c3678bc212fa7dd20822c4c7ee1331" }
-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "f85973acb7c3678bc212fa7dd20822c4c7ee1331" }
-auth = { git = "https://github.com/randomcash/payserver-commons.git", rev = "f85973acb7c3678bc212fa7dd20822c4c7ee1331" }
-crypto = { git = "https://github.com/randomcash/payserver-commons.git", rev = "f85973acb7c3678bc212fa7dd20822c4c7ee1331" }
-rates = { git = "https://github.com/randomcash/payserver-commons.git", rev = "f85973acb7c3678bc212fa7dd20822c4c7ee1331" }
+api-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "6964c6ae6204c6055736b6e0e40b8bf6ae405dec" }
+scrub = { git = "https://github.com/randomcash/payserver-commons.git", rev = "6964c6ae6204c6055736b6e0e40b8bf6ae405dec" }
+types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "6964c6ae6204c6055736b6e0e40b8bf6ae405dec" }
+auth = { git = "https://github.com/randomcash/payserver-commons.git", rev = "6964c6ae6204c6055736b6e0e40b8bf6ae405dec" }
+crypto = { git = "https://github.com/randomcash/payserver-commons.git", rev = "6964c6ae6204c6055736b6e0e40b8bf6ae405dec" }
+rates = { git = "https://github.com/randomcash/payserver-commons.git", rev = "6964c6ae6204c6055736b6e0e40b8bf6ae405dec" }

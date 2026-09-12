@@ -174,7 +174,31 @@ async fn derive_payment_address<A: SessionService>(
     let allocation =
         StorePaymentMethodWriter::allocate_derivation(&*state.data_service, payment_method.id)
             .await
-            .map_err(|_| {
+            .map_err(|e| {
+                // A method with no wallet to derive from is the merchant's to
+                // fix - they deleted the key, or the store lost its wallet -
+                // and it is reachable now that wallets can be deleted. It used
+                // to answer 500 "Failed to allocate payment address", which a
+                // merchant cannot tell from a server fault and cannot act on.
+                if matches!(e, ::types::RepositoryError::NotFound(_)) {
+                    tracing::warn!(
+                        payment_method_id = %payment_method.id,
+                        store_id = %payment_method.store_id,
+                        "payment method resolves to no wallet; cannot derive an address"
+                    );
+                    return invoice_error(
+                        StatusCode::CONFLICT,
+                        "no_receiving_key",
+                        "This store's payment method has no receiving key to derive an \
+                         address from. Add one on the Wallets page, or set a key on the \
+                         payment method.",
+                    );
+                }
+                tracing::error!(
+                    payment_method_id = %payment_method.id,
+                    error = %e,
+                    "failed to allocate a derivation index"
+                );
                 invoice_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
