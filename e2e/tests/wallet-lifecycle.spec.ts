@@ -64,7 +64,7 @@ test.describe('Account lifecycle (wallet)', () => {
     await page.goto('/evm/settings');
     await page.locator('.settings-tab', { hasText: /account/i }).click();
 
-    const danger = page.locator('.detail-card-danger');
+    const danger = page.locator('.ps-card-danger');
     await expect(danger, 'the Danger Zone should be on the Account tab').toBeVisible();
     await danger.locator('button', { hasText: /delete account/i }).click();
 
