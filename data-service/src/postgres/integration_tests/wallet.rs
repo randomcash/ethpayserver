@@ -1359,7 +1359,13 @@ async fn an_unpinned_method_follows_the_store_wallet() {
         .expect("other");
 
     let method = StorePaymentMethodWriter::create_payment_method(
-        &service, store, &ChainId::evm(1), None, "ETH", 18, None,
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        None,
     )
     .await
     .expect("create method");
