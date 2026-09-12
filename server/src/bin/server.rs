@@ -87,6 +87,18 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!(rp_id = %auth_config.rp_id, rp_origin = %auth_config.rp_origin, "WebAuthn configured");
+
+    // Captured here, from the resolved config, because `with_config` below moves
+    // it into AuthService and AuthService keeps it private. /health/deep reports
+    // these so the deploy check can stop scraping the log line just above - which
+    // writes `rp_id` and `=` in separate ANSI escape sequences, so a literal
+    // `rp_id=` matches nothing and the first version of that check failed against
+    // a perfectly healthy server.
+    let webauthn_health = api_types::WebAuthnHealth {
+        rp_id: auth_config.rp_id.clone(),
+        rp_origin: auth_config.rp_origin.clone(),
+    };
+
     let auth_service = Arc::new(AuthService::with_config(
         Arc::clone(&data_service),
         auth_config,
@@ -204,6 +216,7 @@ async fn main() -> Result<()> {
     );
     state.ws_broadcast = Some(ws_broadcast);
     state.captcha_provider = captcha_provider;
+    state.webauthn = Some(webauthn_health);
 
     // Create rate limiters
     let rate_limit_config = RateLimitConfig::from_env();

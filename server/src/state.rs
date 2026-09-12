@@ -76,6 +76,15 @@ pub struct AppState<D, A, E> {
 
     /// Optional CAPTCHA provider for registration endpoints.
     pub captcha_provider: Option<Arc<dyn auth::captcha::CaptchaProvider>>,
+
+    /// The WebAuthn relying party this process resolved at startup.
+    ///
+    /// Copied from the resolved `AuthConfig` *after* the explicit-or-derived
+    /// rp_id logic has run and before that config is moved into `AuthService`,
+    /// which keeps it private. Deliberately not re-read from the environment on
+    /// request: the environment is the thing being verified, and reading it back
+    /// would confirm only that a variable was set, not that it took effect.
+    pub webauthn: Option<api_types::WebAuthnHealth>,
 }
 
 // Manual Clone impl since we only need Arc::clone
@@ -88,6 +97,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             rate_provider: Arc::clone(&self.rate_provider),
             ws_broadcast: self.ws_broadcast.clone(),
             captcha_provider: self.captcha_provider.clone(),
+            webauthn: self.webauthn.clone(),
         }
     }
 }
@@ -107,6 +117,7 @@ impl<D, A, E> AppState<D, A, E> {
             rate_provider,
             ws_broadcast: None,
             captcha_provider: None,
+            webauthn: None,
         }
     }
 }

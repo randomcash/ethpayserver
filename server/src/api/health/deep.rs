@@ -62,6 +62,9 @@ where
             redis,
             rpcs,
             monitor,
+            // The relying party this process actually resolved at startup, not
+            // whatever the environment says now.
+            webauthn: state.webauthn.clone(),
         }),
     )
 }

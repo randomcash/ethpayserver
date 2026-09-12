@@ -85,9 +85,21 @@ fn deep_health_response_serialization() {
             status: "ok".to_string(),
             data_fresh: true,
         },
+        webauthn: Some(api_types::WebAuthnHealth {
+            rp_id: "testnet.random.cash".to_string(),
+            rp_origin: "https://testnet.random.cash".to_string(),
+        }),
     };
 
     let json = serde_json::to_value(&resp).unwrap();
+
+    // The deploy check reads these by jq path, so the wire names are the
+    // contract - not just the values. This is what replaces scraping the log
+    // line, where `rp_id` and `=` arrive in separate ANSI escape sequences and a
+    // literal `rp_id=` matches nothing.
+    assert_eq!(json["webauthn"]["rp_id"], "testnet.random.cash");
+    assert_eq!(json["webauthn"]["rp_origin"], "https://testnet.random.cash");
+
     assert_eq!(json["build_sha"], "abc1234");
     assert_eq!(json["version"], "0.1.0");
     assert_eq!(json["postgres"]["status"], "ok");
@@ -123,9 +135,19 @@ fn deep_health_no_monitor_configured() {
             status: "ok".to_string(),
             data_fresh: false,
         },
+        // Absent on purpose here: a payserver without WebAuthn omits it, and the
+        // response must still serialise and read correctly.
+        webauthn: None,
     };
 
     let json = serde_json::to_value(&resp).unwrap();
+
+    // Absent, not null: `skip_serializing_if` keeps the key out entirely so an
+    // older server and a payserver without WebAuthn produce the same shape.
+    assert!(
+        json.get("webauthn").is_none(),
+        "an absent relying party must not emit a null key"
+    );
     assert_eq!(json["build_sha"], "dev");
     assert_eq!(json["redis"]["error"], "not configured");
     assert!(json["rpcs"].as_object().unwrap().is_empty());
