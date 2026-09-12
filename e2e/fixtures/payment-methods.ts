@@ -86,7 +86,7 @@ export async function addPaymentMethod(page: Page, method: PaymentMethod = {}): 
   // "Add method" *toggles* `show_create_form`, so clicking it blindly closes an
   // already-open form (e.g. on a retry after a failed create) and the wait below
   // then times out reporting "form not visible". Only click when it is shut.
-  const form = page.locator('.detail-card', { hasText: 'Add Payment Method' });
+  const form = page.locator('.ps-card', { hasText: 'Add Payment Method' });
   if (!(await form.isVisible())) {
     await page.locator('.store-tab-payment-methods button', { hasText: /add method/i }).click();
   }
@@ -129,7 +129,7 @@ export async function addPaymentMethod(page: Page, method: PaymentMethod = {}): 
  *
  * Called only on the failure path, once the assertion above has already given
  * the response every chance to arrive. Without this the report is "locator
- * resolved to <div class=detail-card>" nine times over, and the actual cause is
+ * resolved to <div class=ps-card>" nine times over, and the actual cause is
  * only visible by downloading the trace.
  */
 async function addMethodFailure(form: ReturnType<Page['locator']>): Promise<string> {

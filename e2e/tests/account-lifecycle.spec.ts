@@ -54,7 +54,7 @@ test.describe('Account lifecycle (passkey)', () => {
     await page.goto('/evm/settings');
     await page.locator('.settings-tab', { hasText: /account/i }).first().click();
 
-    const danger = page.locator('.detail-card-danger');
+    const danger = page.locator('.ps-card-danger');
     await expect(danger, 'the Danger Zone should be on the Account tab').toBeVisible();
 
     await danger.locator('button', { hasText: /delete account/i }).click();
@@ -111,7 +111,7 @@ test.describe('Account lifecycle (passkey)', () => {
     // ... seed a confirmed payment here ...
 
     await page.goto('/evm/settings');
-    const danger = page.locator('.detail-card-danger');
+    const danger = page.locator('.ps-card-danger');
     await danger.locator('button', { hasText: /delete account/i }).click();
     const confirm = page.locator('.form-group', { hasText: /to confirm/i });
     await confirm.locator('input[type="text"]').fill('whatever');

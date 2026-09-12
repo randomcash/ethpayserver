@@ -556,7 +556,7 @@ test.describe('Auth & Authenticated', () => {
       const label = await tabs.nth(i).textContent({ timeout: 2_000 }).catch(() => '');
       await tabs.nth(i).click();
       await scoutPage.waitForTimeout(500);
-      const content = scoutPage.locator('.settings-tab-content, .detail-card');
+      const content = scoutPage.locator('.settings-tab-content, .ps-card');
       if (!await content.first().isVisible({ timeout: 3_000 }).catch(() => false)) {
         issue('SETTINGS', `Tab "${label}" rendered no content`);
       }
