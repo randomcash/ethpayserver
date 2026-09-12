@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{PayoutReader, PayoutWriter, RepositoryResult, sqlx_to_repo_error};
+use crate::{PayoutClaimReader, PayoutReader, PayoutWriter, RepositoryResult, sqlx_to_repo_error};
 use types::{PayoutData, PayoutStatus, StoreId};
 
 use super::PgDataService;
@@ -96,6 +96,36 @@ impl PayoutReader for PgDataService {
         .map_err(sqlx_to_repo_error)?;
 
         rows.iter().map(try_row_to_payout).collect()
+    }
+}
+
+#[async_trait]
+impl PayoutClaimReader for PgDataService {
+    async fn invoice_ids_already_claimed(
+        &self,
+        store_id: StoreId,
+        invoice_ids: &[String],
+    ) -> RepositoryResult<Vec<String>> {
+        if invoice_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // `invoice_ids` is a JSONB array, so the claimed ids are unnested and
+        // matched against the requested ones in the database. Doing it here
+        // rather than in Rust keeps the answer complete: a paged read of the
+        // store's payouts would miss a claim that fell outside the page.
+        let claimed: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT claimed.invoice_id \
+             FROM payouts p, jsonb_array_elements_text(p.invoice_ids) AS claimed(invoice_id) \
+             WHERE p.store_id = $1 AND p.status <> 'failed' AND claimed.invoice_id = ANY($2)",
+        )
+        .bind(store_id.0)
+        .bind(invoice_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(claimed)
     }
 }
 
