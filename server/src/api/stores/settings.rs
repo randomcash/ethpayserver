@@ -19,9 +19,14 @@ pub use api_types::{StoreSettingsResponse, UpdateStoreSettingsRequest};
 ///
 /// These carry an object value (`{"webhook": true}`) describing the channels
 /// for that event.
+/// Kept in step with `WebhookEventType` by
+/// `test_every_webhook_event_is_configurable`: an event missing from this list
+/// cannot be switched off, and a name here that no event uses is a switch
+/// wired to nothing.
 pub(crate) const VALID_NOTIFICATION_EVENTS: &[&str] = &[
     "payment_detected",
     "payment_confirmed",
+    "payment_reorged",
     "invoice_expired",
     "invoice_cancelled",
     "late_paid",

@@ -13,6 +13,7 @@ use evm::api::EvmDataService;
 use rates::RateProvider;
 
 use crate::api::ws::WsBroadcast;
+use crate::services::webhook::WebhookSink;
 
 /// Read-only data service trait for the application.
 ///
@@ -77,6 +78,15 @@ pub struct AppState<D, A, E> {
     /// Optional CAPTCHA provider for registration endpoints.
     pub captcha_provider: Option<Arc<dyn auth::captcha::CaptchaProvider>>,
 
+    /// Queue for webhook notifications emitted by HTTP handlers.
+    ///
+    /// The background services own their own handle to the same service; this
+    /// one exists because some events are caused by a request, not by a chain
+    /// event - `invoice_cancelled` is emitted by the cancel endpoint. None
+    /// when Redis is not configured, in which case those events are dropped
+    /// rather than queued.
+    pub webhook_sink: Option<Arc<dyn WebhookSink>>,
+
     /// The WebAuthn relying party this process resolved at startup.
     ///
     /// Copied from the resolved `AuthConfig` *after* the explicit-or-derived
@@ -97,6 +107,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             rate_provider: Arc::clone(&self.rate_provider),
             ws_broadcast: self.ws_broadcast.clone(),
             captcha_provider: self.captcha_provider.clone(),
+            webhook_sink: self.webhook_sink.clone(),
             webauthn: self.webauthn.clone(),
         }
     }
@@ -117,6 +128,7 @@ impl<D, A, E> AppState<D, A, E> {
             rate_provider,
             ws_broadcast: None,
             captcha_provider: None,
+            webhook_sink: None,
             webauthn: None,
         }
     }

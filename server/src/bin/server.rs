@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
         bridge_dyn,
         Arc::clone(&data_service),
         Some(cleanup_service),
-        Some(webhook_service),
+        Some(Arc::clone(&webhook_service) as Arc<dyn server::services::WebhookSink>),
         Some(Arc::clone(&ws_broadcast)),
         email_sender,
     );
@@ -215,6 +215,7 @@ async fn main() -> Result<()> {
         rate_provider,
     );
     state.ws_broadcast = Some(ws_broadcast);
+    state.webhook_sink = Some(webhook_service);
     state.captcha_provider = captcha_provider;
     state.webauthn = Some(webauthn_health);
 

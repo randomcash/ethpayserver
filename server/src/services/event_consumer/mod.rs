@@ -27,7 +27,7 @@ use types::{
 use super::email::EmailSender;
 use super::evm_monitor::EVMMonitor;
 use super::invoice_cleanup::{CleanupDataService, InvoiceCleanupService};
-use super::webhook::{WebhookDataService, WebhookService};
+use super::webhook::{WebhookDataService, WebhookSink};
 use crate::api::ws::WsBroadcast;
 
 /// Trait for data service requirements in EventConsumer.
@@ -70,7 +70,7 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     bridge: Arc<dyn EventBridge>,
     data_service: Arc<D>,
     cleanup_service: Option<Arc<InvoiceCleanupService<D, M, W>>>,
-    webhook_service: Option<Arc<WebhookService<W>>>,
+    webhook_service: Option<Arc<dyn WebhookSink>>,
     ws_broadcast: Option<Arc<WsBroadcast>>,
     email_sender: Arc<dyn EmailSender>,
 }
@@ -86,7 +86,7 @@ impl<
         bridge: Arc<dyn EventBridge>,
         data_service: Arc<D>,
         cleanup_service: Option<Arc<InvoiceCleanupService<D, M, W>>>,
-        webhook_service: Option<Arc<WebhookService<W>>>,
+        webhook_service: Option<Arc<dyn WebhookSink>>,
         ws_broadcast: Option<Arc<WsBroadcast>>,
         email_sender: Arc<dyn EmailSender>,
     ) -> Self {

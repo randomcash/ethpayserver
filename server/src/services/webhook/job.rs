@@ -81,22 +81,29 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::services::webhook::WebhookEventType;
+    use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
 
-    fn test_payload() -> WebhookPayload {
-        WebhookPayload {
-            event_id: Uuid::new_v4(),
-            event_type: WebhookEventType::PaymentDetected,
-            timestamp: Utc::now(),
-            invoice_id: "test-invoice".to_string(),
-            store_id: Uuid::new_v4(),
-            status: "processing".to_string(),
+    fn test_invoice(id: &str, status: InvoiceStatus) -> InvoiceData {
+        InvoiceData {
+            id: InvoiceId::from_string(id.to_string()),
+            store_id: StoreId::new(),
+            currency: "ETH".to_string(),
+            status,
             amount: "1000".to_string(),
             amount_received: "1000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            chain_id: Some("eip155:1".to_string()),
-            network: Some("ethereum".to_string()),
-            payment: None,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            metadata: None,
+            customer_email: None,
+            extra: None,
         }
+    }
+
+    fn test_payload() -> WebhookPayload {
+        WebhookPayload::invoice_event(
+            WebhookEventType::InvoiceExpired,
+            &test_invoice("test-invoice", InvoiceStatus::Expired),
+        )
     }
 
     #[test]
@@ -174,20 +181,10 @@ mod tests {
 
     #[test]
     fn test_webhook_job_serialization() {
-        let payload = WebhookPayload {
-            event_id: Uuid::new_v4(),
-            event_type: WebhookEventType::InvoiceExpired,
-            timestamp: Utc::now(),
-            invoice_id: "inv_456".to_string(),
-            store_id: Uuid::new_v4(),
-            status: "expired".to_string(),
-            amount: "500".to_string(),
-            amount_received: "0".to_string(),
-            asset_symbol: "USDC".to_string(),
-            chain_id: Some("eip155:137".to_string()),
-            network: Some("polygon".to_string()),
-            payment: None,
-        };
+        let payload = WebhookPayload::invoice_event(
+            WebhookEventType::InvoiceExpired,
+            &test_invoice("inv_456", InvoiceStatus::Expired),
+        );
 
         let job = WebhookJob::new(
             "https://example.com/hook".to_string(),

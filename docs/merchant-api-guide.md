@@ -417,15 +417,63 @@ securely -- it is regenerated on each update.
 |-------|-------------|
 | `payment_detected` | Payment seen on-chain, awaiting confirmations |
 | `payment_confirmed` | Payment confirmed (reached confirmation threshold) |
+| `payment_reorged` | Previously reported payments were retracted by a chain reorganization |
 | `invoice_expired` | Invoice expired without full payment |
 | `invoice_cancelled` | Invoice was cancelled |
 | `late_paid` | Payment received after invoice expiration |
+
+This table is the whole vocabulary: every event listed is emitted by some code
+path, and nothing outside it is ever sent. New event types may be added, so
+ignore an `event_type` you do not recognise rather than failing the delivery.
+
+#### Retractions
+
+`payment_reorged` is a **retraction**, not a restatement. A chain
+reorganization can remove a transaction you were already told about by
+`payment_detected` or `payment_confirmed`. When that happens:
+
+- `status` is the status the invoice was reverted **to** (`processing` if other
+  valid payments remain, otherwise `pending`).
+- `amount_received` is the amount that survives the reorg.
+- `retracted_payments` lists every transaction that no longer exists on the
+  canonical chain.
+
+If you credited any of those transactions, reverse the credit. There is no
+`payment` object on this event; the retracted transactions are in
+`retracted_payments`.
+
+```json
+{
+  "version": 1,
+  "event_id": "8a1f0b0c-6a2e-4c8b-9d5a-2f3e4b5c6d7e",
+  "idempotency_key": "evt_9f2c...",
+  "event_type": "payment_reorged",
+  "timestamp": "2026-04-01T12:31:00Z",
+  "invoice_id": "inv_c3d4e5f6-a7b8-9012-cdef-345678901234",
+  "store_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "pending",
+  "amount": "7142857142857142",
+  "amount_received": "0",
+  "asset_symbol": "ETH",
+  "chain_id": "eip155:1",
+  "retracted_payments": [
+    {
+      "tx_hash": "0xabc123def456...",
+      "from_address": "0x1234567890abcdef...",
+      "block_number": 19500000,
+      "confirmed": false
+    }
+  ]
+}
+```
 
 ### Webhook Payload
 
 ```json
 {
+  "version": 1,
   "event_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "idempotency_key": "evt_3b7a1c...",
   "event_type": "payment_confirmed",
   "timestamp": "2026-04-01T12:15:00Z",
   "invoice_id": "inv_c3d4e5f6-a7b8-9012-cdef-345678901234",
@@ -434,8 +482,7 @@ securely -- it is regenerated on each update.
   "amount": "7142857142857142",
   "amount_received": "7142857142857142",
   "asset_symbol": "ETH",
-  "chain_id": 1,
-  "network": "mainnet",
+  "chain_id": "eip155:1",
   "payment": {
     "tx_hash": "0xabc123def456...",
     "from_address": "0x1234567890abcdef...",
@@ -452,7 +499,18 @@ securely -- it is regenerated on each update.
 | `Content-Type` | `application/json` |
 | `X-Webhook-Signature` | `sha256=<hex>` HMAC-SHA256 of the JSON body |
 | `X-Webhook-Event` | Event type (e.g., `payment_confirmed`) |
-| `X-Webhook-Id` | Unique event ID (use for idempotency) |
+| `X-Webhook-Id` | Identifier for this delivery |
+| `X-Webhook-Idempotency-Key` | Stable key for the logical event (dedupe on this) |
+
+### Payload Versioning
+
+Every payload carries a `version`. The contract is **additive-only**: new
+fields and new event types may appear at any time without a version bump, so
+ignore what you do not recognise. Removing or renaming a field, changing its
+type, or changing the meaning of an existing value requires a version bump.
+
+Optional fields are omitted rather than sent as `null` or as a placeholder;
+absent means "does not apply to this event".
 
 ### Verifying Signatures
 
@@ -619,9 +677,22 @@ HTTP/1.1 400 Bad Request
 
 ### Idempotency
 
-Use the `X-Webhook-Id` header for webhook idempotency. Store processed event
-IDs and skip duplicates. Invoice IDs are stable and can be used as idempotency
-keys for status polling.
+**Webhook delivery is at-least-once.** A delivery is retried on any non-2xx
+response or transport error (1m, 5m, 30m, 2h, 12h, 24h -- about 38.6 hours in
+total, then the job is dropped), and a handler that re-runs after a restart can
+emit the same logical event again. You will sometimes receive an event twice.
+There is no ordering guarantee between events for different invoices.
+
+Dedupe on `idempotency_key` (also sent as the `X-Webhook-Idempotency-Key`
+header, so you can drop a repeat before parsing the body). It is derived from
+what happened -- the event type, the invoice, and the specific transition --
+so the same logical event always carries the same key. Record the keys you
+have processed and skip repeats.
+
+Do **not** dedupe on `event_id`: it identifies one queued delivery, and a
+re-emission of the same logical event carries a fresh one.
+
+Invoice IDs are stable and can be used as idempotency keys for status polling.
 
 ---
 

@@ -12,4 +12,4 @@ pub use event_consumer::{EventConsumer, EventConsumerError};
 pub use evm_monitor::{EVMMonitor, EVMMonitorError, RedisEVMMonitor};
 pub use invoice_cleanup::{CleanupConfig, CleanupError, CleanupStats, InvoiceCleanupService};
 pub use watch_retry::{WatchRetryConfig, WatchRetryService};
-pub use webhook::{WebhookConfig, WebhookService};
+pub use webhook::{WebhookConfig, WebhookService, WebhookSink};

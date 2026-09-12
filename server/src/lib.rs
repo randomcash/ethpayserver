@@ -44,7 +44,7 @@ pub use config::Config;
 pub use services::{
     CleanupConfig, CleanupError, CleanupStats, EVMMonitor, EVMMonitorError, EventConsumer,
     EventConsumerError, InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig,
-    WatchRetryService, WebhookConfig, WebhookService,
+    WatchRetryService, WebhookConfig, WebhookService, WebhookSink,
 };
 pub use state::{AppDataService, AppDataServiceReader, AppState};
 

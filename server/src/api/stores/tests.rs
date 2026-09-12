@@ -733,12 +733,52 @@ fn test_valid_notification_switches_list() {
 
 #[test]
 fn test_valid_notification_events_list() {
-    assert_eq!(VALID_NOTIFICATION_EVENTS.len(), 5);
+    assert_eq!(VALID_NOTIFICATION_EVENTS.len(), 6);
     assert!(VALID_NOTIFICATION_EVENTS.contains(&"payment_detected"));
     assert!(VALID_NOTIFICATION_EVENTS.contains(&"payment_confirmed"));
+    assert!(VALID_NOTIFICATION_EVENTS.contains(&"payment_reorged"));
     assert!(VALID_NOTIFICATION_EVENTS.contains(&"invoice_expired"));
     assert!(VALID_NOTIFICATION_EVENTS.contains(&"invoice_cancelled"));
     assert!(VALID_NOTIFICATION_EVENTS.contains(&"late_paid"));
+}
+
+/// The preference list and the event vocabulary are one thing. An event absent
+/// from the list cannot be switched off; a name in the list that no event uses
+/// is a switch wired to nothing. Both have happened.
+#[test]
+fn test_every_webhook_event_is_configurable() {
+    use crate::services::webhook::WebhookEventType;
+
+    let events = [
+        WebhookEventType::PaymentDetected,
+        WebhookEventType::PaymentConfirmed,
+        WebhookEventType::PaymentReorged,
+        WebhookEventType::InvoiceExpired,
+        WebhookEventType::InvoiceCancelled,
+        WebhookEventType::LatePaid,
+    ];
+
+    for event in events {
+        assert!(
+            VALID_NOTIFICATION_EVENTS.contains(&event.as_str()),
+            "{event} cannot be switched off in notification_prefs"
+        );
+    }
+
+    // The array above is exhaustive over the enum: if a variant is added
+    // without being listed here, this fails and the match below stops
+    // compiling.
+    assert_eq!(VALID_NOTIFICATION_EVENTS.len(), events.len());
+    for event in events {
+        match event {
+            WebhookEventType::PaymentDetected
+            | WebhookEventType::PaymentConfirmed
+            | WebhookEventType::PaymentReorged
+            | WebhookEventType::InvoiceExpired
+            | WebhookEventType::InvoiceCancelled
+            | WebhookEventType::LatePaid => {}
+        }
+    }
 }
 
 #[test]

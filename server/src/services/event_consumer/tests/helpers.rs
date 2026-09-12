@@ -9,6 +9,7 @@ use types::{ChainId, InvoiceData, InvoiceId, InvoiceStatus, InvoiceWriter, Store
 
 use crate::services::email;
 use crate::services::evm_monitor::{EVMMonitor, EVMMonitorError};
+use crate::services::webhook::{WebhookError, WebhookJob, WebhookSink};
 
 /// Native asset symbol for a chain (test helper).
 ///
@@ -151,6 +152,51 @@ pub fn create_test_consumer(
         ds,
         None,
         None,
+        None,
+        Arc::new(email::NoopEmailSender),
+    )
+}
+
+/// A webhook queue that records instead of delivering.
+///
+/// The production sink needs Redis, so before this existed no test could see
+/// whether a handler emitted an event at all - which is how `payment_reorged`
+/// came to be missing without anything failing.
+#[derive(Default)]
+pub struct RecordingWebhookSink {
+    jobs: std::sync::Mutex<Vec<WebhookJob>>,
+}
+
+impl RecordingWebhookSink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every job queued so far, in order.
+    pub fn jobs(&self) -> Vec<WebhookJob> {
+        self.jobs.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl WebhookSink for RecordingWebhookSink {
+    async fn queue(&self, job: WebhookJob) -> Result<(), WebhookError> {
+        self.jobs.lock().unwrap().push(job);
+        Ok(())
+    }
+}
+
+/// Create a consumer whose webhook emissions are recorded rather than queued.
+pub fn create_test_consumer_with_webhook(
+    ds: Arc<InMemoryDataService>,
+    bridge: Arc<evm::monitor::bridge::MemoryBridge>,
+    sink: Arc<RecordingWebhookSink>,
+) -> super::super::EventConsumer<InMemoryDataService, MockEVMMonitor> {
+    super::super::EventConsumer::new(
+        bridge,
+        ds,
+        None,
+        Some(sink as Arc<dyn WebhookSink>),
         None,
         Arc::new(email::NoopEmailSender),
     )
