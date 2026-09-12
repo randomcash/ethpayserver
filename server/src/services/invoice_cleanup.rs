@@ -15,15 +15,16 @@ use std::sync::Arc;
 use data_service::StoreWebhookReader;
 use evm::Address;
 use futures::StreamExt;
-use types::{InvoiceReader, InvoiceWriter, WatchedAddressReader, WatchedAddressWriter};
-use uuid::Uuid;
+use types::{
+    InvoiceReader, InvoiceWriter, StoreSettingsReader, WatchedAddressReader, WatchedAddressWriter,
+};
 
 use crate::api::ws::{StatusUpdate, WsBroadcast};
 use crate::metrics;
 
 use super::evm_monitor::EVMMonitor;
 use super::webhook::{
-    WebhookDataService, WebhookEventType, WebhookJob, WebhookPayload, WebhookService,
+    WebhookDataService, WebhookEventType, WebhookPayload, WebhookService, queue_for_store,
 };
 
 /// Trait alias for data service requirements.
@@ -35,6 +36,7 @@ pub trait CleanupDataService:
     + WatchedAddressReader
     + WatchedAddressWriter
     + StoreWebhookReader
+    + StoreSettingsReader
     + Send
     + Sync
 {
@@ -47,6 +49,7 @@ impl<T> CleanupDataService for T where
         + WatchedAddressReader
         + WatchedAddressWriter
         + StoreWebhookReader
+        + StoreSettingsReader
         + Send
         + Sync
 {
@@ -202,7 +205,6 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
     /// Queue a webhook notification for an expired invoice.
     ///
     /// This is a non-blocking operation - errors are logged but don't stop expiration processing.
-    #[allow(clippy::cognitive_complexity)] // webhook assembly with store lookup + optional fields
     async fn queue_expiration_webhook(&self, invoice_id: &types::InvoiceId) {
         let Some(webhook_service) = &self.webhook_service else {
             return;
@@ -221,61 +223,15 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
             }
         };
 
-        // Look up webhook config for the store
-        let webhook_config =
-            match StoreWebhookReader::get_enabled_webhook(&*self.data_service, invoice.store_id.0)
-                .await
-            {
-                Ok(Some(config)) => config,
-                Ok(None) => {
-                    tracing::trace!(
-                        store_id = %invoice.store_id.0,
-                        "No webhook configured for store"
-                    );
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        store_id = %invoice.store_id.0,
-                        error = %e,
-                        "Failed to get webhook config"
-                    );
-                    return;
-                }
-            };
-
-        // Create webhook payload
-        // With network-agnostic invoices, we use the invoice currency for asset_symbol
-        // and set chain_id to 0 (no specific chain for expiration events)
-        let payload = WebhookPayload {
-            event_id: Uuid::new_v4(),
-            event_type: WebhookEventType::InvoiceExpired,
-            timestamp: chrono::Utc::now(),
-            invoice_id: invoice.id.as_str().to_string(),
-            store_id: invoice.store_id.0,
-            status: invoice.status.to_string(),
-            amount: invoice.amount.clone(),
-            amount_received: invoice.amount_received.clone(),
-            asset_symbol: invoice.currency.clone(),
-            chain_id: None, // Invoice-level event: no chain is involved
-            network: None,  // Network-agnostic
-            payment: None,
-        };
-
-        // Create job and queue it
-        let job = WebhookJob::new(
-            webhook_config.webhook_url,
-            webhook_config.webhook_secret,
+        let store_id = invoice.store_id.0;
+        let payload = WebhookPayload::invoice_event(WebhookEventType::InvoiceExpired, &invoice);
+        queue_for_store(
+            webhook_service.as_ref(),
+            &*self.data_service,
+            store_id,
             payload,
-        );
-
-        if let Err(e) = webhook_service.queue_webhook(job).await {
-            tracing::warn!(
-                invoice_id = %invoice.id.as_str(),
-                error = %e,
-                "Failed to queue expiration webhook"
-            );
-        }
+        )
+        .await;
     }
 
     /// Cleanup addresses for completed invoices.

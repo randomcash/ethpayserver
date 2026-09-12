@@ -9,6 +9,7 @@ use auth::SessionService;
 use data_service::{PaymentOptionReader, PaymentOptionWriter};
 
 use crate::api::extractors::AdminAuth;
+use crate::services::webhook::{WebhookEventType, WebhookPayload, queue_for_store};
 use crate::state::PgAppState;
 
 use super::{InvoiceResponse, customer_email_of};
@@ -64,6 +65,20 @@ where
 
     let mut cancelled = invoice;
     cancelled.status = InvoiceStatus::Cancelled;
+
+    // Notify the store's webhook subscriber. `invoice_cancelled` was a
+    // declared event with no emitter until this call: the vocabulary promised
+    // it and nothing ever sent it.
+    if let Some(sink) = &state.webhook_sink {
+        let payload = WebhookPayload::invoice_event(WebhookEventType::InvoiceCancelled, &cancelled);
+        queue_for_store(
+            sink.as_ref(),
+            &*state.data_service,
+            cancelled.store_id.0,
+            payload,
+        )
+        .await;
+    }
 
     let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
         .await

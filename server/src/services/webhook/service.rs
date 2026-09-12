@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use data_service::PaymentEventWriter;
 
@@ -13,6 +14,26 @@ use super::{WebhookConfig, WebhookError, WebhookJob};
 pub trait WebhookDataService: PaymentEventWriter + Send + Sync {}
 
 impl<T> WebhookDataService for T where T: PaymentEventWriter + Send + Sync {}
+
+/// The queue an emitter hands a job to.
+///
+/// [`WebhookService`] is the only production implementation. Emitters hold
+/// this rather than the concrete service so that what they emit is
+/// observable: without a seam here, the only way to see whether a handler
+/// emits an event is to stand up Redis, which is why no test asserted on
+/// webhook emission at all.
+#[async_trait]
+pub trait WebhookSink: Send + Sync {
+    /// Enqueue a job for delivery.
+    async fn queue(&self, job: WebhookJob) -> Result<(), WebhookError>;
+}
+
+#[async_trait]
+impl<D: WebhookDataService + 'static> WebhookSink for WebhookService<D> {
+    async fn queue(&self, job: WebhookJob) -> Result<(), WebhookError> {
+        self.queue_webhook(job).await
+    }
+}
 
 /// Webhook delivery service.
 ///
@@ -289,6 +310,10 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             .header("X-Webhook-Signature", &signature)
             .header("X-Webhook-Event", job.payload.event_type.to_string())
             .header("X-Webhook-Id", job.payload.event_id.to_string())
+            .header(
+                "X-Webhook-Idempotency-Key",
+                job.payload.idempotency_key.as_str(),
+            )
             .body(payload_json)
             .send()
             .await
