@@ -167,6 +167,20 @@ export async function login(page: Page): Promise<void> {
   await page.waitForURL(/\/(evm)?$/, { timeout: 15_000 });
 }
 
+/**
+ * Log out through the UI, the way a merchant does.
+ *
+ * Logout lives in the user menu, which is closed by default - clicking the item
+ * without opening the trigger first finds nothing and times out looking like a
+ * broken logout rather than a closed menu.
+ */
+export async function logout(page: Page): Promise<void> {
+  await page.locator('.user-menu-trigger').click();
+  await expect(page.locator('.user-menu-dropdown.open')).toBeVisible();
+  await page.locator('.user-menu-logout').click();
+  await page.waitForURL(/\/login/, { timeout: 15_000 });
+}
+
 export interface AuthFixtures {
   withAuthenticator: Page;
   registeredPage: Page;

@@ -98,7 +98,15 @@ export async function addPaymentMethod(page: Page, method: PaymentMethod = {}): 
     await form.getByPlaceholder(/leave empty for native/i).fill(tokenAddress);
   }
   await form.locator('input[type="number"]').fill(decimals);
-  await form.getByPlaceholder('xpub...').fill(xpub);
+
+  // Anchored to the label, not the placeholder: the receiving key became
+  // optional and its placeholder turned into prose ("Leave empty to use this
+  // store's key"), which silently broke the old getByPlaceholder('xpub...').
+  // The label keeps saying "Receiving key" whatever the hint text does.
+  await form
+    .locator('.form-group', { hasText: /receiving key/i })
+    .locator('input[type="text"]')
+    .fill(xpub);
 
   await form.locator('.form-actions .btn-primary').click();
 
