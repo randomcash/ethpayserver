@@ -32,7 +32,7 @@ export async function configureWebhook(page: Page, url: string): Promise<void> {
   const form = webhookForm(page);
   await expect(form).toBeVisible();
   await form.getByPlaceholder('https://example.com/webhooks/payments').fill(url);
-  await form.locator('.btn-primary', { hasText: 'Save' }).click();
+  await form.locator('.ps-btn-primary', { hasText: 'Save' }).click();
 
   await expect(form).not.toBeVisible();
 }

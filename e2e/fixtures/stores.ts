@@ -18,7 +18,7 @@ export async function createStore(page: Page, name: string): Promise<void> {
 
   const form = page.locator('.detail-card', { hasText: 'New Store' });
   await form.getByPlaceholder('My Store').fill(name);
-  await form.locator('.form-actions .btn-primary').click();
+  await form.locator('.form-actions .ps-btn-primary').click();
 
   await expect(page.locator('.store-card-name', { hasText: name })).toBeVisible();
 }

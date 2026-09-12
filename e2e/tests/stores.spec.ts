@@ -56,7 +56,7 @@ test.describe('Stores', () => {
         );
         return response;
       }),
-      general.locator('.form-actions .btn-primary').click(),
+      general.locator('.form-actions .ps-btn-primary').click(),
     ]);
 
     // Reload and verify persistence
@@ -80,7 +80,7 @@ test.describe('Stores', () => {
     // store undeleted and waited out its timeout on a navigation that could
     // never happen.
     page.once('dialog', (dialog) => dialog.accept());
-    await page.locator('.store-tab-general .btn-danger').click();
+    await page.locator('.store-tab-general .ps-btn-danger').click();
 
     // Should redirect back to list without the deleted store
     await page.waitForURL(/\/evm\/stores$/);
