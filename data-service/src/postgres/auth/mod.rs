@@ -9,7 +9,7 @@ mod device;
 mod passkey;
 mod server_settings;
 mod session;
-mod store;
+pub(crate) mod store;
 mod user;
 mod wallet;
 

@@ -7,8 +7,9 @@ use axum::{
 };
 use uuid::Uuid;
 
-use auth::repository::{StoreRepository, StoreRoleRepository, UserStoreRepository};
+use auth::repository::{StoreRepository, UserStoreRepository};
 use auth::{SessionService, Store, StoreId};
+use data_service::store_creation::{StoreCreationError, StoreCreationWriter};
 
 use super::super::extractors::AuthenticatedUser;
 use crate::metrics;
@@ -89,27 +90,38 @@ where
         store = store.with_website(&website);
     }
 
-    // Create the store
+    // One unit of work: the store row and the membership that owns it, or
+    // neither. These were three sequential writes, each committing on its own,
+    // so a failure after the first left a store belonging to nobody - invisible
+    // in a UI that lists stores by membership, and undeletable through it.
     state
         .data_service
-        .create_store(&store)
+        .create_store_owned_by(&store, owner_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Get the Owner role and add owner as member
-    let owner_role = state
-        .data_service
-        .get_default_role_by_name("Owner")
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let user_store = auth::UserStore::new(owner_id, store.id, owner_role.id);
-    state
-        .data_service
-        .add_user_to_store(&user_store)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            // Log the cause. Every one of the five failure paths used to become a
+            // bare 500 with `|_|`, and nothing was written anywhere, so the only
+            // trace was `tower_http ... classification=Status code: 500`.
+            // Diagnosing the real cause took a database inspection.
+            match &e {
+                StoreCreationError::MissingOwnerRole => {
+                    // An operator fault with a specific fix, not a transient
+                    // database error, so it is worth saying so distinctly.
+                    tracing::error!(
+                        owner_id = %owner_id.0,
+                        "cannot create store: {e}"
+                    );
+                }
+                StoreCreationError::Repository(inner) => {
+                    tracing::error!(
+                        owner_id = %owner_id.0,
+                        error = %inner,
+                        "cannot create store"
+                    );
+                }
+            }
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     metrics::record_store_created();
     Ok((StatusCode::CREATED, Json(store_response(store))))

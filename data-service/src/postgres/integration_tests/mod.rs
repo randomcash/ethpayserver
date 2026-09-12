@@ -12,6 +12,7 @@
 //! - `wallet`: Account wallet derivation and store resolution
 //! - `wallet_migration`: the account-wallets migration run over old-shape data
 //! - `account_deletion`: what blocks deleting an account, against the real FKs
+//! - `store_creation`: a store and the membership that owns it, as one unit
 
 mod account_deletion;
 mod aggregation;
@@ -19,6 +20,7 @@ mod analytics;
 mod invoice;
 mod invoice_creation;
 mod payment;
+mod store_creation;
 mod wallet;
 mod wallet_migration;
 mod watched_address;
