@@ -168,9 +168,30 @@ impl StorePaymentMethodWriter for PgDataService {
         token_address: Option<&str>,
         asset_symbol: &str,
         decimals: u8,
-        xpub: &str,
+        xpub: Option<&str>,
     ) -> RepositoryResult<StorePaymentMethod> {
-        let wallet_id = self.wallet_for_store_xpub(store_id, xpub).await?;
+        // A supplied key pins the method to it, creating the account wallet if
+        // it is new. No key leaves `wallet_id` NULL, so the method follows the
+        // store's resolution afterwards rather than freezing today's answer -
+        // which is the point: rotate the store's wallet and every unpinned
+        // method moves with it.
+        let wallet_id = match xpub {
+            Some(xpub) => Some(self.wallet_for_store_xpub(store_id, xpub).await?),
+            None => {
+                // Refuse now rather than at the first invoice. An unpinned
+                // method on a store that resolves to nothing looks fine in the
+                // list and fails only when a customer is waiting to pay.
+                if !self.store_resolves_to_a_wallet(store_id).await? {
+                    return Err(RepositoryError::Conflict(
+                        "This store has no receiving key to derive addresses from. \
+                         Add one on the Wallets page, or supply an xpub with this \
+                         payment method."
+                            .to_string(),
+                    ));
+                }
+                None
+            }
+        };
 
         // Two conflict targets, because the table needs both. The composite
         // unique index cannot see native assets - token_address is NULL and

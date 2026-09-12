@@ -28,6 +28,28 @@ pub(super) const STORE_WALLET_RESOLUTION: &str = "COALESCE(
         (SELECT p.id FROM wallets p WHERE p.user_id = s.owner_id AND p.is_primary)
     )";
 
+impl PgDataService {
+    /// Whether this store resolves to a wallet without a method-level pin.
+    ///
+    /// The same walk every read uses - the store's own wallet, else the account
+    /// primary. Asked before creating an unpinned payment method, so a merchant
+    /// finds out at setup rather than when a customer is waiting to pay.
+    pub(super) async fn store_resolves_to_a_wallet(
+        &self,
+        store_id: Uuid,
+    ) -> RepositoryResult<bool> {
+        let resolved: Option<Uuid> = sqlx::query_scalar(&format!(
+            "SELECT {STORE_WALLET_RESOLUTION} FROM stores s WHERE s.id = $1"
+        ))
+        .bind(store_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?
+        .flatten();
+        Ok(resolved.is_some())
+    }
+}
+
 fn row_to_wallet(row: &sqlx::postgres::PgRow) -> Wallet {
     Wallet {
         id: row.get("id"),

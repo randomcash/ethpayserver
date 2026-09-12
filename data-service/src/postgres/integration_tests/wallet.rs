@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::super::PgDataService;
 use super::super::tests::create_test_service;
-use crate::{WalletReader, WalletWriter};
+use crate::{RepositoryError, WalletReader, WalletWriter};
 
 /// A key no other test is using.
 ///
@@ -78,7 +78,7 @@ async fn two_methods_on_one_xpub_never_get_the_same_index() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .expect("create eth method");
@@ -89,7 +89,7 @@ async fn two_methods_on_one_xpub_never_get_the_same_index() {
         Some("0x1111111111111111111111111111111111111111"),
         "USDC",
         6,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .expect("create usdc method");
@@ -387,7 +387,7 @@ async fn a_wallet_in_use_cannot_be_deleted() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -430,7 +430,7 @@ async fn rotation_repoints_without_resetting_the_counter() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -492,7 +492,7 @@ async fn payment_options_record_the_wallet_and_index_they_used() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -597,7 +597,7 @@ async fn an_xpub_another_account_holds_is_refused() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .expect_err("configuring a method with another account's key must be refused");
@@ -685,7 +685,7 @@ async fn setting_a_store_override_changes_where_derivation_happens() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -758,7 +758,7 @@ async fn a_method_with_no_resolvable_wallet_is_visible_but_cannot_allocate() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -819,7 +819,7 @@ async fn allocation_returns_the_key_of_the_wallet_whose_counter_moved() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -877,7 +877,7 @@ async fn rotation_moves_a_store_override_off_the_retired_key() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -920,7 +920,7 @@ async fn a_wallet_is_deletable_once_only_history_refers_to_it() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -1010,7 +1010,7 @@ async fn re_adding_a_native_asset_updates_rather_than_duplicating() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -1021,7 +1021,7 @@ async fn re_adding_a_native_asset_updates_rather_than_duplicating() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -1072,7 +1072,7 @@ async fn rotating_a_store_records_no_rotation_from_a_key_to_itself() {
             token,
             symbol,
             18,
-            &xpub_a,
+            Some(&xpub_a),
         )
         .await
         .unwrap();
@@ -1144,7 +1144,7 @@ async fn rotating_one_store_leaves_its_siblings_where_they_were() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -1155,7 +1155,7 @@ async fn rotating_one_store_leaves_its_siblings_where_they_were() {
         None,
         "ETH",
         18,
-        &xpub_a,
+        Some(&xpub_a),
     )
     .await
     .unwrap();
@@ -1218,7 +1218,7 @@ async fn a_refused_rotation_leaves_the_store_entirely_unmoved() {
             None,
             symbol,
             18,
-            &mine,
+            Some(&mine),
         )
         .await
         .unwrap();
@@ -1253,5 +1253,128 @@ async fn a_refused_rotation_leaves_the_store_entirely_unmoved() {
             .unwrap()
             .is_empty(),
         "nothing moved, so nothing is recorded as having moved"
+    );
+}
+
+// =========================================================================
+// Paste the key once
+//
+// A payment method used to require its own xpub, so the same key was retyped
+// per chain, per token and per store. These cover the case where it is omitted
+// and the method follows the store's resolution instead.
+// =========================================================================
+
+#[tokio::test]
+#[ignore]
+async fn a_method_with_no_key_uses_the_account_primary() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let xpub = unique_xpub("primary");
+    let user = seed_user(&service).await;
+    let store = seed_store_for(&service, user).await;
+
+    // The key arrives once, as a wallet on the account.
+    let wallet = WalletWriter::create_wallet(&service, user, &xpub, Some("main"))
+        .await
+        .expect("create wallet");
+
+    let method = StorePaymentMethodWriter::create_payment_method(
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        None,
+    )
+    .await
+    .expect("create method without a key");
+
+    assert_eq!(
+        method.wallet_id,
+        Some(wallet.id),
+        "an unpinned method must read through to the account primary"
+    );
+
+    // And it can actually derive, which is the thing that matters.
+    let allocation = StorePaymentMethodWriter::allocate_derivation(&service, method.id)
+        .await
+        .expect("allocate from the inherited key");
+    assert_eq!(allocation.wallet_id, wallet.id);
+    assert_eq!(allocation.xpub, xpub);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_method_with_no_key_is_refused_when_nothing_resolves() {
+    // The failure this moves earlier. Without the check the method is created,
+    // looks correct in the list, and fails at the first invoice - with a
+    // customer waiting.
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let user = seed_user(&service).await;
+    let store = seed_store_for(&service, user).await;
+
+    let result = StorePaymentMethodWriter::create_payment_method(
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        None,
+    )
+    .await;
+
+    match result {
+        Err(RepositoryError::Conflict(msg)) => {
+            assert!(
+                msg.contains("receiving key"),
+                "the refusal must say what is missing, got: {msg}"
+            );
+        }
+        Err(other) => panic!("expected a Conflict the merchant can act on, got {other:?}"),
+        Ok(_) => panic!("a method with no key and nothing to resolve to must be refused"),
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_unpinned_method_follows_the_store_wallet() {
+    // Unpinned means it tracks resolution rather than freezing today's answer:
+    // point the store at another key and the method moves with it.
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let user = seed_user(&service).await;
+    let store = seed_store_for(&service, user).await;
+
+    let primary = WalletWriter::create_wallet(&service, user, &unique_xpub("p"), None)
+        .await
+        .expect("primary");
+    let other = WalletWriter::create_wallet(&service, user, &unique_xpub("o"), None)
+        .await
+        .expect("other");
+
+    let method = StorePaymentMethodWriter::create_payment_method(
+        &service, store, &ChainId::evm(1), None, "ETH", 18, None,
+    )
+    .await
+    .expect("create method");
+    assert_eq!(method.wallet_id, Some(primary.id));
+
+    WalletWriter::set_store_wallet(&service, store, other.id)
+        .await
+        .expect("point the store at the other key");
+
+    let reread = StorePaymentMethodReader::get_enabled_payment_methods(&service, store)
+        .await
+        .expect("reread");
+    assert_eq!(
+        reread[0].wallet_id,
+        Some(other.id),
+        "an unpinned method must follow the store's wallet, not the one it saw at creation"
     );
 }
