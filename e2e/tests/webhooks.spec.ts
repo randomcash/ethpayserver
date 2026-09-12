@@ -38,7 +38,7 @@ test.describe('Webhooks', () => {
     await page.locator('button', { hasText: 'Edit endpoint' }).click();
     const form = webhookForm(page);
     await form.locator('input[type="checkbox"]').uncheck();
-    await form.locator('.btn-primary', { hasText: 'Save' }).click();
+    await form.locator('.ps-btn-primary', { hasText: 'Save' }).click();
 
     await expect(status).toHaveText('Disabled');
 

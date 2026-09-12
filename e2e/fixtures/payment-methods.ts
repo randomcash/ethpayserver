@@ -108,7 +108,7 @@ export async function addPaymentMethod(page: Page, method: PaymentMethod = {}): 
     .locator('input[type="text"]')
     .fill(xpub);
 
-  await form.locator('.form-actions .btn-primary').click();
+  await form.locator('.form-actions .ps-btn-primary').click();
 
   // Read the error only AFTER the wait has run out, never as an argument to the
   // assertion. `expect(form, await ...)` evaluates the message first, which

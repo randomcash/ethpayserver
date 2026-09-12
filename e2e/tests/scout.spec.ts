@@ -473,7 +473,7 @@ test.describe('Auth & Authenticated', () => {
     // enabled, so clicking it anyway just burned the full 30s test budget and
     // was the last failure in the suite.
     await scoutPage.locator('#ci-amount').fill('');
-    const submit = scoutPage.locator('.modal .btn-primary');
+    const submit = scoutPage.locator('.modal .ps-btn-primary');
     if (!await submit.isDisabled({ timeout: 2_000 }).catch(() => false)) {
       // Not disabled, so the guard has to be on submit instead: click and
       // confirm the modal stays open.
