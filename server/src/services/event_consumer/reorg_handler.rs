@@ -159,6 +159,14 @@ impl<
 
 /// Whether `hash`, as the monitor observed it on chain, names the same
 /// transaction as `stored`, as persisted in `payments.tx_hash`.
+///
+/// `payments.tx_hash` is written with this same `format!("{:#x}", …)` in
+/// `payment_handler.rs`'s `handle_payment_detected`. If that write path ever
+/// changes representation without a matching change here, every comparison
+/// silently fails and this whole guard degrades to "nothing survived" with no
+/// error — see `test_reorg_does_not_retract_a_survived_transaction`, which
+/// pins the write path's literal output rather than re-deriving it with this
+/// same call.
 fn tx_hash_eq(hash: &evm::B256, stored: &str) -> bool {
     format!("{:#x}", hash) == stored
 }

@@ -495,3 +495,70 @@ async fn test_reorg_reports_a_relocated_transaction_as_survived() {
     monitor.stop().await.unwrap();
     let _ = monitor_handle.await;
 }
+
+/// A reorg window wider than `max_blocks_per_scan` must still find a
+/// relocated transaction anywhere in `[fork_block, new_head]`, not just in
+/// the tail nearest the new head. Clamping the re-scan window to that knob —
+/// the same one ordinary block processing uses to bound history scans —
+/// silently drops survivors below the clamp and retracts them anyway: the
+/// opposite error, on a wider reorg than the single-block case above
+/// exercises.
+#[tokio::test]
+async fn test_reorg_wider_than_scan_cap_still_finds_a_relocated_transaction() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let invoice_id = uuid::Uuid::new_v4();
+    let payment_amount = U256::from(50_000_000_000_000_000u64);
+    let tx_hash = B256::random();
+
+    let mut config = test_monitor_config(3);
+    config.max_blocks_per_scan = 2;
+
+    let monitor = Arc::new(ChainMonitor::new(test_chain_config(), source, config));
+
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id,
+            expected_amount: Some(payment_amount),
+            token_contract: None,
+            created_at: Utc::now(),
+            last_known_balance: U256::ZERO,
+        })
+        .await;
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    test_source.push_block(make_block(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The transaction relocates to block 105 — far below the last
+    // `max_blocks_per_scan` (2) blocks of the eventual [100, 130] window.
+    test_source
+        .add_native_transfer(
+            105,
+            make_native_transfer(sender, payment_address, payment_amount, tx_hash),
+        )
+        .await;
+
+    // Block 100 is reorged out, and the chain jumps straight to block 130 —
+    // a fork window far wider than `max_blocks_per_scan`.
+    test_source.set_block_hash(100, B256::random());
+    test_source.push_block(make_block(130));
+
+    let reorg = wait_for_reorg(&mut event_rx).await;
+    assert_eq!(reorg.fork_block, 100);
+    assert!(
+        reorg.survived_tx_hashes.contains(&tx_hash),
+        "a transaction relocated below the scan cap's tail must still be found, not skipped"
+    );
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+}

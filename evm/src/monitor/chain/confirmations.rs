@@ -159,15 +159,17 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             .collect();
         drop(watched);
 
-        // Bounded so a very deep reorg cannot turn this into an unbounded
-        // number of RPC calls; reuses the same knob block processing uses to
-        // limit how much history it scans.
-        let scan_from = from.max(to.saturating_sub(self.config.max_blocks_per_scan));
-
+        // Unlike ordinary block processing, this cannot be clamped to
+        // `max_blocks_per_scan`: a relocated transaction can land anywhere in
+        // `[from, to]`, so truncating the window silently drops survivors
+        // from the truncated part, and an unreported survivor gets retracted
+        // by the caller — the opposite error the ticket warns about. A reorg
+        // wide enough to make this expensive is already a reorg wide enough
+        // that a wrong retraction matters more than the extra RPC calls.
         let mut survived = Vec::new();
 
         if !native_addresses.is_empty() {
-            for block_number in scan_from..=to {
+            for block_number in from..=to {
                 let transfers = self
                     .source
                     .find_native_transfers_to(block_number, &native_addresses)
@@ -177,8 +179,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         }
 
         if !erc20_addresses.is_empty() {
-            let filter =
-                LogFilter::erc20_transfers_to(erc20_addresses).with_block_range(scan_from, to);
+            let filter = LogFilter::erc20_transfers_to(erc20_addresses).with_block_range(from, to);
             let logs = self.source.get_logs(&filter).await?;
             survived.extend(logs.into_iter().filter_map(|l| l.transaction_hash));
         }

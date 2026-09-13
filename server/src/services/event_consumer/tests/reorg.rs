@@ -435,8 +435,13 @@ async fn test_reorg_does_not_retract_a_survived_transaction() {
         .unwrap();
 
     let survivor_hash = B256::repeat_byte(0x42);
-    let tx_hash = format!("{:#x}", survivor_hash);
-    PaymentWriter::upsert(&*ds, &reorgable_payment(&invoice_id, &tx_hash, 100))
+    // Hardcoded, not `format!("{:#x}", survivor_hash)`: that would just check
+    // `tx_hash_eq` against itself. This is the literal string
+    // `payment_handler.rs`'s `format!("{:#x}", event.tx_hash)` actually
+    // writes to `payments.tx_hash`, so the test fails if the two ever
+    // silently disagree on representation.
+    let tx_hash = "0x4242424242424242424242424242424242424242424242424242424242424242";
+    PaymentWriter::upsert(&*ds, &reorgable_payment(&invoice_id, tx_hash, 100))
         .await
         .unwrap();
 
