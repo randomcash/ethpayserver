@@ -52,17 +52,16 @@
 mod config;
 mod dispatch;
 mod error;
-mod idempotency;
 mod job;
 mod service;
 mod signing;
-mod types;
 
+pub use api_types::webhook::{
+    WEBHOOK_PAYLOAD_VERSION, WebhookEventType, WebhookPayload, WebhookPaymentInfo, idempotency_key,
+};
 pub use config::WebhookConfig;
 pub use dispatch::queue_for_store;
 pub use error::WebhookError;
-pub use idempotency::idempotency_key;
 pub use job::WebhookJob;
 pub use service::{WebhookDataService, WebhookService, WebhookSink};
 pub use signing::sign_webhook_payload;
-pub use types::{WEBHOOK_PAYLOAD_VERSION, WebhookEventType, WebhookPayload, WebhookPaymentInfo};
