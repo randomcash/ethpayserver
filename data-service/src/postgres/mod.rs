@@ -10,6 +10,7 @@ mod auth;
 mod conversions;
 mod invoice;
 mod invoice_creation;
+mod merchant_directory;
 mod payment;
 mod payment_option;
 mod payout;

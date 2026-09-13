@@ -1,0 +1,160 @@
+//! Capability 2 (RCS-300): a filter that can refuse invoice creation, and
+//! nothing else.
+//!
+//! This is how a lapsed subscription is enforced - the merchant keeps
+//! everything except creating new invoices. It must never grow into a hook
+//! for payment detection, crediting or confirmation: refusing a lapsed
+//! merchant's *new* invoice is a billing decision, but withholding credit for
+//! a payment a customer already sent takes that customer's money over a
+//! dispute they are not party to.
+//!
+//! That is enforced structurally, not by convention: [`InvoiceCreationFilter`]
+//! has exactly one method, and the only thing it is ever asked about is
+//! [`InvoiceCreationFilterRequest`], which carries a store id and nothing
+//! else - there is no field to name a payment, a confirmation or a credit.
+//! Widening this to a generic `filter(hook, payload)` call is exactly the
+//! shape that would let a future change smuggle in a payment-touching hook
+//! without anyone deciding to; see the test below.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use types::StoreId;
+
+/// The one thing a filter is ever asked about: may an invoice be created on
+/// `store_id`?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvoiceCreationFilterRequest {
+    pub store_id: StoreId,
+}
+
+/// A filter's answer. `Deny`'s `reason` is shown to the merchant verbatim, so
+/// it must name the actual cause (e.g. "Your subscription lapsed on ...") -
+/// this is the plugin's one chance to tell them why, not a code they have to
+/// look up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterVerdict {
+    Allow,
+    Deny { reason: String },
+}
+
+/// Something that may refuse invoice creation.
+///
+/// Note what is absent: no `filter_payment`, no `filter_confirmation`, no way
+/// to be asked about anything but a not-yet-created invoice. See the module
+/// doc for why that is load-bearing.
+#[async_trait]
+pub trait InvoiceCreationFilter: Send + Sync {
+    async fn filter_invoice_creation(&self, request: InvoiceCreationFilterRequest)
+    -> FilterVerdict;
+}
+
+/// Runs every registered filter, refusing on the first denial.
+///
+/// First-denial-wins rather than collecting every reason: the merchant needs
+/// one actionable sentence, not a list assembled from plugins that don't know
+/// about each other.
+pub async fn run_invoice_creation_filters(
+    filters: &[Arc<dyn InvoiceCreationFilter>],
+    request: InvoiceCreationFilterRequest,
+) -> FilterVerdict {
+    for filter in filters {
+        if let FilterVerdict::Deny { reason } = filter.filter_invoice_creation(request).await {
+            return FilterVerdict::Deny { reason };
+        }
+    }
+    FilterVerdict::Allow
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    struct AlwaysAllow;
+    #[async_trait]
+    impl InvoiceCreationFilter for AlwaysAllow {
+        async fn filter_invoice_creation(
+            &self,
+            _request: InvoiceCreationFilterRequest,
+        ) -> FilterVerdict {
+            FilterVerdict::Allow
+        }
+    }
+
+    struct LapsedSubscription;
+    #[async_trait]
+    impl InvoiceCreationFilter for LapsedSubscription {
+        async fn filter_invoice_creation(
+            &self,
+            _request: InvoiceCreationFilterRequest,
+        ) -> FilterVerdict {
+            FilterVerdict::Deny {
+                reason: "Your subscription lapsed; renew it to create new invoices.".to_string(),
+            }
+        }
+    }
+
+    /// Ticket test 2: a filter refusing invoice creation actually blocks it,
+    /// with a reason naming the subscription.
+    #[tokio::test]
+    async fn a_denying_filter_blocks_and_names_the_reason() {
+        let filters: Vec<Arc<dyn InvoiceCreationFilter>> = vec![Arc::new(LapsedSubscription)];
+        let verdict = run_invoice_creation_filters(
+            &filters,
+            InvoiceCreationFilterRequest {
+                store_id: StoreId::new(),
+            },
+        )
+        .await;
+
+        match verdict {
+            FilterVerdict::Deny { reason } => assert!(reason.contains("subscription")),
+            FilterVerdict::Allow => panic!("a denying filter must block invoice creation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_filters_allows() {
+        let verdict = run_invoice_creation_filters(
+            &[],
+            InvoiceCreationFilterRequest {
+                store_id: StoreId::new(),
+            },
+        )
+        .await;
+        assert_eq!(verdict, FilterVerdict::Allow);
+    }
+
+    #[tokio::test]
+    async fn one_allow_and_one_deny_still_blocks() {
+        let filters: Vec<Arc<dyn InvoiceCreationFilter>> =
+            vec![Arc::new(AlwaysAllow), Arc::new(LapsedSubscription)];
+        let verdict = run_invoice_creation_filters(
+            &filters,
+            InvoiceCreationFilterRequest {
+                store_id: StoreId::new(),
+            },
+        )
+        .await;
+        assert!(matches!(verdict, FilterVerdict::Deny { .. }));
+    }
+
+    /// Ticket test 3: a filter cannot reach payment detection or crediting.
+    ///
+    /// Not a call-count assertion - "we never called `PaymentWriter`" would
+    /// still pass the day a payment-touching hook is added elsewhere and
+    /// nothing here calls it either. Instead this pins the *shape* a filter
+    /// is ever handed: `InvoiceCreationFilterRequest` has exactly the one
+    /// field below. Destructuring it without `..` means this stops
+    /// compiling, forcing a reviewer to look at this test, the moment a
+    /// second field - a payment id, a confirmation - is added to what a
+    /// filter can be asked about.
+    #[test]
+    fn the_request_a_filter_receives_names_only_a_store() {
+        let request = InvoiceCreationFilterRequest {
+            store_id: StoreId::new(),
+        };
+        let InvoiceCreationFilterRequest { store_id: _ } = request;
+    }
+}
