@@ -22,6 +22,7 @@ evm = { path = "../evm", features = ["api", "redis", "sentry-scrub"] }
 rates = { workspace = true }
 api-types = { workspace = true, features = ["openapi"] }
 types = { workspace = true, features = ["openapi"] }
+payserver-plugin-api = { workspace = true }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
