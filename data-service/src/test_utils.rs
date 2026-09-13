@@ -435,6 +435,32 @@ impl crate::payment_tx_index::PaymentTxIndexWriter for InMemoryDataService {
         } else {
             index.insert(key, payment.id);
             payments.insert(payment.id, payment.clone());
+impl crate::reorg::ReorgCandidateReader for InMemoryDataService {
+    async fn reorg_candidates(
+        &self,
+        chain_id: &types::ChainId,
+        fork_block: u64,
+    ) -> RepositoryResult<Vec<PaymentData>> {
+        let payments = self.payments.read().unwrap();
+        Ok(payments
+            .values()
+            .filter(|p| {
+                &p.chain_id == chain_id
+                    && p.block_number.is_some_and(|b| b >= fork_block)
+                    && !p.reorged
+            })
+            .cloned()
+            .collect())
+    }
+}
+
+#[async_trait]
+impl crate::reorg::ReorgWriter for InMemoryDataService {
+    async fn mark_payment_reorged(&self, id: Uuid) -> RepositoryResult<()> {
+        let mut payments = self.payments.write().unwrap();
+        if let Some(payment) = payments.get_mut(&id) {
+            payment.reorged = true;
+            payment.confirmed_at = None;
         }
         Ok(())
     }

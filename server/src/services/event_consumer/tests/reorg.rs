@@ -75,6 +75,7 @@ async fn test_handle_reorg_detected() {
         new_hash: B256::repeat_byte(0x01),
         depth: 2,
         affected_invoices: vec![uuid::Uuid::parse_str(invoice_id.as_str()).unwrap()],
+        survived_tx_hashes: vec![],
         detected_at: Utc::now(),
     };
 
@@ -162,6 +163,7 @@ async fn test_handle_reorg_with_remaining_valid_payments() {
         new_hash: B256::repeat_byte(0x01),
         depth: 2,
         affected_invoices: vec![uuid::Uuid::parse_str(invoice_id.as_str()).unwrap()],
+        survived_tx_hashes: vec![],
         detected_at: Utc::now(),
     };
 
@@ -339,6 +341,132 @@ async fn test_replayed_reorg_carries_the_same_idempotency_key() {
     );
 }
 
+/// A payment that has already confirmed — and so would have been dropped
+/// from the monitor's in-memory pending-payment map — must still be
+/// retracted by a reorg at or below its block. `affected_invoices` is left
+/// empty on purpose, to prove the candidate set comes from the database and
+/// not from that field.
+#[tokio::test]
+async fn test_reorg_retracts_an_already_confirmed_payment() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    let store_id = StoreId::new();
+    InvoiceWriter::upsert(&*ds, &fully_paid_invoice(&invoice_id, store_id))
+        .await
+        .unwrap();
+
+    let mut payment = reorgable_payment(&invoice_id, "0xconfirmed", 100);
+    payment.confirmed_at = Some(Utc::now());
+    PaymentWriter::upsert(&*ds, &payment).await.unwrap();
+
+    consumer
+        .handle_reorg_detected(ReorgDetected {
+            affected_invoices: vec![],
+            ..reorg_at(&invoice_id, 99)
+        })
+        .await
+        .unwrap();
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert!(
+        payments[0].reorged,
+        "a confirmed payment must still be retracted"
+    );
+
+    let invoice = InvoiceReader::get(&*ds, &invoice_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(invoice.status, InvoiceStatus::Pending);
+}
+
+/// A reorg arriving with an empty `affected_invoices` — standing in for one
+/// that arrives after a monitor restart, when the in-memory pending-payment
+/// map has nothing in it — must still find and retract the affected
+/// payments, because the candidate set is read from the database.
+#[tokio::test]
+async fn test_reorg_after_restart_still_finds_affected_payments() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    let store_id = StoreId::new();
+    InvoiceWriter::upsert(&*ds, &fully_paid_invoice(&invoice_id, store_id))
+        .await
+        .unwrap();
+    PaymentWriter::upsert(&*ds, &reorgable_payment(&invoice_id, "0xunconfirmed", 100))
+        .await
+        .unwrap();
+
+    consumer
+        .handle_reorg_detected(ReorgDetected {
+            affected_invoices: vec![],
+            ..reorg_at(&invoice_id, 99)
+        })
+        .await
+        .unwrap();
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert!(payments[0].reorged);
+}
+
+/// A transaction that survives the reorg in a different block must not be
+/// retracted — the opposite error, which un-pays an invoice that is still
+/// genuinely paid. This is the case a naive "retract everything at or above
+/// the fork block" fix gets wrong.
+#[tokio::test]
+async fn test_reorg_does_not_retract_a_survived_transaction() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    let store_id = StoreId::new();
+    InvoiceWriter::upsert(&*ds, &fully_paid_invoice(&invoice_id, store_id))
+        .await
+        .unwrap();
+
+    let survivor_hash = B256::repeat_byte(0x42);
+    let tx_hash = format!("{:#x}", survivor_hash);
+    PaymentWriter::upsert(&*ds, &reorgable_payment(&invoice_id, &tx_hash, 100))
+        .await
+        .unwrap();
+
+    consumer
+        .handle_reorg_detected(ReorgDetected {
+            survived_tx_hashes: vec![survivor_hash],
+            ..reorg_at(&invoice_id, 99)
+        })
+        .await
+        .unwrap();
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert!(
+        !payments[0].reorged,
+        "a transaction that survived elsewhere must not be retracted"
+    );
+
+    let invoice = InvoiceReader::get(&*ds, &invoice_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        invoice.status,
+        InvoiceStatus::Processing,
+        "an invoice with no retracted payments must not have its status touched"
+    );
+}
+
 /// A reorg on this invoice at `fork_block`, on chain 1.
 fn reorg_at(invoice_id: &InvoiceId, fork_block: u64) -> ReorgDetected {
     ReorgDetected {
@@ -348,6 +476,7 @@ fn reorg_at(invoice_id: &InvoiceId, fork_block: u64) -> ReorgDetected {
         new_hash: B256::repeat_byte(0x01),
         depth: 2,
         affected_invoices: vec![Uuid::parse_str(invoice_id.as_str()).unwrap()],
+        survived_tx_hashes: vec![],
         detected_at: Utc::now(),
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use evm::monitor::{
     ChainMonitor, ChainMonitorConfig, MockBlockSource, MonitorEvent, WatchedAddress, make_block,
-    make_erc20_transfer_log, make_native_transfer,
+    make_block_with_parent, make_erc20_transfer_log, make_native_transfer,
 };
 use evm::{Address, B256, U256};
 
@@ -358,6 +358,139 @@ async fn test_no_watched_addresses_no_events() {
     if let Ok(Ok(MonitorEvent::PaymentDetected(_))) = result {
         panic!("should not detect payment with no watches")
     }
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+}
+
+// ============================================================================
+// Reorg detection and re-validation (RCS-295)
+// ============================================================================
+
+/// Wait for the next `ReorgDetected` event, skipping anything else.
+async fn wait_for_reorg(
+    event_rx: &mut tokio::sync::broadcast::Receiver<MonitorEvent>,
+) -> evm::monitor::events::ReorgDetected {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), event_rx.recv()).await {
+            Ok(Ok(MonitorEvent::ReorgDetected(r))) => return r,
+            Ok(Ok(_)) => continue,
+            _ => continue,
+        }
+    }
+    panic!("timed out waiting for ReorgDetected");
+}
+
+/// A fork arriving more than one block ahead of the last processed block used
+/// to go unnoticed entirely: `process_block` only ever compared `parent_hash`
+/// when the new block was the immediate successor. Here block 103 arrives
+/// right after block 100, skipping 101 and 102, so that direct comparison
+/// never runs — detection must fall back to asking the chain whether block
+/// 100 is still canonical.
+#[tokio::test]
+async fn test_reorg_detected_across_a_block_gap() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    test_source.push_block(make_block(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Block 100 was reorged out from under us, but the next notification
+    // skips straight to block 103.
+    test_source.set_block_hash(100, B256::random());
+    test_source.push_block(make_block(103));
+
+    let reorg = wait_for_reorg(&mut event_rx).await;
+    assert_eq!(reorg.fork_block, 100);
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+}
+
+/// A transaction that survives a reorg by landing in a different block must
+/// be reported as survived, not treated as gone. Retracting it anyway is the
+/// opposite error: it un-pays an invoice that a customer genuinely settled.
+/// This is the case a naive "everything at or above the fork block is gone"
+/// fix gets wrong.
+#[tokio::test]
+async fn test_reorg_reports_a_relocated_transaction_as_survived() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let invoice_id = uuid::Uuid::new_v4();
+    let payment_amount = U256::from(50_000_000_000_000_000u64);
+    let tx_hash = B256::random();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id,
+            expected_amount: Some(payment_amount),
+            token_contract: None,
+            created_at: Utc::now(),
+            last_known_balance: U256::ZERO,
+        })
+        .await;
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    // The payment is first detected at block 100.
+    test_source
+        .set_balance(payment_address, payment_amount)
+        .await;
+    test_source
+        .add_native_transfer(
+            100,
+            make_native_transfer(sender, payment_address, payment_amount, tx_hash),
+        )
+        .await;
+    test_source.push_block(make_block(100));
+
+    let detected = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("timeout waiting for PaymentDetected")
+        .expect("channel error");
+    assert!(matches!(detected, MonitorEvent::PaymentDetected(_)));
+
+    // A reorg replaces block 100, but the very same transaction lands again
+    // at block 101 on the new canonical chain rather than disappearing.
+    test_source
+        .add_native_transfer(
+            101,
+            make_native_transfer(sender, payment_address, payment_amount, tx_hash),
+        )
+        .await;
+    test_source.push_block(make_block_with_parent(101, B256::random(), B256::random()));
+
+    let reorg = wait_for_reorg(&mut event_rx).await;
+    assert_eq!(reorg.fork_block, 100);
+    assert!(
+        reorg.survived_tx_hashes.contains(&tx_hash),
+        "a transaction relocated to a different block must be reported as survived, not gone"
+    );
 
     monitor.stop().await.unwrap();
     let _ = monitor_handle.await;

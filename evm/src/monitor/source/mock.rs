@@ -13,6 +13,7 @@ use alloy::rpc::types::Block;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock as SyncRwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::StreamExt;
@@ -25,6 +26,10 @@ struct Inner {
     balances: RwLock<HashMap<Address, U256>>,
     native_transfers: RwLock<HashMap<u64, Vec<NativeTransfer>>>,
     logs: RwLock<HashMap<u64, Vec<alloy::rpc::types::Log>>>,
+    /// Hash of every block pushed so far, keyed by number. Backs
+    /// `get_block_hash`, which reorg detection uses to check chain
+    /// continuity across a gap.
+    block_hashes: SyncRwLock<HashMap<u64, B256>>,
     block_tx: broadcast::Sender<EvmResult<BlockNotification>>,
 }
 
@@ -58,6 +63,7 @@ impl MockBlockSource {
                 balances: RwLock::new(HashMap::new()),
                 native_transfers: RwLock::new(HashMap::new()),
                 logs: RwLock::new(HashMap::new()),
+                block_hashes: SyncRwLock::new(HashMap::new()),
                 block_tx,
             }),
         }
@@ -68,6 +74,11 @@ impl MockBlockSource {
         self.inner
             .current_block
             .store(block.number, Ordering::SeqCst);
+        self.inner
+            .block_hashes
+            .write()
+            .unwrap()
+            .insert(block.number, block.hash);
         let _ = self.inner.block_tx.send(Ok(block));
     }
 
@@ -101,6 +112,20 @@ impl MockBlockSource {
     /// Set the current block number without pushing a notification.
     pub fn set_block_number(&self, number: u64) {
         self.inner.current_block.store(number, Ordering::SeqCst);
+    }
+
+    /// Directly set the canonical hash the mock reports for a given height,
+    /// without pushing a block notification.
+    ///
+    /// Lets a test simulate a reorg that replaced a block the monitor has
+    /// already processed: `push_block` alone cannot express "block N now has
+    /// a different hash" without also moving the current block forward.
+    pub fn set_block_hash(&self, number: u64, hash: B256) {
+        self.inner
+            .block_hashes
+            .write()
+            .unwrap()
+            .insert(number, hash);
     }
 }
 
@@ -164,6 +189,16 @@ impl BlockSource for MockBlockSource {
 
     async fn get_block(&self, _number: u64) -> EvmResult<Option<Block>> {
         Ok(None)
+    }
+
+    async fn get_block_hash(&self, number: u64) -> EvmResult<Option<B256>> {
+        Ok(self
+            .inner
+            .block_hashes
+            .read()
+            .unwrap()
+            .get(&number)
+            .copied())
     }
 
     async fn find_native_transfers_to(

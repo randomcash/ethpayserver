@@ -241,7 +241,19 @@ pub struct ReorgDetected {
     /// Depth of the reorg (number of blocks replaced).
     pub depth: u64,
     /// Invoice IDs that may be affected.
+    ///
+    /// Best-effort, drawn from payments the monitor still has in memory: it
+    /// is empty right after a restart and never includes a payment that has
+    /// already confirmed. Not the source of truth for which payments the
+    /// reorg touches — a consumer needing that should query its own durable
+    /// store for this chain and fork block instead of trusting this list.
     pub affected_invoices: Vec<uuid::Uuid>,
+    /// Transaction hashes the monitor re-validated against the chain and
+    /// found still present between `fork_block` and the new head — merely
+    /// relocated to a different block, not dropped. A consumer must not
+    /// retract one of these: doing so would un-pay an invoice that is still
+    /// genuinely paid.
+    pub survived_tx_hashes: Vec<B256>,
     /// When detected.
     pub detected_at: DateTime<Utc>,
 }
@@ -294,6 +306,7 @@ mod tests {
             new_hash: B256::ZERO,
             depth: 2,
             affected_invoices: vec![],
+            survived_tx_hashes: vec![],
             detected_at: Utc::now(),
         };
 

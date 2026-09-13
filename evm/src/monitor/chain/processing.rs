@@ -20,16 +20,45 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         if let Some(last_hash) = *self.last_block_hash.read().await
             && let Some(last_num) = *self.last_block.read().await
         {
-            // If this block's parent doesn't match our last block, potential reorg
-            if block.number == last_num + 1 && block.parent_hash != last_hash {
+            // The common case: this block is the immediate successor of the
+            // last one we processed, so its parent hash must match exactly.
+            //
+            // Any other arrival — a gap (blocks skipped, e.g. catching up
+            // after a stall) or a block at or behind a height we already
+            // processed — means `parent_hash` cannot be compared directly
+            // against `last_hash`. That used to mean no check ran at all, so
+            // a fork arriving more than one block ahead went unnoticed. Ask
+            // the chain instead whether the block we last processed is still
+            // canonical.
+            let fork_block = if block.number == last_num + 1 {
+                (block.parent_hash != last_hash).then_some(last_num)
+            } else {
+                match self.source.get_block_hash(last_num).await {
+                    Ok(Some(hash)) if hash != last_hash => Some(last_num.min(block.number)),
+                    Ok(_) => None,
+                    Err(e) => {
+                        warn!(
+                            chain_id,
+                            block = block.number,
+                            last_num,
+                            error = %e,
+                            "failed to verify chain continuity across a block gap"
+                        );
+                        None
+                    }
+                }
+            };
+
+            if let Some(fork_block) = fork_block {
                 warn!(
                     chain_id,
                     block = block.number,
+                    fork_block,
                     expected_parent = %last_hash,
                     actual_parent = %block.parent_hash,
                     "potential reorg detected"
                 );
-                self.handle_reorg(last_num, last_hash, block).await?;
+                self.handle_reorg(fork_block, last_hash, block).await?;
             }
         }
 

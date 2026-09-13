@@ -24,6 +24,7 @@ pub mod invoice_creation;
 pub mod merchant_directory;
 pub mod payment_tx_index;
 pub mod payout_claims;
+pub mod reorg;
 pub mod store_creation;
 pub mod webhook_delivery;
 
@@ -38,6 +39,7 @@ pub use webhook_delivery::{
     UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,
     WebhookDeliveryWriter,
 };
+pub use reorg::{ReorgCandidateReader, ReorgWriter};
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
