@@ -1,4 +1,4 @@
-//! Error-telemetry scrubbing for the self-hosted errex (Sentry-protocol) backend.
+//! Error-telemetry scrubbing for a Sentry-protocol error telemetry backend.
 //!
 //! random.cash is a crypto payment processor, so error payloads must **never**
 //! carry secrets or customer data: wallet/private keys, mnemonics, API keys,
@@ -426,7 +426,7 @@ mod tests {
             "GET https://eth-mainnet.g.alchemy.com/v2/9f8e7d6c5b4a3210zz failed",
             "wss://polygon-mainnet.infura.io:443/ws/v3/0123456789abcdefzz closed",
             "https://api.coingecko.com/api/v3/simple/price?ids=ethereum",
-            "https://errex.example.internal/api/random.cash/envelope/",
+            "https://telemetry.example.com/api/random.cash/envelope/",
             "no store for merchant@example.com or a@b.co.uk or bad@b.c",
             "Authorization: Bearer rc_live_opaque123",
             "authorization=eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig; token: abc, secret = \"s3cr3t\"",
