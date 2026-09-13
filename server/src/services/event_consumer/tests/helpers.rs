@@ -140,6 +140,18 @@ impl email::EmailSender for MockEmailSender {
             .push((to.to_string(), data.invoice_id.clone()));
         Ok(())
     }
+
+    async fn send_email_change_verification(
+        &self,
+        _to: &str,
+        _data: &email::EmailChangeVerificationData,
+    ) -> Result<(), email::EmailError> {
+        Ok(())
+    }
+
+    fn is_configured(&self) -> bool {
+        true
+    }
 }
 
 /// Create a consumer with in-memory data service and no-op email.

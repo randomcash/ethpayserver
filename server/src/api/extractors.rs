@@ -37,6 +37,72 @@ pub struct ApiKeyDeprecationInfo {
 /// - `Authorization: Bearer ak_...` → API key auth
 pub struct AuthenticatedUser(pub UserInfo);
 
+/// How long ago a session must have been created to count as a fresh proof of
+/// a passkey or wallet assertion. Matches the window `cleanup_expired_challenges`
+/// (auth crate, wallet/passkey challenge tables) treats a login challenge as
+/// live for, so "recent enough to prove you just authenticated" means the same
+/// thing everywhere in this codebase.
+const REAUTH_FRESHNESS: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Extractor for endpoints that must not trust a merely-valid session -
+/// changing the account's recovery email being the case this exists for.
+///
+/// A session is a bearer token good for its full lifetime (up to 24h idle-
+/// checked, longer absolute). That is fine for reading data, and wrong for an
+/// action where a session hijacked hours after login must not be able to
+/// swap the account's recovery address out from under its owner. This
+/// codebase has no separate WebAuthn step-up ceremony (see `payserver-commons`
+/// auth crate - there is no "prove you hold this passkey without logging in"
+/// primitive), so this reuses the one proof already on hand: a session's
+/// `created_at` records the moment its login assertion - passkey or wallet -
+/// was verified. Requiring that moment to be within `REAUTH_FRESHNESS` is
+/// exactly "you just completed a passkey or wallet assertion". The client
+/// re-runs the ordinary login ceremony and retries with the session it
+/// returns; nothing about the caller's *existing* session changes.
+///
+/// API keys never satisfy this: a key is not a login assertion, so it is
+/// rejected outright rather than checked for freshness it cannot have.
+pub struct FreshlyAuthenticatedUser(pub UserInfo);
+
+impl<A> FromRequestParts<PgAppState<A>> for FreshlyAuthenticatedUser
+where
+    A: SessionService + 'static,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &PgAppState<A>,
+    ) -> Result<Self, Self::Rejection> {
+        let token = extract_bearer_token(parts)?;
+
+        if token.starts_with("ak_") {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "This action requires a fresh sign-in, not an API key",
+            ));
+        }
+
+        let uuid = uuid::Uuid::parse_str(&token)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid session ID format"))?;
+
+        let (user_info, session) = state
+            .auth_service
+            .validate_session(SessionId(uuid))
+            .await
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
+
+        if Utc::now() - session.created_at > REAUTH_FRESHNESS {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "This action requires a fresh sign-in. Please log in again and retry.",
+            ));
+        }
+
+        Ok(FreshlyAuthenticatedUser(user_info))
+    }
+}
+
 /// Extractor that validates server admin authentication.
 ///
 /// Same as AuthenticatedUser but requires ServerAdmin role.

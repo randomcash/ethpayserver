@@ -14,6 +14,7 @@
 //! - `account_deletion`: what blocks deleting an account, against the real FKs
 //! - `store_creation`: a store and the membership that owns it, as one unit
 //! - `payout_claims`: which invoices a store's payouts already hold
+//! - `email_change`: pending email changes leave the recovery salt untouched
 //! - `webhook_delivery`: retries of one job collapse to one row, and a
 //!   store's deliveries stay scoped to it
 //! - `merchant_directory`: the plugin host's server-wide account/store list
@@ -21,6 +22,7 @@
 mod account_deletion;
 mod aggregation;
 mod analytics;
+mod email_change;
 mod invoice;
 mod invoice_creation;
 mod merchant_directory;

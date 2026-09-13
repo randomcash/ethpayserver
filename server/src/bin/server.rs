@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
         Some(cleanup_service),
         Some(Arc::clone(&webhook_service) as Arc<dyn server::services::WebhookSink>),
         Some(Arc::clone(&ws_broadcast)),
-        email_sender,
+        Arc::clone(&email_sender),
     );
     tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
@@ -228,6 +228,7 @@ async fn main() -> Result<()> {
         auth_service,
         Some(evm_monitor),
         rate_provider,
+        email_sender,
     );
     state.ws_broadcast = Some(ws_broadcast);
     state.webhook_sink = Some(webhook_service);

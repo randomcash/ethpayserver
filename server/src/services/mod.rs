@@ -10,7 +10,7 @@ pub mod watch_retry;
 pub mod webhook;
 
 pub use chain_health_metrics::{ChainHealthMetricsConfig, ChainHealthMetricsService};
-pub use email::{EmailSender, create_email_sender};
+pub use email::{EmailChangeVerificationData, EmailSender, create_email_sender};
 pub use event_consumer::{EventConsumer, EventConsumerError};
 pub use evm_monitor::{EVMMonitor, EVMMonitorError, RedisEVMMonitor};
 pub use invoice_cleanup::{CleanupConfig, CleanupError, CleanupStats, InvoiceCleanupService};
