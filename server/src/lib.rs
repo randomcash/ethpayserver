@@ -43,8 +43,8 @@ pub mod state;
 pub use config::Config;
 pub use services::{
     CleanupConfig, CleanupError, CleanupStats, EVMMonitor, EVMMonitorError, EventConsumer,
-    EventConsumerError, InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig,
-    WatchRetryService, WebhookConfig, WebhookService, WebhookSink,
+    EventConsumerError, InvoiceCleanupService, PluginLoadError, PluginRegistry, RedisEVMMonitor,
+    WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService, WebhookSink,
 };
 pub use state::{AppDataService, AppDataServiceReader, AppState};
 
