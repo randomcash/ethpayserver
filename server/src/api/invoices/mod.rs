@@ -25,6 +25,8 @@ pub use types::*;
 
 // Re-export pub(crate) items from sub-modules for tests.
 #[cfg(test)]
+pub(crate) use crud::store_has_no_wallet;
+#[cfg(test)]
 pub(crate) use csv_export::{csv_escape_field, csv_row};
 #[cfg(test)]
 pub(crate) use lookup::is_valid_tx_hash;

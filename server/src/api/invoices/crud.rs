@@ -108,6 +108,26 @@ where
         ));
     }
 
+    // Every method already carries the answer to its own pin -> store override
+    // -> account primary walk (`StorePaymentMethod::wallet_id`, resolved by
+    // `get_enabled_payment_methods`), so this is a read of what was already
+    // fetched, not a new query. An invoice whose every method resolves to no
+    // wallet quotes no address, or one derived from nothing - it can never be
+    // paid, so refuse it here rather than let each method fail derivation one
+    // at a time after rates have already been fetched.
+    if store_has_no_wallet(&payment_methods) {
+        tracing::warn!(
+            "Store {} has enabled payment methods but none resolve to a wallet",
+            req.store_id
+        );
+        return Err(invoice_error(
+            StatusCode::BAD_REQUEST,
+            "no_wallet",
+            "This store has no wallet to receive payments. Add a wallet on the Wallets \
+             page before creating an invoice.",
+        ));
+    }
+
     // Pre-validate: Fetch rates for cross-currency invoices to avoid creating orphan invoices
     // For same-asset invoices (e.g., ETH invoice paid with ETH), no rate needed
     // Stores (payment_method_index, crypto_amount, rate_string, rate_timestamp)
@@ -393,4 +413,14 @@ where
     };
 
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// Whether every enabled payment method on this store resolves to no wallet.
+///
+/// A store with none of its methods resolving cannot pay any invoice it is
+/// asked to create - see the gate in `create_invoice`. A store where even one
+/// method resolves is left alone: that invoice can be paid on that method, and
+/// gating here is not this ticket's job.
+pub(crate) fn store_has_no_wallet(payment_methods: &[data_service::StorePaymentMethod]) -> bool {
+    payment_methods.iter().all(|pm| pm.wallet_id.is_none())
 }
