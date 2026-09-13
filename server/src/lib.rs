@@ -42,9 +42,29 @@ pub mod state;
 
 pub use config::Config;
 pub use services::{
-    ChainHealthMetricsConfig, ChainHealthMetricsService, CleanupConfig, CleanupError, CleanupStats,
-    EVMMonitor, EVMMonitorError, EventConsumer, EventConsumerError, InvoiceCleanupService,
-    PluginLoadError, PluginRegistry, RedisEVMMonitor, WatchRetryConfig, WatchRetryService,
+    ChainHealthMetricsConfig,
+    ChainHealthMetricsService,
+    CleanupConfig,
+    CleanupError,
+    CleanupStats,
+    EVMMonitor,
+    EVMMonitorError,
+    EventConsumer,
+    EventConsumerError,
+    FilterOutcome,
+    InvoiceCleanupService,
+    PluginCallError,
+    PluginEngine,
+    PluginHost,
+    PluginHostError,
+    PluginInstance,
+    PluginLoadError,
+    PluginRegistry,
+    PluginStatusSnapshot,
+    PluginWasmError,
+    RedisEVMMonitor,
+    WatchRetryConfig,
+    WatchRetryService,
     WebhookConfig, WebhookService, WebhookSink,
 };
 pub use state::{AppDataService, AppDataServiceReader, AppState};
