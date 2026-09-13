@@ -14,6 +14,7 @@ use ::types::{
 use auth::SessionService;
 
 use super::{ListInvoicesQuery, ListPaymentsQuery, StoreScope, verify_store_access_for_query};
+use crate::api::ApiErr;
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
@@ -64,10 +65,17 @@ pub(crate) fn build_invoice_filter_params(
     status: Option<&str>,
     currency: Option<&str>,
     search: Option<&str>,
-) -> Result<InvoiceQueryParams, StatusCode> {
+) -> Result<InvoiceQueryParams, ApiErr> {
     let mut params = scope.apply_invoice(InvoiceQueryParams::new());
     if let Some(s) = status {
-        let parsed: InvoiceStatus = s.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+        // The reason has to distinguish this from every other 400 the caller
+        // might see for `/invoices` or `/payments` - the client used to treat
+        // any 400 as "no store selected" (see `verify_store_access_for_query`'s
+        // history), and a bare status here would put an invalid filter right
+        // back into that same bucket.
+        let parsed: InvoiceStatus = s
+            .parse()
+            .map_err(|_| (StatusCode::BAD_REQUEST, "invalid status filter".to_string()))?;
         params = params.with_status(parsed);
     }
     if let Some(c) = currency {
@@ -87,13 +95,15 @@ pub(crate) fn build_payment_filter_params(
     scope: &StoreScope,
     status: Option<&str>,
     search: Option<&str>,
-) -> Result<PaymentQueryParams, StatusCode> {
+) -> Result<PaymentQueryParams, ApiErr> {
     let mut params = scope.apply_payment(PaymentQueryParams::new());
     if let Some(s) = status {
         match s {
             "confirmed" => params = params.with_confirmed(true),
             "pending" => params = params.with_confirmed(false),
-            _ => return Err(StatusCode::BAD_REQUEST),
+            _ => {
+                return Err((StatusCode::BAD_REQUEST, "invalid status filter".to_string()).into());
+            }
         }
     }
     if let Some(q) = search {
@@ -111,7 +121,7 @@ pub async fn export_invoices_csv<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListInvoicesQuery>,
-) -> Result<Response, StatusCode>
+) -> Result<Response, ApiErr>
 where
     A: SessionService + 'static,
 {
@@ -139,7 +149,7 @@ where
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .header("Content-Type", "application/json")
             .body(Body::from(body.to_string()))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into());
     }
 
     // "all" covers both the admin's whole-server export and a merchant's
@@ -234,7 +244,7 @@ where
             format!("attachment; filename=\"{}\"", filename),
         )
         .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into())
 }
 
 /// Export payments as a streaming CSV file.
@@ -246,7 +256,7 @@ pub async fn export_payments_csv<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListPaymentsQuery>,
-) -> Result<Response, StatusCode>
+) -> Result<Response, ApiErr>
 where
     A: SessionService + 'static,
 {
@@ -269,7 +279,7 @@ where
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .header("Content-Type", "application/json")
             .body(Body::from(body.to_string()))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into());
     }
 
     // "all" covers both the admin's whole-server export and a merchant's
@@ -358,5 +368,5 @@ where
             format!("attachment; filename=\"{}\"", filename),
         )
         .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into())
 }

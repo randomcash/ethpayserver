@@ -14,6 +14,7 @@ use super::{
     build_payment_filter_params, get_invoice_with_permission, resolve_store_names,
     verify_store_access_for_query,
 };
+use crate::api::ApiErr;
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
@@ -66,7 +67,7 @@ where
     params(ListPaymentsQuery),
     responses(
         (status = 200, description = "List of payments", body = PaymentListResponse),
-        (status = 400, description = "store_id required"),
+        (status = 400, description = "invalid status filter"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Not a member of the store"),
     )
@@ -75,7 +76,7 @@ pub async fn list_payments<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListPaymentsQuery>,
-) -> Result<Json<PaymentListResponse>, StatusCode>
+) -> Result<Json<PaymentListResponse>, ApiErr>
 where
     A: SessionService + 'static,
 {
@@ -224,7 +225,18 @@ where
         }
     }
 
-    Ok(Json(payment.into()))
+    // The invoice is already in hand from the membership check above, so
+    // labelling the payment costs one store lookup rather than a second
+    // invoice round trip. Without this, `store_id`/`store_name` were always
+    // null here even though the list endpoint fills them in for the exact
+    // same rows - documented, but a schema field that only some routes honour
+    // is a trap for anyone who reads it from `GET /payments/{id}` directly.
+    let store_names = resolve_store_names(&state, std::iter::once(invoice.store_id)).await;
+    let mut response: PaymentResponse = payment.into();
+    response.store_id = Some(invoice.store_id.0.to_string());
+    response.store_name = store_names.get(&invoice.store_id.0).cloned();
+
+    Ok(Json(response))
 }
 
 /// Get detailed status of an invoice including payments.

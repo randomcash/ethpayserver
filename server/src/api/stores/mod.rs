@@ -21,7 +21,6 @@ pub use wallets::*;
 pub use webhooks::*;
 
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 
 use auth::SessionService;
 use auth::repository::UserStoreRepository;
@@ -35,44 +34,10 @@ pub(crate) use api_types::mask_xpub;
 
 /// A status, optionally with a reason the caller can read.
 ///
-/// Handlers in this module mostly return bare `StatusCode`, and that stays
-/// true: `From<StatusCode>` gives an empty reason, so `?` on the existing
-/// permission and lookup helpers is unchanged and those responses keep exactly
-/// the shape they had. What this adds is somewhere for a repository error's own
-/// words to travel, for the cases where the status alone does not say enough.
-pub struct ApiErr(StatusCode, String);
-
-impl IntoResponse for ApiErr {
-    fn into_response(self) -> Response {
-        // An empty reason stays a bare status, which is what every handler here
-        // returned before and what `From<StatusCode>` produces.
-        //
-        // Note what this does NOT fix: both branches send an empty body, so the
-        // client still Displays a reasonless error as "HTTP error 404: ",
-        // trailing colon and all. The difference is only that the bare branch
-        // sends no `content-type` for a body that does not exist. Filling the
-        // reason is what removes the colon, and that is the caller's job - see
-        // `repository_error`, which does it for the two variants that have
-        // something worth saying.
-        if self.1.is_empty() {
-            self.0.into_response()
-        } else {
-            (self.0, self.1).into_response()
-        }
-    }
-}
-
-impl From<StatusCode> for ApiErr {
-    fn from(status: StatusCode) -> Self {
-        Self(status, String::new())
-    }
-}
-
-impl From<(StatusCode, String)> for ApiErr {
-    fn from((status, reason): (StatusCode, String)) -> Self {
-        Self(status, reason)
-    }
-}
+/// Defined in `crate::api` - `invoices`' filter builders need the same
+/// status-plus-reason shape, and this module's own doc comment already argues
+/// against a second byte-identical copy.
+pub use crate::api::ApiErr;
 
 /// The status a repository error deserves, and a reason the caller can read.
 ///

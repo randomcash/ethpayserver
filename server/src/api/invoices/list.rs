@@ -8,6 +8,7 @@ use ::types::{InvoiceId, InvoiceReader};
 use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
+use crate::api::ApiErr;
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
@@ -28,7 +29,7 @@ use super::{
     params(ListInvoicesQuery),
     responses(
         (status = 200, description = "List of invoices", body = InvoiceListResponse),
-        (status = 400, description = "store_id required"),
+        (status = 400, description = "invalid status filter"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Not a member of the store"),
     )
@@ -37,7 +38,7 @@ pub async fn list_invoices<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListInvoicesQuery>,
-) -> Result<Json<InvoiceListResponse>, StatusCode>
+) -> Result<Json<InvoiceListResponse>, ApiErr>
 where
     A: SessionService + 'static,
 {

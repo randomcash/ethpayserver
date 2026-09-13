@@ -219,6 +219,72 @@ fn search_does_not_displace_the_store_scope() {
     assert_eq!(params.store_ids, Some(vec![]));
 }
 
+// =========================================================================
+// Invalid filter values carry a reason (RCS-213 item 3)
+// =========================================================================
+
+/// A bare `StatusCode::BAD_REQUEST` reaches the client as `ApiError::Http {
+/// status: 400, message: "" }` - indistinguishable from any other 400 these
+/// endpoints can return. Both list pages used to swallow every 400 as "pick a
+/// store" whenever no store was selected, which would have mis-rendered an
+/// invalid filter as that empty state instead of showing the real error. The
+/// server has to hand the client something to key on instead of the bare code.
+#[tokio::test]
+async fn invalid_status_filter_carries_a_reason_the_client_can_key_on() {
+    async fn body_of(err: impl axum::response::IntoResponse) -> (StatusCode, String) {
+        let response = err.into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    let scope = StoreScope::All;
+
+    let err = build_invoice_filter_params(&scope, Some("bogus"), None, None).unwrap_err();
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        !body.is_empty(),
+        "invoice status 400 must carry a reason, not an empty body"
+    );
+
+    let err = build_payment_filter_params(&scope, Some("bogus"), None).unwrap_err();
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        !body.is_empty(),
+        "payment status 400 must carry a reason, not an empty body"
+    );
+}
+
+// =========================================================================
+// Handler wiring: GET /payments/{id} store backfill (RCS-213 item 6)
+// =========================================================================
+
+/// `From<PaymentData> for PaymentResponse` (in payserver-commons) always
+/// leaves `store_id`/`store_name` `None` - only the list handler backfilled
+/// them, so `GET /payments/{id}` returned null for both no matter what the
+/// OpenAPI schema promised. Handlers cannot be instantiated in a unit test
+/// (`PgAppState` is pinned to the concrete Postgres service - see the module
+/// doc on `store_scope.rs`), so this checks the wiring the cheap way: the
+/// single-payment handler must not return the bare, un-backfilled conversion.
+#[test]
+fn get_payment_backfills_store_fields_from_the_invoice_it_already_looked_up() {
+    let src = include_str!("../payments.rs");
+    assert!(
+        !src.contains("Ok(Json(payment.into()))"),
+        "get_payment must not return the bare PaymentData conversion - it \
+         already looks up the invoice for the membership check, so store_id \
+         and store_name should come along for free"
+    );
+    assert!(
+        src.contains("response.store_id = Some(invoice.store_id"),
+        "get_payment must set store_id from the invoice it already holds"
+    );
+}
+
 /// The list and the export must feed the same field into that shared builder.
 /// Handlers cannot be instantiated in a unit test (`PgAppState` is pinned to
 /// the concrete Postgres service), so this checks the wiring the cheap way, in
