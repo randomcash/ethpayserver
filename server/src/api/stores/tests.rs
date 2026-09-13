@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
-use auth::{Store, StoreId, UserId};
+use auth::{ServerSettings, Store, StoreId, UserId};
 use chrono::Utc;
 use data_service::StorePaymentMethod;
 use types::ChainId;
@@ -146,9 +146,17 @@ fn test_payment_method_response_erc20() {
 // chain_has_no_adapter (RCS-281)
 // =========================================================================
 
-/// The server's actual defaults - EVM chains only, no Tron adapter registered.
-fn evm_only_chains() -> Vec<ChainId> {
-    [1u64, 137].into_iter().map(ChainId::evm).collect()
+/// A settings row enabling only mainnet Ethereum and Polygon - no Tron
+/// adapter registered, and notably no Sepolia either (see the
+/// `an_unconfigured_server_still_accepts_evm` test below for why that
+/// matters).
+fn evm_only_settings() -> ServerSettings {
+    ServerSettings {
+        default_confirmations: 3,
+        invoice_expiry_minutes: 60,
+        rate_limit_rpm: 100,
+        enabled_chain_ids: [1u64, 137].into_iter().map(ChainId::evm).collect(),
+    }
 }
 
 /// The hole this ticket closes: a chain with no adapter (here, Tron) must be
@@ -159,18 +167,19 @@ fn evm_only_chains() -> Vec<ChainId> {
 #[test]
 fn a_chain_with_no_adapter_is_refused() {
     let tron = ChainId::parse("tron:728126428").unwrap();
-    assert!(chain_has_no_adapter(&tron, &evm_only_chains()));
+    assert!(chain_has_no_adapter(&tron, Some(&evm_only_settings())));
 }
 
 /// The predicate must not also catch a chain the server does serve - a gate
 /// that refused everything would pass the test above trivially.
 #[test]
 fn a_registered_chain_is_not_refused() {
+    let settings = ServerSettings {
+        enabled_chain_ids: [1u64, 11_155_111].into_iter().map(ChainId::evm).collect(),
+        ..evm_only_settings()
+    };
     let sepolia = ChainId::parse("eip155:11155111").unwrap();
-    assert!(!chain_has_no_adapter(
-        &sepolia,
-        &[ChainId::evm(1), ChainId::evm(11_155_111)]
-    ));
+    assert!(!chain_has_no_adapter(&sepolia, Some(&settings)));
 }
 
 /// This is deliberately not "is it eip155": the predicate is membership in
@@ -181,7 +190,53 @@ fn a_registered_chain_is_not_refused() {
 #[test]
 fn an_eip155_chain_outside_the_enabled_set_is_still_refused() {
     let untracked = ChainId::parse("eip155:999999").unwrap();
-    assert!(chain_has_no_adapter(&untracked, &evm_only_chains()));
+    assert!(chain_has_no_adapter(&untracked, Some(&evm_only_settings())));
+}
+
+/// `None` means nobody has ever written a `server_settings` row - true of
+/// the live testnet database as of this ticket. Falling back to
+/// `ServerSettings::default()` there (a Rust-side, EVM-mainnet chain list)
+/// would refuse `eip155:11155111` too, since Sepolia isn't in it - turning
+/// this ticket's fix into an outage for the only chain testnet actually
+/// serves. `is_evm()` is the correct fallback: any EVM chain is accepted
+/// when nothing has been explicitly configured yet.
+#[test]
+fn an_unconfigured_server_still_accepts_evm() {
+    let sepolia = ChainId::parse("eip155:11155111").unwrap();
+    assert!(!chain_has_no_adapter(&sepolia, None));
+}
+
+/// The unconfigured fallback is EVM-only, not "accept anything" - Tron must
+/// still be refused even before an operator has written a settings row.
+#[test]
+fn an_unconfigured_server_still_refuses_tron() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    assert!(chain_has_no_adapter(&tron, None));
+}
+
+// =========================================================================
+// update_should_check_chain (RCS-281)
+// =========================================================================
+
+/// Disabling a legacy bad row must always be reachable through the API -
+/// otherwise the only remediation left is direct database surgery.
+#[test]
+fn disabling_skips_the_chain_check() {
+    assert!(!update_should_check_chain(Some(false)));
+}
+
+/// Re-enabling a legacy bad row is still refused - only turning one off is
+/// safe.
+#[test]
+fn enabling_still_checks_the_chain() {
+    assert!(update_should_check_chain(Some(true)));
+}
+
+/// An update that doesn't touch `enabled` at all (e.g. rotating the xpub)
+/// must still be checked - omitting the field is not the same as disabling.
+#[test]
+fn an_unspecified_enabled_still_checks_the_chain() {
+    assert!(update_should_check_chain(None));
 }
 
 // =========================================================================

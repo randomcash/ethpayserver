@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use ::types::ChainId;
 use auth::repository::StoreRepository;
-use auth::{ServerSettingsRepository, SessionService, StoreId};
+use auth::{ServerSettings, ServerSettingsRepository, SessionService, StoreId};
 use data_service::{self, StorePaymentMethodReader, StorePaymentMethodWriter};
 use evm::validate_xpub;
 
@@ -22,15 +22,51 @@ pub use api_types::{
 
 /// Whether the server has a registered adapter for this chain.
 ///
-/// `enabled_chain_ids` is the operator's list of chains something on this
+/// When a settings row exists, this is membership in
+/// `enabled_chain_ids` - the operator's list of chains something on this
 /// server actually watches - not "is this an EVM chain", because that would
 /// hardcode today's only adapter into the check. A Tron adapter registers by
 /// the operator adding `tron:...` to that list; this predicate does not
-/// change. Without this gate a merchant can register e.g. `tron:728126428`,
+/// change.
+///
+/// `settings` is `None` when nobody has ever written a `server_settings`
+/// row - confirmed true of the live testnet database as of this change
+/// (`SELECT * FROM server_settings` returns zero rows there), and unverified
+/// but plausibly also true of mainnet. Falling back to
+/// `ServerSettings::default()` in that case, as an earlier version of this
+/// check did, silently turns "reject Tron" into "reject every chain this
+/// deployment actually serves": that default is a Rust-side, EVM-mainnet
+/// chain list baked in at compile time, and testnet's only real chain
+/// (`eip155:11155111`, Sepolia) is not on it - the "unchanged 201" half of
+/// this ticket's own required tests would have failed against the databases
+/// this server actually runs on. Until an operator populates a real row,
+/// `is_evm()` is the honest fallback: it is, today, an exact description of
+/// "has a registered adapter" (the only adapter that exists is the EVM one),
+/// and it costs nothing once a real Tron row lands, because a configured
+/// `Some` always wins.
+///
+/// Without this gate at all a merchant can register e.g. `tron:728126428`,
 /// which still derives a secp256k1 address (the same curve as EVM) but that
 /// address is never watched - the invoice can be paid and is never marked so.
-pub(crate) fn chain_has_no_adapter(chain_id: &ChainId, enabled_chain_ids: &[ChainId]) -> bool {
-    !enabled_chain_ids.contains(chain_id)
+pub(crate) fn chain_has_no_adapter(chain_id: &ChainId, settings: Option<&ServerSettings>) -> bool {
+    match settings {
+        Some(settings) => !settings.enabled_chain_ids.contains(chain_id),
+        None => !chain_id.is_evm(),
+    }
+}
+
+/// Whether an update to a payment method should still be checked against
+/// `chain_has_no_adapter`.
+///
+/// The check only ever fires for a legacy row that predates this ticket -
+/// `UpdatePaymentMethodRequest` has no `chain_id`, so a fresh row can never
+/// fail it. If it also blocked `enabled: false` on such a row, the only way
+/// to turn one off would be direct database surgery, which is exactly what
+/// the ticket's audit step is for someone to be able to avoid. Disabling
+/// only reduces exposure, so it is let through unconditionally; anything
+/// else on a bad row (re-enabling it, rotating its xpub) is still refused.
+pub(crate) fn update_should_check_chain(requested_enabled: Option<bool>) -> bool {
+    requested_enabled != Some(false)
 }
 
 /// List payment methods for a store.
@@ -116,9 +152,8 @@ where
         .data_service
         .get_server_settings()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .unwrap_or_default();
-    if chain_has_no_adapter(&req.chain_id, &settings.enabled_chain_ids) {
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if chain_has_no_adapter(&req.chain_id, settings.as_ref()) {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
@@ -246,21 +281,22 @@ where
     // nothing to validate on the request. This only bites a row from before
     // this check existed (see the RCS-281 commit message for the audit); a
     // fresh row can never have an unsupported chain.
-    let settings = state
-        .data_service
-        .get_server_settings()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .unwrap_or_default();
-    if chain_has_no_adapter(&existing.chain_id, &settings.enabled_chain_ids) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "unsupported_chain: no adapter is registered for {}",
-                existing.chain_id
-            ),
-        )
-            .into());
+    if update_should_check_chain(req.enabled) {
+        let settings = state
+            .data_service
+            .get_server_settings()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if chain_has_no_adapter(&existing.chain_id, settings.as_ref()) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unsupported_chain: no adapter is registered for {}",
+                    existing.chain_id
+                ),
+            )
+                .into());
+        }
     }
 
     let method = StorePaymentMethodWriter::update_payment_method(
