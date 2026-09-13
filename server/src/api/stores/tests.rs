@@ -198,7 +198,8 @@ fn an_eip155_chain_outside_the_enabled_set_is_still_refused() {
 /// `ServerSettings::default()` there (a Rust-side, EVM-mainnet chain list)
 /// would refuse `eip155:11155111` too, since Sepolia isn't in it - turning
 /// this ticket's fix into an outage for the only chain testnet actually
-/// serves. `is_evm()` is the correct fallback: any EVM chain is accepted
+/// serves. `evm::get_any_chain_config` is the correct fallback: any chain
+/// this codebase ships a real config for (mainnet or testnet) is accepted
 /// when nothing has been explicitly configured yet.
 #[test]
 fn an_unconfigured_server_still_accepts_evm() {
@@ -212,6 +213,38 @@ fn an_unconfigured_server_still_accepts_evm() {
 fn an_unconfigured_server_still_refuses_tron() {
     let tron = ChainId::parse("tron:728126428").unwrap();
     assert!(chain_has_no_adapter(&tron, None));
+}
+
+/// The bug in an earlier version of this predicate: falling back to
+/// `is_evm()` accepts ANY eip155 number, not just ones this codebase has a
+/// config for. `eip155:999999` names no real chain - `evm::get_any_chain_config`
+/// returns `None` for it - so it must still be refused even with no settings
+/// row, exactly like Tron. Ablated locally (swapped the fallback back to
+/// `is_evm()`) and watched this test go red before restoring the fix.
+#[test]
+fn an_unconfigured_server_refuses_an_unregistered_eip155_id() {
+    let untracked = ChainId::parse("eip155:999999").unwrap();
+    assert!(chain_has_no_adapter(&untracked, None));
+}
+
+// =========================================================================
+// unsupported_chain_error (RCS-281)
+// =========================================================================
+
+/// The wiring the predicate alone can't prove: the 400 the handlers actually
+/// send names the chain and says `unsupported_chain`, not just "some 400".
+/// A refusal that 400s for the wrong reason (or a wrong field name) would
+/// pass every `chain_has_no_adapter` test above and still fail a merchant
+/// trying to read the error.
+#[tokio::test]
+async fn unsupported_chain_error_names_the_chain() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    let (status, body) = body_of(unsupported_chain_error(&tron)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body,
+        "unsupported_chain: no adapter is registered for tron:728126428"
+    );
 }
 
 // =========================================================================
