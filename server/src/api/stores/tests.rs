@@ -143,6 +143,48 @@ fn test_payment_method_response_erc20() {
 }
 
 // =========================================================================
+// chain_has_no_adapter (RCS-281)
+// =========================================================================
+
+/// The server's actual defaults - EVM chains only, no Tron adapter registered.
+fn evm_only_chains() -> Vec<ChainId> {
+    [1u64, 137].into_iter().map(ChainId::evm).collect()
+}
+
+/// The hole this ticket closes: a chain with no adapter (here, Tron) must be
+/// refused. Without this predicate returning `true` here, `tron:728126428`
+/// sails through create/update, gets a `0x...` address from the EVM deriver
+/// regardless of namespace, and is never watched - see `derive_payment_address`
+/// and `eip155_for_watch`.
+#[test]
+fn a_chain_with_no_adapter_is_refused() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    assert!(chain_has_no_adapter(&tron, &evm_only_chains()));
+}
+
+/// The predicate must not also catch a chain the server does serve - a gate
+/// that refused everything would pass the test above trivially.
+#[test]
+fn a_registered_chain_is_not_refused() {
+    let sepolia = ChainId::parse("eip155:11155111").unwrap();
+    assert!(!chain_has_no_adapter(
+        &sepolia,
+        &[ChainId::evm(1), ChainId::evm(11_155_111)]
+    ));
+}
+
+/// This is deliberately not "is it eip155": the predicate is membership in
+/// the operator's registered set, not a namespace check. So the day a Tron
+/// adapter exists, it is satisfied by the operator adding `tron:...` to
+/// `enabled_chain_ids`, not by editing this function - an eip155 chain that
+/// was never enabled is refused just the same as Tron is today.
+#[test]
+fn an_eip155_chain_outside_the_enabled_set_is_still_refused() {
+    let untracked = ChainId::parse("eip155:999999").unwrap();
+    assert!(chain_has_no_adapter(&untracked, &evm_only_chains()));
+}
+
+// =========================================================================
 // Request deserialization
 // =========================================================================
 

@@ -7,8 +7,9 @@ use axum::{
 };
 use uuid::Uuid;
 
+use ::types::ChainId;
 use auth::repository::StoreRepository;
-use auth::{SessionService, StoreId};
+use auth::{ServerSettingsRepository, SessionService, StoreId};
 use data_service::{self, StorePaymentMethodReader, StorePaymentMethodWriter};
 use evm::validate_xpub;
 
@@ -18,6 +19,19 @@ use crate::state::PgAppState;
 pub use api_types::{
     CreatePaymentMethodRequest, PaymentMethodResponse, UpdatePaymentMethodRequest,
 };
+
+/// Whether the server has a registered adapter for this chain.
+///
+/// `enabled_chain_ids` is the operator's list of chains something on this
+/// server actually watches - not "is this an EVM chain", because that would
+/// hardcode today's only adapter into the check. A Tron adapter registers by
+/// the operator adding `tron:...` to that list; this predicate does not
+/// change. Without this gate a merchant can register e.g. `tron:728126428`,
+/// which still derives a secp256k1 address (the same curve as EVM) but that
+/// address is never watched - the invoice can be paid and is never marked so.
+pub(crate) fn chain_has_no_adapter(chain_id: &ChainId, enabled_chain_ids: &[ChainId]) -> bool {
+    !enabled_chain_ids.contains(chain_id)
+}
 
 /// List payment methods for a store.
 #[utoipa::path(
@@ -92,6 +106,27 @@ where
         && !validate_xpub(xpub)
     {
         return Err(StatusCode::BAD_REQUEST.into());
+    }
+
+    // Refuse a chain nothing here can watch. See `chain_has_no_adapter` -
+    // otherwise the option gets an address (the same curve derives one for
+    // any namespace) and quotes a customer who can pay it while nothing
+    // notices the money arrived.
+    let settings = state
+        .data_service
+        .get_server_settings()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .unwrap_or_default();
+    if chain_has_no_adapter(&req.chain_id, &settings.enabled_chain_ids) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unsupported_chain: no adapter is registered for {}",
+                req.chain_id
+            ),
+        )
+            .into());
     }
 
     // Verify store exists
@@ -204,6 +239,28 @@ where
 
     if existing.store_id != store_id {
         return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    // Same gate as creation, against the chain already stored on this method -
+    // `UpdatePaymentMethodRequest` carries no chain_id of its own, so there is
+    // nothing to validate on the request. This only bites a row from before
+    // this check existed (see the RCS-281 commit message for the audit); a
+    // fresh row can never have an unsupported chain.
+    let settings = state
+        .data_service
+        .get_server_settings()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .unwrap_or_default();
+    if chain_has_no_adapter(&existing.chain_id, &settings.enabled_chain_ids) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unsupported_chain: no adapter is registered for {}",
+                existing.chain_id
+            ),
+        )
+            .into());
     }
 
     let method = StorePaymentMethodWriter::update_payment_method(
