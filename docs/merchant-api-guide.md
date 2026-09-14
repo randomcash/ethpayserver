@@ -53,7 +53,14 @@ places a plausible-looking guess is wrong.
 - **Amounts are strings, never JSON numbers, and two different kinds exist.**
   - `Invoice.amount` and `Invoice.amount_received` are decimal strings in the
     invoice's own `currency` (e.g. `"25.00"` for a `"USD"` invoice, `"0.1"`
-    for an asset-denominated `"ETH"` invoice).
+    for an asset-denominated `"ETH"` invoice). This is what `POST /invoices`
+    actually does with the value, not just what its doc comment says: a
+    same-asset invoice is converted with `convert_human_to_smallest_unit`,
+    which treats the request `amount` as a human-readable decimal
+    (`server/src/api/invoices/crud.rs`). Trust that conversion code over
+    `CreateInvoiceRequest.amount`'s own doc comment upstream in
+    `payserver-commons`, which currently contradicts itself on this exact
+    point.
   - `PaymentOption.amount`, `Payment.amount`, and refund/payout `amount`
     fields are integer strings in the asset's **smallest unit** (wei for
     ETH, the ERC20's own base unit for a token) — divide by `10^decimals` to
@@ -873,7 +880,7 @@ payout endpoints are bookkeeping for that process, not a substitute for it.
 | `404` | Resource not found |
 | `409` | Conflict (e.g. duplicate xpub, idempotency key reuse) |
 | `413` | Request body too large |
-| `422` | Well-formed request, rejected by validation (e.g. malformed chain id) |
+| `422` | Well-formed JSON body, but a field fails validation while deserializing — e.g. a `chain_id` that isn't valid CAIP-2 in a `POST /stores/{id}/payment-methods` body. This is axum's default response for that class of error. A malformed `chain_id` in a URL path segment (e.g. `GET /invoices/by-tx/{chain_id}/{tx_hash}`) is parsed explicitly by the handler instead and returns `400`. |
 | `425` | Idempotent request already in flight |
 | `500` | Internal server error |
 
