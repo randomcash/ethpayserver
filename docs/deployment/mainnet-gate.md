@@ -1,7 +1,7 @@
-# Production Gate: testnet to mainnet promotion
+# Mainnet Gate: testnet to mainnet promotion
 
 This document defines the procedure for promoting an ethpayserver release from
-testnet to production (mainnet), including the manual approval gate, post-deploy
+testnet to mainnet, including the manual approval gate, post-deploy
 health verification, and rollback playbook.
 
 ## Strategy
@@ -10,7 +10,7 @@ health verification, and rollback playbook.
 VPS via docker-compose. There is no blue/green or canary infrastructure. Safety
 comes from:
 
-1. A human approval gate in CI before the production deploy triggers.
+1. A human approval gate in CI before the mainnet deploy triggers.
 2. A health gate that verifies the new image before declaring success.
 3. A documented, single-command rollback path.
 
@@ -20,8 +20,8 @@ Before clicking the manual deploy button in CI for the `main` branch:
 
 - [ ] All chain monitors are synced on testnet (`/health/deep` shows
       `data_fresh: true` and all RPCs report `ok`).
-- [ ] RPC provider quotas are sufficient for production traffic.
-- [ ] All secrets are present in the production `.env` file:
+- [ ] RPC provider quotas are sufficient for mainnet traffic.
+- [ ] All secrets are present in the mainnet `.env` file:
       `DATABASE_URL`, `REDIS_URL`, `EVMMONITOR_CHAIN_*_RPC_*`,
       `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_ORIGIN`.
 - [ ] Database migrations have been reviewed. Run `migrate_postgres` in
@@ -37,7 +37,7 @@ The `notify:deploy` CI job for the `main` branch is configured with
 `when: manual`. This means the pipeline will pause at the notify stage
 and wait for a maintainer to click "Run" in the GitLab UI.
 
-The testnet deploy remains automatic — only production requires manual
+The testnet deploy remains automatic — only mainnet requires manual
 approval.
 
 ### How it works in CI
@@ -107,7 +107,7 @@ rollback.
 
 ## Rollback procedure
 
-If production is broken after a deploy, rollback to the previous known-good
+If mainnet is broken after a deploy, rollback to the previous known-good
 image:
 
 ### 1. Identify the previous good SHA
@@ -161,7 +161,6 @@ The `/health/deep` endpoint exposes a `build_sha` field that contains the
 short commit SHA baked into the binary at compile time. This allows:
 
 - The health-gate script to confirm the new version is actually running.
-- The verifier pass to match deployed commits to Linear issues.
 - Operators to quickly confirm which version is live.
 
 ```json
