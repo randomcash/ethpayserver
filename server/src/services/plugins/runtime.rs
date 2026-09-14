@@ -1,16 +1,14 @@
 //! Instantiate a plugin module, call an export, bound it with a deadline,
 //! and turn whatever goes wrong into a value instead of a panic.
 //!
-//! There is no host API surface here (see [RCS-256]'s follow-up tickets for
-//! `invoice_get` and friends) and no imports at all: today's plugin modules
-//! are self-contained, so instantiation needs no [`wasmtime::Linker`]. The
+//! There is no host API surface here (`invoice_get` and friends are a
+//! follow-up slice) and no imports at all: today's plugin modules are
+//! self-contained, so instantiation needs no [`wasmtime::Linker`]. The
 //! calling convention is host-defined, not part of `payserver-plugin-api`
 //! yet: a plugin exports `memory`, an `alloc(len: i32) -> i32` bump
 //! allocator the host uses to place its (JSON) argument, and one function
 //! per call name with signature `(ptr: i32, len: i32) -> i64`, the result
 //! packed as `(ptr << 32) | len` into the return value.
-//!
-//! [RCS-256]: https://linear.app/randomcash/issue/RCS-256
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
