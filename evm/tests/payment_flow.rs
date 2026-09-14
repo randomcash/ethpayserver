@@ -419,6 +419,59 @@ async fn test_reorg_detected_across_a_block_gap() {
     let _ = monitor_handle.await;
 }
 
+/// If the RPC call backing the gap-continuity check itself fails, that must
+/// not be treated the same as "checked, no reorg": falling through to `None`
+/// would advance `last_block` past block 100 as if continuity were confirmed,
+/// permanently losing the one chance to catch the fork. The failure must
+/// instead leave `last_block` at 100 so the same gap is re-checked on the
+/// next block.
+#[tokio::test]
+async fn test_reorg_gap_check_rpc_failure_does_not_lose_the_reorg() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    test_source.push_block(make_block(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Block 100 was reorged out, and the next notification skips to 103 (a
+    // gap), so continuity can only be checked via get_block_hash. Make that
+    // RPC call fail.
+    test_source.set_block_hash(100, B256::random());
+    test_source.set_get_block_hash_error(Some("rpc unavailable"));
+    test_source.push_block(make_block(103));
+
+    // Nothing must be reported while the check itself couldn't run - not a
+    // reorg, and not silence that looks identical to "verified clean".
+    let outcome = tokio::time::timeout(Duration::from_millis(300), event_rx.recv()).await;
+    assert!(
+        !matches!(outcome, Ok(Ok(MonitorEvent::ReorgDetected(_)))),
+        "must not report a reorg when the gap check itself failed to run: {outcome:?}"
+    );
+
+    // Once the RPC recovers, the fork must still be found against the
+    // original last_num (100) - proving it was never advanced past the
+    // failed check.
+    test_source.set_get_block_hash_error(None);
+    test_source.push_block(make_block(104));
+
+    let reorg = wait_for_reorg(&mut event_rx).await;
+    assert_eq!(reorg.fork_block, 100);
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+}
+
 /// A transaction that survives a reorg by landing in a different block must
 /// be reported as survived, not treated as gone. Retracting it anyway is the
 /// opposite error: it un-pays an invoice that a customer genuinely settled.

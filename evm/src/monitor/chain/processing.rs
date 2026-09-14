@@ -33,6 +33,16 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             let fork_block = if block.number == last_num + 1 {
                 (block.parent_hash != last_hash).then_some(last_num)
             } else {
+                // A failure here must not be treated as "no reorg": `Ok(_)
+                // => None` and a swallowed `Err` are indistinguishable to
+                // the caller, but only one of them actually checked. Silently
+                // falling through to `None` would advance `last_block` below
+                // as if continuity were confirmed, permanently losing the one
+                // chance to catch a reorg that coincided with an RPC hiccup.
+                // Propagating instead leaves `last_block`/`last_block_hash`
+                // untouched, so the same gap is re-checked on the next block
+                // — the same fail-closed, free-retry pattern `handle_reorg`
+                // uses for re-validation failures.
                 match self.source.get_block_hash(last_num).await {
                     Ok(Some(hash)) if hash != last_hash => Some(last_num.min(block.number)),
                     Ok(_) => None,
@@ -42,9 +52,9 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                             block = block.number,
                             last_num,
                             error = %e,
-                            "failed to verify chain continuity across a block gap"
+                            "failed to verify chain continuity across a block gap; will retry on the next block"
                         );
-                        None
+                        return Err(e);
                     }
                 }
             };

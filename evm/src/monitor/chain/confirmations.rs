@@ -143,10 +143,19 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     ///
     /// Watched addresses are restored from persistence on monitor restart, so
     /// this still works after one — unlike `pending`, which starts empty. It
-    /// misses a payment whose address has since been unwatched (e.g. an
-    /// expired, cleaned-up invoice), which is a known limitation: confirming
-    /// survival for those would require asking the chain about a specific
-    /// historical transaction hash, which no `BlockSource` method does today.
+    /// misses a payment whose address has since been unwatched, which is a
+    /// known limitation: confirming survival for those would require asking
+    /// the chain about a specific historical transaction hash, which no
+    /// `BlockSource` method does today. This process (evmmonitor) has no
+    /// database access and talks to the server only over a Redis command/event
+    /// bridge, so it cannot itself ask "which addresses does the DB still care
+    /// about" — the server is the one place that knows, and it drives
+    /// unwatching. The server-side mitigation is
+    /// `InvoiceCleanupService::paid_unwatch_grace_period_secs`, which keeps a
+    /// just-paid address watched for a while after confirmation specifically
+    /// so this scan can still find it if a deep reorg follows quickly. That
+    /// narrows the gap for the realistic window; it does not close it for a
+    /// reorg arriving after the grace period elapses.
     async fn find_survived_tx_hashes(&self, from: u64, to: u64) -> EvmResult<Vec<B256>> {
         let watched = self.watched.read().await;
         if watched.is_empty() {

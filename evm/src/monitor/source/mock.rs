@@ -35,6 +35,10 @@ struct Inner {
     /// looking anything up. Lets a test simulate an RPC failure during reorg
     /// re-validation without disturbing ordinary payment detection.
     find_native_transfers_error: SyncRwLock<Option<String>>,
+    /// When set, `get_block_hash` returns this error instead of looking
+    /// anything up. Lets a test simulate an RPC failure during the
+    /// block-gap continuity check without disturbing ordinary processing.
+    get_block_hash_error: SyncRwLock<Option<String>>,
 }
 
 /// A mock block source for testing payment detection.
@@ -70,6 +74,7 @@ impl MockBlockSource {
                 block_hashes: SyncRwLock::new(HashMap::new()),
                 block_tx,
                 find_native_transfers_error: SyncRwLock::new(None),
+                get_block_hash_error: SyncRwLock::new(None),
             }),
         }
     }
@@ -78,6 +83,12 @@ impl MockBlockSource {
     /// `None`. Simulates an RPC error during reorg re-validation.
     pub fn set_find_native_transfers_error(&self, message: Option<&str>) {
         *self.inner.find_native_transfers_error.write().unwrap() = message.map(ToString::to_string);
+    }
+
+    /// Make `get_block_hash` fail with `message` until cleared with `None`.
+    /// Simulates an RPC error during the block-gap continuity check.
+    pub fn set_get_block_hash_error(&self, message: Option<&str>) {
+        *self.inner.get_block_hash_error.write().unwrap() = message.map(ToString::to_string);
     }
 
     /// Push a block notification to all subscribers.
@@ -203,6 +214,10 @@ impl BlockSource for MockBlockSource {
     }
 
     async fn get_block_hash(&self, number: u64) -> EvmResult<Option<B256>> {
+        if let Some(message) = self.inner.get_block_hash_error.read().unwrap().clone() {
+            return Err(EvmError::Rpc(message));
+        }
+
         Ok(self
             .inner
             .block_hashes
