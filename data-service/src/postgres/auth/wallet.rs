@@ -242,6 +242,75 @@ impl PgDataService {
             ..target
         })
     }
+
+    /// Record a fresh proof-of-possession challenge for `address`, replacing
+    /// whatever challenge this user had pending.
+    ///
+    /// One row per user (`ON CONFLICT (user_id) DO UPDATE`), same shape as
+    /// the auth crate's own `wallet_challenges`: requesting a second
+    /// challenge invalidates the first rather than leaving two live at once.
+    /// `created_at` is bound explicitly rather than left to the database's
+    /// `NOW()` - the caller embeds this exact timestamp in the message shown
+    /// to the wallet extension, and `take_wallet_reauth_challenge` must
+    /// return the identical value so the signature it verifies is checked
+    /// against the same bytes that were signed.
+    pub async fn store_wallet_reauth_challenge(
+        &self,
+        user_id: UserId,
+        address: &str,
+        challenge: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO wallet_reauth_challenges (user_id, address, challenge, created_at)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id) DO UPDATE SET
+                address = EXCLUDED.address,
+                challenge = EXCLUDED.challenge,
+                created_at = EXCLUDED.created_at
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(address)
+        .bind(challenge)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Consume the pending wallet-reauth challenge for `user_id`, if any and
+    /// if still within its freshness window.
+    ///
+    /// `DELETE ... RETURNING` in one statement makes this single-use: a
+    /// signature answering this challenge cannot be replayed against a
+    /// second promotion request.
+    pub async fn take_wallet_reauth_challenge(
+        &self,
+        user_id: UserId,
+    ) -> std::result::Result<Option<WalletReauthChallenge>, sqlx::Error> {
+        sqlx::query_as::<_, WalletReauthChallenge>(
+            r#"
+            DELETE FROM wallet_reauth_challenges
+            WHERE user_id = $1 AND created_at > NOW() - INTERVAL '5 minutes'
+            RETURNING address, challenge, created_at
+            "#,
+        )
+        .bind(user_id.0)
+        .fetch_optional(&self.pool)
+        .await
+    }
+}
+
+/// A pending proof-of-possession challenge for promoting a wallet credential
+/// to primary. See `store_wallet_reauth_challenge` / `take_wallet_reauth_challenge`.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct WalletReauthChallenge {
+    pub address: String,
+    pub challenge: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 fn row_to_wallet(row: &sqlx::postgres::PgRow) -> WalletCredential {

@@ -517,6 +517,68 @@ async fn integration_wallet_challenge() {
     assert!(fetched.is_none());
 }
 
+/// The wallet-reauth-challenge table backing `POST .../reauth-challenge` and
+/// `PATCH .../primary` — a separate slot from `wallet_challenges` above, and
+/// with the same single-use, one-row-per-user shape.
+#[tokio::test]
+#[ignore]
+async fn integration_wallet_reauth_challenge() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut user = test_user();
+    user.email = Some(unique_email());
+    service.create_user(&user).await.unwrap();
+
+    let address = unique_wallet_address();
+    let created_at = Utc::now();
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "abc123", created_at)
+        .await
+        .unwrap();
+
+    let fetched = service
+        .take_wallet_reauth_challenge(user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.address, address);
+    assert_eq!(fetched.challenge, "abc123");
+    assert_eq!(fetched.created_at.timestamp(), created_at.timestamp());
+
+    // Single-use: taken once, gone after.
+    let fetched = service.take_wallet_reauth_challenge(user.id).await.unwrap();
+    assert!(fetched.is_none());
+
+    // A second challenge request overwrites the first rather than stacking -
+    // only the most recent one this user asked for should ever be answerable.
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "first", Utc::now())
+        .await
+        .unwrap();
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "second", Utc::now())
+        .await
+        .unwrap();
+    let fetched = service
+        .take_wallet_reauth_challenge(user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.challenge, "second");
+
+    // Past the freshness window, the challenge is no longer answerable - the
+    // same rule `take_wallet_challenge` enforces for login challenges.
+    let stale = Utc::now() - Duration::minutes(10);
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "stale", stale)
+        .await
+        .unwrap();
+    let fetched = service.take_wallet_reauth_challenge(user.id).await.unwrap();
+    assert!(fetched.is_none());
+
+    service.delete_user(user.id).await.unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn integration_cascade_delete_user() {

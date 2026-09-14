@@ -8,7 +8,7 @@ use axum::{
     http::{StatusCode, header::AUTHORIZATION, request::Parts},
 };
 
-use auth::{Permission, Role, Session, SessionId, SessionService, UserId, UserInfo};
+use auth::{Permission, Role, SessionId, SessionService, UserId, UserInfo};
 use chrono::{DateTime, Utc};
 
 use super::api_key_deprecation::DeprecationSlot;
@@ -41,72 +41,6 @@ pub struct AuthenticatedUser(pub UserInfo);
 ///
 /// Same as AuthenticatedUser but requires ServerAdmin role.
 pub struct AdminAuth(pub UserInfo);
-
-/// A valid session is not enough to authorize a credential change - a
-/// valid-but-stale session has previously been enough for permanent account
-/// takeover. `FreshlyAuthenticatedUser` additionally requires the session
-/// itself to have been created recently, which a hijacked long-lived token
-/// cannot forge without the underlying passkey or wallet credential: minting
-/// a fresh session still means passing `complete_wallet_login` /
-/// `complete_passkey_login` again.
-///
-/// Deliberately session-only - API keys have no notion of "just logged in"
-/// and must not be usable to authorize an account-security change like
-/// swapping the primary wallet.
-pub struct FreshlyAuthenticatedUser(pub UserInfo);
-
-/// How recently the session backing a sensitive-operation request must have
-/// been created. Chosen to comfortably cover "log in, then immediately go
-/// change your primary wallet" while still being short enough that a session
-/// stolen even a few minutes ago cannot be replayed against this endpoint.
-const REAUTH_FRESHNESS: chrono::Duration = chrono::Duration::minutes(5);
-
-/// Pure predicate behind `FreshlyAuthenticatedUser`: was `created_at` recent
-/// enough, as of `now`, to count as a fresh re-authentication?
-///
-/// Extracted so the freshness rule is unit-testable without a database,
-/// mirroring `is_grace_expired` below.
-pub(super) fn is_session_fresh(created_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    now <= created_at + REAUTH_FRESHNESS
-}
-
-impl<A> FromRequestParts<PgAppState<A>> for FreshlyAuthenticatedUser
-where
-    A: SessionService + 'static,
-{
-    type Rejection = (StatusCode, &'static str);
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &PgAppState<A>,
-    ) -> Result<Self, Self::Rejection> {
-        let token = extract_bearer_token(parts)?;
-        if token.starts_with("ak_") {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "API keys cannot authorize this operation, re-authenticate in the browser",
-            ));
-        }
-
-        let uuid = uuid::Uuid::parse_str(&token)
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid session ID format"))?;
-
-        let (user_info, session): (UserInfo, Session) = state
-            .auth_service
-            .validate_session(SessionId(uuid))
-            .await
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
-
-        if !is_session_fresh(session.created_at, Utc::now()) {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "Re-authentication required: please log in again to continue",
-            ));
-        }
-
-        Ok(FreshlyAuthenticatedUser(user_info))
-    }
-}
 
 /// Extract the bearer token string from the Authorization header.
 fn extract_bearer_token(parts: &Parts) -> Result<String, (StatusCode, &'static str)> {
@@ -410,34 +344,5 @@ mod tests {
         let grace = 30 * 24 * 3600;
         assert!(!is_grace_expired(at(0), at(24 * 20), grace));
         assert!(is_grace_expired(at(0), at(24 * 31), grace));
-    }
-
-    #[test]
-    fn session_created_now_is_fresh() {
-        let created = at(0);
-        assert!(is_session_fresh(created, created));
-    }
-
-    #[test]
-    fn session_at_the_freshness_boundary_is_still_fresh() {
-        let created = at(0);
-        assert!(is_session_fresh(created, created + REAUTH_FRESHNESS));
-    }
-
-    #[test]
-    fn session_past_the_freshness_window_is_stale() {
-        let created = at(0);
-        assert!(!is_session_fresh(
-            created,
-            created + REAUTH_FRESHNESS + Duration::seconds(1)
-        ));
-    }
-
-    #[test]
-    fn an_old_session_used_much_later_is_stale() {
-        // A session minted a day ago is still "valid" (not expired, not
-        // idle-timed-out) but must not pass as a fresh login.
-        let created = at(0);
-        assert!(!is_session_fresh(created, created + Duration::hours(24)));
     }
 }

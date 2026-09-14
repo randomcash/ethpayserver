@@ -151,6 +151,7 @@ impl From<(StatusCode, String)> for ApiErr {
         users::update_api_key,
         users::rotate_api_key,
         users::list_wallet_credentials,
+        users::create_wallet_reauth_challenge,
         users::set_primary_wallet_credential,
         // Admin
         admin::list_users,
@@ -210,6 +211,8 @@ impl From<(StatusCode, String)> for ApiErr {
         users::UpdateApiKeyPayload,
         users::RotateApiKeyResponsePayload,
         users::WalletCredentialResponse,
+        users::WalletReauthChallengeResponse,
+        users::PromoteWalletCredentialRequest,
         admin::UserListResponse,
         admin::AdminUserInfo,
         admin::UpdateRoleRequest,
@@ -389,6 +392,10 @@ where
             axum::routing::post(users::rotate_api_key::<A>),
         )
         .route("/wallets", get(users::list_wallet_credentials::<A>))
+        .route(
+            "/wallets/{id}/reauth-challenge",
+            axum::routing::post(users::create_wallet_reauth_challenge::<A>),
+        )
         .route(
             "/wallets/{id}/primary",
             axum::routing::patch(users::set_primary_wallet_credential::<A>),
