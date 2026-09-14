@@ -597,6 +597,97 @@ async fn test_reorg_reports_a_relocated_transaction_as_survived() {
     let _ = monitor_handle.await;
 }
 
+/// The same relocation guarantee must hold for ERC20 payments, not just
+/// native transfers: `find_survived_tx_hashes` re-validates them through a
+/// completely different code path (`get_logs` with a Transfer-event filter
+/// rather than `find_native_transfers_to`), which none of the other reorg
+/// tests exercise.
+#[tokio::test]
+async fn test_reorg_reports_a_relocated_erc20_transfer_as_survived() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let token_contract = Address::random();
+    let invoice_id = uuid::Uuid::new_v4();
+    let payment_amount = U256::from(100_000_000u64); // 100 USDT (6 decimals)
+    let tx_hash = B256::random();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id,
+            expected_amount: Some(payment_amount),
+            token_contract: Some(token_contract),
+            created_at: Utc::now(),
+            last_known_balance: U256::ZERO,
+        })
+        .await;
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    // The payment is first detected at block 100.
+    test_source
+        .add_log(
+            100,
+            make_erc20_transfer_log(
+                token_contract,
+                sender,
+                payment_address,
+                payment_amount,
+                100,
+                tx_hash,
+                0,
+            ),
+        )
+        .await;
+    test_source.push_block(make_block(100));
+
+    let detected = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("timeout waiting for PaymentDetected")
+        .expect("channel error");
+    assert!(matches!(detected, MonitorEvent::PaymentDetected(_)));
+
+    // A reorg replaces block 100, but the very same transaction lands again
+    // at block 101 on the new canonical chain rather than disappearing.
+    test_source
+        .add_log(
+            101,
+            make_erc20_transfer_log(
+                token_contract,
+                sender,
+                payment_address,
+                payment_amount,
+                101,
+                tx_hash,
+                0,
+            ),
+        )
+        .await;
+    test_source.push_block(make_block_with_parent(101, B256::random(), B256::random()));
+
+    let reorg = wait_for_reorg(&mut event_rx).await;
+    assert_eq!(reorg.fork_block, 100);
+    assert!(
+        reorg.survived_tx_hashes.contains(&tx_hash),
+        "a relocated ERC20 transfer must be reported as survived, not gone"
+    );
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+}
+
 /// A reorg window wider than `max_blocks_per_scan` must still find a
 /// relocated transaction anywhere in `[fork_block, new_head]`, not just in
 /// the tail nearest the new head. Clamping the re-scan window to that knob —
