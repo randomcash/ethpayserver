@@ -210,6 +210,38 @@ pub fn scrub_event(mut event: Event<'static>) -> Option<Event<'static>> {
     Some(event)
 }
 
+/// Whether error reporting is on, and — when it is off — whether that is
+/// acceptable for the environment reporting failed to catch this itself once:
+/// a disabled integration looks identical to a working one unless something
+/// says so at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportingStatus {
+    /// A DSN is configured.
+    Enabled,
+    /// No DSN, but that's permitted outside `mainnet`.
+    DisabledPermitted,
+    /// No DSN in the `mainnet` environment: must not boot like this.
+    DisabledRefused,
+}
+
+/// Decide whether error reporting is enabled and, if not, whether that's
+/// permitted. Only `environment == "mainnet"` with no DSN is refused; every
+/// other environment (testnet, dev, anything else) is permitted disabled.
+///
+/// Pure and side-effect free: the caller is responsible for logging the
+/// result and, for [`ReportingStatus::DisabledRefused`], for refusing to
+/// continue booting.
+#[must_use]
+pub fn reporting_status(dsn_configured: bool, environment: &str) -> ReportingStatus {
+    if dsn_configured {
+        ReportingStatus::Enabled
+    } else if environment == "mainnet" {
+        ReportingStatus::DisabledRefused
+    } else {
+        ReportingStatus::DisabledPermitted
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +475,37 @@ mod tests {
                 redact_secrets(input),
                 scrub::redact_secrets(input),
                 "shared `scrub` diverged from the audited regex table on: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_dsn_is_disabled_but_permitted_outside_mainnet() {
+        assert_eq!(
+            reporting_status(false, "testnet"),
+            ReportingStatus::DisabledPermitted
+        );
+        assert_eq!(
+            reporting_status(false, "dev"),
+            ReportingStatus::DisabledPermitted
+        );
+    }
+
+    #[test]
+    fn no_dsn_in_mainnet_is_refused() {
+        assert_eq!(
+            reporting_status(false, "mainnet"),
+            ReportingStatus::DisabledRefused
+        );
+    }
+
+    #[test]
+    fn a_configured_dsn_flips_every_environment_to_enabled() {
+        for environment in ["mainnet", "testnet", "dev"] {
+            assert_eq!(
+                reporting_status(true, environment),
+                ReportingStatus::Enabled,
+                "environment={environment}"
             );
         }
     }

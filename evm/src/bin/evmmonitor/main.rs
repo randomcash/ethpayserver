@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     // Initialize Sentry (no-op when SENTRY_DSN is unset)
-    let _sentry_guard = init_sentry();
+    let (_sentry_guard, sentry_dsn_configured) = init_sentry();
 
     // Parse CLI args
     let args = Args::parse();
@@ -106,6 +106,12 @@ async fn main() -> anyhow::Result<()> {
     init_logging(&args.log_format, &args.log_level)?;
 
     info!("starting evmmonitor");
+
+    // Report whether error reporting is actually on. Must come after
+    // `init_logging`: `info!`/`error!` before that has no subscriber to write
+    // to. This is the component that failed silently for 10.5 hours, so it
+    // must not also be silently unreported.
+    report_sentry_status(sentry_dsn_configured)?;
 
     // Load configuration
     let config = load_config(&args)?;
@@ -238,11 +244,16 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_sentry() -> sentry::ClientInitGuard {
-    sentry::init(sentry::ClientOptions {
-        dsn: std::env::var("SENTRY_DSN")
-            .ok()
-            .and_then(|s| s.parse().ok()),
+/// Initializes Sentry and reports whether a DSN was actually parsed — an
+/// unset or unparseable `SENTRY_DSN` both leave the client a no-op, and
+/// `dsn_configured` is what tells the caller which happened.
+fn init_sentry() -> (sentry::ClientInitGuard, bool) {
+    let dsn = std::env::var("SENTRY_DSN")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let dsn_configured = dsn.is_some();
+    let guard = sentry::init(sentry::ClientOptions {
+        dsn,
         release: option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from),
         environment: std::env::var("SENTRY_ENVIRONMENT").ok().map(Cow::from),
         // Never attach default PII (IP, cookies, request bodies). This is a
@@ -252,7 +263,34 @@ fn init_sentry() -> sentry::ClientInitGuard {
         // API keys, emails and on-chain addresses before events leave the host.
         before_send: Some(Arc::new(evm::telemetry::scrub_event)),
         ..Default::default()
-    })
+    });
+    (guard, dsn_configured)
+}
+
+/// Log whether error reporting is on, at INFO, always — never the DSN
+/// itself. In the `mainnet` environment, no DSN is a startup error: the
+/// monitor is the component that already failed silently once, and must not
+/// also run with reporting silently off. Every other environment (including
+/// unset) logs and continues.
+fn report_sentry_status(dsn_configured: bool) -> anyhow::Result<()> {
+    let environment = std::env::var("SENTRY_ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
+    match evm::telemetry::reporting_status(dsn_configured, &environment) {
+        evm::telemetry::ReportingStatus::Enabled => {
+            info!(environment = %environment, "error reporting enabled");
+        }
+        evm::telemetry::ReportingStatus::DisabledPermitted => {
+            info!(
+                environment = %environment,
+                "error reporting DISABLED (no DSN configured); permitted outside mainnet"
+            );
+        }
+        evm::telemetry::ReportingStatus::DisabledRefused => {
+            anyhow::bail!(
+                "error reporting DISABLED (no DSN configured) while environment=mainnet; refusing to start"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
