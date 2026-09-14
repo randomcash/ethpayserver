@@ -153,9 +153,14 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// unwatching. The server-side mitigation is
     /// `InvoiceCleanupService::paid_unwatch_grace_period_secs`, which keeps a
     /// just-paid address watched for a while after confirmation specifically
-    /// so this scan can still find it if a deep reorg follows quickly. That
-    /// narrows the gap for the realistic window; it does not close it for a
-    /// reorg arriving after the grace period elapses.
+    /// so this scan can still find it if a deep reorg follows quickly, floored
+    /// per chain by `ChainConfig::min_paid_unwatch_grace_period_secs` rather
+    /// than trusting one flat number for every chain. That narrows the gap
+    /// for the realistic window; it does not close it for a reorg arriving
+    /// after the effective grace period elapses — closing it for good would
+    /// need the server to hand the monitor the specific DB candidate set for
+    /// a second round of validation, which the command/event bridge does not
+    /// support today.
     async fn find_survived_tx_hashes(&self, from: u64, to: u64) -> EvmResult<Vec<B256>> {
         let watched = self.watched.read().await;
         if watched.is_empty() {

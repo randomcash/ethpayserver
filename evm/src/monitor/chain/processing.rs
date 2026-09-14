@@ -44,6 +44,19 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 // — the same fail-closed, free-retry pattern `handle_reorg`
                 // uses for re-validation failures.
                 match self.source.get_block_hash(last_num).await {
+                    // `min(last_num, block.number)` is a best-effort guess,
+                    // not a verified fork point: this call only tells us
+                    // `last_num`'s canonical hash changed, and for a block
+                    // arriving *behind* `last_num` (rather than the gap-ahead
+                    // case this branch mainly exists for) we have no recorded
+                    // hash below `last_num` to check against. If the true
+                    // fork is deeper than `block.number`, this under-guesses
+                    // it and misses candidates between the true fork and
+                    // `block.number` — the dangerous direction. Closing that
+                    // would need retained per-block history to walk back
+                    // through, which this monitor does not keep; accepted as
+                    // residual scope for the rare backward-jump case (see
+                    // `test_reorg_backward_jump_guesses_fork_block_from_incoming_block_number`).
                     Ok(Some(hash)) if hash != last_hash => Some(last_num.min(block.number)),
                     Ok(_) => None,
                     Err(e) => {

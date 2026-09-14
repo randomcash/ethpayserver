@@ -188,6 +188,27 @@ impl ChainConfig {
         self.explorer_url
             .replace("/tx/{tx}", &format!("/address/{}", address))
     }
+
+    /// Minimum time a confirmed payment's address should stay watched before
+    /// `InvoiceCleanupService` is allowed to unwatch it (RCS-295).
+    ///
+    /// A reorg re-validates candidates by re-scanning currently watched
+    /// addresses, so unwatching too soon after confirmation makes a
+    /// relocated-but-still-paid transaction indistinguishable from a
+    /// genuinely gone one. `confirmations_required * block_time_secs` is
+    /// this chain's own estimate of how long it takes to reach the depth we
+    /// already treat as final; a reorg reaching that deep *again* after
+    /// confirmation is the tail event RCS-295 exists to catch, so the floor
+    /// here doubles it rather than pulling a chain-agnostic number out of
+    /// thin air. This is a floor, not the actual grace period — callers
+    /// combine it with their own configured value (typically much larger)
+    /// via `max`, so it only bites for a chain whose confirmations/block
+    /// time make the operator's flat default too thin.
+    pub fn min_paid_unwatch_grace_period_secs(&self) -> u64 {
+        (self.confirmations_required as u64)
+            .saturating_mul(self.block_time_secs)
+            .saturating_mul(2)
+    }
 }
 
 /// Ethereum Mainnet configuration.
@@ -421,5 +442,16 @@ mod tests {
                 assert_eq!(network.chain_id(), config.chain_id);
             }
         }
+    }
+
+    #[test]
+    fn test_min_paid_unwatch_grace_period_is_double_the_confirmation_time() {
+        // Polygon: 128 confirmations * 2s/block * 2 = 512s.
+        assert_eq!(POLYGON.min_paid_unwatch_grace_period_secs(), 512);
+        // zkSync: 1 confirmation * 1s/block * 2 = 2s — a much smaller floor,
+        // since its single confirmation is backed by a ZK validity proof
+        // rather than probabilistic depth; the flat operator default (not
+        // computed here) is what actually protects it.
+        assert_eq!(ZKSYNC.min_paid_unwatch_grace_period_secs(), 2);
     }
 }

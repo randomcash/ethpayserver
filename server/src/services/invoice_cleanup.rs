@@ -74,6 +74,15 @@ pub struct CleanupConfig {
     /// retracted — the "opposite error" RCS-295 warns about. This keeps the
     /// address watched long enough to cover the realistic window in which a
     /// deep reorg would be detected and re-validated.
+    ///
+    /// This one value is a flat default across every chain, which is not by
+    /// itself a per-chain reorg-depth assumption — `effective_paid_unwatch_grace_period_secs`
+    /// raises it to `ChainConfig::min_paid_unwatch_grace_period_secs` for any
+    /// chain whose own confirmation depth and block time call for more than
+    /// this default gives it, rather than trusting one wall-clock number to
+    /// fit every chain. It still does not make the window unbounded: a reorg
+    /// arriving after the effective grace period has elapsed is a residual
+    /// risk this service accepts, not one it closes.
     pub paid_unwatch_grace_period_secs: u64,
 }
 
@@ -369,8 +378,8 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         Ok(count)
     }
 
-    /// Whether `invoice_id` has a payment that confirmed within
-    /// `paid_unwatch_grace_period_secs` of now.
+    /// Whether `invoice_id` has a payment that confirmed within its
+    /// effective `paid_unwatch_grace_period_secs` of now.
     async fn within_paid_grace_period(&self, invoice_id: &str) -> Result<bool, CleanupError> {
         let payments = PaymentReader::get_for_invoice(
             &*self.data_service,
@@ -378,11 +387,30 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         )
         .await?;
 
-        let grace = chrono::Duration::seconds(self.config.paid_unwatch_grace_period_secs as i64);
         let now = chrono::Utc::now();
-        Ok(payments
-            .iter()
-            .any(|p| p.confirmed_at.is_some_and(|c| now - c < grace)))
+        Ok(payments.iter().any(|p| {
+            p.confirmed_at.is_some_and(|c| {
+                let grace = chrono::Duration::seconds(
+                    self.effective_paid_unwatch_grace_period_secs(&p.chain_id) as i64,
+                );
+                now - c < grace
+            })
+        }))
+    }
+
+    /// The configured `paid_unwatch_grace_period_secs`, raised to this
+    /// chain's own minimum if the configured value is too thin for it — see
+    /// `ChainConfig::min_paid_unwatch_grace_period_secs` for why. A single
+    /// flat default tuned for one chain isn't automatically adequate for
+    /// every chain this server watches, so the floor is derived per chain
+    /// rather than left an implicit constant.
+    fn effective_paid_unwatch_grace_period_secs(&self, chain_id: &types::ChainId) -> u64 {
+        let floor = chain_id
+            .evm_chain_id()
+            .and_then(evm::get_any_chain_config)
+            .map(evm::ChainConfig::min_paid_unwatch_grace_period_secs)
+            .unwrap_or(0);
+        self.config.paid_unwatch_grace_period_secs.max(floor)
     }
 
     /// Cleanup addresses for cancelled invoices.
@@ -635,6 +663,7 @@ mod tests {
     /// address, `confirmed_at` set `age_secs` in the past. Returns the
     /// service under test plus the address to assert on.
     async fn paid_invoice_with_watched_address(
+        chain_id: ChainId,
         paid_unwatch_grace_period_secs: u64,
         age_secs: i64,
     ) -> (
@@ -642,7 +671,6 @@ mod tests {
         String,
     ) {
         let ds = Arc::new(InMemoryDataService::new());
-        let chain_id = ChainId::parse("eip155:1").unwrap();
         let address = "0x1111111111111111111111111111111111111111".to_string();
 
         let invoice_id = InvoiceId::new();
@@ -730,11 +758,32 @@ mod tests {
     /// retract a payment that is still genuinely on chain.
     #[tokio::test]
     async fn recently_confirmed_payment_keeps_its_address_watched() {
-        let (service, _address) = paid_invoice_with_watched_address(3600, 5).await;
+        let chain_id = ChainId::parse("eip155:1").unwrap();
+        let (service, _address) = paid_invoice_with_watched_address(chain_id, 3600, 5).await;
 
         let stats = service.cleanup_addresses().await.unwrap();
 
         assert_eq!(stats.paid, 0, "address unwatched inside its grace period");
+        assert!(service.evm_monitor.unwatched.lock().unwrap().is_empty());
+    }
+
+    /// A chain whose own confirmation depth and block time call for a longer
+    /// buffer than the operator's flat `paid_unwatch_grace_period_secs` must
+    /// still keep the address watched — the flat default is not itself a
+    /// per-chain reorg-depth assumption (Polygon needs 128 confirmations at
+    /// 2s/block; `min_paid_unwatch_grace_period_secs` floors the effective
+    /// grace period at twice that, 512s, well past the 60s configured here).
+    #[tokio::test]
+    async fn chain_with_deep_confirmations_gets_a_longer_floor_than_the_flat_default() {
+        let chain_id = ChainId::parse("eip155:137").unwrap(); // Polygon
+        let (service, _address) = paid_invoice_with_watched_address(chain_id, 60, 300).await;
+
+        let stats = service.cleanup_addresses().await.unwrap();
+
+        assert_eq!(
+            stats.paid, 0,
+            "300s is past the flat 60s default but inside Polygon's 512s floor"
+        );
         assert!(service.evm_monitor.unwatched.lock().unwrap().is_empty());
     }
 
@@ -743,7 +792,8 @@ mod tests {
     /// paid address watched forever.
     #[tokio::test]
     async fn payment_confirmed_past_the_grace_period_gets_unwatched() {
-        let (service, address) = paid_invoice_with_watched_address(60, 3600).await;
+        let chain_id = ChainId::parse("eip155:1").unwrap();
+        let (service, address) = paid_invoice_with_watched_address(chain_id, 60, 3600).await;
 
         let stats = service.cleanup_addresses().await.unwrap();
 

@@ -419,6 +419,54 @@ async fn test_reorg_detected_across_a_block_gap() {
     let _ = monitor_handle.await;
 }
 
+/// A block arriving at or behind an already-processed height (not the
+/// documented gap-*forward* case above) takes the same continuity-check
+/// branch, but the only fact it can establish is that the chain's current
+/// hash at `last_num` no longer matches what was recorded — it has no record
+/// of any hash below `last_num` to compare against. So `fork_block` is a
+/// best-effort guess (the lower of `last_num` and the incoming block's own
+/// number), not a verified bound: it is only correct if the true fork point
+/// happens to be at or above the incoming block's number. A fork deeper than
+/// that is guessed too shallow, under-including candidates — documented and
+/// accepted as residual scope (see the comment above this branch in
+/// `process_block`), since closing it needs retained per-block history this
+/// monitor does not keep. This test pins that guess so a future change to it
+/// is deliberate, not accidental.
+#[tokio::test]
+async fn test_reorg_backward_jump_guesses_fork_block_from_incoming_block_number() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    test_source.push_block(make_block(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The chain's canonical hash at 100 no longer matches, and rather than a
+    // forward gap, the next notification is for an *earlier* height (98) -
+    // e.g. a provider re-delivering after reconnecting mid-reorg.
+    test_source.set_block_hash(100, B256::random());
+    test_source.push_block(make_block(98));
+
+    let reorg = wait_for_reorg(&mut event_rx).await;
+    assert_eq!(
+        reorg.fork_block, 98,
+        "guess is min(last_num, incoming) = 98"
+    );
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+}
+
 /// If the RPC call backing the gap-continuity check itself fails, that must
 /// not be treated the same as "checked, no reorg": falling through to `None`
 /// would advance `last_block` past block 100 as if continuity were confirmed,
