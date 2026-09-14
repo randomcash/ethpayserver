@@ -99,6 +99,7 @@ enum EntryStatus {
 /// The manifest itself lives in [`PluginRegistry`], not here — this only
 /// needs `max_failures`, resolved once at registration time.
 struct PluginEntry {
+    id: PluginId,
     instance: Mutex<PluginInstance>,
     failures: AtomicU32,
     status: RwLock<EntryStatus>,
@@ -106,8 +107,9 @@ struct PluginEntry {
 }
 
 impl PluginEntry {
-    fn new(instance: PluginInstance, max_failures: u32) -> Self {
+    fn new(id: PluginId, instance: PluginInstance, max_failures: u32) -> Self {
         Self {
+            id,
             instance: Mutex::new(instance),
             failures: AtomicU32::new(0),
             status: RwLock::new(EntryStatus::Enabled),
@@ -132,9 +134,20 @@ impl PluginEntry {
     /// Records a failed call. Once `max_failures` consecutive failures have
     /// been seen, disables the plugin and remembers why — the reason an
     /// admin needs to see to fix it, not just "disabled".
+    ///
+    /// Every failure is also logged here, not just counted: `status()` is a
+    /// pull the admin has to know to make, so it alone does not satisfy
+    /// "failures logged" for an action, which has no other observer at all.
     fn record_failure(&self, reason: String) {
+        tracing::warn!(plugin_id = %self.id, reason = %reason, "plugin call failed");
         let failures = self.failures.fetch_add(1, Ordering::SeqCst) + 1;
         if failures >= self.max_failures {
+            tracing::error!(
+                plugin_id = %self.id,
+                reason = %reason,
+                consecutive_failures = failures,
+                "plugin disabled after repeated failure"
+            );
             *self.status.write().unwrap_or_else(PoisonError::into_inner) =
                 EntryStatus::Disabled { reason };
         }
@@ -220,7 +233,7 @@ impl PluginHost {
             .unwrap_or_else(PoisonError::into_inner)
             .register(manifest)?;
 
-        let entry = Arc::new(PluginEntry::new(instance, self.max_failures));
+        let entry = Arc::new(PluginEntry::new(id.clone(), instance, self.max_failures));
         self.entries
             .write()
             .unwrap_or_else(PoisonError::into_inner)
@@ -254,7 +267,10 @@ impl PluginHost {
         };
         let arg = match serde_json::to_vec(req) {
             Ok(arg) => arg,
-            Err(_) => return,
+            Err(e) => {
+                entry.record_failure(format!("could not serialise action argument: {e}"));
+                return;
+            }
         };
         let export = export.to_string();
         let ticks = self.engine.ticks_for(self.call_deadline);
@@ -309,10 +325,9 @@ impl PluginHost {
         let arg = match serde_json::to_vec(req) {
             Ok(arg) => arg,
             Err(e) => {
-                return FilterOutcome::could_not_run(
-                    failure_mode,
-                    format!("could not serialise filter argument: {e}"),
-                );
+                let reason = format!("could not serialise filter argument: {e}");
+                entry.record_failure(reason.clone());
+                return FilterOutcome::could_not_run(failure_mode, reason);
             }
         };
         let export = export.to_string();
@@ -380,6 +395,19 @@ mod tests {
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     struct Ping {
         n: u32,
+    }
+
+    /// A request that always fails to serialise — standing in for whatever
+    /// real `Req` type might one day fail `serde_json::to_vec`, to prove the
+    /// failure is actually recorded rather than silently swallowed.
+    struct AlwaysFailsToSerialize;
+
+    impl Serialize for AlwaysFailsToSerialize {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom(
+                "test-forced serialization failure",
+            ))
+        }
     }
 
     fn host(max_failures: u32) -> PluginHost {
@@ -596,6 +624,57 @@ mod tests {
         // Failures stop accumulating past disablement: nothing after
         // disablement ever reached wasmtime to fail again.
         assert_eq!(host.status(&id).unwrap().consecutive_failures, 2);
+    }
+
+    /// A request that fails to serialise never reaches wasmtime, but it is
+    /// still a real failure to run the call — it must count toward
+    /// `max_failures` and show up via `status()`, not vanish silently.
+    #[tokio::test]
+    async fn run_action_serialization_failure_counts_as_a_failure() {
+        let host = host(1);
+        let id = PluginId::new("cash.random.badactionarg").unwrap();
+        host.register(
+            manifest("cash.random.badactionarg", "action", None),
+            &fixtures::echo_module(),
+        )
+        .unwrap();
+
+        host.run_action(&id, "call", &AlwaysFailsToSerialize);
+
+        let status = host.status(&id).unwrap();
+        assert!(
+            !status.enabled,
+            "a call that never made it to the plugin must still count as a failure"
+        );
+        assert!(status.disabled_reason.unwrap().contains("serialise"));
+    }
+
+    /// Same swallowed-failure bug, filter side: a serialisation failure must
+    /// both apply the failure mode to the caller *and* be recorded against
+    /// the plugin, not just the former.
+    #[tokio::test]
+    async fn run_filter_serialization_failure_counts_as_a_failure() {
+        let host = host(1);
+        let id = PluginId::new("cash.random.badfilterarg").unwrap();
+        host.register(
+            manifest("cash.random.badfilterarg", "filter", None),
+            &fixtures::echo_module(),
+        )
+        .unwrap();
+
+        let outcome = host
+            .run_filter::<_, Ping>(&id, "call", &AlwaysFailsToSerialize)
+            .await;
+
+        assert!(
+            matches!(outcome, FilterOutcome::CouldNotRun { allowed: false, .. }),
+            "got {outcome:?}"
+        );
+        let status = host.status(&id).unwrap();
+        assert!(
+            !status.enabled,
+            "a call that never made it to the plugin must still count as a failure"
+        );
     }
 
     #[test]
