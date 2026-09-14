@@ -29,6 +29,7 @@ pub mod http_metrics;
 pub mod idempotency;
 pub mod invoices;
 pub mod payouts;
+pub mod plugins;
 pub mod rate_limit;
 pub mod rates;
 pub mod refunds;
