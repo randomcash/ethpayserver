@@ -185,3 +185,81 @@ async fn test_handle_payment_detected_two_transfers_in_one_tx_both_survive() {
     assert!(amounts.contains(&first_amount.to_string()));
     assert!(amounts.contains(&second_amount.to_string()));
 }
+
+/// RCS-282 follow-up: a native transfer (`log_index: None`) and an ERC20
+/// transfer whose *real* log index happens to be 0 can share a `tx_hash` -
+/// e.g. a contract that receives ETH directly at the top level and, in the
+/// same transaction, emits a Transfer log at index 0 to a different watched
+/// address. If native transfers were keyed on `tx_index = 0`, this would
+/// collide with exactly that ERC20 transfer and silently overwrite it. The
+/// fix keys native transfers on a -1 sentinel instead, which no real log
+/// index can ever produce.
+#[tokio::test]
+async fn test_handle_payment_detected_native_and_log_index_zero_both_survive() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    let store_id = StoreId::new();
+    create_test_invoice(&ds, &invoice_id, store_id).await;
+
+    let shared_tx_hash = B256::repeat_byte(0xef);
+
+    let native_amount = U256::from(500000000000000000u64); // 0.5 ETH
+    let erc20_amount = U256::from(1_000_000u64);
+
+    let native_event = PaymentDetected {
+        chain_id: 1,
+        invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+        payment_address: Address::repeat_byte(0x01),
+        amount: native_amount,
+        tx_hash: shared_tx_hash,
+        block_number: 12345678,
+        block_hash: B256::ZERO,
+        log_index: None,
+        is_native: true,
+        token_address: None,
+        from_address: Address::repeat_byte(0xab),
+        confirmations: 1,
+        required_confirmations: 12,
+        detected_at: Utc::now(),
+    };
+
+    let erc20_event = PaymentDetected {
+        chain_id: 1,
+        invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+        payment_address: Address::repeat_byte(0x02),
+        amount: erc20_amount,
+        tx_hash: shared_tx_hash,
+        block_number: 12345678,
+        block_hash: B256::ZERO,
+        log_index: Some(0),
+        is_native: false,
+        token_address: Some(Address::repeat_byte(0x03)),
+        from_address: Address::repeat_byte(0xef),
+        confirmations: 1,
+        required_confirmations: 12,
+        detected_at: Utc::now(),
+    };
+
+    consumer
+        .handle_payment_detected(native_event)
+        .await
+        .unwrap();
+    consumer.handle_payment_detected(erc20_event).await.unwrap();
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        payments.len(),
+        2,
+        "a native transfer and an ERC20 transfer at log_index 0 sharing a \
+         tx_hash must both survive, not collide on tx_index"
+    );
+
+    let amounts: std::collections::HashSet<_> = payments.iter().map(|p| p.amount.clone()).collect();
+    assert!(amounts.contains(&native_amount.to_string()));
+    assert!(amounts.contains(&erc20_amount.to_string()));
+}
