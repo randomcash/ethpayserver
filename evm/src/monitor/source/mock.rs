@@ -7,7 +7,7 @@
 //! This lets a test retain a handle for injection while `ChainMonitor` owns another.
 
 use super::{BlockNotification, BlockSource, BlockStream, LogFilter, NativeTransfer, SourceStatus};
-use crate::error::EvmResult;
+use crate::error::{EvmError, EvmResult};
 use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::Block;
 use async_trait::async_trait;
@@ -31,6 +31,10 @@ struct Inner {
     /// continuity across a gap.
     block_hashes: SyncRwLock<HashMap<u64, B256>>,
     block_tx: broadcast::Sender<EvmResult<BlockNotification>>,
+    /// When set, `find_native_transfers_to` returns this error instead of
+    /// looking anything up. Lets a test simulate an RPC failure during reorg
+    /// re-validation without disturbing ordinary payment detection.
+    find_native_transfers_error: SyncRwLock<Option<String>>,
 }
 
 /// A mock block source for testing payment detection.
@@ -65,8 +69,15 @@ impl MockBlockSource {
                 logs: RwLock::new(HashMap::new()),
                 block_hashes: SyncRwLock::new(HashMap::new()),
                 block_tx,
+                find_native_transfers_error: SyncRwLock::new(None),
             }),
         }
+    }
+
+    /// Make `find_native_transfers_to` fail with `message` until cleared with
+    /// `None`. Simulates an RPC error during reorg re-validation.
+    pub fn set_find_native_transfers_error(&self, message: Option<&str>) {
+        *self.inner.find_native_transfers_error.write().unwrap() = message.map(ToString::to_string);
     }
 
     /// Push a block notification to all subscribers.
@@ -206,6 +217,16 @@ impl BlockSource for MockBlockSource {
         block_number: u64,
         addresses: &[Address],
     ) -> EvmResult<Vec<NativeTransfer>> {
+        if let Some(message) = self
+            .inner
+            .find_native_transfers_error
+            .read()
+            .unwrap()
+            .clone()
+        {
+            return Err(EvmError::Rpc(message));
+        }
+
         let transfers = self.inner.native_transfers.read().await;
         Ok(transfers
             .get(&block_number)

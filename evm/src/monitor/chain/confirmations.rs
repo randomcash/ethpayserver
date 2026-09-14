@@ -92,21 +92,26 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
 
         let depth = new_block.number.saturating_sub(fork_block) + 1;
 
-        let survived_tx_hashes = match self
+        // If we can't ask the chain what survived, we must not report the
+        // reorg at all: the caller treats an unlisted candidate as "gone" and
+        // retracts it, so an empty list here would silently retract every
+        // payment at or above `fork_block` on a mere RPC hiccup — the exact
+        // "opposite error" the ticket warns about, just triggered by a
+        // transient failure instead of a naive implementation. Propagating
+        // the error instead leaves `last_block`/`last_block_hash` untouched
+        // (see `process_block`), so the same reorg is re-evaluated, and
+        // re-validated, on the next block.
+        let survived_tx_hashes = self
             .find_survived_tx_hashes(fork_block, new_block.number)
             .await
-        {
-            Ok(hashes) => hashes,
-            Err(e) => {
+            .inspect_err(|e| {
                 warn!(
                     chain_id = self.chain_id(),
                     fork_block,
                     error = %e,
-                    "failed to re-validate reorg against the chain; nothing reported as survived"
+                    "failed to re-validate reorg against the chain; will retry on the next block"
                 );
-                Vec::new()
-            }
-        };
+            })?;
 
         let event = ReorgDetected {
             chain_id: self.chain_id(),

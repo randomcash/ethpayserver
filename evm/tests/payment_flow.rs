@@ -562,3 +562,100 @@ async fn test_reorg_wider_than_scan_cap_still_finds_a_relocated_transaction() {
     monitor.stop().await.unwrap();
     let _ = monitor_handle.await;
 }
+
+/// When re-validation can't reach the chain (RPC error), the monitor must not
+/// report the reorg at all — reporting it with an empty `survived_tx_hashes`
+/// would make the caller retract every candidate payment, on a mere hiccup.
+/// This is the same "opposite error" the naive fix made, just triggered by a
+/// transient failure instead of a naive implementation.
+///
+/// It must also retry: once the chain is reachable again, the very next
+/// block re-evaluates the same reorg and reports it correctly.
+#[tokio::test]
+async fn test_reorg_revalidation_failure_reports_nothing_and_retries() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let invoice_id = uuid::Uuid::new_v4();
+    let payment_amount = U256::from(50_000_000_000_000_000u64);
+    let tx_hash = B256::random();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id,
+            expected_amount: Some(payment_amount),
+            token_contract: None,
+            created_at: Utc::now(),
+            last_known_balance: U256::ZERO,
+        })
+        .await;
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    // Block 100 is processed normally: this must succeed even though the
+    // fault we inject below targets the very same RPC call, so the fault is
+    // armed only after detection has already used it once.
+    test_source
+        .set_balance(payment_address, payment_amount)
+        .await;
+    test_source
+        .add_native_transfer(
+            100,
+            make_native_transfer(sender, payment_address, payment_amount, tx_hash),
+        )
+        .await;
+    let block_100 = make_block(100);
+    let block_100_hash = block_100.hash;
+    test_source.push_block(block_100);
+
+    let detected = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("timeout waiting for PaymentDetected")
+        .expect("channel error");
+    assert!(matches!(detected, MonitorEvent::PaymentDetected(_)));
+
+    // Now a reorg arrives, but the chain is unreachable for re-validation.
+    test_source.set_find_native_transfers_error(Some("mock RPC timeout"));
+    let forking_block = make_block_with_parent(101, B256::random(), B256::random());
+    assert_ne!(forking_block.parent_hash, block_100_hash);
+    test_source.push_block(forking_block.clone());
+
+    // A MonitorError must appear instead of a ReorgDetected: reporting the
+    // reorg with nothing marked as survived would retract a payment we never
+    // actually re-validated.
+    let after_failure = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("timeout waiting for MonitorError")
+        .expect("channel error");
+    assert!(
+        matches!(after_failure, MonitorEvent::MonitorError { .. }),
+        "expected MonitorError after a failed re-validation, got {:?}",
+        after_failure
+    );
+
+    // The chain is reachable again. Re-pushing the same block must retry and
+    // now succeed, because the failed attempt never advanced past block 100.
+    test_source.set_find_native_transfers_error(None);
+    test_source.push_block(forking_block);
+
+    let reorg = wait_for_reorg(&mut event_rx).await;
+    assert_eq!(
+        reorg.fork_block, 100,
+        "the retry must still find the same fork point"
+    );
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+}

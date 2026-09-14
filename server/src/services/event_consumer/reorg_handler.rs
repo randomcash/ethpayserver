@@ -160,13 +160,15 @@ impl<
 /// Whether `hash`, as the monitor observed it on chain, names the same
 /// transaction as `stored`, as persisted in `payments.tx_hash`.
 ///
-/// `payments.tx_hash` is written with this same `format!("{:#x}", …)` in
-/// `payment_handler.rs`'s `handle_payment_detected`. If that write path ever
-/// changes representation without a matching change here, every comparison
-/// silently fails and this whole guard degrades to "nothing survived" with no
-/// error — see `test_reorg_does_not_retract_a_survived_transaction`, which
-/// pins the write path's literal output rather than re-deriving it with this
-/// same call.
+/// Parses `stored` back into a `B256` and compares bytes, rather than
+/// formatting `hash` to a string and comparing text: two independently
+/// formatted strings degrade silently the moment either representation
+/// drifts (case, `0x` prefix, …), and a silent mismatch here means "nothing
+/// survived" — retracting a payment that is still genuinely on chain. A
+/// parse failure means `stored` isn't a well-formed hash at all, which is a
+/// data problem no string comparison would have caught either.
 fn tx_hash_eq(hash: &evm::B256, stored: &str) -> bool {
-    format!("{:#x}", hash) == stored
+    stored
+        .parse::<evm::B256>()
+        .is_ok_and(|parsed| parsed == *hash)
 }
