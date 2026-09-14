@@ -389,3 +389,25 @@ fn healthy_chain_reports_no_error() {
     assert_eq!(rpcs["1"].status, "ok");
     assert!(rpcs["1"].error.is_none());
 }
+
+#[test]
+fn connected_with_no_processed_block_reports_that_not_a_bare_unhealthy() {
+    // Connected but neither block number is known yet - the fallback arm of
+    // `build_rpc_map`'s Connected match, otherwise never exercised by a test.
+    let chain = ChainHealth {
+        chain_id: 11_155_111,
+        chain_name: "Sepolia".to_string(),
+        status: SourceStatus::Connected,
+        current_block: None,
+        last_processed_block: None,
+        watched_addresses: 0,
+        is_healthy: false,
+    };
+    let rpcs = build_rpc_map(vec![chain], 5);
+    let rpc = &rpcs["11155111"];
+    assert_eq!(rpc.status, "error");
+    assert_eq!(
+        rpc.error.as_deref(),
+        Some("connected but has not processed a block yet")
+    );
+}

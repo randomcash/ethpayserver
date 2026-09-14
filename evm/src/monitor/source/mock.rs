@@ -7,13 +7,13 @@
 //! This lets a test retain a handle for injection while `ChainMonitor` owns another.
 
 use super::{BlockNotification, BlockSource, BlockStream, LogFilter, NativeTransfer, SourceStatus};
-use crate::error::EvmResult;
+use crate::error::{EvmError, EvmResult};
 use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::Block;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -25,11 +25,24 @@ struct Inner {
     balances: RwLock<HashMap<Address, U256>>,
     native_transfers: RwLock<HashMap<u64, Vec<NativeTransfer>>>,
     logs: RwLock<HashMap<u64, Vec<alloy::rpc::types::Log>>>,
-    block_tx: broadcast::Sender<EvmResult<BlockNotification>>,
-    /// How many times `subscribe_blocks` has been called. Lets a test assert
+    /// Behind a `Mutex` (not the `tokio::sync::RwLock` used elsewhere) because
+    /// `kill_connection` replaces it synchronously and `status()` - part of
+    /// the `BlockSource` trait - is not async.
+    block_tx: Mutex<broadcast::Sender<EvmResult<BlockNotification>>>,
+    /// How many times `subscribe_blocks` has succeeded. Lets a test assert
     /// that a stalled monitor actually reconnected, not just that it kept
     /// running.
     subscribe_count: AtomicU64,
+    /// Last status a `subscribe_blocks` attempt produced. Like the real
+    /// `RpcBlockSource`, this only changes as a side effect of an actual
+    /// subscribe attempt - not the instant `reachable` flips - so a test
+    /// cannot fake recovery by setting this directly; it has to go through
+    /// the same path a stalled watchdog does.
+    status: Mutex<SourceStatus>,
+    /// Whether the next `subscribe_blocks` attempt succeeds. Separate from
+    /// `status` so a test can simulate the endpoint going down and coming
+    /// back independently of when the monitor notices.
+    reachable: AtomicBool,
 }
 
 /// A mock block source for testing payment detection.
@@ -62,8 +75,10 @@ impl MockBlockSource {
                 balances: RwLock::new(HashMap::new()),
                 native_transfers: RwLock::new(HashMap::new()),
                 logs: RwLock::new(HashMap::new()),
-                block_tx,
+                block_tx: Mutex::new(block_tx),
                 subscribe_count: AtomicU64::new(0),
+                status: Mutex::new(SourceStatus::Connected),
+                reachable: AtomicBool::new(true),
             }),
         }
     }
@@ -79,7 +94,38 @@ impl MockBlockSource {
         self.inner
             .current_block
             .store(block.number, Ordering::SeqCst);
-        let _ = self.inner.block_tx.send(Ok(block));
+        let _ = self
+            .inner
+            .block_tx
+            .lock()
+            .expect("mock block_tx mutex poisoned")
+            .send(Ok(block));
+    }
+
+    /// Kill the RPC endpoint: every `subscribe_blocks` attempt fails (and
+    /// reports `status() == Disconnected`, exactly like `RpcBlockSource`
+    /// does on a failed connect) until [`Self::restore_connection`]. Also
+    /// severs every stream already handed out, the way a dropped WebSocket
+    /// would: an existing subscriber sees its stream end for good, and only
+    /// a fresh, successful `subscribe_blocks` call sees blocks pushed after
+    /// this point.
+    pub fn kill_connection(&self) {
+        self.inner.reachable.store(false, Ordering::SeqCst);
+        let (new_tx, _) = broadcast::channel(256);
+        *self
+            .inner
+            .block_tx
+            .lock()
+            .expect("mock block_tx mutex poisoned") = new_tx;
+    }
+
+    /// Restore the RPC endpoint. `status()` does not move back to
+    /// `Connected` until something actually calls `subscribe_blocks` again -
+    /// same as the real source, whose status is only ever touched inside a
+    /// subscribe attempt - so recovery still depends on the monitor retrying
+    /// on its own.
+    pub fn restore_connection(&self) {
+        self.inner.reachable.store(true, Ordering::SeqCst);
     }
 
     /// Set the balance for an address.
@@ -122,12 +168,37 @@ impl BlockSource for MockBlockSource {
     }
 
     fn status(&self) -> SourceStatus {
-        SourceStatus::Connected
+        self.inner
+            .status
+            .lock()
+            .expect("mock status mutex poisoned")
+            .clone()
     }
 
     async fn subscribe_blocks(&self) -> EvmResult<BlockStream> {
+        if !self.inner.reachable.load(Ordering::SeqCst) {
+            *self
+                .inner
+                .status
+                .lock()
+                .expect("mock status mutex poisoned") = SourceStatus::Disconnected;
+            return Err(EvmError::Connection(
+                "mock source is not connected".to_string(),
+            ));
+        }
+        *self
+            .inner
+            .status
+            .lock()
+            .expect("mock status mutex poisoned") = SourceStatus::Connected;
+
         self.inner.subscribe_count.fetch_add(1, Ordering::SeqCst);
-        let rx = self.inner.block_tx.subscribe();
+        let rx = self
+            .inner
+            .block_tx
+            .lock()
+            .expect("mock block_tx mutex poisoned")
+            .subscribe();
         let stream = BroadcastStream::new(rx).filter_map(|result| match result {
             Ok(Ok(block)) => Some(Ok(block)),
             Ok(Err(e)) => Some(Err(e)),

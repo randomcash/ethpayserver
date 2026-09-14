@@ -115,28 +115,32 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         Ok(())
     }
 
-    /// Notice a block-processing loop that has silently stopped, and reconnect it.
+    /// Notice an unhealthy chain - stalled or disconnected - and reconnect it.
     ///
-    /// A dropped or half-open WebSocket doesn't always deliver a close frame -
-    /// sometimes the subscription just stops yielding blocks forever, with no
-    /// error to log and nothing to select! on. That leaves the RPC reachable
-    /// (health checks that ask it directly still succeed) while the block
-    /// stream is dead, which is indistinguishable from a healthy idle chain
-    /// unless something checks whether blocks are still arriving. This runs on
-    /// the confirmation-check timer because that's the one thing already on a
-    /// clock here, and reuses `is_healthy`'s own lag check rather than
-    /// invent a second definition of "stalled".
+    /// Two failure shapes land here. A dropped or half-open WebSocket doesn't
+    /// always deliver a close frame - sometimes the subscription just stops
+    /// yielding blocks forever, with no error to log and nothing to select!
+    /// on, leaving the RPC reachable (health checks that ask it directly
+    /// still succeed) while the block stream is dead. Or the connection
+    /// itself goes down (`Disconnected`/`Failed`), and nothing retries it:
+    /// `subscribe_blocks` is otherwise only ever called once, at startup.
+    /// Both cases are indistinguishable from a healthy chain unless something
+    /// checks, so this reuses `is_healthy` - which already covers "not
+    /// connected" and "connected but lagging" - rather than invent a second
+    /// definition of "unhealthy". This runs on the confirmation-check timer
+    /// because that's the one thing already on a clock here.
     async fn resubscribe_if_stalled(&self, block_stream: &mut BlockStream) -> EvmResult<()> {
         let health = self.get_health().await;
-        if health.status != SourceStatus::Connected || health.is_healthy {
+        if health.is_healthy {
             return Ok(());
         }
 
         error!(
             chain_id = self.chain_id(),
+            status = ?health.status,
             current_block = ?health.current_block,
             last_processed_block = ?health.last_processed_block,
-            "block processing stalled while RPC is reachable; resubscribing"
+            "chain unhealthy; resubscribing"
         );
 
         *block_stream = self.source.subscribe_blocks().await?;
