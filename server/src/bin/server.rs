@@ -36,7 +36,8 @@ async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
 
     // Initialize Sentry (no-op when SENTRY_DSN is unset)
-    let (_sentry_guard, sentry_dsn_configured) = init_sentry();
+    let (_sentry_guard, sentry_dsn_configured, sentry_environment) =
+        evm::telemetry::init_sentry(option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from));
 
     // Load configuration
     let config = Config::from_env()?;
@@ -47,7 +48,7 @@ async fn main() -> Result<()> {
     // Report whether error reporting is actually on. `tracing::info!` before
     // this point has no subscriber to write to, so this must come after
     // `init_tracing`, not next to `init_sentry`.
-    report_sentry_status(sentry_dsn_configured)?;
+    evm::telemetry::report_reporting_status(sentry_dsn_configured, &sentry_environment)?;
 
     // Initialize Prometheus metrics
     metrics::init_metrics()?;
@@ -301,55 +302,6 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&bind_addr).await?;
     axum::serve(listener, app).await?;
 
-    Ok(())
-}
-
-/// Initializes Sentry and reports whether a DSN was actually parsed — an
-/// unset or unparseable `SENTRY_DSN` both leave the client a no-op, and
-/// `dsn_configured` is what tells the caller which happened.
-fn init_sentry() -> (sentry::ClientInitGuard, bool) {
-    let dsn = std::env::var("SENTRY_DSN")
-        .ok()
-        .and_then(|s| s.parse().ok());
-    let dsn_configured = dsn.is_some();
-    let guard = sentry::init(sentry::ClientOptions {
-        dsn,
-        release: option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from),
-        environment: std::env::var("SENTRY_ENVIRONMENT").ok().map(Cow::from),
-        // Never attach default PII (IP, cookies, request bodies). This is a
-        // payment processor — see `evm::telemetry::scrub_event`.
-        send_default_pii: false,
-        // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
-        // API keys, emails and on-chain addresses before events leave the host.
-        before_send: Some(Arc::new(evm::telemetry::scrub_event)),
-        ..Default::default()
-    });
-    (guard, dsn_configured)
-}
-
-/// Log whether error reporting is on, at INFO, always — never the DSN
-/// itself. In the `mainnet` environment, no DSN is a startup error: a
-/// payment processor holding real funds must not run with reporting
-/// silently off. Every other environment (including unset) logs and
-/// continues.
-fn report_sentry_status(dsn_configured: bool) -> Result<()> {
-    let environment = std::env::var("SENTRY_ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
-    match evm::telemetry::reporting_status(dsn_configured, &environment) {
-        evm::telemetry::ReportingStatus::Enabled => {
-            tracing::info!(environment = %environment, "error reporting enabled");
-        }
-        evm::telemetry::ReportingStatus::DisabledPermitted => {
-            tracing::info!(
-                environment = %environment,
-                "error reporting DISABLED (no DSN configured); permitted outside mainnet"
-            );
-        }
-        evm::telemetry::ReportingStatus::DisabledRefused => {
-            anyhow::bail!(
-                "error reporting DISABLED (no DSN configured) while environment=mainnet; refusing to start"
-            );
-        }
-    }
     Ok(())
 }
 
