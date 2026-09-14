@@ -1,4 +1,4 @@
-//! Refunds are the merchant's job, not this server's (RCS-272).
+//! Refunds are the merchant's job, not this server's.
 //!
 //! `create_refund` used to check an amount and write a `Pending` row that
 //! nothing downstream would ever move — a promise the server could not keep,

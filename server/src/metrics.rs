@@ -102,11 +102,11 @@ fn describe_counters() {
     // Refund metrics
     //
     // No `initiated` counter here: `record_refund_initiated` was removed
-    // (RCS-272) along with its only caller when POST /invoices/{id}/refund
-    // stopped creating refund rows. Registering a description for a counter
-    // nothing increments would be the same "implies a capability" problem
-    // this ticket exists to fix, just in the metrics namespace instead of
-    // the API surface.
+    // along with its only caller when POST /invoices/{id}/refund stopped
+    // creating refund rows. Registering a description for a counter nothing
+    // increments would be the same "implies a capability" problem this
+    // change exists to fix, just in the metrics namespace instead of the API
+    // surface.
     describe_counter!(
         "ethpayserver_refunds_confirmed_total",
         "Total number of refunds confirmed"

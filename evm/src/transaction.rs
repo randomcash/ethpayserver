@@ -7,10 +7,10 @@
 //!
 //! ethpayserver is non-custodial by design: the server holds no spending key,
 //! refunds and payouts are the merchant's own responsibility, and nothing in
-//! the default build calls into this module (RCS-272). It exists, gated
-//! behind the `hot-wallet` feature, as reserved infrastructure for a possible
-//! future hot-wallet mode — a deliberate product decision that has not been
-//! made, not a capability that should reach a caller by accident.
+//! the default build calls into this module. It exists, gated behind the
+//! `hot-wallet` feature, as reserved infrastructure for a possible future
+//! hot-wallet mode — a deliberate product decision that has not been made,
+//! not a capability that should reach a caller by accident.
 
 use alloy::consensus::TxEnvelope;
 use alloy::network::{EthereumWallet, TransactionBuilder};

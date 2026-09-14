@@ -18,10 +18,10 @@ test-utils = []
 # Sentry `before_send` PII scrubber. Shared by the `server` and
 # Compiles evm::transaction, which can sign and broadcast outbound transfers
 # from a derived payment address. Off by default and not turned on anywhere:
-# the product is non-custodial (RCS-272) and refunds/payouts are the
-# merchant's job from their own wallet. Reserved for a possible future
-# hot-wallet mode, which is a deliberate product decision, not something this
-# flag should drift into on its own.
+# the product is non-custodial and refunds/payouts are the merchant's job
+# from their own wallet. Reserved for a possible future hot-wallet mode,
+# which is a deliberate product decision, not something this flag should
+# drift into on its own.
 hot-wallet = []
 # Sentry/errex `before_send` PII scrubber. Shared by the `server` and
 # `evmmonitor` binaries so both run one audited scrubber implementation.

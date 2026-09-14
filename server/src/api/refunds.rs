@@ -3,7 +3,7 @@
 //! POST /invoices/{invoice_id}/refund — refuses; refunds are the merchant's job.
 //! GET  /invoices/{invoice_id}/refunds — List refunds for an invoice.
 //!
-//! # Refunds are the merchant's job (RCS-272)
+//! # Refunds are the merchant's job
 //!
 //! This deployment is non-custodial: it derives payment addresses from a
 //! merchant's xpub and never holds the matching private key (see
