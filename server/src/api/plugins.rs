@@ -7,7 +7,9 @@
 //! "registered" into "reachable": each plugin's own router is nested under
 //! its [`PluginId`], which is validated (no path separators, no empty
 //! labels) as exactly what makes that prefix safe to reserve — see
-//! `payserver_plugin_api::PluginId`.
+//! `payserver_plugin_api::PluginId`. The `/plugins` prefix itself is applied
+//! by [`router()`], not left to whoever calls it, so the reservation is
+//! structural rather than a convention a future call site could forget.
 //!
 //! There is no plugin runtime yet (RCS-256/RCS-269 are the wasmtime slice),
 //! so nothing in this build can ask a loaded plugin for its own router.
@@ -21,7 +23,11 @@
 //! layer runs before the plugin's router at all, including for a sub-path
 //! the plugin itself does not recognize. It reuses [`AuthenticatedUser`],
 //! the exact extractor every core handler already goes through, so a plugin
-//! is held to the same authentication as the rest of the host.
+//! is held to the same authentication as the rest of the host. The
+//! authenticated `UserInfo` — identity and role — is then inserted into
+//! the request's extensions before the plugin's router runs, so a future
+//! plugin handler can read who is calling via `Extension<UserInfo>` instead
+//! of asserting it itself.
 //!
 //! A plugin id absent from [`PluginRegistry`] has nothing mounted for its
 //! prefix: a request under it falls through to the app's ordinary 404,
@@ -46,7 +52,9 @@ use crate::state::PgAppState;
 ///
 /// `declared_routes` pairs a plugin id with the router it wants exposed.
 /// Only ids also present in `registry` are mounted — an entry here for an
-/// id the registry never accepted is dropped, not trusted.
+/// id the registry never accepted is dropped, not trusted. The `/plugins`
+/// prefix is applied here, not by the caller, so the reservation holds no
+/// matter how this router gets merged into the app.
 pub fn router<A>(
     state: PgAppState<A>,
     registry: &PluginRegistry,
@@ -66,16 +74,19 @@ where
         ));
         mounted = mounted.nest(&format!("/{id}"), gated);
     }
-    mounted
+    Router::new().nest("/plugins", mounted)
 }
 
 /// The host's own authentication, run before a plugin's router ever sees the
-/// request.
+/// request. Threads the authenticated identity and role through as a request
+/// extension so a plugin handler can read who is calling instead of deciding
+/// it itself.
 async fn require_host_auth(
-    AuthenticatedUser(_user): AuthenticatedUser,
-    request: Request,
+    AuthenticatedUser(user): AuthenticatedUser,
+    mut request: Request,
     next: Next,
 ) -> Response {
+    request.extensions_mut().insert(user);
     next.run(request).await
 }
 
@@ -197,7 +208,7 @@ mod tests {
         let app = router(test_state(), &registry, declared_routes);
 
         let request = HttpRequest::builder()
-            .uri("/cash.random.billing/anything")
+            .uri("/plugins/cash.random.billing/anything")
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
@@ -219,7 +230,29 @@ mod tests {
         let app = router(test_state(), &registry, declared_routes);
 
         let request = HttpRequest::builder()
-            .uri("/cash.random.billing/anything")
+            .uri("/plugins/cash.random.billing/anything")
+            .header("authorization", bearer_for_valid_session())
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A plugin id addressed without the reserved `/plugins` prefix must not
+    /// resolve to anything — the prefix is applied by `router()` itself, not
+    /// left as a convention for whoever merges this router into the app.
+    #[tokio::test]
+    async fn plugin_id_without_the_plugins_prefix_404s() {
+        let registry = registry_with("cash.random.billing");
+        let plugin_routes = Router::new().route("/", get(|| async { "should not be reachable" }));
+        let mut declared_routes = HashMap::new();
+        declared_routes.insert(PluginId::new("cash.random.billing").unwrap(), plugin_routes);
+
+        let app = router(test_state(), &registry, declared_routes);
+
+        let request = HttpRequest::builder()
+            .uri("/cash.random.billing/")
             .header("authorization", bearer_for_valid_session())
             .body(Body::empty())
             .unwrap();
@@ -241,7 +274,7 @@ mod tests {
         let app = router(test_state(), &registry, declared_routes);
 
         let request = HttpRequest::builder()
-            .uri("/cash.random.billing/")
+            .uri("/plugins/cash.random.billing/")
             .header("authorization", bearer_for_valid_session())
             .body(Body::empty())
             .unwrap();
@@ -284,7 +317,7 @@ mod tests {
         let plugin_response = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/cash.random.billing/api/invoices")
+                    .uri("/plugins/cash.random.billing/api/invoices")
                     .header("authorization", bearer_for_valid_session())
                     .body(Body::empty())
                     .unwrap(),
@@ -296,6 +329,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body, "plugin invoices");
+    }
+
+    /// The host passes the authenticated identity and role to the plugin
+    /// rather than letting it assert who is calling: `require_host_auth`
+    /// inserts the `UserInfo` it extracted into the request's extensions, so
+    /// a plugin handler downstream can read it with `Extension<UserInfo>`.
+    #[tokio::test]
+    async fn authenticated_identity_and_role_reach_the_plugin() {
+        let registry = registry_with("cash.random.billing");
+
+        let plugin_routes = Router::new().route(
+            "/whoami",
+            get(
+                |axum::extract::Extension(user): axum::extract::Extension<UserInfo>| async move {
+                    format!("{}:{:?}", user.id.0, user.role)
+                },
+            ),
+        );
+        let mut declared_routes = HashMap::new();
+        declared_routes.insert(PluginId::new("cash.random.billing").unwrap(), plugin_routes);
+
+        let app = router(test_state(), &registry, declared_routes);
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/plugins/cash.random.billing/whoami")
+                    .header("authorization", bearer_for_valid_session())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let expected = format!("{}:{:?}", uuid::Uuid::from_u128(1), Role::User);
+        assert_eq!(body, expected.as_str());
     }
 
     /// Ablation for ticket test 3: remove the prefixing and the collision is
