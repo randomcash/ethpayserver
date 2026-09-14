@@ -12,14 +12,18 @@
 # `main` is enough to walk its commit graph.
 #
 # Must-fail-first, run against real payserver-commons commits (2026-09-14):
-#   - pin set to 1319b2a7b018397a23afc6f157b791a699590eb3 (tip of
-#     origin/(tip of an unmerged commons branch) not merged
-#     to main) -> exit 1, "is not on commons main".
+#   - pin set to a commons commit that existed only on an unmerged branch
+#     (sha 1319b2a7b018397a23afc6f157b791a699590eb3, redacted branch name -
+#     this repo is public) -> exit 1, "is not on commons main".
 #   - pin set to 780dd224d5f756901f45efe68fdd5bb4c7f416ff (this repo's actual
 #     pin, on main) -> exit 0, "is on payserver-commons main".
 #   - one crate line left on the branch-only sha while the rest were reverted
 #     to the main sha (partial re-pin) -> exit 1, reporting only the
 #     offending rev and "ok" for the rest.
+#   - a commons line pinned with a short sha (e.g. rev = "048acab", what
+#     `git log --oneline` and GitHub's UI show by default) -> exit 1, "is not
+#     a full 40-character sha", instead of being silently skipped while a
+#     full-sha line elsewhere satisfies the "some rev was found" check.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,7 +43,30 @@ url="${COMMONS_URL:-https://github.com/randomcash/payserver-commons.git}"
 # output at all. For a check whose entire job is explaining a cross-repo
 # mistake, "Process completed with exit code 1" is the worst possible message.
 commons_lines="$(grep 'payserver-commons' "$manifest" || true)"
-revs="$(printf '%s\n' "$commons_lines" | grep -oP 'rev = "\K[0-9a-f]{40}' | sort -u || true)"
+# Capture the whole `rev = "..."` value, not just an already-40-hex match -
+# a short sha (cargo accepts one) must be caught and named, not skipped as if
+# the line had no rev at all.
+rev_values="$(printf '%s\n' "$commons_lines" | grep -oP 'rev = "\K[^"]*' | sort -u || true)"
+
+revs=""
+malformed=""
+while IFS= read -r v; do
+  [ -z "$v" ] && continue
+  if [[ "$v" =~ ^[0-9a-f]{40}$ ]]; then
+    revs="$revs$v"$'\n'
+  else
+    malformed="$malformed$v"$'\n'
+  fi
+done <<< "$rev_values"
+revs="${revs%$'\n'}"
+malformed="${malformed%$'\n'}"
+
+if [ -n "$malformed" ]; then
+  echo "::error::payserver-commons rev is not a full 40-character sha:"
+  printf '%s\n' "$malformed" | sed 's/^/  /'
+  echo "  A short or malformed sha cannot be checked against commons main. Re-pin with the full sha: scripts/commons.sh pin <sha>"
+  exit 1
+fi
 
 # A crate pinned by `branch =` or `tag =` is NOT pinned to a revision, and this
 # check cannot say anything about where it points. Silently skipping it exits 0
