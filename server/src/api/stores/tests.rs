@@ -227,6 +227,21 @@ fn an_unconfigured_server_refuses_an_unregistered_eip155_id() {
     assert!(chain_has_no_adapter(&untracked, None));
 }
 
+/// The ticket's example, `tron:728126428`, happens to be Tron's real
+/// EVM-compatible chain id - the same number as a genuine `eip155` chain
+/// somewhere. `chain_has_no_adapter`'s `None` branch only feeds a namespace's
+/// numeric reference to `evm::get_any_chain_config` after `evm_chain_id()`
+/// checks `is_evm()` (`types::ChainId::evm_chain_id`, see its doc comment:
+/// "`None` for any other namespace ... whose reference is also numeric but is
+/// emphatically not an EIP-155 id"), so the collision can't leak `tron:...`
+/// through as if it were the eip155 chain of the same number - confirmed
+/// directly here rather than only inferred from that doc comment.
+#[test]
+fn evm_chain_id_does_not_leak_across_the_tron_eip155_number_collision() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    assert_eq!(tron.evm_chain_id(), None);
+}
+
 // =========================================================================
 // unsupported_chain_error (RCS-281)
 // =========================================================================
@@ -270,6 +285,226 @@ fn enabling_still_checks_the_chain() {
 #[test]
 fn an_unspecified_enabled_still_checks_the_chain() {
     assert!(update_should_check_chain(None));
+}
+
+// =========================================================================
+// create_payment_method - through the handler, against a real database
+// (RCS-281)
+//
+// Every test above calls `chain_has_no_adapter` or `update_should_check_chain`
+// directly. None of them would notice if `create_payment_method` itself
+// stopped calling the predicate, checked the wrong field, or placed the check
+// after a different early return - the exact "guard written but never
+// exercised" gap three review passes on this ticket flagged. These go through
+// the handler function itself, against the real `rcs-test-postgres` fixture
+// (see `DATABASE_URL` below), so that class of bug actually fails a test.
+//
+// `#[ignore]`d and skipped with no `DATABASE_URL`, matching every other
+// database-backed test in this codebase (`data-service/src/postgres/
+// integration_tests/*`) - the `cargo test --workspace` gate does not touch
+// this container.
+//
+// `AuthenticatedUser` is constructed by hand rather than produced by
+// `FromRequestParts`: `require_store_settings_permission` returns `Ok(())`
+// for `Role::ServerAdmin` before it touches the database (see
+// `stores/mod.rs`), so no session and no store-membership row is needed to
+// reach the code under test. `NoAuthSessionService` only exists to give
+// `PgAppState<A>` a concrete `A` - `create_payment_method` never calls it.
+//
+// Ablation performed locally against this same fixture before writing this
+// comment: with the `if chain_has_no_adapter(...)` block in
+// `create_payment_method` deleted, `a_tron_payment_method_is_refused_by_the_
+// handler` failed with `Ok(StatusCode::CREATED, ...)` instead of the expected
+// `Err`, i.e. tron:728126428 was created - proving this test is sensitive to
+// the gate and not to some unrelated 400. The block was then restored.
+// =========================================================================
+
+use crate::api::extractors::AuthenticatedUser;
+use crate::state::PgAppState;
+use auth::{Role, SessionId, SessionService, UserInfo};
+use axum::Json;
+use axum::extract::{Path, State};
+
+/// Exists only to give `PgAppState<A>` a concrete auth-service type; never
+/// called because `AuthenticatedUser` below is constructed directly.
+struct NoAuthSessionService;
+
+#[async_trait::async_trait]
+impl SessionService for NoAuthSessionService {
+    async fn validate_session(
+        &self,
+        _session_id: SessionId,
+    ) -> auth::Result<(UserInfo, auth::Session)> {
+        Err(auth::AuthError::InvalidCredentials)
+    }
+
+    async fn logout(&self, _session_id: SessionId) -> auth::Result<()> {
+        Err(auth::AuthError::InvalidCredentials)
+    }
+
+    async fn logout_all(&self, _session_id: SessionId) -> auth::Result<()> {
+        Err(auth::AuthError::InvalidCredentials)
+    }
+
+    async fn cleanup_stale_sessions(&self) -> auth::Result<u64> {
+        Err(auth::AuthError::InvalidCredentials)
+    }
+}
+
+async fn handler_test_service() -> Option<data_service::PgDataService> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    data_service::PgDataService::connect(&database_url)
+        .await
+        .ok()
+}
+
+fn admin_user(user_id: Uuid) -> AuthenticatedUser {
+    AuthenticatedUser(UserInfo {
+        id: UserId(user_id),
+        email: None,
+        primary_wallet_address: None,
+        created_at: Utc::now(),
+        last_login_at: None,
+        role: Role::ServerAdmin,
+    })
+}
+
+async fn seed_handler_test_user(pool: &sqlx::PgPool) -> Uuid {
+    let user_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, kdf_params, encrypted_symmetric_key, \
+         recovery_verification_hash, kdf_salt_identifier) \
+         VALUES ($1, '{}'::jsonb, '{}'::jsonb, 'h', 'passkey:' || $1::text)",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .expect("seed user");
+    user_id
+}
+
+async fn seed_handler_test_store(pool: &sqlx::PgPool, owner: Uuid) -> Uuid {
+    let store_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO stores (id, name, owner_id) VALUES ($1, $2, $3)")
+        .bind(store_id)
+        .bind(format!("store-{store_id}"))
+        .bind(owner)
+        .execute(pool)
+        .await
+        .expect("seed store");
+    store_id
+}
+
+/// So the create call's xpub-less branch resolves to something, without a
+/// real BIP-32 key: the `wallets.xpub` column is text the repository never
+/// parses (see `data-service/src/postgres/integration_tests/wallet.rs`'s
+/// `unique_xpub`) - only `create_payment_method`'s own `validate_xpub` check
+/// parses the request body's xpub, and this bypasses that by seeding the
+/// store's resolution directly. Unique per call so repeated runs against the
+/// shared fixture don't collide on the account-uniqueness constraint that
+/// `wallet_for_store_xpub` enforces on this same table.
+async fn seed_handler_test_primary_wallet(pool: &sqlx::PgPool, owner: Uuid) {
+    sqlx::query("INSERT INTO wallets (id, user_id, xpub, is_primary) VALUES ($1, $2, $3, true)")
+        .bind(Uuid::new_v4())
+        .bind(owner)
+        .bind(format!("xpub-test-{}", Uuid::new_v4()))
+        .execute(pool)
+        .await
+        .expect("seed wallet");
+}
+
+fn handler_test_state(service: data_service::PgDataService) -> PgAppState<NoAuthSessionService> {
+    PgAppState::new(
+        std::sync::Arc::new(service),
+        std::sync::Arc::new(NoAuthSessionService),
+        None,
+        std::sync::Arc::new(rates::NoOpRateProvider),
+    )
+}
+
+/// BIP-32 test vector 1's account xpub - real, valid, and reused from
+/// `evm::wallet`'s own `an_xprv_is_never_accepted_as_an_xpub` test so this
+/// file needs no key material of its own. Passed explicitly so the request
+/// takes the "pin to this key" branch of `create_payment_method` rather than
+/// the "resolve the store's existing wallet" branch - the chain gate must
+/// refuse tron before either branch runs.
+const HANDLER_TEST_XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+
+/// Test 1 of the ticket: `tron:728126428` must 400, naming the chain.
+///
+/// Ablation: with the `if chain_has_no_adapter(...)` block in
+/// `create_payment_method` replaced by `let _ = chain_has_no_adapter(...);`,
+/// this test's `expect_err` panicked with `Ok((StatusCode::CREATED, ..))` -
+/// tron:728126428 was created, pinned to `HANDLER_TEST_XPUB` via the same
+/// `wallet_for_store_xpub` path Sepolia uses below. Restored before
+/// committing. That is the "hole" this ticket closes: once created, an
+/// invoice against this method would derive a `0x...` address from that xpub
+/// regardless of namespace (`server/src/api/invoices/payment_options.rs`'s
+/// `derive_payment_address` builds an `evm::XpubDeriver` unconditionally) and
+/// nothing would ever watch it.
+#[tokio::test]
+#[ignore]
+async fn a_tron_payment_method_is_refused_by_the_handler() {
+    let Some(service) = handler_test_service().await else {
+        return;
+    };
+    let pool = service.pool().clone();
+    let user_id = seed_handler_test_user(&pool).await;
+    let store_id = seed_handler_test_store(&pool, user_id).await;
+    let state = handler_test_state(service);
+
+    let req = CreatePaymentMethodRequest {
+        chain_id: ChainId::parse("tron:728126428").unwrap(),
+        token_address: None,
+        asset_symbol: "USDT".to_string(),
+        decimals: 6,
+        xpub: Some(HANDLER_TEST_XPUB.to_string()),
+    };
+
+    let err = create_payment_method(admin_user(user_id), State(state), Path(store_id), Json(req))
+        .await
+        .expect_err("tron has no adapter and must be refused, not created");
+
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("unsupported_chain"), "wrong reason: {body}");
+    assert!(
+        body.contains("tron:728126428"),
+        "the error must name the refused chain: {body}"
+    );
+}
+
+/// Test 2 of the ticket: `eip155:11155111` (Sepolia) is unchanged - still 201.
+#[tokio::test]
+#[ignore]
+async fn a_sepolia_payment_method_is_still_created_by_the_handler() {
+    let Some(service) = handler_test_service().await else {
+        return;
+    };
+    let pool = service.pool().clone();
+    let user_id = seed_handler_test_user(&pool).await;
+    let store_id = seed_handler_test_store(&pool, user_id).await;
+    seed_handler_test_primary_wallet(&pool, user_id).await;
+    let state = handler_test_state(service);
+
+    let req = CreatePaymentMethodRequest {
+        chain_id: ChainId::parse("eip155:11155111").unwrap(),
+        token_address: None,
+        asset_symbol: "ETH".to_string(),
+        decimals: 18,
+        xpub: None,
+    };
+
+    let (status, response) =
+        create_payment_method(admin_user(user_id), State(state), Path(store_id), Json(req))
+            .await
+            .expect("sepolia has a compiled-in adapter and must still be accepted");
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        response.0.chain_id,
+        ChainId::parse("eip155:11155111").unwrap()
+    );
 }
 
 // =========================================================================
