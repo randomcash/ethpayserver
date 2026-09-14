@@ -278,9 +278,11 @@ async fn upsert_payment_row(
     payment: &PaymentData,
     tx_index: i32,
 ) -> RepositoryResult<()> {
-    // ON CONFLICT (chain_id, tx_hash, tx_index) handles duplicate
-    // PaymentDetected events (e.g., after service restart). This is the
-    // unique constraint in the DB.
+    // ON CONFLICT (chain_id, tx_hash, tx_index) handles a redelivered
+    // PaymentDetected for a transfer already on file (tx_index is
+    // recomputed the same way both times, so the same transfer always maps
+    // to the same key) rather than inserting a second row for it. This is
+    // the unique constraint in the DB.
     sqlx::query(
         r#"
         INSERT INTO payments (

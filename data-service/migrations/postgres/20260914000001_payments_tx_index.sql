@@ -9,11 +9,17 @@
 -- an ERC20 transfer, or a fixed -1 sentinel for a native transfer (see
 -- payment_handler.rs for why -1 rather than 0: it must never collide with a
 -- real log index of 0 in the same transaction). Defaulting existing rows to 0
--- keeps every one of them - all genuinely one transfer per transaction so far
--- - a trivial backfill: nothing to reconcile, nothing to look up. New rows
--- never write 0 for a native transfer going forward, but the column stays a
--- plain signed integer so both this backfill value and the -1 sentinel fit.
+-- and then re-pointing the native ones at -1 keeps the backfill trivial -
+-- nothing to reconcile against chain data - while still landing every
+-- existing row on the same value a recomputation of that same transfer would
+-- produce going forward: native rows already used a made-up 0 that never came
+-- from a real log index, so moving them to -1 costs nothing, and ERC20 rows
+-- keep 0, correct for the overwhelming majority (one transfer per
+-- transaction) and merely approximate - not recoverable from this table
+-- alone - for the rest.
 ALTER TABLE payments ADD COLUMN tx_index INTEGER NOT NULL DEFAULT 0;
+
+UPDATE payments SET tx_index = -1 WHERE asset_type = 'native';
 
 ALTER TABLE payments DROP CONSTRAINT unique_payment_tx;
 ALTER TABLE payments ADD CONSTRAINT unique_payment_tx UNIQUE (chain_id, tx_hash, tx_index);
