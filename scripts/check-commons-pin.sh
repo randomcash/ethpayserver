@@ -11,19 +11,13 @@
 # Commons is public, so this needs no token - an anonymous, blobless clone of
 # `main` is enough to walk its commit graph.
 #
-# Must-fail-first, run against real payserver-commons commits (2026-09-14):
-#   - pin set to a commons commit that existed only on an unmerged branch
-#     (sha 1319b2a7b018397a23afc6f157b791a699590eb3, redacted branch name -
-#     this repo is public) -> exit 1, "is not on commons main".
-#   - pin set to 780dd224d5f756901f45efe68fdd5bb4c7f416ff (this repo's actual
-#     pin, on main) -> exit 0, "is on payserver-commons main".
-#   - one crate line left on the branch-only sha while the rest were reverted
-#     to the main sha (partial re-pin) -> exit 1, reporting only the
-#     offending rev and "ok" for the rest.
-#   - a commons line pinned with a short sha (e.g. rev = "048acab", what
-#     `git log --oneline` and GitHub's UI show by default) -> exit 1, "is not
-#     a full 40-character sha", instead of being silently skipped while a
-#     full-sha line elsewhere satisfies the "some rev was found" check.
+# Must-fail-first is not a claim to take on faith here: run
+# check-commons-pin.test.sh, which builds a real throwaway commons history
+# (a main commit and an unmerged branch commit) and asserts this script goes
+# red against the branch-only sha, green against the main sha, red on a
+# partial re-pin, and red on a short sha - the same shape as the incident
+# this guard exists to catch, reproduced on every run instead of asserted
+# once in a comment.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -97,18 +91,22 @@ echo "fetching payserver-commons main..."
 # one this check exists to catch. The apt step in the same workflow already
 # carries a retry loop for exactly this reason.
 cloned=0
+clone_err=""
 for attempt in 1 2 3; do
-  if timeout "${COMMONS_CLONE_TIMEOUT:-45}" git clone -q --single-branch --branch main --filter=blob:none \
-      --no-checkout "$url" "$workdir/commons" 2>/dev/null; then
+  # Same `if` shape as the merge-base call below, for the same reason: a bare
+  # assignment would let `set -e` exit before $clone_err could be read.
+  if clone_err="$(timeout "${COMMONS_CLONE_TIMEOUT:-45}" git clone -q --single-branch --branch main --filter=blob:none \
+      --no-checkout "$url" "$workdir/commons" 2>&1)"; then
     cloned=1
     break
   fi
   rm -rf "$workdir/commons"
-  echo "::warning::clone of payserver-commons failed (attempt $attempt of 3)"
+  echo "::warning::clone of payserver-commons failed (attempt $attempt of 3): $clone_err"
   [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
 done
 if [ "$cloned" != 1 ]; then
   echo "::error::could not clone payserver-commons after 3 attempts - cannot verify the pin"
+  echo "  last error: $clone_err"
   exit 1
 fi
 

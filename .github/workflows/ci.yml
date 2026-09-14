@@ -69,6 +69,12 @@ jobs:
           done
           echo "commons pinned at $REV in both Cargo.toml and Cargo.lock"
 
+      # Proves the guard below actually goes red and green on the cases it
+      # claims to, against a real throwaway commons history built on the fly -
+      # not a comment asserting someone ran it once by hand.
+      - name: Commons pin guard self-test
+        run: scripts/check-commons-pin.test.sh
+
       # A cross-repo ticket pins commons by the commons PR's branch sha before
       # that PR merges. Merge ethpayserver first (or just forget to re-pin)
       # and the workspace ends up pinned to a commit that only exists on the
