@@ -10,11 +10,14 @@ use axum::{
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService};
+use auth::{
+    ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService, WalletCredential,
+    WalletCredentialId, WalletRepository,
+};
 use data_service::ApiKeyFullInfo;
 
 use super::api_key_hash::hash_api_key;
-use super::extractors::AuthenticatedUser;
+use super::extractors::{AuthenticatedUser, FreshlyAuthenticatedUser};
 use crate::state::PgAppState;
 pub use api_types::{
     ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
@@ -407,6 +410,129 @@ fn generate_key_segment(bytes: usize) -> String {
         write!(s, "{:02x}", b).unwrap();
     }
     s
+}
+
+// =========================================================================
+// Wallet credentials (login identity) — RCS-227
+//
+// SENSITIVE: this section changes and lists login-credential wallets and the
+// primary-wallet pointer wallet login resolves accounts by. Human review
+// required without exception.
+// =========================================================================
+
+/// A wallet credential, as returned to the account owner.
+///
+/// Hand-mirrors `auth::WalletInfo` rather than reusing it directly: `auth` is
+/// a server-side crate the client does not depend on (see
+/// `api_key_info_response` above for the same reasoning), and this DTO can't
+/// be added to the shared `api-types` crate in this change — that crate is
+/// pinned by `rev` in a sibling repository and moving the pin is its own
+/// three-step change. The client defines a matching struct for deserializing
+/// this response.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct WalletCredentialResponse {
+    pub id: Uuid,
+    pub address: String,
+    pub name: String,
+    pub is_primary: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+impl From<WalletCredential> for WalletCredentialResponse {
+    fn from(w: WalletCredential) -> Self {
+        Self {
+            id: w.id.0,
+            address: w.address,
+            name: w.name,
+            is_primary: w.is_primary,
+            created_at: w.created_at,
+            last_used_at: w.last_used_at,
+        }
+    }
+}
+
+/// List the authenticated account's wallet login credentials.
+///
+/// A plain valid session is enough to *read* this — it is the same
+/// information `GET /auth/wallets` already returns. Only the write below
+/// (making one of them primary) is gated on a fresh re-authentication.
+#[utoipa::path(
+    get,
+    path = "/users/wallets",
+    tag = "users",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Wallet credentials for this account", body = Vec<WalletCredentialResponse>),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
+pub async fn list_wallet_credentials<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+) -> Result<Json<Vec<WalletCredentialResponse>>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let mut wallets = state
+        .data_service
+        .get_wallets_for_user(user.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    wallets.retain(|w| w.is_active);
+
+    Ok(Json(
+        wallets
+            .into_iter()
+            .map(WalletCredentialResponse::from)
+            .collect(),
+    ))
+}
+
+/// Make an existing wallet credential the account's primary — the address
+/// wallet login resolves the account by, and the one shown in Settings.
+///
+/// Requires a *fresh* re-authentication (see `FreshlyAuthenticatedUser`):
+/// this changes a login credential, and RCS-207 was exactly a merely-valid
+/// session being enough for permanent account takeover.
+///
+/// Deliberately does not accept a bare address plus signature. `wallet_id`
+/// must already name an active `WalletCredential` belonging to this account —
+/// ownership of that address was already proven, via the existing
+/// challenge/signature flow, when it was added
+/// (`complete_wallet_registration`) or at account creation. Accepting a raw
+/// address here instead would let a hijacked-but-fresh session point
+/// `primary_wallet_address` at a key the caller merely typed, never signed
+/// for.
+#[utoipa::path(
+    patch,
+    path = "/users/wallets/{id}/primary",
+    tag = "users",
+    security(("bearer_auth" = [])),
+    params(("id" = Uuid, Path, description = "Wallet credential to make primary")),
+    responses(
+        (status = 200, description = "Primary wallet changed", body = WalletCredentialResponse),
+        (status = 401, description = "Unauthorized, or session not fresh enough — log in again"),
+        (status = 404, description = "No such active wallet credential on this account"),
+    )
+)]
+pub async fn set_primary_wallet_credential<A>(
+    FreshlyAuthenticatedUser(user): FreshlyAuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WalletCredentialResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    state
+        .data_service
+        .set_primary_wallet_credential(user.id, WalletCredentialId(id))
+        .await
+        .map(|w| Json(WalletCredentialResponse::from(w)))
+        .map_err(|e| match e {
+            auth::AuthError::WalletNotFound(_) => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        })
 }
 
 // =========================================================================
