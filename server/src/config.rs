@@ -31,8 +31,8 @@
 //! - `CAPTCHA_SITE_KEY` - Provider site key (required when CAPTCHA_PROVIDER is set)
 //!
 //! ## Rate Limiting
-//! - `RATE_LIMIT_AUTH` - Auth endpoint limit, req/min per IP (default: 5)
-//! - `RATE_LIMIT_WRITE` - Write endpoint limit, req/min per IP (default: 10)
+//! - `RATE_LIMIT_AUTH` - Auth endpoint limit, req/min per IP (default: 10)
+//! - `RATE_LIMIT_WRITE` - Write endpoint limit, req/min per IP (default: 20)
 //! - `RATE_LIMIT_READ` - Read endpoint limit, req/min per IP (default: 60)
 //! - `RATE_LIMIT_WS` - WebSocket upgrade limit, req/min per IP (default: 5)
 //!
