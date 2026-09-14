@@ -96,6 +96,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # This job's whole point is "warn, not fail" - every lookup below is
+          # guarded by an emptiness check that falls back to a warning. Actions
+          # runs steps under `bash -eo pipefail`, which would abort the script
+          # on the first failed curl/jq/grep *before* that guard ever runs, so
+          # turn both off and let the guards do the job they were written for.
+          set +e +o pipefail
+
           CLIENT_REPO="randomcash/payserver-client"
           # Arbitrary but documented: past this many commits behind, e2e is
           # exercising a client build old enough that a shipped feature has no
