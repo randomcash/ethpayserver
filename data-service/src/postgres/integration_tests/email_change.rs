@@ -1,4 +1,4 @@
-//! Email-change verification against a real database (RCS-263).
+//! Email-change verification against a real database.
 //!
 //! The property this module exists to pin: `kdf_salt_identifier` is the
 //! identifier the recovery KDF is salted with at registration, and it must

@@ -1,4 +1,4 @@
--- Pending email changes awaiting verification (RCS-263).
+-- Pending email changes awaiting verification.
 --
 -- Changing `users.email` directly would leave the address pending with no
 -- proof its owner can read mail there. This table holds the request until a

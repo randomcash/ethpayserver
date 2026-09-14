@@ -92,7 +92,7 @@ where
             .await
             .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
 
-        if Utc::now() - session.created_at > REAUTH_FRESHNESS {
+        if is_reauth_stale(session.created_at, Utc::now()) {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "This action requires a fresh sign-in. Please log in again and retry.",
@@ -349,6 +349,16 @@ impl AdminAuth {
     }
 }
 
+/// Pure predicate: is a session's login assertion too old to count as a
+/// fresh re-authentication at `now`?
+///
+/// Extracted so the freshness window `FreshlyAuthenticatedUser` enforces can
+/// be unit-tested without booting a database or a `SessionService`. Matches
+/// the live check in `FreshlyAuthenticatedUser::from_request_parts` exactly.
+pub(super) fn is_reauth_stale(session_created_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now - session_created_at > REAUTH_FRESHNESS
+}
+
 /// Pure predicate: is a deprecated key past its grace window at `now`?
 ///
 /// Extracted so the grace-expiry rule can be unit-tested without booting a
@@ -374,6 +384,30 @@ mod tests {
     }
 
     const GRACE_48H: i64 = 48 * 3600;
+
+    #[test]
+    fn fresh_session_is_not_stale() {
+        // logged in at hour 0, asking at hour 0 plus a couple minutes
+        assert!(!is_reauth_stale(at(0), at(0) + Duration::minutes(2)));
+    }
+
+    #[test]
+    fn exactly_at_freshness_boundary_is_not_stale() {
+        assert!(!is_reauth_stale(at(0), at(0) + Duration::minutes(5)));
+    }
+
+    #[test]
+    fn past_freshness_window_is_stale() {
+        assert!(is_reauth_stale(
+            at(0),
+            at(0) + Duration::minutes(5) + Duration::seconds(1)
+        ));
+    }
+
+    #[test]
+    fn hours_old_session_is_stale() {
+        assert!(is_reauth_stale(at(0), at(6)));
+    }
 
     #[test]
     fn in_grace_is_not_expired() {

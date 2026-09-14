@@ -395,7 +395,7 @@ where
         // `users` cascades through `stores` into `invoices` and `payments`, so
         // deleting a merchant who traded would erase their financial history.
         .route("/me", delete(users::delete_account::<A>))
-        // Email change (RCS-263, sensitive - see server/src/api/users.rs).
+        // Email change (sensitive - see server/src/api/users.rs).
         // Set/change and remove require a fresh passkey or wallet login
         // (`FreshlyAuthenticatedUser`); confirm is unauthenticated by design
         // and gated on the verification token alone.

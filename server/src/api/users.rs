@@ -919,7 +919,7 @@ where
 }
 
 // =========================================================================
-// Email change (RCS-263)
+// Email change
 //
 // SENSITIVE: this touches account recovery. Set, change and remove all sit
 // behind `FreshlyAuthenticatedUser` (server/src/api/extractors.rs) rather than
