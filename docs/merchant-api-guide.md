@@ -33,9 +33,9 @@ it is ever stored. That is enforced in code, not just convention: see
 The full OpenAPI 3 schema is generated from the same request/response types
 the server actually serializes — it is never hand-maintained, so it cannot
 drift the way prose can. On any instance with `ENABLE_SWAGGER=true` (the
-server's own default; the production compose template in this repo turns it
-off, so check with your operator if you're integrating against someone
-else's deployment):
+server's own default; `docker/docker-compose.prod.yml` in this repo sets it
+to `false`, so check with your operator if you're integrating against
+someone else's deployment):
 
 - Interactive docs: `GET /swagger-ui`
 - Raw spec: `GET /api-docs/openapi.json`
