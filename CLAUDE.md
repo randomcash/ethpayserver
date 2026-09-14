@@ -57,7 +57,7 @@ Exactly what CI runs, and nothing more:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --lib
+cargo nextest run --workspace --lib --no-fail-fast -j 2
 ```
 
 **Do not add `--all-features`.** It surfaces pre-existing errors in `evmmonitor`
@@ -82,12 +82,15 @@ that are not in CI's path. Several people have lost an hour to this.
   every `RATE_LIMIT_*` at `10000`, as CI does. See `e2e/README.md`.
 - Integration tests are `#[ignore]` by convention and need `DATABASE_URL`. CI
   *does* run them — the `test` job migrates a real Postgres service and runs
-  `cargo nextest run -p data-service --run-ignored only` — so a failure there
-  gates merges same as any other test. They only run for `data-service`; other
-  crates' `#[ignore]`'d tests are not in that command and still need to be run
-  locally. `cargo test --workspace --lib` (the gate above) does not touch any
-  of them either way, so run the `data-service` ones locally too when you touch
-  that layer, to see a failure before CI does.
+  `cargo nextest run -p data-service --no-fail-fast --run-ignored only -j 1` —
+  so a failure there gates merges same as any other test. The `-j 1` is not
+  cosmetic: these tests share one real Postgres instance, so run them locally
+  with the same flag rather than nextest's default concurrency, or you can get
+  spurious cross-test failures CI never sees. They only run for `data-service`;
+  other crates' `#[ignore]`'d tests are not in that command and still need to
+  be run locally. The gate above does not touch any of them either way, so run
+  the `data-service` ones locally too when you touch that layer, to see a
+  failure before CI does.
 
 ## Sensitive paths
 
