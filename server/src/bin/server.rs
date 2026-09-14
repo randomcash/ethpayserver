@@ -20,8 +20,9 @@ use data_service::PgDataService;
 use evm::monitor::bridge::{COMMANDS_CHANNEL, EVENTS_CHANNEL, RedisBridge};
 use rates::RateProviderConfig;
 use server::{
-    AppState, CleanupConfig, EventConsumer, InvoiceCleanupService, RedisEVMMonitor,
-    WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService, api,
+    AppState, ChainHealthMetricsConfig, ChainHealthMetricsService, CleanupConfig, EventConsumer,
+    InvoiceCleanupService, RedisEVMMonitor, WatchRetryConfig, WatchRetryService, WebhookConfig,
+    WebhookService, api,
     api::api_key_rate_limit::ApiKeyRateLimitState,
     api::rate_limit::{RateLimitConfig, RateLimitState},
     config::Config,
@@ -201,6 +202,20 @@ async fn main() -> Result<()> {
     } else {
         tracing::info!("Watch retry service disabled");
     }
+
+    // 5. Chain health metrics service - polls evmmonitor's published health
+    //    data on a timer and exports it as Prometheus gauges, so the gauges
+    //    are a fact about the chain rather than a side effect of someone
+    //    calling /health/chains.
+    let chain_health_metrics_config = ChainHealthMetricsConfig::from_env();
+    tracing::debug!(
+        ?chain_health_metrics_config,
+        "Chain health metrics config loaded"
+    );
+    let chain_health_metrics_service =
+        ChainHealthMetricsService::new(Arc::clone(&evm_monitor), chain_health_metrics_config);
+    tokio::spawn(chain_health_metrics_service.run());
+    tracing::info!("Chain health metrics service started");
 
     // Create rate provider
     let rate_config = RateProviderConfig::from_env();
