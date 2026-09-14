@@ -7,9 +7,17 @@
 -- changing `email` while leaving `kdf_salt_identifier` untouched, the
 -- immutable field the recovery KDF is salted with at registration.
 --
--- At most one unconsumed request per user: starting a new one deletes any
--- prior unconsumed row for that user first (see `EmailChangeWriter`), so a
--- stale link from an earlier attempt can never resurrect a superseded email.
+-- At most one unconsumed request per user, enforced by the unique index
+-- below rather than only in application code. A plain (non-unique) index
+-- plus a DELETE-then-INSERT in the writer looked sufficient but was not: two
+-- concurrent requests for the same user (a double-submitted click, or a
+-- resubmission before the first request's transaction commits) could each
+-- see nothing to delete and both insert, leaving two live tokens for
+-- different addresses. `EmailChangeWriter::create_email_change_request` uses
+-- `INSERT ... ON CONFLICT ... DO UPDATE` against this constraint instead,
+-- which is a single atomic statement with no such window - so a stale link
+-- from an earlier attempt can never resurrect a superseded email even under
+-- concurrent resubmission.
 
 CREATE TABLE email_change_requests (
     token UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -23,9 +31,10 @@ CREATE TABLE email_change_requests (
     consumed_at TIMESTAMPTZ
 );
 
--- Only ever looked up by the caller's own id (to invalidate a prior request)
--- while unconsumed; consumed rows are dead weight for that query.
-CREATE INDEX idx_email_change_requests_user_id
+-- Both the caller's own-id lookup and the "at most one" guarantee: UNIQUE
+-- makes the invariant a database constraint, not just an application-level
+-- convention two concurrent writers could race past.
+CREATE UNIQUE INDEX idx_email_change_requests_user_id
     ON email_change_requests(user_id) WHERE consumed_at IS NULL;
 
 COMMENT ON TABLE email_change_requests IS

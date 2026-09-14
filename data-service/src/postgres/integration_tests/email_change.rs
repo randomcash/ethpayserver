@@ -177,6 +177,89 @@ async fn a_token_cannot_be_redeemed_twice() {
     cleanup(&service.pool, user_id).await;
 }
 
+/// The property `a_new_request_supersedes_the_old_one` cannot see: that test
+/// `await`s the first call to completion before starting the second, so it
+/// only ever exercises the sequential case. Two callers racing for real -
+/// e.g. a double-submitted click, or a resubmission before the first
+/// request's transaction has committed - must still end up with exactly one
+/// live, unconsumed row for the user; the unique partial index plus
+/// `INSERT ... ON CONFLICT ... DO UPDATE` in `create_email_change_request`
+/// exist specifically to make that true regardless of interleaving.
+#[tokio::test]
+#[ignore]
+async fn concurrent_requests_never_leave_two_live_tokens() {
+    let Some(service) = service().await else {
+        return;
+    };
+    let service = std::sync::Arc::new(service);
+    let user_id = seed_user_with_email(&service.pool, "racer@example.com").await;
+
+    let a = {
+        let service = service.clone();
+        tokio::spawn(async move {
+            service
+                .create_email_change_request(
+                    auth::UserId(user_id),
+                    "a@example.com",
+                    Utc::now() + chrono::Duration::minutes(30),
+                )
+                .await
+        })
+    };
+    let b = {
+        let service = service.clone();
+        tokio::spawn(async move {
+            service
+                .create_email_change_request(
+                    auth::UserId(user_id),
+                    "b@example.com",
+                    Utc::now() + chrono::Duration::minutes(30),
+                )
+                .await
+        })
+    };
+
+    let (a, b) = (
+        a.await.expect("task a").expect("request a"),
+        b.await.expect("task b").expect("request b"),
+    );
+
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM email_change_requests \
+         WHERE user_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(user_id)
+    .fetch_one(&service.pool)
+    .await
+    .expect("count live requests");
+    assert_eq!(
+        live, 1,
+        "two concurrent requests for the same user must never leave two \
+         live tokens, whichever won"
+    );
+
+    // Exactly one of the two returned tokens - whichever request landed
+    // last - can still be redeemed; the other must already be stale, the
+    // same guarantee `a_new_request_supersedes_the_old_one` checks for the
+    // sequential case.
+    let a_consumable = service
+        .consume_email_change_request(a.token)
+        .await
+        .expect("consume attempt a")
+        .is_some();
+    let b_consumable = service
+        .consume_email_change_request(b.token)
+        .await
+        .expect("consume attempt b")
+        .is_some();
+    assert_ne!(
+        a_consumable, b_consumable,
+        "exactly one of the two racing requests should still be redeemable, not both and not neither"
+    );
+
+    cleanup(&service.pool, user_id).await;
+}
+
 #[tokio::test]
 #[ignore]
 async fn a_new_request_supersedes_the_old_one() {

@@ -18,35 +18,31 @@ impl EmailChangeWriter for PgDataService {
         new_email: &str,
         expires_at: DateTime<Utc>,
     ) -> RepositoryResult<EmailChangeRequest> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| RepositoryError::Database(e.to_string()))?;
-
-        // Supersede first: at most one unconsumed request per user must ever
-        // exist, so an earlier, possibly wrong, token stops being redeemable
-        // the moment a new one is requested.
-        sqlx::query("DELETE FROM email_change_requests WHERE user_id = $1 AND consumed_at IS NULL")
-            .bind(user_id.0)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| RepositoryError::Database(e.to_string()))?;
-
+        // Supersede-or-insert in one atomic statement against the unique
+        // partial index on (user_id) WHERE consumed_at IS NULL: a separate
+        // DELETE-then-INSERT looked equivalent but left a window where two
+        // concurrent requests for the same user could each find nothing to
+        // delete and both insert, leaving two live tokens. ON CONFLICT closes
+        // that window - only one row can ever exist for this user with
+        // consumed_at IS NULL, and this statement either creates it or
+        // replaces it, never both. `token` is reassigned on conflict too, so
+        // the superseded request's token stops being the one in flight.
         let row = sqlx::query(
             "INSERT INTO email_change_requests (user_id, new_email, expires_at) \
-             VALUES ($1, $2, $3) RETURNING token",
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (user_id) WHERE consumed_at IS NULL \
+             DO UPDATE SET new_email = EXCLUDED.new_email, \
+                 expires_at = EXCLUDED.expires_at, \
+                 created_at = NOW(), \
+                 token = uuid_generate_v4() \
+             RETURNING token",
         )
         .bind(user_id.0)
         .bind(new_email)
         .bind(expires_at)
-        .fetch_one(&mut *tx)
+        .fetch_one(&self.pool)
         .await
         .map_err(|e| RepositoryError::Database(e.to_string()))?;
-
-        tx.commit()
-            .await
-            .map_err(|e| RepositoryError::Database(e.to_string()))?;
 
         Ok(EmailChangeRequest {
             token: row.get("token"),
