@@ -3,7 +3,9 @@
 use chrono::Utc;
 use types::{InvoiceWriter, PaymentQueryParams, PaymentReader, PaymentWriter};
 
-use super::{create_test_service, seeded_test_invoice, test_payment};
+use crate::PaymentTxIndexWriter;
+
+use super::{assert_amount_eq, create_test_service, seeded_test_invoice, test_payment};
 
 #[tokio::test]
 #[ignore]
@@ -325,5 +327,70 @@ async fn integration_payment_search_anchors_the_hash_but_not_the_sender() {
     assert_eq!(
         wildcard_total, 0,
         "`%` must be escaped, not match every row"
+    );
+}
+
+/// RCS-282: a batching contract, a multicall, or an exchange sweep can pay two
+/// different watched addresses in a single transaction. `unique_payment_tx`
+/// used to be `(tx_hash, chain_id)` alone, so the second transfer's
+/// `ON CONFLICT` silently overwrote the first instead of inserting - one of
+/// the two payments ceased to exist. `tx_index` (the EVM log index) is the
+/// third column that tells the two transfers apart.
+///
+/// Against the pre-fix schema (`unique_payment_tx (tx_hash, chain_id)`, no
+/// `tx_index` column) this produces one row and the second amount is lost.
+#[tokio::test]
+#[ignore]
+async fn integration_payment_upsert_keeps_two_transfers_in_one_tx() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let invoice = seeded_test_invoice(&service).await;
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    // Two transfers in the same transaction: same tx_hash and chain_id, a
+    // different log index each, paying different amounts to different
+    // addresses.
+    let shared_tx_hash = format!("0x{:064x}", uuid::Uuid::new_v4().as_u128());
+    let mut first = test_payment(&invoice.id);
+    first.tx_hash = shared_tx_hash.clone();
+    first.amount = "1000000000000000000".to_string();
+    let mut second = test_payment(&invoice.id);
+    second.tx_hash = shared_tx_hash;
+    second.amount = "2000000000000000000".to_string();
+
+    PaymentTxIndexWriter::upsert_with_tx_index(&service, &first, 0)
+        .await
+        .unwrap();
+    PaymentTxIndexWriter::upsert_with_tx_index(&service, &second, 1)
+        .await
+        .unwrap();
+
+    let payments = PaymentReader::get_for_invoice(&service, &invoice.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        payments.len(),
+        2,
+        "two transfers batched into one tx must produce two rows, not one \
+         overwritten by the other"
+    );
+
+    let fetched_first = payments
+        .iter()
+        .find(|p| p.id == first.id)
+        .expect("the first transfer must survive the second's upsert");
+    let fetched_second = payments
+        .iter()
+        .find(|p| p.id == second.id)
+        .expect("the second transfer must have been inserted, not merged into the first");
+    assert_amount_eq(
+        &fetched_first.amount,
+        &first.amount,
+        "first transfer's amount",
+    );
+    assert_amount_eq(
+        &fetched_second.amount,
+        &second.amount,
+        "second transfer's amount",
     );
 }

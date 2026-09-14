@@ -1,13 +1,10 @@
 //! Handler for `PaymentDetected` events.
 
 use chrono::Utc;
-use data_service::PaymentOptionReader;
+use data_service::{PaymentOptionReader, PaymentTxIndexWriter};
 use evm::get_any_chain_config;
 use evm::monitor::events::PaymentDetected;
-use types::{
-    AssetType, InvoiceId, InvoiceReader, PaymentData, PaymentWriter, TokenReader,
-    WatchedAddressReader,
-};
+use types::{AssetType, InvoiceId, InvoiceReader, PaymentData, TokenReader, WatchedAddressReader};
 use uuid::Uuid;
 
 use crate::api::ws::StatusUpdate;
@@ -205,7 +202,14 @@ impl<
             "Payment detected"
         );
 
-        PaymentWriter::upsert(&*self.data_service, &payment).await?;
+        // `tx_index` is the log index of this transfer within its transaction,
+        // distinguishing two transfers batched into one tx (a multicall, an
+        // exchange sweep) that would otherwise share (chain_id, tx_hash) and
+        // collide in `unique_payment_tx`. Native transfers carry no log index;
+        // 0 is correct there too since a native transfer never shares a
+        // transaction with another transfer to a watched address.
+        let tx_index = event.log_index.map_or(0, |i| i as i32);
+        PaymentTxIndexWriter::upsert_with_tx_index(&*self.data_service, &payment, tx_index).await?;
 
         // Broadcast payment detected via WebSocket
         if let Some(ref ws) = self.ws_broadcast {

@@ -25,6 +25,13 @@ use crate::{UpsertDeliveryParams, WebhookDeliveryWriter};
 pub struct InMemoryDataService {
     invoices: RwLock<HashMap<String, InvoiceData>>,
     payments: RwLock<HashMap<Uuid, PaymentData>>,
+    // Key: (chain_id, tx_hash, tx_index) -> payment id. Mirrors the real
+    // `unique_payment_tx` constraint, for `PaymentTxIndexWriter::upsert_with_tx_index`
+    // below. The plain `PaymentWriter::upsert` above does not consult this index,
+    // so (unlike Postgres, where both paths hit the same constraint) mixing the
+    // two entry points for the same (chain_id, tx_hash) will not collide here.
+    // Nothing in this crate does that.
+    payment_tx_index: RwLock<HashMap<(ChainId, String, i32), Uuid>>,
     payment_options: RwLock<HashMap<Uuid, PaymentOptionData>>,
     // Key: (address, chain_id, token_address) -> payment_option_id
     addresses: RwLock<HashMap<(String, ChainId, Option<String>), PaymentOptionId>>,
@@ -351,6 +358,48 @@ impl PaymentWriter for InMemoryDataService {
             }
         }
         Ok(count)
+    }
+}
+
+#[async_trait]
+impl crate::payment_tx_index::PaymentTxIndexWriter for InMemoryDataService {
+    async fn upsert_with_tx_index(
+        &self,
+        payment: &PaymentData,
+        tx_index: i32,
+    ) -> RepositoryResult<()> {
+        let key = (payment.chain_id.clone(), payment.tx_hash.clone(), tx_index);
+        let mut index = self.payment_tx_index.write().unwrap();
+        let mut payments = self.payments.write().unwrap();
+
+        if let Some(existing_id) = index.get(&key).copied()
+            && let Some(existing) = payments.get_mut(&existing_id)
+        {
+            // Mirrors the `ON CONFLICT ... DO UPDATE SET` list in
+            // `postgres::payment::upsert_payment_row`.
+            if payment.block_number.is_some() {
+                existing.block_number = payment.block_number;
+            }
+            if payment.confirmed_at.is_some() {
+                existing.confirmed_at = payment.confirmed_at;
+            }
+            if payment.extra.is_some() {
+                existing.extra = payment.extra.clone();
+            }
+            if payment.credited_amount.is_some() {
+                existing.credited_amount = payment.credited_amount.clone();
+            }
+            if payment.rate_used.is_some() {
+                existing.rate_used = payment.rate_used.clone();
+            }
+            if payment.rate_applied_at.is_some() {
+                existing.rate_applied_at = payment.rate_applied_at;
+            }
+        } else {
+            index.insert(key, payment.id);
+            payments.insert(payment.id, payment.clone());
+        }
+        Ok(())
     }
 }
 
