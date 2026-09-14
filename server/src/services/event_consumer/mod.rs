@@ -15,9 +15,10 @@ use std::sync::Arc;
 
 use auth::StoreRepository;
 use data_service::{PaymentOptionReader, PaymentTxIndexWriter};
+use bigdecimal::{BigDecimal, Zero};
+use data_service::PaymentOptionReader;
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::MonitorEvent;
-use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
 use types::{
     InvoiceReader, InvoiceWriter, PaymentReader, PaymentWriter, StoreSettingsReader, TokenReader,
@@ -215,6 +216,13 @@ impl<
     ///
     /// The rate represents: 1 invoice_currency = rate asset_units
     /// So to get invoice currency: asset_amount / rate
+    ///
+    /// A raw amount is up to 78 digits (`NUMERIC(78,0)`), well past what
+    /// `rust_decimal::Decimal`'s 96-bit mantissa (~28-29 digits) can hold
+    /// exactly. `BigDecimal` is arbitrary-precision, so parsing and the
+    /// power-of-ten division never round; only the division by `rate` (a
+    /// genuinely fractional value) can produce a non-terminating result, and
+    /// that's inherent to rate conversion, not a precision bug.
     fn convert_payment_to_invoice_currency(
         &self,
         raw_amount: &str,
@@ -222,12 +230,12 @@ impl<
         decimals: u8,
     ) -> Result<String, String> {
         // Parse raw amount (in smallest units, e.g., wei)
-        let raw: Decimal = raw_amount
+        let raw: BigDecimal = raw_amount
             .parse()
             .map_err(|e| format!("Invalid raw amount '{}': {}", raw_amount, e))?;
 
         // Parse exchange rate
-        let rate: Decimal = rate_str
+        let rate: BigDecimal = rate_str
             .parse()
             .map_err(|e| format!("Invalid rate '{}': {}", rate_str, e))?;
 
@@ -236,7 +244,7 @@ impl<
         }
 
         // Convert to human-readable amount: raw / 10^decimals
-        let divisor = Self::compute_decimal_divisor(decimals)?;
+        let divisor = Self::compute_decimal_divisor(decimals);
         let human_amount = raw / divisor;
 
         // Convert to invoice currency: human_amount / rate
@@ -248,27 +256,23 @@ impl<
     /// Convert a smallest unit amount to human-readable format.
     ///
     /// Used for asset-denominated invoices where no rate conversion is needed.
+    /// This is an exact power-of-ten division (moving the decimal point), so
+    /// `BigDecimal` never rounds here regardless of how large `raw_amount` is.
     fn convert_smallest_to_human(&self, raw_amount: &str, decimals: u8) -> Result<String, String> {
-        let raw: Decimal = raw_amount
+        let raw: BigDecimal = raw_amount
             .parse()
             .map_err(|e| format!("Invalid raw amount '{}': {}", raw_amount, e))?;
 
-        let divisor = Self::compute_decimal_divisor(decimals)?;
+        let divisor = Self::compute_decimal_divisor(decimals);
         let human_amount = raw / divisor;
 
         Ok(human_amount.to_string())
     }
 
-    /// Compute 10^decimals safely using checked multiplication.
-    fn compute_decimal_divisor(decimals: u8) -> Result<Decimal, String> {
-        let ten = Decimal::from(10);
-        let mut divisor = Decimal::ONE;
-        for _ in 0..decimals {
-            divisor = divisor
-                .checked_mul(ten)
-                .ok_or_else(|| format!("Overflow computing 10^{}", decimals))?;
-        }
-        Ok(divisor)
+    /// Compute 10^decimals. `BigDecimal` is arbitrary-precision, so this is
+    /// always exact and cannot overflow the way a fixed-mantissa type would.
+    fn compute_decimal_divisor(decimals: u8) -> BigDecimal {
+        BigDecimal::from(10u8).powi(i64::from(decimals))
     }
 }
 
