@@ -53,14 +53,17 @@ places a plausible-looking guess is wrong.
 - **Amounts are strings, never JSON numbers, and two different kinds exist.**
   - `Invoice.amount` and `Invoice.amount_received` are decimal strings in the
     invoice's own `currency` (e.g. `"25.00"` for a `"USD"` invoice, `"0.1"`
-    for an asset-denominated `"ETH"` invoice). This is what `POST /invoices`
-    actually does with the value, not just what its doc comment says: a
-    same-asset invoice is converted with `convert_human_to_smallest_unit`,
-    which treats the request `amount` as a human-readable decimal
-    (`server/src/api/invoices/crud.rs`). Trust that conversion code over
-    `CreateInvoiceRequest.amount`'s own doc comment upstream in
-    `payserver-commons`, which currently contradicts itself on this exact
-    point.
+    for an asset-denominated `"ETH"` invoice) — human-readable, always,
+    regardless of whether `currency` is fiat or a crypto asset symbol. Never
+    send a pre-converted (smallest-unit) value as the request `amount`; a
+    same-asset invoice runs it through `convert_human_to_smallest_unit`
+    server-side (`server/src/api/invoices/crud.rs`). The upstream doc comment
+    on `CreateInvoiceRequest.amount` in `payserver-commons` was
+    self-contradictory on this exact point; it is fixed at the source
+    (`api-types/src/invoice.rs`), and the generated spec will carry the
+    correct description once this repo's commons pin moves to that revision.
+    Until then, trust this page and the linked server code over the spec's
+    field description for this one field.
   - `PaymentOption.amount`, `Payment.amount`, and refund/payout `amount`
     fields are integer strings in the asset's **smallest unit** (wei for
     ETH, the ERC20's own base unit for a token) — divide by `10^decimals` to
@@ -637,9 +640,13 @@ function verifyWebhook(body, signature, secret) {
 ### Retry Policy
 
 Failed deliveries (non-2xx response or timeout) are retried with exponential
-backoff: 1m, 5m, 30m, 2h, 12h, 24h -- about 38.6 hours in total, then the
-delivery is dropped and recorded in the payment events log for later
-inspection.
+backoff, up to a fixed number of attempts, then the delivery is dropped and
+recorded in the payment events log for later inspection. The exact delays and
+attempt count are `WebhookJob::RETRY_DELAYS_SECS` and `max_attempts` in
+`server/src/services/webhook/job.rs` — read those rather than this paragraph
+if you need to reason about worst-case delivery latency, since this prose
+copy is exactly the kind of restatement that drifts the moment the code
+changes.
 
 ### Webhook Delivery Idempotency
 
