@@ -203,18 +203,23 @@ impl PluginHost {
         }
     }
 
-    /// Validates `manifest` against the load-time gate, then compiles and
-    /// instantiates `wasm` — once; the resulting instance is kept and reused
-    /// across every future call.
+    /// Compiles and instantiates `wasm` — once; the resulting instance is
+    /// kept and reused across every future call — before touching the
+    /// registry at all, so a plugin id is only ever claimed once both have
+    /// actually succeeded. Compiling first (rather than validating the
+    /// manifest, then compiling, then rolling back on failure) means a bad
+    /// manifest and a bad module both leave the id free to retry, with no
+    /// partial state to unwind either way.
     pub fn register(&self, manifest: Manifest, wasm: &[u8]) -> Result<(), PluginHostError> {
+        let module = self.engine.compile(wasm)?;
+        let instance = self.engine.instantiate(&module)?;
+
         let id = manifest.id.clone();
         self.registry
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .register(manifest.clone())?;
+            .register(manifest)?;
 
-        let module = self.engine.compile(wasm)?;
-        let instance = self.engine.instantiate(&module)?;
         let entry = Arc::new(PluginEntry::new(instance, self.max_failures));
         self.entries
             .write()
@@ -608,5 +613,25 @@ mod tests {
 
         let err = host.register(bad, &fixtures::echo_module()).unwrap_err();
         assert!(matches!(err, PluginHostError::Rejected(_)));
+    }
+
+    /// A module that fails to compile must not leave its id claimed in the
+    /// registry — otherwise there is no way to retry a fix under the same
+    /// id, since `status` reports the id absent while a re-registration
+    /// attempt would hit the registry's duplicate-id rejection.
+    #[test]
+    fn a_failed_instantiation_leaves_the_id_free_to_retry() {
+        let host = host(3);
+        let id = PluginId::new("cash.random.retry").unwrap();
+        let manifest = manifest("cash.random.retry", "action", None);
+
+        let err = host
+            .register(manifest.clone(), b"not a wasm module")
+            .unwrap_err();
+        assert!(matches!(err, PluginHostError::Wasm(_)));
+        assert!(host.status(&id).is_none());
+
+        host.register(manifest, &fixtures::echo_module()).unwrap();
+        assert!(host.status(&id).unwrap().enabled);
     }
 }

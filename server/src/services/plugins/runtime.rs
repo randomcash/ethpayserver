@@ -183,9 +183,23 @@ impl PluginInstance {
         if out_len == 0 {
             return Ok(Vec::new());
         }
-        let mut buf = vec![0u8; out_len as usize];
+        let (out_ptr, out_len) = (out_ptr as usize, out_len as usize);
+        // `out_len` came straight from the plugin's return value with no
+        // validation yet — a garbage or adversarial packed value can claim
+        // up to ~4 GiB. Bound it against the plugin's actual memory before
+        // allocating: an allocation that large can fail, and Rust's default
+        // allocator aborts the whole process on allocation failure rather
+        // than returning an error, which would take down every other plugin
+        // and the admin page along with it.
+        let mem_size = self.memory.data_size(&self.store);
+        if out_len > mem_size || out_ptr > mem_size - out_len {
+            return Err(PluginCallError::Other(format!(
+                "plugin returned an out-of-bounds answer (ptr {out_ptr}, len {out_len}, memory size {mem_size})"
+            )));
+        }
+        let mut buf = vec![0u8; out_len];
         self.memory
-            .read(&self.store, out_ptr as usize, &mut buf)
+            .read(&self.store, out_ptr, &mut buf)
             .map_err(|e| PluginCallError::Other(e.to_string()))?;
         Ok(buf)
     }
@@ -344,6 +358,25 @@ pub(crate) mod fixtures {
         wat::parse_str(text).unwrap()
     }
 
+    /// Ignores its argument and returns a packed value claiming a length far
+    /// larger than the plugin's actual memory (one page, 64 KiB) — a garbage
+    /// or adversarial `out_len` rather than garbage *bytes*. Distinct from
+    /// [`garbage_module`], which returns a well-formed pointer/length into
+    /// real (if non-JSON) memory: this one exercises the bound check itself.
+    /// Chosen large enough to be well outside the module's memory but small
+    /// enough that even an unbounded allocation attempt stays safe to run in
+    /// a test — the point being to prove the bound check fires before any
+    /// allocation, not to reproduce a multi-gigabyte allocation here.
+    pub(crate) fn garbage_length_module() -> Vec<u8> {
+        wat_module(
+            r#"
+            (i64.or
+                (i64.shl (i64.extend_i32_u (i32.const 0)) (i64.const 32))
+                (i64.extend_i32_u (i32.const 10000000)))
+            "#,
+        )
+    }
+
     pub(crate) fn instance_for(engine: &PluginEngine, wasm: &[u8]) -> PluginInstance {
         let module = engine.compile(wasm).unwrap();
         engine.instantiate(&module).unwrap()
@@ -443,6 +476,39 @@ mod tests {
             matches!(err, PluginCallError::Deserialize(_)),
             "got {err:?}"
         );
+    }
+
+    /// A garbage packed length is rejected against the plugin's actual
+    /// memory size before any allocation is attempted — not just garbage
+    /// *bytes* at a valid length (see `garbage_bytes_fail_deserialisation_cleanly`
+    /// above), but a claimed length the plugin's memory could not possibly
+    /// back. An adversarial plugin could claim a length up to ~4 GiB this
+    /// way; before the bound check, that allocation was attempted before
+    /// wasmtime's own memory-bounds check ever ran, and a failed allocation
+    /// that large aborts the process rather than returning an error.
+    #[test]
+    fn garbage_length_is_rejected_before_allocating() {
+        let engine = PluginEngine::with_tick(Duration::from_millis(5));
+        let mut plugin = instance_for(&engine, &garbage_length_module());
+
+        let err = plugin
+            .call::<_, Ping>(
+                "call",
+                &Ping { n: 1 },
+                engine.ticks_for(Duration::from_secs(1)),
+            )
+            .unwrap_err();
+
+        // Specifically the bound check's own message, not wasmtime's
+        // separate (and looser) out-of-bounds error from `Memory::read` —
+        // proves the length was rejected before the read/allocation was
+        // even attempted, not merely that some error eventually surfaced.
+        match &err {
+            PluginCallError::Other(msg) => {
+                assert!(msg.contains("out-of-bounds answer"), "got {msg:?}");
+            }
+            other => panic!("expected PluginCallError::Other, got {other:?}"),
+        }
     }
 
     /// A store that has trapped is still usable for the next call — the
