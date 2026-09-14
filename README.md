@@ -398,7 +398,12 @@ spending key: yours.
 an invoice for historical/audit purposes; going forward none will be created
 through this API. Testnet was checked directly on 2026-09-14: zero rows of
 any status existed there, so no migration or backfill was needed for existing
-data — there was nothing to clean up.
+data — there was nothing to clean up. Mainnet needs no equivalent check: it
+deploys only from a release tag matching `vMAJOR.MINOR.PATCH` exactly (see
+`.github/workflows/ci.yml`'s `notify-deploy` job), this repository's only tag
+is the prerelease `v0.1.0-alpha`, and it has consequently never received a
+deploy dispatch — there is no mainnet deployment of the old refund code for
+any row to exist in.
 
 `evm::transaction` contains the signing/broadcasting infrastructure a refund
 would need. It is reserved for a possible future hot-wallet mode, gated

@@ -32,6 +32,13 @@
 //! treat any `Pending`/`Broadcasting` row found there the same way: it is a
 //! record of a request this server was never able to carry out, not a
 //! refund in progress.
+//!
+//! Mainnet was not checked the same way because there is nothing to check:
+//! it deploys only from a release tag matching `vMAJOR.MINOR.PATCH` exactly,
+//! this repository's only tag is the prerelease `v0.1.0-alpha`, and mainnet
+//! has consequently never received a deploy dispatch (see `ci.yml`'s
+//! `notify-deploy` job). No deployment means no database with the old
+//! refund code ever running against it, so there is no row to have written.
 
 #[cfg(test)]
 mod tests;
