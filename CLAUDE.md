@@ -89,8 +89,8 @@ that are not in CI's path. Several people have lost an hour to this.
   spurious cross-test failures CI never sees. They only run for `data-service`;
   other crates' `#[ignore]`'d tests are not in that command and still need to
   be run locally. The gate above does not touch any of them either way, so run
-  the `data-service` ones locally too when you touch that layer, to see a
-  failure before CI does.
+  the `data-service` ones locally too when you touch that layer — CI will
+  catch a failure regardless, but locally you see it sooner.
 
 ## Sensitive paths
 
