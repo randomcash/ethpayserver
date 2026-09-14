@@ -100,10 +100,13 @@ fn describe_counters() {
     );
 
     // Refund metrics
-    describe_counter!(
-        "ethpayserver_refunds_initiated_total",
-        "Total number of refunds initiated"
-    );
+    //
+    // No `initiated` counter here: `record_refund_initiated` was removed
+    // (RCS-272) along with its only caller when POST /invoices/{id}/refund
+    // stopped creating refund rows. Registering a description for a counter
+    // nothing increments would be the same "implies a capability" problem
+    // this ticket exists to fix, just in the metrics namespace instead of
+    // the API surface.
     describe_counter!(
         "ethpayserver_refunds_confirmed_total",
         "Total number of refunds confirmed"
@@ -366,16 +369,6 @@ pub fn record_store_created() {
 pub fn record_payout_initiated(chain_id: &types::ChainId, asset_symbol: &str) {
     counter!(
         "ethpayserver_payouts_initiated_total",
-        "chain_id" => chain_id.to_string(),
-        "asset_symbol" => asset_symbol.to_string()
-    )
-    .increment(1);
-}
-
-/// Record a refund initiation.
-pub fn record_refund_initiated(chain_id: &types::ChainId, asset_symbol: &str) {
-    counter!(
-        "ethpayserver_refunds_initiated_total",
         "chain_id" => chain_id.to_string(),
         "asset_symbol" => asset_symbol.to_string()
     )

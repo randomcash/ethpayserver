@@ -396,7 +396,9 @@ spending key: yours.
 
 `GET /invoices/{id}/refunds` still lists any refund records associated with
 an invoice for historical/audit purposes; going forward none will be created
-through this API.
+through this API. Testnet was checked directly on 2026-09-14: zero rows of
+any status existed there, so no migration or backfill was needed for existing
+data — there was nothing to clean up.
 
 `evm::transaction` contains the signing/broadcasting infrastructure a refund
 would need. It is reserved for a possible future hot-wallet mode, gated

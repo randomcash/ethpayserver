@@ -21,6 +21,17 @@
 //! A merchant refunds a payer from their own wallet, the one that holds the
 //! spending key. This endpoint remains only as an explicit, documented refusal
 //! rather than a route that disappears with no explanation.
+//!
+//! ## Existing testnet rows
+//!
+//! Checked directly against the testnet database on 2026-09-14: the
+//! `refunds` table held zero rows of any status, `Pending`/`Broadcasting`
+//! included. Nothing there was ever real, so this change ships with no
+//! migration and no backfill — there is nothing to migrate away from. If
+//! that ever stops being true (a restored backup, a different environment),
+//! treat any `Pending`/`Broadcasting` row found there the same way: it is a
+//! record of a request this server was never able to carry out, not a
+//! refund in progress.
 
 #[cfg(test)]
 mod tests;
