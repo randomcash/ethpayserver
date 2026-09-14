@@ -3,7 +3,7 @@
 use super::ChainMonitor;
 use crate::error::{EvmError, EvmResult};
 use crate::monitor::events::MonitorEvent;
-use crate::monitor::source::{BlockSource, ChainHealth, SourceStatus};
+use crate::monitor::source::{BlockSource, BlockStream, ChainHealth, SourceStatus};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
@@ -98,6 +98,10 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                     if let Err(e) = self.check_confirmations().await {
                         warn!(chain_id, error = %e, "error checking confirmations");
                     }
+
+                    if let Err(e) = self.resubscribe_if_stalled(&mut block_stream).await {
+                        warn!(chain_id, error = %e, "failed to resubscribe stalled block stream");
+                    }
                 }
             }
         }
@@ -108,6 +112,34 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// Stop the monitor.
     pub async fn stop(&self) -> EvmResult<()> {
         let _ = self.shutdown_tx.send(()).await;
+        Ok(())
+    }
+
+    /// Notice a block-processing loop that has silently stopped, and reconnect it.
+    ///
+    /// A dropped or half-open WebSocket doesn't always deliver a close frame -
+    /// sometimes the subscription just stops yielding blocks forever, with no
+    /// error to log and nothing to select! on. That leaves the RPC reachable
+    /// (health checks that ask it directly still succeed) while the block
+    /// stream is dead, which is indistinguishable from a healthy idle chain
+    /// unless something checks whether blocks are still arriving. This runs on
+    /// the confirmation-check timer because that's the one thing already on a
+    /// clock here, and reuses `is_healthy`'s own lag check rather than
+    /// invent a second definition of "stalled".
+    async fn resubscribe_if_stalled(&self, block_stream: &mut BlockStream) -> EvmResult<()> {
+        let health = self.get_health().await;
+        if health.status != SourceStatus::Connected || health.is_healthy {
+            return Ok(());
+        }
+
+        error!(
+            chain_id = self.chain_id(),
+            current_block = ?health.current_block,
+            last_processed_block = ?health.last_processed_block,
+            "block processing stalled while RPC is reachable; resubscribing"
+        );
+
+        *block_stream = self.source.subscribe_blocks().await?;
         Ok(())
     }
 }

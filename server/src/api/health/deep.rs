@@ -110,7 +110,7 @@ async fn probe_evm_monitor(
 
     let (rpcs, data_fresh) = match chains_result {
         Ok(Ok(chains)) => {
-            let fresh = !chains.is_empty();
+            let fresh = chains_are_fresh(&chains);
             (build_rpc_map(chains, chains_latency), fresh)
         }
         Ok(Err(e)) => {
@@ -131,7 +131,22 @@ async fn probe_evm_monitor(
     (redis, rpcs, monitor)
 }
 
-fn build_rpc_map(chains: Vec<ChainHealth>, latency_ms: u64) -> HashMap<String, RpcHealth> {
+/// Whether a chain-health snapshot represents fresh monitor data.
+///
+/// An empty snapshot means the health key never parsed - that is never
+/// fresh, regardless of how the `Vec` got empty. A non-empty one is fresh
+/// only if every chain in it is itself healthy: connected and not lagging
+/// behind the block number it just reported. `is_healthy` already carries
+/// that lag check, so this just refuses to call a stalled chain "fresh"
+/// because *something* answered.
+pub(super) fn chains_are_fresh(chains: &[ChainHealth]) -> bool {
+    !chains.is_empty() && chains.iter().all(|chain| chain.is_healthy)
+}
+
+pub(super) fn build_rpc_map(
+    chains: Vec<ChainHealth>,
+    latency_ms: u64,
+) -> HashMap<String, RpcHealth> {
     chains
         .into_iter()
         .map(|chain| {
@@ -143,7 +158,20 @@ fn build_rpc_map(chains: Vec<ChainHealth>, latency_ms: u64) -> HashMap<String, R
                     SourceStatus::Failed(msg) => msg.clone(),
                     SourceStatus::Disconnected => "disconnected".to_string(),
                     SourceStatus::Connecting => "connecting".to_string(),
-                    _ => "unhealthy".to_string(),
+                    // Connected but not is_healthy means one thing: the RPC
+                    // answers fine and the processing loop isn't keeping up
+                    // with it. Say the lag instead of a bare "unhealthy" -
+                    // that's the difference between a two-minute read and an
+                    // hour spent assuming the RPC itself was the problem.
+                    SourceStatus::Connected => {
+                        match (chain.current_block, chain.last_processed_block) {
+                            (Some(current), Some(last)) => format!(
+                                "connected but {} blocks behind",
+                                current.saturating_sub(last)
+                            ),
+                            _ => "connected but has not processed a block yet".to_string(),
+                        }
+                    }
                 })
             };
             (

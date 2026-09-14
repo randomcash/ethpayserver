@@ -26,6 +26,10 @@ struct Inner {
     native_transfers: RwLock<HashMap<u64, Vec<NativeTransfer>>>,
     logs: RwLock<HashMap<u64, Vec<alloy::rpc::types::Log>>>,
     block_tx: broadcast::Sender<EvmResult<BlockNotification>>,
+    /// How many times `subscribe_blocks` has been called. Lets a test assert
+    /// that a stalled monitor actually reconnected, not just that it kept
+    /// running.
+    subscribe_count: AtomicU64,
 }
 
 /// A mock block source for testing payment detection.
@@ -59,8 +63,15 @@ impl MockBlockSource {
                 native_transfers: RwLock::new(HashMap::new()),
                 logs: RwLock::new(HashMap::new()),
                 block_tx,
+                subscribe_count: AtomicU64::new(0),
             }),
         }
+    }
+
+    /// Number of times `subscribe_blocks` has been called on this source
+    /// (through any clone, since they share state).
+    pub fn subscribe_count(&self) -> u64 {
+        self.inner.subscribe_count.load(Ordering::SeqCst)
     }
 
     /// Push a block notification to all subscribers.
@@ -115,6 +126,7 @@ impl BlockSource for MockBlockSource {
     }
 
     async fn subscribe_blocks(&self) -> EvmResult<BlockStream> {
+        self.inner.subscribe_count.fetch_add(1, Ordering::SeqCst);
         let rx = self.inner.block_tx.subscribe();
         let stream = BroadcastStream::new(rx).filter_map(|result| match result {
             Ok(Ok(block)) => Some(Ok(block)),
