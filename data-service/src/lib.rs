@@ -22,11 +22,16 @@ pub mod analytics;
 pub mod invoice_creation;
 pub mod payout_claims;
 pub mod store_creation;
+pub mod webhook_delivery;
 
 pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
 pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
 pub use invoice_creation::InvoiceCreationWriter;
 pub use payout_claims::PayoutClaimReader;
+pub use webhook_delivery::{
+    UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,
+    WebhookDeliveryWriter,
+};
 
 #[cfg(feature = "postgres")]
 pub mod postgres;

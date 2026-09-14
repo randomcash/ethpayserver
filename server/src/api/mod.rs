@@ -34,6 +34,7 @@ pub mod rates;
 pub mod refunds;
 pub mod stores;
 pub mod users;
+pub mod webhook_deliveries;
 pub mod ws;
 
 pub use extractors::{AdminAuth, AuthenticatedUser};
@@ -299,6 +300,15 @@ where
         .route("/{store_id}/payouts", get(payouts::list_payouts::<A>))
         .route("/{store_id}/payouts", post(payouts::create_payout::<A>))
         .route("/{store_id}/payouts/{payout_id}", get(payouts::get_payout::<A>))
+        // Webhook deliveries
+        .route(
+            "/{store_id}/webhook-deliveries",
+            get(webhook_deliveries::list_deliveries_for_store::<A>),
+        )
+        .route(
+            "/{store_id}/webhook-deliveries/{delivery_id}/replay",
+            post(webhook_deliveries::replay_delivery::<A>),
+        )
         .with_state(state.clone());
 
     // Invoice endpoints (with idempotency middleware on POST)
@@ -322,6 +332,10 @@ where
         .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
         .route("/{invoice_id}/refund", post(refunds::create_refund::<A>))
         .route("/{invoice_id}/refunds", get(refunds::list_refunds::<A>))
+        .route(
+            "/{invoice_id}/webhook-deliveries",
+            get(webhook_deliveries::list_deliveries_for_invoice::<A>),
+        )
         .with_state(state.clone());
 
     if let Some(idem) = idempotency {

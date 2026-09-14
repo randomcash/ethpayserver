@@ -23,6 +23,7 @@ mod token;
 pub(crate) mod wallet;
 mod wallet_rotation;
 mod watched_address;
+mod webhook_delivery;
 
 pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository};
 pub use wallet_rotation::WalletRotation;
