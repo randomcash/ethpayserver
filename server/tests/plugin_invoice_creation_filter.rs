@@ -15,6 +15,13 @@
 //! through the router: `AuthenticatedUser` and `State` are plain data the
 //! extractors produce, so nothing about this assertion depends on routing or
 //! middleware, only on `create_invoice`'s own body.
+//!
+//! RCS-300 review finding, fixed: this comment used to claim the filter
+//! "runs after a real permission check has already passed rather than being
+//! indistinguishable from an auth rejection" without a test asserting it.
+//! Both rejections actually share HTTP 403 - `permission_denies_before_the_filter_is_ever_consulted`
+//! below is the ordering test, and it distinguishes them by the `error` code
+//! in the body (`forbidden` vs `invoice_creation_blocked`), not by status.
 
 use std::sync::Arc;
 
@@ -25,14 +32,18 @@ use axum::http::StatusCode;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use auth::{Result as AuthResult, Role, Session, SessionId, SessionService, Store, UserId, UserInfo};
+use auth::{
+    Result as AuthResult, Role, Session, SessionId, SessionService, Store, UserId, UserInfo,
+};
 use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
 use server::api::AuthenticatedUser;
 use server::api::invoices::{CreateInvoiceRequest, create_invoice};
 use server::services::RedisEVMMonitor;
-use server::services::plugins::{FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest};
+use server::services::plugins::{
+    FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest,
+};
 use server::state::PgAppState;
 
 /// Not exercised: `create_invoice` never calls back into session management,
@@ -162,6 +173,44 @@ async fn a_denying_filter_blocks_the_real_endpoint_with_the_reason() {
     assert!(
         message.contains("subscription"),
         "the merchant must see why, got: {message}"
+    );
+}
+
+/// RCS-300 review finding, fixed: the module comment claimed the filter runs
+/// after the permission check without a test pinning the order. A denying
+/// filter is installed here too, so if the filter ran first - or the
+/// permission check were skipped - this request would come back
+/// `invoice_creation_blocked` instead. It must come back `forbidden`: a user
+/// with no role on the store never reaches the filter at all.
+#[tokio::test]
+#[ignore]
+async fn permission_denies_before_the_filter_is_ever_consulted() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let stranger = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
+
+    let result = create_invoice(
+        AuthenticatedUser(user_info(stranger)),
+        State(state),
+        Json(invoice_request(store.id.0)),
+    )
+    .await;
+
+    let Err((status, Json(body))) = result else {
+        panic!("a user with no role on the store must be refused");
+    };
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"], "forbidden",
+        "must fail on the permission check, not the filter: got {body:?}"
     );
 }
 

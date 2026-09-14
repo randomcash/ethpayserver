@@ -232,7 +232,12 @@ impl<A: SessionService + 'static> HostInvoiceIssuer for PluginHostApi<A> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    use std::sync::Arc;
+
+    use auth::{Result as AuthResult, Session, SessionId, UserInfo};
+
     use super::*;
+    use crate::state::PgAppState;
 
     /// Ticket test 1: a plugin calling invoice-create for a merchant's store
     /// id is refused. This is the pure enforcement decision, isolated from
@@ -254,5 +259,73 @@ mod tests {
     fn allows_the_hosts_own_store() {
         let own_store = StoreId::new();
         assert!(enforce_own_store(own_store, own_store).is_ok());
+    }
+
+    /// Never actually called: `invoice_create` refuses a foreign store before
+    /// it touches session state, and this test never reaches the host's own
+    /// store either.
+    struct UnusedSessionService;
+
+    #[async_trait]
+    impl SessionService for UnusedSessionService {
+        async fn validate_session(
+            &self,
+            _session_id: SessionId,
+        ) -> AuthResult<(UserInfo, Session)> {
+            unimplemented!("not exercised by invoice_create's store check")
+        }
+        async fn logout(&self, _session_id: SessionId) -> AuthResult<()> {
+            unimplemented!("not exercised by invoice_create's store check")
+        }
+        async fn logout_all(&self, _session_id: SessionId) -> AuthResult<()> {
+            unimplemented!("not exercised by invoice_create's store check")
+        }
+        async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
+            unimplemented!("not exercised by invoice_create's store check")
+        }
+    }
+
+    /// A pool that never connects: `enforce_own_store` is the first thing
+    /// `invoice_create` does, and it returns before the pool is ever touched.
+    /// `connect_lazy` (already used the same way in
+    /// `api::api_key_rate_limit`'s tests) defers the actual TCP connection to
+    /// first query, so this test needs no live database.
+    fn host_api(own_store: StoreId) -> PluginHostApi<UnusedSessionService> {
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+        let state = PgAppState::new(
+            Arc::new(data_service::PgDataService::new(pool)),
+            Arc::new(UnusedSessionService),
+            None,
+            Arc::new(rates::NoOpRateProvider),
+        );
+        PluginHostApi::new(state, own_store)
+    }
+
+    /// RCS-300 review finding, fixed: the earlier tests here only exercised
+    /// the isolated `enforce_own_store` helper. Nothing called
+    /// `HostInvoiceIssuer::invoice_create` itself - the method a plugin
+    /// actually invokes - so a regression that dropped the `?`, ignored the
+    /// result, or reordered the check after a DB read would have left every
+    /// test in this file green. This calls the real trait method with a
+    /// merchant's store id and checks the refusal comes from it.
+    #[tokio::test]
+    async fn invoice_create_refuses_a_merchants_store() {
+        let own_store = StoreId::new();
+        let merchants_store = StoreId::new();
+        let api = host_api(own_store);
+
+        let request = InvoiceCreateRequest {
+            store_id: merchants_store,
+            asset_symbol: "USDC".to_string(),
+            amount: "10.00".to_string(),
+            metadata: None,
+            customer_email: None,
+        };
+
+        let err = api.invoice_create(request).await.unwrap_err();
+        assert!(matches!(
+            err,
+            InvoiceIssuerError::ForbiddenStore { requested } if requested == merchants_store
+        ));
     }
 }
