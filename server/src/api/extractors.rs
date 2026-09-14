@@ -42,8 +42,8 @@ pub struct AuthenticatedUser(pub UserInfo);
 /// Same as AuthenticatedUser but requires ServerAdmin role.
 pub struct AdminAuth(pub UserInfo);
 
-/// A valid session is not enough to authorize a credential change - RCS-207
-/// was exactly a valid-but-stale session being enough for permanent account
+/// A valid session is not enough to authorize a credential change - a
+/// valid-but-stale session has previously been enough for permanent account
 /// takeover. `FreshlyAuthenticatedUser` additionally requires the session
 /// itself to have been created recently, which a hijacked long-lived token
 /// cannot forge without the underlying passkey or wallet credential: minting
@@ -435,8 +435,8 @@ mod tests {
 
     #[test]
     fn an_old_session_used_much_later_is_stale() {
-        // The RCS-207 shape: a session minted a day ago is still "valid" (not
-        // expired, not idle-timed-out) but must not pass as a fresh login.
+        // A session minted a day ago is still "valid" (not expired, not
+        // idle-timed-out) but must not pass as a fresh login.
         let created = at(0);
         assert!(!is_session_fresh(created, created + Duration::hours(24)));
     }

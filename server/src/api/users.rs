@@ -413,7 +413,7 @@ fn generate_key_segment(bytes: usize) -> String {
 }
 
 // =========================================================================
-// Wallet credentials (login identity) — RCS-227
+// Wallet credentials (login identity)
 //
 // SENSITIVE: this section changes and lists login-credential wallets and the
 // primary-wallet pointer wallet login resolves accounts by. Human review
@@ -493,8 +493,8 @@ where
 /// wallet login resolves the account by, and the one shown in Settings.
 ///
 /// Requires a *fresh* re-authentication (see `FreshlyAuthenticatedUser`):
-/// this changes a login credential, and RCS-207 was exactly a merely-valid
-/// session being enough for permanent account takeover.
+/// this changes a login credential, and a merely-valid session has
+/// previously been enough for permanent account takeover.
 ///
 /// Deliberately does not accept a bare address plus signature. `wallet_id`
 /// must already name an active `WalletCredential` belonging to this account —

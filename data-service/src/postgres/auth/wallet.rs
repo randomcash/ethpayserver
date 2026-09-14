@@ -157,7 +157,7 @@ impl WalletRepository for PgDataService {
 
 impl PgDataService {
     /// Make `wallet_id` the account's primary login wallet, demoting whatever
-    /// was primary before it - RCS-227, sensitive path (auth credential change).
+    /// was primary before it. Sensitive path: this changes an auth credential.
     ///
     /// Not a `WalletRepository` trait method: that trait is defined in the
     /// pinned `auth` crate (payserver-commons), and a proper "set primary"
@@ -226,8 +226,8 @@ impl PgDataService {
         // Keep `users.primary_wallet_address` - the field wallet *login*
         // actually resolves accounts by - in step with the credential that is
         // now primary. `kdf_salt_identifier` is deliberately untouched: it is
-        // pinned at registration (RCS-201/RCS-203) and this statement does not
-        // mention it, so the recovery hash stays valid across the swap.
+        // pinned at registration and this statement does not mention it, so
+        // the recovery hash stays valid across the swap.
         sqlx::query("UPDATE users SET primary_wallet_address = $1 WHERE id = $2")
             .bind(&target.address)
             .bind(user_id.0)

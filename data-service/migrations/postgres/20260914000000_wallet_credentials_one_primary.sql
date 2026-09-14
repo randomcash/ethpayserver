@@ -1,5 +1,5 @@
 -- Exactly one primary wallet credential per account, enforced here rather
--- than in application code (RCS-227).
+-- than in application code.
 --
 -- `wallet_credentials.is_primary` had no uniqueness constraint at all before
 -- this migration - only a non-unique index (`idx_wallets_user_primary`) for

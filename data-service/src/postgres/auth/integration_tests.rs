@@ -375,7 +375,7 @@ async fn integration_wallet_unique_constraint() {
     service.delete_user(user2.id).await.unwrap();
 }
 
-/// RCS-227: swapping the primary wallet credential must demote the old one,
+/// Swapping the primary wallet credential must demote the old one,
 /// promote the new one, keep `users.primary_wallet_address` (what wallet
 /// *login* actually resolves accounts by) in step, and - the regression that
 /// matters - leave the pinned `kdf_salt_identifier` untouched so recovery
