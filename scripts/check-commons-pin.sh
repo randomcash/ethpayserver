@@ -10,6 +10,16 @@
 #
 # Commons is public, so this needs no token - an anonymous, blobless clone of
 # `main` is enough to walk its commit graph.
+#
+# Must-fail-first, run against real payserver-commons commits (2026-09-14):
+#   - pin set to 1319b2a7b018397a23afc6f157b791a699590eb3 (tip of
+#     origin/rcs/rcs-217-feat-merchants-must-explicitly-acknowled, not merged
+#     to main) -> exit 1, "is not on commons main".
+#   - pin set to 780dd224d5f756901f45efe68fdd5bb4c7f416ff (this repo's actual
+#     pin, on main) -> exit 0, "is on payserver-commons main".
+#   - one crate line left on the branch-only sha while the rest were reverted
+#     to the main sha (partial re-pin) -> exit 1, reporting only the
+#     offending rev and "ok" for the rest.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
