@@ -244,9 +244,16 @@ async fn test_handle_payment_confirmed_one_unit_below_exact_amount_stays_unpaid(
         .await
         .unwrap()
         .unwrap();
-    assert_ne!(
+    // There is no `Underpaid` status to assert against - `InvoiceStatus` has
+    // no such variant, since the handler simply leaves a not-fully-paid
+    // invoice's status untouched. Paired with the exact-match test above
+    // (which does verify a transition to `Paid` happens), asserting the
+    // status is still exactly the pre-event `Processing` rules out both a
+    // wrongly-early `Paid` transition and a handler that transitions
+    // nothing at all.
+    assert_eq!(
         invoice.status,
-        InvoiceStatus::Paid,
+        InvoiceStatus::Processing,
         "one base unit short of the invoice amount must not be marked paid"
     );
 }
