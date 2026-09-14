@@ -1,14 +1,8 @@
 //! Store payment method CRUD endpoints: list, create, get, update, delete.
 //!
-//! RCS-281 pre-close audit, re-run against the live testnet database
-//! (`ethpayserver_testnet_postgres` / `ethpayserver_testnet`) immediately
-//! before this commit:
-//! `SELECT id, store_id, chain_id FROM store_payment_methods WHERE chain_id
-//! NOT LIKE 'eip155:%'` and the equivalent query against `watched_addresses`
-//! both return zero rows. The only chain in `store_payment_methods` today is
-//! `eip155:11155111` (21 rows). `server_settings` also has zero rows, which
-//! is why `chain_has_no_adapter`'s `None` branch below is load-bearing.
-//! Mainnet is not reachable from this box and remains unaudited.
+//! RCS-281's pre-close audit (see the ticket and PR description for the
+//! query and result - not repeated here, since this file ships in a public
+//! repository and the result would go stale the moment a new row appears).
 
 use axum::{
     Json,
@@ -21,7 +15,7 @@ use ::types::ChainId;
 use auth::repository::StoreRepository;
 use auth::{ServerSettings, ServerSettingsRepository, SessionService, StoreId};
 use data_service::{self, StorePaymentMethodReader, StorePaymentMethodWriter};
-use evm::{get_any_chain_config, validate_xpub};
+use evm::validate_xpub;
 
 use super::super::extractors::AuthenticatedUser;
 use super::{ApiErr, repository_error, require_store_settings_permission};
@@ -40,26 +34,35 @@ pub use api_types::{
 /// change.
 ///
 /// `settings` is `None` when nobody has ever written a `server_settings`
-/// row - confirmed true of the live testnet database as of this change
-/// (`SELECT * FROM server_settings` returns zero rows there, re-checked
-/// immediately before this commit), and unverified but plausibly also true
-/// of mainnet. Falling back to `ServerSettings::default()` in that case, as
-/// an earlier version of this check did, silently turns "reject Tron" into
-/// "reject every chain this deployment actually serves": that default is a
-/// Rust-side, EVM-mainnet chain list baked in at compile time, and testnet's
-/// only real chain (`eip155:11155111`, Sepolia) is not on it.
+/// row - confirmed true of the live testnet database, and unverified but
+/// plausibly also true of mainnet (see the ticket's audit). Falling back to
+/// `ServerSettings::default()` in that case, as an earlier version of this
+/// check did, silently turns "reject Tron" into "reject every chain this
+/// deployment actually serves": that default is a Rust-side, EVM-mainnet
+/// chain list baked in at compile time, and testnet's only real chain
+/// (`eip155:11155111`, Sepolia) is not on it.
 ///
 /// A second earlier version fell back to `is_evm()` - a bare namespace check,
 /// exactly what this predicate exists to not be. That accepted any invented
-/// `eip155:<n>`, not just chains this codebase actually has a config for:
-/// nothing stops `eip155:999999` sailing through while unconfigured, the same
-/// hole the ticket describes for Tron. The fallback used here instead,
-/// `evm::get_any_chain_config`, is the compiled-in registry of EVM chains
-/// (mainnet and testnet) this codebase actually ships adapter code for - so
-/// Sepolia still passes unconfigured, but a made-up id does not. It is not a
-/// substitute for `enabled_chain_ids`: a `Some` settings row always wins, and
-/// once an operator writes one, every chain not in it is refused regardless
-/// of whether `evm` recognizes it.
+/// `eip155:<n>`, not just chains this codebase actually has a config for.
+///
+/// A third earlier version fell back to `evm::get_any_chain_config`, the
+/// compiled-in registry of every EVM chain this codebase ships adapter code
+/// for - mainnet chains included. That let a merchant on the (Sepolia-only)
+/// testnet deployment register `eip155:1` and get quoted a `0x...` address
+/// for Ethereum mainnet, which nothing on that box watches: the exact hole
+/// this ticket exists to close, reopened for any mainnet chain id the binary
+/// happens to recognize instead of only Tron.
+///
+/// The fallback used here instead is scoped to `evm::testnet`'s registry
+/// only. Mainnet holds real merchant funds, so an unconfigured deployment
+/// must never guess that a mainnet chain id is safe to quote - an operator
+/// enables one explicitly via `enabled_chain_ids`, the same as Tron would be.
+/// A testnet id is lower-stakes and testnet's own real traffic (Sepolia)
+/// depends on continuing to pass here unconfigured, so that side stays
+/// permissive. Either way this is not a substitute for `enabled_chain_ids`:
+/// a `Some` settings row always wins, and once an operator writes one, every
+/// chain not in it is refused regardless of what `evm` recognizes.
 ///
 /// Without this gate at all a merchant can register e.g. `tron:728126428`,
 /// which still derives a secp256k1 address (the same curve as EVM) but that
@@ -69,7 +72,7 @@ pub(crate) fn chain_has_no_adapter(chain_id: &ChainId, settings: Option<&ServerS
         Some(settings) => !settings.enabled_chain_ids.contains(chain_id),
         None => chain_id
             .evm_chain_id()
-            .and_then(get_any_chain_config)
+            .and_then(evm::testnet::get_testnet_config)
             .is_none(),
     }
 }

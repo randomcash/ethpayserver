@@ -198,26 +198,46 @@ fn an_eip155_chain_outside_the_enabled_set_is_still_refused() {
 /// `ServerSettings::default()` there (a Rust-side, EVM-mainnet chain list)
 /// would refuse `eip155:11155111` too, since Sepolia isn't in it - turning
 /// this ticket's fix into an outage for the only chain testnet actually
-/// serves. `evm::get_any_chain_config` is the correct fallback: any chain
-/// this codebase ships a real config for (mainnet or testnet) is accepted
-/// when nothing has been explicitly configured yet.
+/// serves. `evm::testnet::get_testnet_config` is the fallback used instead:
+/// a real testnet chain is accepted when nothing has been explicitly
+/// configured yet (see `an_unconfigured_server_refuses_a_mainnet_evm_chain`
+/// below for why mainnet chains are deliberately excluded from this
+/// fallback).
 #[test]
 fn an_unconfigured_server_still_accepts_evm() {
     let sepolia = ChainId::parse("eip155:11155111").unwrap();
     assert!(!chain_has_no_adapter(&sepolia, None));
 }
 
-/// The unconfigured fallback is EVM-only, not "accept anything" - Tron must
-/// still be refused even before an operator has written a settings row.
+/// The unconfigured fallback is EVM-testnet-only, not "accept anything" -
+/// Tron must still be refused even before an operator has written a settings
+/// row.
 #[test]
 fn an_unconfigured_server_still_refuses_tron() {
     let tron = ChainId::parse("tron:728126428").unwrap();
     assert!(chain_has_no_adapter(&tron, None));
 }
 
+/// The bug an earlier version of this predicate reopened: falling back to
+/// the full compiled chain registry (mainnet and testnet) accepts any
+/// mainnet chain id the binary recognizes, not just the testnet chains this
+/// (Sepolia-only) deployment actually serves. A merchant on testnet could
+/// register `eip155:1` - Ethereum mainnet - get quoted a `0x...` address,
+/// and have nothing on the testnet box watching it: the exact hole this
+/// ticket exists to close, reopened for any recognized mainnet chain instead
+/// of only Tron. Mainnet chains must be refused here; an operator turns one
+/// on explicitly via `enabled_chain_ids`, same as Tron would be. Ablated
+/// locally (swapped the fallback back to `evm::get_any_chain_config`) and
+/// watched this test go red before restoring the testnet-scoped fix.
+#[test]
+fn an_unconfigured_server_refuses_a_mainnet_evm_chain() {
+    let ethereum_mainnet = ChainId::parse("eip155:1").unwrap();
+    assert!(chain_has_no_adapter(&ethereum_mainnet, None));
+}
+
 /// The bug in an earlier version of this predicate: falling back to
 /// `is_evm()` accepts ANY eip155 number, not just ones this codebase has a
-/// config for. `eip155:999999` names no real chain - `evm::get_any_chain_config`
+/// config for. `eip155:999999` names no real chain - `evm::testnet::get_testnet_config`
 /// returns `None` for it - so it must still be refused even with no settings
 /// row, exactly like Tron. Ablated locally (swapped the fallback back to
 /// `is_evm()`) and watched this test go red before restoring the fix.
@@ -230,7 +250,7 @@ fn an_unconfigured_server_refuses_an_unregistered_eip155_id() {
 /// The ticket's example, `tron:728126428`, happens to be Tron's real
 /// EVM-compatible chain id - the same number as a genuine `eip155` chain
 /// somewhere. `chain_has_no_adapter`'s `None` branch only feeds a namespace's
-/// numeric reference to `evm::get_any_chain_config` after `evm_chain_id()`
+/// numeric reference to `evm::testnet::get_testnet_config` after `evm_chain_id()`
 /// checks `is_evm()` (`types::ChainId::evm_chain_id`, see its doc comment:
 /// "`None` for any other namespace ... whose reference is also numeric but is
 /// emphatically not an EIP-155 id"), so the collision can't leak `tron:...`
