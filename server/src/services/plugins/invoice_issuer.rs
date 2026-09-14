@@ -123,6 +123,13 @@ impl<A> PluginHostApi<A> {
             own_store_id,
         }
     }
+
+    /// Shared with sibling capability modules under `services::plugins` (see
+    /// `merchant_directory.rs`) that read through the same data service this
+    /// one writes through, rather than a second connection of their own.
+    pub(super) fn data_service(&self) -> &data_service::PgDataService {
+        &self.state.data_service
+    }
 }
 
 #[async_trait]
