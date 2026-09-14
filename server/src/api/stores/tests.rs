@@ -167,7 +167,11 @@ fn evm_only_settings() -> ServerSettings {
 #[test]
 fn a_chain_with_no_adapter_is_refused() {
     let tron = ChainId::parse("tron:728126428").unwrap();
-    assert!(chain_has_no_adapter(&tron, Some(&evm_only_settings())));
+    assert!(chain_has_no_adapter(
+        &tron,
+        Some(&evm_only_settings()),
+        ChainCheckContext::New
+    ));
 }
 
 /// The predicate must not also catch a chain the server does serve - a gate
@@ -179,7 +183,11 @@ fn a_registered_chain_is_not_refused() {
         ..evm_only_settings()
     };
     let sepolia = ChainId::parse("eip155:11155111").unwrap();
-    assert!(!chain_has_no_adapter(&sepolia, Some(&settings)));
+    assert!(!chain_has_no_adapter(
+        &sepolia,
+        Some(&settings),
+        ChainCheckContext::New
+    ));
 }
 
 /// This is deliberately not "is it eip155": the predicate is membership in
@@ -190,8 +198,20 @@ fn a_registered_chain_is_not_refused() {
 #[test]
 fn an_eip155_chain_outside_the_enabled_set_is_still_refused() {
     let untracked = ChainId::parse("eip155:999999").unwrap();
-    assert!(chain_has_no_adapter(&untracked, Some(&evm_only_settings())));
+    assert!(chain_has_no_adapter(
+        &untracked,
+        Some(&evm_only_settings()),
+        ChainCheckContext::New
+    ));
 }
+
+// -------------------------------------------------------------------------
+// `settings: None`, `ChainCheckContext::New` - a request introducing a chain
+// id (`create`'s `req.chain_id`). Must not guess which environment this
+// binary is running as: testnet's one real chain stays accepted, but
+// nothing wider does, so an unconfigured mainnet deployment refuses
+// everything rather than mistake some other environment's chain for its own.
+// -------------------------------------------------------------------------
 
 /// `None` means nobody has ever written a `server_settings` row - true of
 /// the live testnet database as of this ticket. Falling back to
@@ -200,22 +220,26 @@ fn an_eip155_chain_outside_the_enabled_set_is_still_refused() {
 /// this ticket's fix into an outage for the only chain testnet actually
 /// serves. `evm::testnet::get_testnet_config` is the fallback used instead:
 /// a real testnet chain is accepted when nothing has been explicitly
-/// configured yet (see `an_unconfigured_server_refuses_a_mainnet_evm_chain`
+/// configured yet (see `an_unconfigured_server_refuses_a_mainnet_evm_chain_for_a_new_request`
 /// below for why mainnet chains are deliberately excluded from this
 /// fallback).
 #[test]
-fn an_unconfigured_server_still_accepts_evm() {
+fn an_unconfigured_server_still_accepts_evm_for_a_new_request() {
     let sepolia = ChainId::parse("eip155:11155111").unwrap();
-    assert!(!chain_has_no_adapter(&sepolia, None));
+    assert!(!chain_has_no_adapter(
+        &sepolia,
+        None,
+        ChainCheckContext::New
+    ));
 }
 
 /// The unconfigured fallback is EVM-testnet-only, not "accept anything" -
 /// Tron must still be refused even before an operator has written a settings
 /// row.
 #[test]
-fn an_unconfigured_server_still_refuses_tron() {
+fn an_unconfigured_server_still_refuses_tron_for_a_new_request() {
     let tron = ChainId::parse("tron:728126428").unwrap();
-    assert!(chain_has_no_adapter(&tron, None));
+    assert!(chain_has_no_adapter(&tron, None, ChainCheckContext::New));
 }
 
 /// The bug an earlier version of this predicate reopened: falling back to
@@ -230,9 +254,13 @@ fn an_unconfigured_server_still_refuses_tron() {
 /// locally (swapped the fallback back to `evm::get_any_chain_config`) and
 /// watched this test go red before restoring the testnet-scoped fix.
 #[test]
-fn an_unconfigured_server_refuses_a_mainnet_evm_chain() {
+fn an_unconfigured_server_refuses_a_mainnet_evm_chain_for_a_new_request() {
     let ethereum_mainnet = ChainId::parse("eip155:1").unwrap();
-    assert!(chain_has_no_adapter(&ethereum_mainnet, None));
+    assert!(chain_has_no_adapter(
+        &ethereum_mainnet,
+        None,
+        ChainCheckContext::New
+    ));
 }
 
 /// The bug in an earlier version of this predicate: falling back to
@@ -242,9 +270,77 @@ fn an_unconfigured_server_refuses_a_mainnet_evm_chain() {
 /// row, exactly like Tron. Ablated locally (swapped the fallback back to
 /// `is_evm()`) and watched this test go red before restoring the fix.
 #[test]
-fn an_unconfigured_server_refuses_an_unregistered_eip155_id() {
+fn an_unconfigured_server_refuses_an_unregistered_eip155_id_for_a_new_request() {
     let untracked = ChainId::parse("eip155:999999").unwrap();
-    assert!(chain_has_no_adapter(&untracked, None));
+    assert!(chain_has_no_adapter(
+        &untracked,
+        None,
+        ChainCheckContext::New
+    ));
+}
+
+// -------------------------------------------------------------------------
+// `settings: None`, `ChainCheckContext::Existing` - a chain already stored
+// on a row (`update`'s `existing.chain_id`). Never a value the request
+// chose, so there is no environment to guess wrong; the only thing left to
+// catch is a namespace with no adapter anywhere (Tron).
+// -------------------------------------------------------------------------
+
+/// The bug this context split fixes: with the `New`-style testnet-only
+/// fallback applied here too, an unconfigured *mainnet* deployment would
+/// 400 on every update to an already-working `eip155:1` row - re-enabling
+/// it, rotating its xpub - the moment this ticket shipped, since mainnet
+/// chain ids are never in `evm::testnet`'s registry. `Existing` uses the
+/// full compiled registry instead, so a stored chain this codebase actually
+/// has adapter code for is left alone. Ablated locally (used
+/// `ChainCheckContext::New` for this call site too) and watched this test go
+/// red before restoring the fix.
+#[test]
+fn an_unconfigured_server_leaves_an_existing_mainnet_evm_chain_alone() {
+    let ethereum_mainnet = ChainId::parse("eip155:1").unwrap();
+    assert!(!chain_has_no_adapter(
+        &ethereum_mainnet,
+        None,
+        ChainCheckContext::Existing
+    ));
+}
+
+/// Same widening, still refuses what has no adapter anywhere - Tron isn't in
+/// the compiled registry under any name, so an unconfigured deployment still
+/// refuses to leave a legacy Tron row alone.
+#[test]
+fn an_unconfigured_server_still_refuses_an_existing_tron_chain() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    assert!(chain_has_no_adapter(
+        &tron,
+        None,
+        ChainCheckContext::Existing
+    ));
+}
+
+/// A testnet chain already stored on a row must still pass under `Existing`:
+/// widening the fallback for updates must not narrow it for the chain `New`
+/// already accepted.
+#[test]
+fn an_unconfigured_server_leaves_an_existing_testnet_chain_alone() {
+    let sepolia = ChainId::parse("eip155:11155111").unwrap();
+    assert!(!chain_has_no_adapter(
+        &sepolia,
+        None,
+        ChainCheckContext::Existing
+    ));
+}
+
+/// An invented eip155 number is still refused under `Existing` too - the
+/// compiled registry doesn't recognize it any more than `evm::testnet` did.
+#[test]
+fn an_unconfigured_server_refuses_an_unregistered_eip155_id_for_an_existing_chain() {
+    let untracked = ChainId::parse("eip155:999999").unwrap();
+    assert!(chain_has_no_adapter(
+        &untracked,
+        None,
+        ChainCheckContext::Existing
+    ));
 }
 
 /// The ticket's example, `tron:728126428`, happens to be Tron's real
