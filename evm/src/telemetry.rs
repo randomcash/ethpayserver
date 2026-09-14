@@ -248,13 +248,20 @@ pub fn reporting_status(dsn_configured: bool, environment: &str) -> ReportingSta
     }
 }
 
-/// Resolve the `SENTRY_ENVIRONMENT` tag, defaulting to `"dev"`. A single
-/// source of truth so [`init_sentry`] (what gets sent to Sentry) and
+/// Resolve the `SENTRY_ENVIRONMENT` tag. A single source of truth so
+/// [`init_sentry`] (what gets sent to Sentry) and
 /// [`report_reporting_status`] (what a human sees at boot) cannot default it
 /// two different ways and drift apart.
+///
+/// An unset variable resolves to the empty string, **not** to a permitted
+/// value like `"dev"`. `reporting_status` already treats `""` the same as any
+/// other unrecognised environment (refused). Defaulting it to `"dev"` here
+/// used to silently launder "nobody set this" into "known safe to run
+/// disabled" before `reporting_status` ever saw it — the exact failure shape
+/// this ticket exists to close, one layer up.
 #[must_use]
 pub fn resolve_environment() -> String {
-    std::env::var("SENTRY_ENVIRONMENT").unwrap_or_else(|_| "dev".to_string())
+    std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
 }
 
 /// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
@@ -291,6 +298,11 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
 /// — and refuse to continue when [`reporting_status`] says this environment
 /// must not run disabled.
 pub fn report_reporting_status(dsn_configured: bool, environment: &str) -> anyhow::Result<()> {
+    let environment = if environment.is_empty() {
+        "(unset)"
+    } else {
+        environment
+    };
     match reporting_status(dsn_configured, environment) {
         ReportingStatus::Enabled => {
             tracing::info!(environment = %environment, "error reporting enabled");
@@ -589,6 +601,52 @@ mod tests {
                 ReportingStatus::Enabled,
                 "environment={environment}"
             );
+        }
+    }
+
+    #[test]
+    fn report_reporting_status_is_ok_when_permitted_and_err_when_refused() {
+        assert!(report_reporting_status(true, "mainnet").is_ok());
+        assert!(report_reporting_status(false, "testnet").is_ok());
+        assert!(report_reporting_status(false, "dev").is_ok());
+        assert!(report_reporting_status(false, "mainnet").is_err());
+        assert!(report_reporting_status(false, "").is_err());
+    }
+
+    #[test]
+    fn resolve_environment_does_not_default_an_absent_var_to_a_permitted_value() {
+        // Owns SENTRY_ENVIRONMENT for the duration of the test and restores
+        // whatever was there before, since this is a process-global var and
+        // no other test touches it.
+        let previous = std::env::var("SENTRY_ENVIRONMENT").ok();
+
+        // SAFETY: no other test reads or writes SENTRY_ENVIRONMENT.
+        unsafe {
+            std::env::remove_var("SENTRY_ENVIRONMENT");
+        }
+        let absent = resolve_environment();
+        assert_ne!(
+            absent, "dev",
+            "an absent SENTRY_ENVIRONMENT must not resolve to a permitted value"
+        );
+        assert_eq!(
+            reporting_status(false, &absent),
+            ReportingStatus::DisabledRefused,
+            "the resolved value for an absent var must fail closed, not boot disabled on mainnet"
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_ENVIRONMENT", "testnet");
+        }
+        assert_eq!(resolve_environment(), "testnet");
+
+        // SAFETY: see above.
+        unsafe {
+            match &previous {
+                Some(value) => std::env::set_var("SENTRY_ENVIRONMENT", value),
+                None => std::env::remove_var("SENTRY_ENVIRONMENT"),
+            }
         }
     }
 }
