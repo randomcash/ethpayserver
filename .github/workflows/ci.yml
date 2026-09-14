@@ -75,6 +75,69 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # Non-blocking on purpose. ops/client-image.pin only has to be non-empty to
+  # pass the rest of CI, so it can fall arbitrarily far behind
+  # payserver-client's main without anything noticing - e2e keeps passing
+  # because the old client still matches the old selectors, and whoever
+  # eventually bumps the pin inherits every failure that drift was hiding. A
+  # hard failure here would block unrelated PRs the moment the client moved,
+  # which is how a check like that gets disabled; a warning keeps the drift
+  # visible without holding anything up.
+  client-pin-drift:
+    name: Client pin drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check pin distance from payserver-client main
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          CLIENT_REPO="randomcash/payserver-client"
+          # Arbitrary but documented: past this many commits behind, e2e is
+          # exercising a client build old enough that a shipped feature has no
+          # coverage. Raise or lower it here if it fires too often or too
+          # rarely.
+          MAX_COMMITS_BEHIND=20
+
+          CLIENT_IMAGE="$(grep -v '^[[:space:]]*#' ops/client-image.pin | tr -d '[:space:]')"
+          if [ -z "$CLIENT_IMAGE" ]; then
+            echo "::warning::ops/client-image.pin is empty, skipping drift check"
+            exit 0
+          fi
+
+          PIN_SHA="${CLIENT_IMAGE##*:sha-}"
+          if [ "$PIN_SHA" = "$CLIENT_IMAGE" ] || [ -z "$PIN_SHA" ]; then
+            echo "::warning::ops/client-image.pin ($CLIENT_IMAGE) is not a sha-<commit> tag, cannot measure drift against $CLIENT_REPO main"
+            exit 0
+          fi
+
+          api() { curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${CLIENT_REPO}/$1"; }
+
+          CURRENT_SHA="$(api branches/main | jq -r '.commit.sha // empty')"
+          if [ -z "$CURRENT_SHA" ]; then
+            echo "::warning::could not resolve $CLIENT_REPO main, skipping drift check"
+            exit 0
+          fi
+          CURRENT_TAG="sha-${CURRENT_SHA:0:7}"
+
+          AHEAD_BY="$(api "compare/${PIN_SHA}...${CURRENT_SHA}" | jq -r '.ahead_by // empty')"
+          if [ -z "$AHEAD_BY" ]; then
+            echo "::warning::could not compare ops/client-image.pin (sha-$PIN_SHA) against $CLIENT_REPO main, skipping drift check"
+            exit 0
+          fi
+
+          echo "pinned:   sha-$PIN_SHA"
+          echo "current:  $CURRENT_TAG"
+          echo "distance: $AHEAD_BY commit(s) behind main"
+
+          if [ "$AHEAD_BY" -gt "$MAX_COMMITS_BEHIND" ]; then
+            echo "::warning::ops/client-image.pin is $AHEAD_BY commits behind payserver-client main (pinned sha-$PIN_SHA, current $CURRENT_TAG) - past $MAX_COMMITS_BEHIND, e2e may no longer exercise what the client actually ships. Bump it: edit ops/client-image.pin to ghcr.io/randomcash/payserver-client:$CURRENT_TAG"
+          fi
+
   test:
     name: Test
     runs-on: ubuntu-latest
