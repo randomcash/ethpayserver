@@ -81,8 +81,13 @@ that are not in CI's path. Several people have lost an hour to this.
   server looks healthy while tests fail in no pattern. Run a local server with
   every `RATE_LIMIT_*` at `10000`, as CI does. See `e2e/README.md`.
 - Integration tests are `#[ignore]` by convention and need `DATABASE_URL`. CI
-  compiles them but does not run them, so run them locally when you touch that
-  layer.
+  *does* run them — the `test` job migrates a real Postgres service and runs
+  `cargo nextest run -p data-service --run-ignored only` — so a failure there
+  gates merges same as any other test. They only run for `data-service`; other
+  crates' `#[ignore]`'d tests are not in that command and still need to be run
+  locally. `cargo test --workspace --lib` (the gate above) does not touch any
+  of them either way, so run the `data-service` ones locally too when you touch
+  that layer, to see a failure before CI does.
 
 ## Sensitive paths
 
