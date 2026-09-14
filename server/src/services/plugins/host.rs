@@ -278,24 +278,28 @@ impl PluginHost {
         // see the struct doc on `PluginHost::engine` for why a detached call
         // needs its own claim on the engine that enforces its deadline.
         let engine = Arc::clone(&self.engine);
+        // Cloned rather than moved into the blocking closure: `entry` stays
+        // with this outer task so it is still there to record against no
+        // matter how the blocking task ends, including a Rust-level panic
+        // inside it (distinct from a wasm trap, which never panics — that's
+        // the point of the rest of this module).
+        let call_entry = Arc::clone(&entry);
 
         tokio::spawn(async move {
             let outcome = tokio::task::spawn_blocking(move || {
-                let mut instance = entry_instance_lock(&entry);
+                let mut instance = entry_instance_lock(&call_entry);
                 let result = instance.call_raw(&export, &arg, ticks);
                 drop(instance);
                 drop(engine);
-                (entry, result)
+                result
             })
             .await;
 
             match outcome {
-                Ok((entry, Ok(_))) => entry.record_success(),
-                Ok((entry, Err(err))) => entry.record_failure(err.to_string()),
-                Err(_join_err) => {
-                    // The blocking task itself panicked; we no longer have
-                    // the `Arc<PluginEntry>` (it was moved into the aborted
-                    // task), so there is nothing left to record against.
+                Ok(Ok(_)) => entry.record_success(),
+                Ok(Err(err)) => entry.record_failure(err.to_string()),
+                Err(join_err) => {
+                    entry.record_failure(format!("plugin call task panicked: {join_err}"));
                 }
             }
         });
@@ -332,17 +336,21 @@ impl PluginHost {
         };
         let export = export.to_string();
         let ticks = self.engine.ticks_for(self.call_deadline);
+        // See the matching comment in `run_action`: cloned, not moved, so
+        // `entry` is still here to record against even if the blocking task
+        // itself panics rather than returning a caught call error.
+        let call_entry = Arc::clone(&entry);
 
         let outcome = tokio::task::spawn_blocking(move || {
-            let mut instance = entry_instance_lock(&entry);
+            let mut instance = entry_instance_lock(&call_entry);
             let result = instance.call_raw(&export, &arg, ticks);
             drop(instance);
-            (entry, result)
+            result
         })
         .await;
 
         match outcome {
-            Ok((entry, Ok(bytes))) => match serde_json::from_slice::<Resp>(&bytes) {
+            Ok(Ok(bytes)) => match serde_json::from_slice::<Resp>(&bytes) {
                 Ok(resp) => {
                     entry.record_success();
                     FilterOutcome::Ran(resp)
@@ -353,15 +361,16 @@ impl PluginHost {
                     FilterOutcome::could_not_run(failure_mode, reason)
                 }
             },
-            Ok((entry, Err(call_err))) => {
+            Ok(Err(call_err)) => {
                 let reason = call_err.to_string();
                 entry.record_failure(reason.clone());
                 FilterOutcome::could_not_run(failure_mode, reason)
             }
-            Err(join_err) => FilterOutcome::could_not_run(
-                failure_mode,
-                format!("filter task did not complete: {join_err}"),
-            ),
+            Err(join_err) => {
+                let reason = format!("filter task panicked: {join_err}");
+                entry.record_failure(reason.clone());
+                FilterOutcome::could_not_run(failure_mode, reason)
+            }
         }
     }
 
@@ -567,9 +576,25 @@ mod tests {
     /// Ticket test 5: while a plugin is crash-looping (or simply mid-call),
     /// a status read — the admin page's data source — stays fast. It never
     /// waits on the same lock a stuck call is holding.
+    ///
+    /// The call deadline here (500ms) is deliberately far longer than the
+    /// status budget asserted below (150ms) — not the same order of
+    /// magnitude, as an earlier version of this test had it. With a loose
+    /// gap, a `status()` that regressed into blocking on the stuck call's
+    /// own instance lock would still finish inside the budget by accident,
+    /// since the call itself gets interrupted quickly too, and the test
+    /// would keep passing against containment that no longer holds. With
+    /// this gap, a regression has to wait out most of the call's 500ms
+    /// budget before the lock frees up, which blows through the 150ms
+    /// budget unmistakably.
     #[tokio::test]
     async fn status_reads_stay_fast_while_a_plugin_is_stuck() {
-        let host = Arc::new(host(100));
+        let host = Arc::new(PluginHost::with_tick(
+            Version::new(1, 0, 0),
+            100,
+            Duration::from_millis(500),
+            Duration::from_millis(10),
+        ));
         let id = PluginId::new("cash.random.stuck").unwrap();
         host.register(
             manifest("cash.random.stuck", "action", None),
@@ -584,16 +609,16 @@ mod tests {
         tokio::spawn(async move {
             in_flight.run_action(&in_flight_id, "call", &Ping { n: 1 });
         });
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
 
         let started = Instant::now();
-        let status = tokio::time::timeout(Duration::from_millis(50), async { host.status(&id) })
+        let status = tokio::time::timeout(Duration::from_millis(150), async { host.status(&id) })
             .await
             .unwrap();
         assert!(status.is_some());
         assert!(
-            started.elapsed() < Duration::from_millis(50),
-            "status() took {:?}",
+            started.elapsed() < Duration::from_millis(150),
+            "status() took {:?}; a regression to lock contention would show up here as ~500ms",
             started.elapsed()
         );
     }
