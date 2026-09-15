@@ -435,6 +435,13 @@ impl crate::payment_tx_index::PaymentTxIndexWriter for InMemoryDataService {
         } else {
             index.insert(key, payment.id);
             payments.insert(payment.id, payment.clone());
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl crate::reorg::ReorgCandidateReader for InMemoryDataService {
     async fn reorg_candidates(
         &self,
