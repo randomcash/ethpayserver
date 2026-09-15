@@ -1,4 +1,4 @@
-//! Server-wide reads of which merchants exist (RCS-300).
+//! Server-wide reads of which merchants exist.
 //!
 //! `UserRepository` and `StoreRepository` (both in `auth`, pinned via the
 //! commons dance) can list *a* user's stores or count *all* users for the

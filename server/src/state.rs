@@ -100,7 +100,7 @@ pub struct AppState<D, A, E> {
     /// would confirm only that a variable was set, not that it took effect.
     pub webauthn: Option<api_types::WebAuthnHealth>,
 
-    /// Plugins that may refuse invoice creation (RCS-300 capability 2), e.g.
+    /// Plugins that may refuse invoice creation (host capability 2), e.g.
     /// to enforce a lapsed subscription. Empty when no such plugin is
     /// installed, in which case invoice creation is never filtered at all.
     pub invoice_creation_filters: Vec<Arc<dyn InvoiceCreationFilter>>,

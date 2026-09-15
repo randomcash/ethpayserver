@@ -220,7 +220,7 @@ fn search_does_not_displace_the_store_scope() {
 }
 
 // =========================================================================
-// Invalid filter values carry a reason (RCS-213 item 3)
+// Invalid filter values carry a reason
 // =========================================================================
 
 /// A bare `StatusCode::BAD_REQUEST` reaches the client as `ApiError::Http {
@@ -260,7 +260,7 @@ async fn invalid_status_filter_carries_a_reason_the_client_can_key_on() {
 }
 
 // =========================================================================
-// Handler wiring: GET /payments/{id} store backfill (RCS-213 item 6)
+// Handler wiring: GET /payments/{id} store backfill
 // =========================================================================
 
 /// `From<PaymentData> for PaymentResponse` (in payserver-commons) always

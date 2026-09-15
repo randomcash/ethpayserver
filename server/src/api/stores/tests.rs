@@ -143,7 +143,7 @@ fn test_payment_method_response_erc20() {
 }
 
 // =========================================================================
-// chain_has_no_adapter (RCS-281)
+// chain_has_no_adapter
 // =========================================================================
 
 /// A settings row enabling only mainnet Ethereum and Polygon - no Tron
@@ -359,7 +359,7 @@ fn evm_chain_id_does_not_leak_across_the_tron_eip155_number_collision() {
 }
 
 // =========================================================================
-// unsupported_chain_error (RCS-281)
+// unsupported_chain_error
 // =========================================================================
 
 /// The wiring the predicate alone can't prove: the 400 the handlers actually
@@ -379,7 +379,7 @@ async fn unsupported_chain_error_names_the_chain() {
 }
 
 // =========================================================================
-// update_should_check_chain (RCS-281)
+// update_should_check_chain
 // =========================================================================
 
 /// Disabling a legacy bad row must always be reachable through the API -
@@ -405,7 +405,6 @@ fn an_unspecified_enabled_still_checks_the_chain() {
 
 // =========================================================================
 // create_payment_method - through the handler, against a real database
-// (RCS-281)
 //
 // Every test above calls `chain_has_no_adapter` or `update_should_check_chain`
 // directly. None of them would notice if `create_payment_method` itself

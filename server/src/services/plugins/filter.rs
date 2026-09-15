@@ -1,4 +1,4 @@
-//! Capability 2 (RCS-300): a filter that can refuse invoice creation, and
+//! Capability 2: a filter that can refuse invoice creation, and
 //! nothing else.
 //!
 //! This is how a lapsed subscription is enforced - the merchant keeps

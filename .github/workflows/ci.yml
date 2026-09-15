@@ -20,6 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # This repository is public. A ticket id in a source file leaks the
+      # title and shape of unreleased work, and an outside reader cannot open
+      # the tracker anyway. Ticket ids belong in the commit message and PR
+      # title, not the tree - see CLAUDE.md.
+      - name: No ticket ids or tracker links in source
+        run: ./scripts/check-no-ticket-refs.sh
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -214,7 +220,7 @@ jobs:
         # unnoticed on an FK the fixtures never satisfied, so CI reported green
         # over dead multi-chain and fractional-amount aggregation coverage.
         #
-        # `-p server` covers the RCS-257 plugin-storage tests (schema
+        # `-p server` covers the plugin-storage tests (schema
         # creation, migration runner, search_path scoping): they were
         # `#[ignore]`'d like the rest of this suite but, unlike data-service,
         # had no CI job ever passing `--run-ignored`, so nothing here actually

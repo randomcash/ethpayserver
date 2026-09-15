@@ -1,8 +1,8 @@
 //! Mounts installed plugins' declared routes under the reserved
-//! `/plugins/{id}` prefix (RCS-301), with the host's own authentication
+//! `/plugins/{id}` prefix, with the host's own authentication
 //! applied before any plugin code runs.
 //!
-//! [`PluginRegistry`] (RCS-264) is the load-time gate for which manifests
+//! [`PluginRegistry`] is the load-time gate for which manifests
 //! this host accepts; it knows nothing about HTTP. This module is what turns
 //! "registered" into "reachable": each plugin's own router is nested under
 //! its [`PluginId`], which is validated (no path separators, no empty
@@ -11,8 +11,9 @@
 //! by [`router()`], not left to whoever calls it, so the reservation is
 //! structural rather than a convention a future call site could forget.
 //!
-//! There is no plugin runtime yet (RCS-256/RCS-269 are the wasmtime slice),
-//! so nothing in this build can ask a loaded plugin for its own router.
+//! Nothing in this build can ask a loaded plugin for its own router: the
+//! wasmtime runtime instantiates and calls plugins, but no entry point
+//! produces a router.
 //! `declared_routes` is therefore supplied by the caller — today always
 //! empty in the live server — as the seam a future slice fills in once a
 //! plugin can actually produce one.

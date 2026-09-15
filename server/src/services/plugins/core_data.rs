@@ -1,4 +1,4 @@
-//! Typed read access to core data, for plugins (RCS-257 work item 4).
+//! Typed read access to core data, for plugins.
 //!
 //! A plugin needs to read core state — the billing plugin needs to know
 //! which merchants and stores exist — but cannot be handed a connection to
