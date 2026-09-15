@@ -429,6 +429,17 @@ curl -X POST https://your-instance.example.com/invoices/{invoice_id}/cancel \
   -H "Authorization: Bearer <token>"
 ```
 
+### Refunds
+
+There is no API that sends a refund. This server is non-custodial — it
+derives payment addresses from your xpub and never holds the private key, so
+it has no way to sign or broadcast a transaction on your behalf. `POST
+/invoices/{invoice_id}/refund` always returns `501 Not Implemented`.
+
+To refund a customer, send funds back to their payment address yourself, from
+the wallet that holds your keys. `GET /invoices/{invoice_id}/refunds` lists
+any refund records on file for the invoice, for your own bookkeeping.
+
 ---
 
 ## 5. Retrying Safely: the `Idempotency-Key` Header

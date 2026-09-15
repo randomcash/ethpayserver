@@ -40,6 +40,12 @@ pub mod provider;
 pub mod telemetry;
 pub mod testnet;
 pub mod tokens;
+// Reserved for a future hot-wallet mode: the server is non-custodial by
+// design and holds no spending key today, so nothing turns this feature on.
+// A caller that wants to move funds from a derived address has to opt into
+// that as a deliberate, visible product decision rather than finding the
+// capability already compiled in.
+#[cfg(feature = "hot-wallet")]
 pub mod transaction;
 pub mod wallet;
 

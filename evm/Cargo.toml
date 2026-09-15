@@ -15,6 +15,13 @@ default = []
 api = ["axum", "utoipa", "types", "data-service", "auth"]
 redis = ["dep:redis"]
 test-utils = []
+# Compiles evm::transaction, which can sign and broadcast outbound transfers
+# from a derived payment address. Off by default and not turned on anywhere:
+# the product is non-custodial and refunds/payouts are the merchant's job
+# from their own wallet. Reserved for a possible future hot-wallet mode,
+# which is a deliberate product decision, not something this flag should
+# drift into on its own.
+hot-wallet = []
 # Sentry `before_send` PII scrubber. Shared by the `server` and
 # `evmmonitor` binaries so both run one audited scrubber implementation.
 sentry-scrub = ["dep:sentry", "dep:regex"]

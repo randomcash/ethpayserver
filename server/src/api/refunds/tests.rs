@@ -1,246 +1,184 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
-//! What a refund is allowed to be worth.
+//! Refunds are the merchant's job, not this server's.
 //!
-//! The refund amount arrived from the client as a string and was written into
-//! the refund record untouched — never parsed, never compared to the payment it
-//! refunds, and never compared to the refunds already recorded against that
-//! payment. These tests pin both halves of the rule that replaced it: a refund
-//! may not exceed its payment, and the payment's value can only be handed back
-//! once.
+//! `create_refund` used to check an amount and write a `Pending` row that
+//! nothing downstream would ever move — a promise the server could not keep,
+//! since it holds no spending key. These tests pin the replacement: every
+//! call gets the same explicit refusal, not a row that looks like progress.
+//!
+//! `calling_the_refund_endpoint_refuses_not_queues` goes through the same
+//! `Router` wiring `api::mod` uses in production — same path, same
+//! `create_refund::<A>` handler reference — rather than calling the private
+//! `refund_unsupported()` helper directly. That matters here specifically:
+//! a helper-only test would keep passing if `create_refund` were ever
+//! changed to call something else first, add a conditional before the
+//! refusal, or reintroduce a write path, because it would never touch the
+//! function the router actually dispatches to.
 
-use super::{already_refunded, refundable_amount, resolve_refund_amount};
+#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test-only setup")]
 
-use alloy_primitives::U256;
+use std::sync::Arc;
+
 use async_trait::async_trait;
-use axum::http::StatusCode;
-use chrono::Utc;
-use types::{
-    AssetType, ChainId, InvoiceId, PaymentData, RefundData, RefundReader, RefundStatus,
-    RepositoryResult, StoreId,
+use auth::{DeviceId, Role, Session, SessionId, SessionService, UserId, UserInfo};
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode},
+    routing::post,
 };
+use chrono::Utc;
+use data_service::PgDataService;
+use sqlx::postgres::PgPoolOptions;
+use tower::ServiceExt;
 use uuid::Uuid;
 
-fn payment(amount: &str) -> PaymentData {
-    PaymentData {
-        id: Uuid::new_v4(),
-        invoice_id: InvoiceId::from_string("inv-1".to_string()),
-        payment_option_id: None,
-        chain_id: ChainId::evm(1),
-        asset_type: AssetType::Native,
-        amount: amount.to_string(),
-        asset_symbol: "ETH".to_string(),
-        token_address: None,
-        tx_hash: format!("0x{:064x}", 1),
-        block_number: Some(1),
-        detected_at: Utc::now(),
-        confirmed_at: Some(Utc::now()),
-        from_address: Some("0xpayer".to_string()),
-        reorged: false,
-        extra: None,
-        credited_amount: None,
-        rate_used: None,
-        rate_applied_at: None,
-    }
-}
+use crate::state::{AppState, PgAppState};
 
-fn refund_of(payment_id: Uuid, amount: &str, status: RefundStatus) -> RefundData {
-    RefundData {
-        id: Uuid::new_v4(),
-        invoice_id: InvoiceId::from_string("inv-1".to_string()),
-        payment_id,
-        store_id: StoreId(Uuid::new_v4()),
-        to_address: "0xpayer".to_string(),
-        chain_id: ChainId::evm(1),
-        asset_type: "native".to_string(),
-        asset_symbol: "ETH".to_string(),
-        token_address: None,
-        amount: amount.to_string(),
-        tx_hash: None,
-        status,
-        fee_amount: None,
-        reason: None,
-        error_message: None,
-        created_at: Utc::now(),
-        confirmed_at: None,
-    }
-}
+use super::{REFUND_UNSUPPORTED_REASON, refund_unsupported};
 
-/// Returns a fixed set of refunds for any invoice.
-struct StubRefunds(Vec<RefundData>);
+// `ApiErr` is a private tuple struct defined in `crate::api`; this module is
+// a descendant of it, so its fields are visible here even though
+// `refunds.rs` itself only ever sees `ApiErr` as an opaque `IntoResponse`.
+use crate::api::ApiErr;
+
+/// `SessionService` double that authenticates any bearer session ID as one
+/// fixed user. `create_refund` never reads `state.auth_service` for
+/// anything but the `AuthenticatedUser` extractor's session check, so this
+/// is the only piece of the auth service the test needs to supply.
+struct AnySessionIsValid;
 
 #[async_trait]
-impl RefundReader for StubRefunds {
-    async fn get_refunds_for_invoice(&self, _: &InvoiceId) -> RepositoryResult<Vec<RefundData>> {
-        Ok(self.0.clone())
+impl SessionService for AnySessionIsValid {
+    async fn validate_session(&self, session_id: SessionId) -> auth::Result<(UserInfo, Session)> {
+        let user_id = UserId(Uuid::new_v4());
+        let user = UserInfo {
+            id: user_id,
+            email: None,
+            primary_wallet_address: None,
+            created_at: Utc::now(),
+            last_login_at: None,
+            role: Role::User,
+        };
+        let mut session = Session::new(user_id, DeviceId::new());
+        session.id = session_id;
+        Ok((user, session))
     }
 
-    async fn get_refund(&self, _: Uuid) -> RepositoryResult<Option<RefundData>> {
-        unimplemented!("not exercised by the refund amount rule")
+    async fn logout(&self, _session_id: SessionId) -> auth::Result<()> {
+        unimplemented!("create_refund never logs a session out")
     }
-    async fn get_refunds_for_store(
+
+    async fn logout_all(&self, _session_id: SessionId) -> auth::Result<()> {
+        unimplemented!("create_refund never logs a session out")
+    }
+
+    async fn cleanup_stale_sessions(&self) -> auth::Result<u64> {
+        unimplemented!("create_refund never cleans up sessions")
+    }
+}
+
+/// `RateProvider` double. `create_refund` never converts currency; this
+/// only exists because `AppState` requires one.
+struct NoRates;
+
+#[async_trait]
+impl rates::RateProvider for NoRates {
+    async fn get_rate(
         &self,
-        _: StoreId,
-        _: i64,
-        _: i64,
-    ) -> RepositoryResult<(i64, Vec<RefundData>)> {
-        unimplemented!("not exercised by the refund amount rule")
+        _from: &str,
+        _to: &str,
+    ) -> Result<rates::ExchangeRate, rates::RateError> {
+        unimplemented!("create_refund never looks up a rate")
     }
-    async fn get_active_refunds(&self) -> RepositoryResult<Vec<RefundData>> {
-        unimplemented!("not exercised by the refund amount rule")
-    }
-}
 
-// =============================================================================
-// The amount itself
-// =============================================================================
-
-#[test]
-fn an_omitted_amount_is_the_whole_payment() {
-    let amount = resolve_refund_amount(None, U256::from(1000), U256::ZERO).unwrap();
-    assert_eq!(amount, U256::from(1000));
-}
-
-#[test]
-fn a_partial_amount_within_the_payment_is_allowed() {
-    let amount = resolve_refund_amount(Some("400"), U256::from(1000), U256::ZERO).unwrap();
-    assert_eq!(amount, U256::from(400));
-}
-
-#[test]
-fn an_amount_larger_than_the_payment_is_refused() {
-    assert_eq!(
-        resolve_refund_amount(Some("1001"), U256::from(1000), U256::ZERO),
-        Err(StatusCode::BAD_REQUEST),
-        "a refund may never be worth more than the payment it refunds"
-    );
-}
-
-#[test]
-fn an_amount_that_is_not_a_base_ten_integer_is_refused() {
-    for bad in [
-        "", " ", "abc", "-1", "1.5", "1e9", "1_000", "0x10", " 100", "100 ",
-    ] {
-        assert_eq!(
-            resolve_refund_amount(Some(bad), U256::from(1000), U256::ZERO),
-            Err(StatusCode::BAD_REQUEST),
-            "{bad:?} is not an amount in base units"
-        );
+    fn name(&self) -> &'static str {
+        "none"
     }
 }
 
-#[test]
-fn a_zero_amount_is_refused() {
-    assert_eq!(
-        resolve_refund_amount(Some("0"), U256::from(1000), U256::ZERO),
-        Err(StatusCode::BAD_REQUEST)
-    );
+/// A real `PgDataService` whose pool connects lazily and is never queried.
+/// `create_refund` discards `State<PgAppState<A>>` entirely — that's the
+/// behavior this test pins — so the pool never needs a live database behind
+/// it. `connect_lazy` only fails on a malformed URL, never on an
+/// unreachable host: the first real query is what would fail, and this test
+/// asserts that no query ever happens.
+fn never_queried_pg_data_service() -> PgDataService {
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://refund-endpoint-test-unused/db")
+        .expect("connect_lazy only validates the URL, it does not connect");
+    PgDataService::new(pool)
 }
 
-// =============================================================================
-// Paying the same money back twice
-// =============================================================================
-
-#[test]
-fn a_fully_refunded_payment_has_nothing_left() {
-    assert_eq!(
-        resolve_refund_amount(None, U256::from(1000), U256::from(1000)),
-        Err(StatusCode::CONFLICT),
-        "a payment refunded in full must not be refunded again"
-    );
+fn test_state() -> PgAppState<AnySessionIsValid> {
+    AppState::new(
+        Arc::new(never_queried_pg_data_service()),
+        Arc::new(AnySessionIsValid),
+        None,
+        Arc::new(NoRates),
+        Arc::new(crate::services::email::NoopEmailSender),
+    )
 }
 
-#[test]
-fn a_partly_refunded_payment_gives_up_only_the_remainder() {
-    assert_eq!(
-        resolve_refund_amount(Some("600"), U256::from(1000), U256::from(400)),
-        Ok(U256::from(600))
-    );
-    assert_eq!(
-        resolve_refund_amount(Some("601"), U256::from(1000), U256::from(400)),
-        Err(StatusCode::CONFLICT),
-        "the remainder is what is left after existing refunds, not the payment"
-    );
-}
-
-#[test]
-fn refunds_in_flight_hold_their_value() {
-    let id = Uuid::new_v4();
-    for status in [
-        RefundStatus::Pending,
-        RefundStatus::Broadcasting,
-        RefundStatus::Confirmed,
-    ] {
-        let refunds = vec![refund_of(id, "1000", status)];
-        assert_eq!(
-            already_refunded(&refunds, id),
-            Some(U256::from(1000)),
-            "a {status:?} refund has not failed, so its value is spoken for"
-        );
-    }
-}
-
-#[test]
-fn a_failed_refund_releases_its_value() {
-    let id = Uuid::new_v4();
-    let refunds = vec![refund_of(id, "1000", RefundStatus::Failed)];
-    assert_eq!(already_refunded(&refunds, id), Some(U256::ZERO));
-}
-
-#[test]
-fn refunds_of_another_payment_do_not_count() {
-    // One invoice can carry several payments; each is refundable on its own.
-    let mine = Uuid::new_v4();
-    let other = Uuid::new_v4();
-    let refunds = vec![refund_of(other, "1000", RefundStatus::Confirmed)];
-    assert_eq!(already_refunded(&refunds, mine), Some(U256::ZERO));
-}
-
-#[test]
-fn an_unparseable_stored_refund_is_not_silently_skipped() {
-    // Skipping it would undercount what has already gone out and let a refund
-    // be written on top of one that is already there.
-    let id = Uuid::new_v4();
-    let refunds = vec![refund_of(id, "not-a-number", RefundStatus::Confirmed)];
-    assert_eq!(already_refunded(&refunds, id), None);
-}
-
-// =============================================================================
-// The two joined together, over a refund store
-// =============================================================================
-
+/// Mirrors the production mount in `api::mod` (same path shape, same
+/// `create_refund::<A>` handler reference) so the request travels through
+/// axum's extractors exactly as it would for a real caller.
 #[tokio::test]
-async fn a_first_full_refund_is_allowed() {
-    let payment = payment("1000");
-    let store = StubRefunds(Vec::new());
+async fn calling_the_refund_endpoint_refuses_not_queues() {
+    let app: Router = Router::new()
+        .route(
+            "/invoices/{invoice_id}/refund",
+            post(super::create_refund::<AnySessionIsValid>),
+        )
+        .with_state(test_state());
 
-    let amount = refundable_amount(&store, &payment.invoice_id, &payment, None)
-        .await
-        .expect("an unrefunded payment may be refunded in full");
+    let req = Request::builder()
+        .method("POST")
+        .uri("/invoices/some-invoice-id/refund")
+        .header("Authorization", format!("Bearer {}", Uuid::new_v4()))
+        .body(Body::empty())
+        .unwrap();
 
-    assert_eq!(amount, U256::from(1000));
-}
-
-#[tokio::test]
-async fn a_second_full_refund_is_refused() {
-    let payment = payment("1000");
-    let store = StubRefunds(vec![refund_of(payment.id, "1000", RefundStatus::Confirmed)]);
-
-    let refused = refundable_amount(&store, &payment.invoice_id, &payment, None).await;
+    let resp = app.oneshot(req).await.unwrap();
 
     assert_eq!(
-        refused,
-        Err(StatusCode::CONFLICT),
-        "the refunds already recorded against a payment bound the next one"
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "a refund the server can never carry out must not look like an accepted one"
     );
+    let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+    assert_eq!(body, REFUND_UNSUPPORTED_REASON.as_bytes());
 }
 
-#[tokio::test]
-async fn an_over_large_amount_is_refused_against_a_real_payment() {
-    let payment = payment("1000");
-    let store = StubRefunds(Vec::new());
+#[test]
+fn a_refund_request_is_refused_not_queued() {
+    let ApiErr(status, reason) = refund_unsupported();
 
-    let refused = refundable_amount(&store, &payment.invoice_id, &payment, Some("100000")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_IMPLEMENTED,
+        "a refund the server can never carry out must not look like an accepted one"
+    );
+    assert_eq!(reason, REFUND_UNSUPPORTED_REASON);
+}
 
-    assert_eq!(refused, Err(StatusCode::BAD_REQUEST));
+#[test]
+fn the_refusal_tells_the_merchant_what_to_do_instead() {
+    // A bare status with no body reaches a caller as "HTTP error 501:" and
+    // nothing else — the same dead end `ApiErr`'s own doc comment describes
+    // for a reasonless 409. A merchant hitting this endpoint needs to learn
+    // to refund from their own wallet, not guess why the request failed.
+    //
+    // Asserting the constant is non-empty could not fail: it is a literal.
+    // What can regress is someone shortening this to "refunds are not
+    // supported", which is accurate, reasonless, and leaves the merchant
+    // exactly where the bare 501 did. So assert the two things that make it
+    // actionable — why the server cannot, and what the merchant should do.
+    assert!(
+        REFUND_UNSUPPORTED_REASON.contains("holds no spending key"),
+        "the reason must say why this server cannot refund, not merely that it will not: {REFUND_UNSUPPORTED_REASON}"
+    );
+    assert!(
+        REFUND_UNSUPPORTED_REASON.contains("your own wallet"),
+        "the reason must name the action the merchant can actually take: {REFUND_UNSUPPORTED_REASON}"
+    );
 }

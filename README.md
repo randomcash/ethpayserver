@@ -364,6 +364,8 @@ that just builds the pinned revision needs nothing special — plain
 | POST | `/invoices` | Create a new invoice |
 | GET | `/invoices/{id}` | Get invoice details |
 | POST | `/invoices/{id}/cancel` | Cancel a pending invoice |
+| POST | `/invoices/{id}/refund` | Always refuses (501) — see [Refunds](#refunds) |
+| GET | `/invoices/{id}/refunds` | List refund records for an invoice |
 
 ### EVM
 
@@ -375,6 +377,39 @@ that just builds the pinned revision needs nothing special — plain
 | POST | `/evm/tokens` | Create token (admin) |
 | PUT | `/evm/tokens/{id}` | Update token (admin) |
 | DELETE | `/evm/tokens/{id}` | Delete token (admin) |
+
+## Refunds
+
+**Refunds are the merchant's job, not this server's.** ETHPayServer is
+non-custodial by design: a merchant hands over an xpub, this server derives
+payment addresses from it, and it never holds the matching private key (see
+`evm::wallet::validate_xpub`, which rejects an xprv pasted in by mistake). No
+amount of implementation changes that — a server with no spending key cannot
+sign or broadcast a transaction, refund included.
+
+`POST /invoices/{id}/refund` reflects that: it always returns `501 Not
+Implemented` and creates nothing. It used to write a `Pending` refund row that
+nothing downstream ever moved past that status, which was worse than refusing
+— it told a merchant a refund was in flight when none was, and could never be.
+To refund a payer, send the funds back from the wallet that holds the
+spending key: yours.
+
+`GET /invoices/{id}/refunds` still lists any refund records associated with
+an invoice for historical/audit purposes; going forward none will be created
+through this API. Testnet was checked directly on 2026-09-14: zero rows of
+any status existed there, so no migration or backfill was needed for existing
+data — there was nothing to clean up. Mainnet needs no equivalent check: it
+deploys only from a release tag matching `vMAJOR.MINOR.PATCH` exactly (see
+`.github/workflows/ci.yml`'s `notify-deploy` job), this repository's only tag
+is the prerelease `v0.1.0-alpha`, and it has consequently never received a
+deploy dispatch — there is no mainnet deployment of the old refund code for
+any row to exist in.
+
+`evm::transaction` contains the signing/broadcasting infrastructure a refund
+would need. It is reserved for a possible future hot-wallet mode, gated
+behind the (default-off) `hot-wallet` feature on the `evm` crate — enabling it
+would be a deliberate product decision, not something this endpoint should
+grow into by accident.
 
 ## Redis Communication
 
@@ -620,6 +655,8 @@ docker run \
 
 ETHPayServer implements several security measures:
 
+- Non-custodial by design: derives payment addresses from a merchant's xpub
+  and never holds a spending key (see [Refunds](#refunds))
 - Address validation (checksum verification)
 - Whitelisted token contracts only
 - Confirmation requirements per chain
