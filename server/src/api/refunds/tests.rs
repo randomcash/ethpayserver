@@ -115,6 +115,7 @@ fn test_state() -> PgAppState<AnySessionIsValid> {
         Arc::new(AnySessionIsValid),
         None,
         Arc::new(NoRates),
+        Arc::new(crate::services::email::NoopEmailSender),
     )
 }
 
