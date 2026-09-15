@@ -1,0 +1,217 @@
+name: Sync issues to Linear
+
+# Mirrors GitHub issues to Linear automatically so agents only ever need to
+# post a GitHub issue. The Linear MCP OAuth problem disappears: agents write
+# to GitHub (always available), this Action writes to Linear.
+#
+# SETUP (one-time, in repo Settings → Secrets and variables → Actions):
+#   LINEAR_API_KEY   — a Linear personal API key or service-account key.
+#                      Generate at: linear.app → Settings → API → Personal API keys
+#   LINEAR_TEAM_ID   — the UUID of the team to create issues in.
+#                      Find it: curl -s -H 'Authorization: YOUR_KEY' \
+#                        -H 'Content-Type: application/json' \
+#                        -d '{"query":"{teams{nodes{id name}}}"}' \
+#                        https://api.linear.app/graphql
+#   LINEAR_PROJECT_ID (optional) — UUID of a specific project within the team.
+#                      Leave unset to create issues without a project assignment.
+#
+# HOW IT WORKS:
+#   1. An issue is opened or labeled with a sync label (see LINEAR_SYNC_LABELS).
+#   2. This Action creates a Linear issue and posts a comment back to the
+#      GitHub issue with the Linear URL + a hidden UUID marker.
+#   3. On subsequent edits, closes, or reopens the UUID marker is found and the
+#      existing Linear issue is updated — no duplicates.
+#
+# SYNC LABELS (comma-separated, no spaces):
+#   Any issue bearing at least one of these labels is synced.
+#   - 'linear-sync'   explicit opt-in for any issue
+#   - 'refactoring'   architecture audit issues
+#   - 'architecture'  architecture audit issues
+#   - 'security'      cargo-audit/cargo-deny issues (audit-scheduled.yml)
+#   - 'bug'           reported defects
+
+on:
+  issues:
+    types: [opened, edited, labeled, closed, reopened]
+
+env:
+  LINEAR_SYNC_LABELS: "linear-sync,refactoring,architecture,security,bug"
+
+jobs:
+  sync:
+    name: Mirror to Linear
+    runs-on: ubuntu-latest
+    # Avoid syncing our own bot comments triggering a loop (they aren't issues,
+    # but belt-and-suspenders).
+    if: github.event.sender.type != 'Bot' || github.event.action == 'opened'
+    steps:
+      - name: Sync issue
+        uses: actions/github-script@v7
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM_ID: ${{ secrets.LINEAR_TEAM_ID }}
+          LINEAR_PROJECT_ID: ${{ secrets.LINEAR_PROJECT_ID }}
+        with:
+          script: |
+            const LINEAR_API_KEY  = process.env.LINEAR_API_KEY;
+            const LINEAR_TEAM_ID  = process.env.LINEAR_TEAM_ID;
+            const LINEAR_PROJECT_ID = process.env.LINEAR_PROJECT_ID || null;
+            const SYNC_LABELS = process.env.LINEAR_SYNC_LABELS
+              .split(',')
+              .map(l => l.trim())
+              .filter(Boolean);
+
+            const issue = context.payload.issue;
+            const issueLabels = issue.labels.map(l => l.name);
+
+            if (!issueLabels.some(l => SYNC_LABELS.includes(l))) {
+              core.info(`Issue #${issue.number} has no sync label — skipping.`);
+              return;
+            }
+
+            if (!LINEAR_API_KEY || !LINEAR_TEAM_ID) {
+              core.warning(
+                'LINEAR_API_KEY and LINEAR_TEAM_ID secrets are not set. ' +
+                'Add them in Settings → Secrets → Actions. See workflow comments for details.'
+              );
+              return;
+            }
+
+            // ── Linear GraphQL helper ────────────────────────────────────────
+            async function linearRequest(query, variables = {}) {
+              const resp = await fetch('https://api.linear.app/graphql', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': LINEAR_API_KEY,
+                },
+                body: JSON.stringify({ query, variables }),
+              });
+              const json = await resp.json();
+              if (!resp.ok || json.errors) {
+                throw new Error(
+                  `Linear API error (HTTP ${resp.status}): ` +
+                  JSON.stringify(json.errors ?? json)
+                );
+              }
+              return json.data;
+            }
+
+            // ── Build issue content ──────────────────────────────────────────
+            const title = issue.title;
+            const description = [
+              issue.body || '',
+              '',
+              '---',
+              `GitHub: ${issue.html_url}`,
+            ].join('\n');
+
+            // ── Find existing Linear UUID from a previous bot comment ────────
+            // Stored as <!-- linear-uuid: UUID --> so it survives edits.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              per_page: 100,
+            });
+
+            let existingUuid = null;
+            for (const c of comments) {
+              const m = c.body.match(
+                /<!--\s*linear-uuid:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*-->/
+              );
+              if (m) { existingUuid = m[1]; break; }
+            }
+
+            if (existingUuid) {
+              // ── Update existing Linear issue ─────────────────────────────
+              const action = context.payload.action;
+              let newStateId = undefined;
+
+              if (action === 'closed' || action === 'reopened') {
+                const teamData = await linearRequest(`
+                  query GetStates($teamId: String!) {
+                    team(id: $teamId) {
+                      states { nodes { id type } }
+                    }
+                  }
+                `, { teamId: LINEAR_TEAM_ID });
+
+                const states = teamData.team.states.nodes;
+                if (action === 'closed') {
+                  const reason = issue.state_reason;
+                  const targetType = reason === 'not_planned' ? 'cancelled' : 'completed';
+                  const s = states.find(s => s.type === targetType)
+                         ?? states.find(s => s.type === 'completed');
+                  if (s) newStateId = s.id;
+                } else {
+                  const s = states.find(s => s.type === 'unstarted')
+                         ?? states.find(s => s.type === 'started');
+                  if (s) newStateId = s.id;
+                }
+              }
+
+              const updateVars = { id: existingUuid, title, description };
+              if (newStateId) updateVars.stateId = newStateId;
+
+              await linearRequest(`
+                mutation IssueUpdate(
+                  $id: String!
+                  $title: String!
+                  $description: String
+                  $stateId: String
+                ) {
+                  issueUpdate(
+                    id: $id
+                    input: { title: $title, description: $description, stateId: $stateId }
+                  ) {
+                    success
+                  }
+                }
+              `, updateVars);
+
+              core.info(`Updated Linear issue ${existingUuid} (action: ${action}).`);
+
+            } else {
+              // ── Create new Linear issue ──────────────────────────────────
+              const createVars = {
+                title,
+                description,
+                teamId: LINEAR_TEAM_ID,
+                projectId: LINEAR_PROJECT_ID || undefined,
+              };
+
+              const data = await linearRequest(`
+                mutation IssueCreate(
+                  $title: String!
+                  $description: String
+                  $teamId: String!
+                  $projectId: String
+                ) {
+                  issueCreate(input: {
+                    title: $title
+                    description: $description
+                    teamId: $teamId
+                    projectId: $projectId
+                  }) {
+                    success
+                    issue { id identifier url }
+                  }
+                }
+              `, createVars);
+
+              const created = data.issueCreate.issue;
+
+              // Post Linear URL back to the GitHub issue for discoverability,
+              // and embed UUID in an HTML comment so future runs can find it.
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body:
+                  `🔗 Tracked in Linear: [${created.identifier}](${created.url})\n` +
+                  `<!-- linear-uuid: ${created.id} -->`,
+              });
+
+              core.info(`Created Linear issue ${created.identifier}: ${created.url}`);
+            }
