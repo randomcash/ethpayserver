@@ -130,10 +130,17 @@ else
     echo "This is a pre-release ($VERSION)."
 fi
 
-# Confirm unconditionally: --prerelease only affects the label on the releases
-# page. A vX.Y.Z tag dispatches a mainnet deploy; a prerelease tag does not, so a
-# pre-release is not the safer path it reads as.
-echo "Tagging dispatches a PRODUCTION deploy (ci.yml maps every v* tag to it)."
+# Confirm unconditionally, including for a prerelease. A prerelease does not
+# deploy - ci.yml resolves only ^v[0-9]+\.[0-9]+\.[0-9]+$ to a mainnet dispatch -
+# but the confirmation is not really about the deploy: the tag is pushed and the
+# image published either way, and the version typed here is the only thing
+# standing between "v0.2.0-alpha" and "v0.2.0", which differ by exactly one
+# mainnet deploy.
+if [ -z "$PRERELEASE_FLAG" ]; then
+    echo "Tagging $VERSION DISPATCHES A MAINNET DEPLOY - mainnet holds real merchant funds."
+else
+    echo "$VERSION is a prerelease: the image is published, no deploy is dispatched."
+fi
 if [ -n "$DRY_RUN" ]; then
     echo "dry run: skipping confirmation."
 else
@@ -175,7 +182,11 @@ echo
 if [ -n "$DRY_RUN" ]; then
     echo "dry run: all checks passed."
     echo "would publish $VERSION from origin/$TARGET_BRANCH @ $TARGET_SHA${PRERELEASE_FLAG:+ (pre-release)}"
-    echo "would dispatch a mainnet deploy via ci.yml (vX.Y.Z only)."
+    if [ -z "$PRERELEASE_FLAG" ]; then
+        echo "would dispatch a mainnet deploy via ci.yml."
+    else
+        echo "would NOT dispatch a deploy: ci.yml resolves only vX.Y.Z to mainnet."
+    fi
     exit 0
 fi
 
