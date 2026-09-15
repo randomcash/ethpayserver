@@ -14,9 +14,8 @@ mod tests;
 use std::sync::Arc;
 
 use auth::StoreRepository;
-use data_service::{PaymentOptionReader, PaymentTxIndexWriter};
 use bigdecimal::{BigDecimal, Zero};
-use data_service::PaymentOptionReader;
+use data_service::{PaymentOptionReader, PaymentTxIndexWriter};
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::MonitorEvent;
 use tokio_stream::StreamExt;
