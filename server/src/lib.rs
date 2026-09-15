@@ -44,11 +44,11 @@ pub use config::Config;
 pub use services::{
     ChainHealthMetricsConfig, ChainHealthMetricsService, CleanupConfig, CleanupError, CleanupStats,
     EVMMonitor, EVMMonitorError, EventConsumer, EventConsumerError, FilterOutcome,
-    InvoiceCleanupService, PluginCallError, PluginCoreDataApi, PluginEngine, PluginHost,
-    PluginHostError, PluginInstance, PluginLoadError, PluginRegistry, PluginSchema,
-    PluginStatusSnapshot, PluginStorage, PluginStorageError, PluginStoreSummary, PluginWasmError,
-    RedisEVMMonitor, WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService,
-    WebhookSink,
+    InvoiceCleanupService, PageElement, PageError, PageHost, PageRenderer, PluginCallError,
+    PluginCoreDataApi, PluginEngine, PluginHost, PluginHostError, PluginInstance, PluginLoadError,
+    PluginRegistry, PluginSchema, PluginStatusSnapshot, PluginStorage, PluginStorageError,
+    PluginStoreSummary, PluginWasmError, RedisEVMMonitor, Viewer, WatchRetryConfig,
+    WatchRetryService, WebhookConfig, WebhookService, WebhookSink,
 };
 pub use state::{AppDataService, AppDataServiceReader, AppState};
 

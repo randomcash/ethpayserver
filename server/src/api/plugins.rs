@@ -35,17 +35,19 @@
 
 use std::collections::HashMap;
 
-use auth::SessionService;
+use auth::{Role, SessionService};
 use axum::{
-    Router,
-    extract::Request,
+    Json, Router,
+    extract::{Path, Request, State},
+    http::StatusCode,
     middleware::{self, Next},
     response::Response,
 };
 use payserver_plugin_api::PluginId;
 
+use super::ApiErr;
 use super::extractors::AuthenticatedUser;
-use crate::services::plugins::PluginRegistry;
+use crate::services::plugins::{PageElement, PageError, PluginRegistry, Viewer};
 use crate::state::PgAppState;
 
 /// Builds the `/plugins` mount.
@@ -88,6 +90,38 @@ async fn require_host_auth(
 ) -> Response {
     request.extensions_mut().insert(user);
     next.run(request).await
+}
+
+/// The host resolves this from the authenticated identity; the plugin never
+/// chooses it. `Role` only distinguishes admin from everyone else today, so
+/// every non-admin session is a merchant view.
+fn viewer_for(role: Role) -> Viewer {
+    match role {
+        Role::ServerAdmin => Viewer::Admin,
+        Role::User => Viewer::Merchant,
+    }
+}
+
+impl From<PageError> for ApiErr {
+    fn from(err: PageError) -> Self {
+        (StatusCode::NOT_FOUND, err.to_string()).into()
+    }
+}
+
+pub async fn get_page<A>(
+    State(state): State<PgAppState<A>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path((plugin_id, path)): Path<(String, String)>,
+) -> Result<Json<PageElement>, ApiErr>
+where
+    A: SessionService + 'static,
+{
+    let plugin_id = PluginId::new(plugin_id)
+        .map_err(|e| ApiErr::from((StatusCode::NOT_FOUND, e.to_string())))?;
+    let viewer = viewer_for(user.role);
+
+    let page = state.plugin_pages.render(&plugin_id, &path, viewer)?;
+    Ok(Json(page))
 }
 
 #[cfg(test)]
@@ -390,5 +424,15 @@ mod tests {
             "merging an unprefixed plugin router onto the core router should panic on the exact \
              path collision that the /plugins/{{id}} prefix exists to prevent"
         );
+    }
+
+    #[test]
+    fn server_admin_is_the_admin_viewer() {
+        assert_eq!(viewer_for(Role::ServerAdmin), Viewer::Admin);
+    }
+
+    #[test]
+    fn everyone_else_is_the_merchant_viewer() {
+        assert_eq!(viewer_for(Role::User), Viewer::Merchant);
     }
 }
