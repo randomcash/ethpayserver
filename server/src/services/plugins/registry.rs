@@ -22,9 +22,8 @@ pub fn host_version() -> Version {
 /// The manifests this host has accepted, keyed by [`PluginId`].
 ///
 /// This is the load-time gate only: no wasmtime, no instantiation, no
-/// dispatch (see RCS-256). Registering a manifest just means the host has
-/// decided it is safe to *consider* loading — everything after that is out
-/// of scope here.
+/// dispatch. Registering a manifest just means the host has decided it is
+/// safe to *consider* loading — everything after that is out of scope here.
 #[derive(Debug)]
 pub struct PluginRegistry {
     host_version: Version,

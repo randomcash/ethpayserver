@@ -14,6 +14,9 @@ pub use email::{EmailChangeVerificationData, EmailSender, create_email_sender};
 pub use event_consumer::{EventConsumer, EventConsumerError};
 pub use evm_monitor::{EVMMonitor, EVMMonitorError, RedisEVMMonitor};
 pub use invoice_cleanup::{CleanupConfig, CleanupError, CleanupStats, InvoiceCleanupService};
-pub use plugins::{PluginLoadError, PluginRegistry};
+pub use plugins::{
+    FilterOutcome, PluginCallError, PluginEngine, PluginHost, PluginHostError, PluginInstance,
+    PluginLoadError, PluginRegistry, PluginStatusSnapshot, PluginWasmError,
+};
 pub use watch_retry::{WatchRetryConfig, WatchRetryService};
 pub use webhook::{WebhookConfig, WebhookService, WebhookSink};
