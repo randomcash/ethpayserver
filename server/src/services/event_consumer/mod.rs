@@ -14,7 +14,7 @@ mod tests;
 use std::sync::Arc;
 
 use auth::StoreRepository;
-use bigdecimal::{BigDecimal, Zero};
+use bigdecimal::{BigDecimal, RoundingMode, Zero};
 use data_service::{PaymentOptionReader, PaymentTxIndexWriter};
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::MonitorEvent;
@@ -249,7 +249,7 @@ impl<
         // Convert to invoice currency: human_amount / rate
         let invoice_amount = human_amount / rate;
 
-        Ok(invoice_amount.to_string())
+        Ok(Self::format_amount(&invoice_amount))
     }
 
     /// Convert a smallest unit amount to human-readable format.
@@ -265,13 +265,37 @@ impl<
         let divisor = Self::compute_decimal_divisor(decimals);
         let human_amount = raw / divisor;
 
-        Ok(human_amount.to_string())
+        Ok(Self::format_amount(&human_amount))
     }
 
     /// Compute 10^decimals. `BigDecimal` is arbitrary-precision, so this is
     /// always exact and cannot overflow the way a fixed-mantissa type would.
     fn compute_decimal_divisor(decimals: u8) -> BigDecimal {
         BigDecimal::from(10u8).powi(i64::from(decimals))
+    }
+
+    /// Render an amount the way the rest of the system already reads it.
+    ///
+    /// Two things `BigDecimal::to_string` does that `rust_decimal` did not,
+    /// and that reach a user:
+    ///
+    /// - It switches to scientific notation past five leading zeros, so one
+    ///   wei of an 18-decimal token stringifies as `1E-18`. That value is
+    ///   broadcast over the checkout and dashboard WebSocket, where a plain
+    ///   decimal was shown before.
+    /// - Division runs at 100 significant digits rather than 28, so a rate
+    ///   conversion can produce a 100-plus character string. It is stored in
+    ///   `NUMERIC(78,18)`, so everything past the 18th decimal is dropped on
+    ///   write - rounding here means the number sent over the WebSocket and
+    ///   the number the invoice API returns later are the same number.
+    ///
+    /// `normalized` strips the trailing zeros the fixed scale introduces, so
+    /// a whole amount stays `1` rather than `1.000000000000000000`.
+    fn format_amount(value: &BigDecimal) -> String {
+        value
+            .with_scale_round(18, RoundingMode::HalfUp)
+            .normalized()
+            .to_plain_string()
     }
 }
 

@@ -78,3 +78,54 @@ fn test_convert_payment_to_invoice_currency_exact_beyond_decimal_precision() {
         .unwrap();
     assert_eq!(converted, "79228162514264337593543950336");
 }
+
+/// One wei of an 18-decimal token must not reach the WebSocket as `1E-18`.
+///
+/// `BigDecimal`'s `Display` switches to scientific notation past five leading
+/// zeros; `rust_decimal`'s never did. The value produced here is broadcast to
+/// the checkout and dashboard as a string, so the notation is user-visible.
+/// Goes red against a bare `to_string()`.
+#[test]
+fn dust_amounts_stay_in_plain_decimal_notation() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds, bridge);
+
+    assert_eq!(
+        consumer.convert_smallest_to_human("1", 18).unwrap(),
+        "0.000000000000000001"
+    );
+    assert_eq!(
+        consumer.convert_smallest_to_human("123456789", 18).unwrap(),
+        "0.000000000123456789"
+    );
+    // A whole amount keeps its short form rather than gaining the trailing
+    // zeros the fixed scale would otherwise introduce.
+    assert_eq!(
+        consumer
+            .convert_smallest_to_human("1000000000000000000", 18)
+            .unwrap(),
+        "1"
+    );
+}
+
+/// A rate conversion must not emit more precision than the column that stores
+/// it. `credited_amount` is `NUMERIC(78,18)`, so anything past the 18th
+/// decimal is dropped on write - if the WebSocket carries the unrounded value,
+/// it and the invoice API disagree from the 19th decimal onward.
+#[test]
+fn rate_conversion_is_rounded_to_the_stored_scale() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds, bridge);
+
+    let converted = consumer
+        .convert_payment_to_invoice_currency("500000000000000000", "2500.50", 18)
+        .unwrap();
+
+    let decimals = converted.split_once('.').map_or(0, |(_, frac)| frac.len());
+    assert!(
+        decimals <= 18,
+        "amount carries {decimals} decimals, more than NUMERIC(78,18) stores: {converted}"
+    );
+}
