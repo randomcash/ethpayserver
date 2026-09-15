@@ -26,6 +26,20 @@ pub struct ChainMonitorConfig {
     /// subscription. Default is comfortably longer than a block on any chain
     /// this monitors.
     pub stall_timeout_secs: u64,
+    /// How long the event loop itself may go without completing a single
+    /// `select!` iteration before it is treated as hung and the process
+    /// exits so it can be restarted.
+    ///
+    /// Distinct from `stall_timeout_secs`: that one is checked *from inside*
+    /// the loop, on the confirmation-check tick, so it can only ever fire
+    /// while the loop is still cycling. It cannot help when the loop itself
+    /// is wedged - stuck awaiting an RPC call inside `process_block` or
+    /// `check_confirmations` that never returns - because the tick that
+    /// would notice never comes either. There is no in-process fix for a
+    /// hung await; exiting is the only thing guaranteed to work regardless
+    /// of what it is stuck on. Default is comfortably longer than several
+    /// confirmation-check intervals, so an ordinary slow tick never trips it.
+    pub loop_hang_timeout_secs: u64,
     /// Whether to detect native (ETH) transfers.
     pub monitor_native: bool,
     /// Whether to detect ERC20 transfers.
@@ -39,6 +53,7 @@ impl Default for ChainMonitorConfig {
             max_blocks_per_scan: 100,
             confirmation_check_interval_secs: 30,
             stall_timeout_secs: 120,
+            loop_hang_timeout_secs: 300,
             monitor_native: true,
             monitor_erc20: true,
         }

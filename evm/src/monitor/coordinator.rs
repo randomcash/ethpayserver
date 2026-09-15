@@ -9,6 +9,7 @@ use alloy::primitives::Address;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
@@ -57,6 +58,11 @@ struct MonitorHandle<S: BlockSource + 'static> {
     /// Reference to the actual monitor for command handling.
     monitor: Arc<ChainMonitor<S>>,
     task: JoinHandle<()>,
+    /// Watches `monitor`'s event loop from outside it and exits the process
+    /// if that loop stops making progress. Aborted alongside `task` so a
+    /// deliberately removed chain doesn't outlive its monitor and trip the
+    /// watchdog on a loop nothing is running anymore.
+    watchdog_task: JoinHandle<()>,
     event_rx: broadcast::Receiver<MonitorEvent>,
 }
 
@@ -109,6 +115,35 @@ impl<S: BlockSource + 'static> MonitorCoordinator<S> {
             }
         });
 
+        // Watch the monitor's event loop from outside it. The loop's own
+        // confirmation-check tick can reconnect a dead subscription, but
+        // that fix shares the loop's fate: if the loop itself wedges - stuck
+        // awaiting an RPC call inside `process_block` or
+        // `check_confirmations` that never returns - the tick that would
+        // notice never comes either, and the container looks up and alive
+        // while the loop is not. Nothing in-process can un-wedge an
+        // arbitrary hung await, so this exits instead, and relies on
+        // whatever restarts this process (Docker's restart policy) to bring
+        // it back.
+        let watchdog_monitor = monitor.clone();
+        let watchdog_task = tokio::spawn(async move {
+            let hang_timeout = watchdog_monitor.loop_hang_timeout();
+            let check_interval = (hang_timeout / 4).max(Duration::from_millis(50));
+            let mut interval = tokio::time::interval(check_interval);
+            loop {
+                interval.tick().await;
+                let stalled_for = watchdog_monitor.loop_stalled_for().await;
+                if stalled_for >= hang_timeout {
+                    error!(
+                        chain_id,
+                        stalled_secs = stalled_for.as_secs(),
+                        "chain monitor event loop made no progress for too long; exiting so the process can be restarted"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        });
+
         // Store handle with reference to monitor
         self.monitors.write().await.insert(
             chain_id,
@@ -117,6 +152,7 @@ impl<S: BlockSource + 'static> MonitorCoordinator<S> {
                 chain_name: chain_name.clone(),
                 monitor,
                 task,
+                watchdog_task,
                 event_rx,
             },
         );
@@ -164,6 +200,7 @@ impl<S: BlockSource + 'static> MonitorCoordinator<S> {
             .ok_or_else(|| EvmError::Monitor(format!("chain {} not found", chain_id)))?;
 
         handle.task.abort();
+        handle.watchdog_task.abort();
         info!(chain_id, chain = handle.chain_name, "chain monitor removed");
 
         Ok(())

@@ -11,9 +11,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use evm::monitor::{
-    ChainMonitor, ChainMonitorConfig, MockBlockSource, MonitorEvent, SourceStatus, make_block,
+    ChainMonitor, ChainMonitorConfig, MockBlockSource, MonitorEvent, SourceStatus, WatchedAddress,
+    make_block,
 };
+use evm::{Address, U256};
 
 const TEST_CHAIN_ID: u64 = 11155111;
 
@@ -31,6 +34,10 @@ fn fast_confirm_config() -> ChainMonitorConfig {
         // Short so the stall watchdog fires quickly in the test; production
         // defaults to 120s.
         stall_timeout_secs: 1,
+        // Long relative to the sleeps these tests use, so nothing here is
+        // mistaken for a hung event loop. `event_loop_hang_is_detected_from_outside_it`
+        // below uses its own much shorter value.
+        loop_hang_timeout_secs: 5,
         monitor_native: true,
         monitor_erc20: true,
     }
@@ -289,4 +296,85 @@ async fn a_lagging_but_delivering_chain_is_not_resubscribed() {
         "a monitor that is merely behind must not have its subscription torn \
          down; blocks were arriving throughout"
     );
+}
+
+/// A dead *stream* is not the only way the incident's "10.5 hours of total
+/// silence" can happen. The `select!` loop itself can wedge - stuck awaiting
+/// an RPC call from inside `process_block` that never returns - and then the
+/// confirmation-check tick that would otherwise resubscribe a stalled
+/// subscription never comes either, because nothing inside a wedged loop can
+/// run again to notice. This is why detection has to live outside the loop:
+/// exercises `loop_stalled_for`/`loop_hang_timeout`, the signal the
+/// coordinator's watchdog polls to decide whether to exit the process.
+#[tokio::test]
+async fn event_loop_hang_is_detected_from_outside_it() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let config = ChainMonitorConfig {
+        // Short so the test doesn't have to wait long to observe the hang
+        // being detected; production defaults to 300s.
+        loop_hang_timeout_secs: 1,
+        ..fast_confirm_config()
+    };
+
+    let monitor = Arc::new(ChainMonitor::new(test_chain_config(), source, config));
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let _monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+
+    let started = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+    assert!(
+        matches!(started, Ok(Ok(MonitorEvent::MonitorStarted { .. }))),
+        "expected MonitorStarted"
+    );
+
+    // A watched native address makes `process_block` call `get_balance` -
+    // the RPC call this test hangs.
+    monitor
+        .watch(WatchedAddress {
+            address: Address::random(),
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: None,
+            token_contract: None,
+            created_at: Utc::now(),
+            last_known_balance: U256::ZERO,
+        })
+        .await;
+
+    assert!(
+        monitor.loop_stalled_for().await < monitor.loop_hang_timeout(),
+        "precondition: a freshly started loop must not already read as hung"
+    );
+
+    test_source.hang_get_balance();
+    let subscribes_before = test_source.subscribe_count();
+
+    // Drive the loop into `process_block`, where it wedges on `get_balance`.
+    test_source.push_block(make_block(1));
+
+    // Long enough to clear `loop_hang_timeout_secs` several times over, and
+    // long enough that the confirmation-check tick (1s, from
+    // `fast_confirm_config`) would have fired repeatedly too - if the fix
+    // lived inside the loop, this is exactly when it would have needed to
+    // run, and could not, because the loop never got back around to it.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    assert!(
+        monitor.loop_stalled_for().await >= monitor.loop_hang_timeout(),
+        "a loop wedged inside process_block must read as hung - nothing on \
+         the loop's own timer can ever run again to say otherwise"
+    );
+    assert_eq!(
+        test_source.subscribe_count(),
+        subscribes_before,
+        "the in-loop resubscribe watchdog never got a turn to run while the \
+         loop was wedged, proving this failure mode needs detection from \
+         outside the loop"
+    );
+
+    // Let the wedged call return so the background task can exit instead of
+    // leaking past the end of this test.
+    test_source.release_hang();
 }

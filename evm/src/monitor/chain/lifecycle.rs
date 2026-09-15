@@ -68,6 +68,16 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         ));
 
         loop {
+            // Written before the loop waits on anything, so it advances once
+            // per completed iteration regardless of which branch fired. A
+            // hang inside any branch below - `process_block`,
+            // `check_confirmations`, `resubscribe_if_stalled` - freezes this
+            // exactly where an in-loop watchdog cannot see it, because that
+            // watchdog would need another iteration to run and none is
+            // coming. The coordinator's watchdog task polls this from
+            // outside the loop for that reason.
+            *self.loop_alive_at.write().await = Instant::now();
+
             tokio::select! {
                 // Shutdown signal
                 _ = shutdown_rx.recv() => {
@@ -125,6 +135,20 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// How long a silent subscription is tolerated before it is assumed dead.
     fn stall_timeout(&self) -> Duration {
         Duration::from_secs(self.config.stall_timeout_secs)
+    }
+
+    /// How long since the `start` event loop last completed an iteration.
+    ///
+    /// Meant to be polled from outside the loop - anything running on the
+    /// loop's own timer shares its fate if the loop wedges.
+    pub async fn loop_stalled_for(&self) -> Duration {
+        self.loop_alive_at.read().await.elapsed()
+    }
+
+    /// How long the event loop may go without completing an iteration before
+    /// it is treated as hung.
+    pub fn loop_hang_timeout(&self) -> Duration {
+        Duration::from_secs(self.config.loop_hang_timeout_secs)
     }
 
     /// Reconnect a block stream that has stopped delivering.

@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{Notify, RwLock, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -43,6 +43,12 @@ struct Inner {
     /// `status` so a test can simulate the endpoint going down and coming
     /// back independently of when the monitor notices.
     reachable: AtomicBool,
+    /// Whether `get_balance` should block forever instead of returning.
+    /// Simulates an RPC call made *from inside* block processing that never
+    /// completes - as distinct from `kill_connection`, which kills the block
+    /// stream but leaves ordinary request/response calls answering.
+    hung: AtomicBool,
+    hang_notify: Notify,
 }
 
 /// A mock block source for testing payment detection.
@@ -79,6 +85,8 @@ impl MockBlockSource {
                 subscribe_count: AtomicU64::new(0),
                 status: Mutex::new(SourceStatus::Connected),
                 reachable: AtomicBool::new(true),
+                hung: AtomicBool::new(false),
+                hang_notify: Notify::new(),
             }),
         }
     }
@@ -159,6 +167,21 @@ impl MockBlockSource {
     pub fn set_block_number(&self, number: u64) {
         self.inner.current_block.store(number, Ordering::SeqCst);
     }
+
+    /// Make every `get_balance` call block forever, simulating an RPC call
+    /// made from inside the monitor's own event loop that never returns -
+    /// wedging the loop itself, rather than just leaving its subscription
+    /// silent the way [`Self::kill_connection`] does.
+    pub fn hang_get_balance(&self) {
+        self.inner.hung.store(true, Ordering::SeqCst);
+    }
+
+    /// Release every `get_balance` call currently blocked (and let future
+    /// ones return normally).
+    pub fn release_hang(&self) {
+        self.inner.hung.store(false, Ordering::SeqCst);
+        self.inner.hang_notify.notify_waiters();
+    }
 }
 
 #[async_trait]
@@ -237,6 +260,19 @@ impl BlockSource for MockBlockSource {
     }
 
     async fn get_balance(&self, address: Address, _block: Option<u64>) -> EvmResult<U256> {
+        loop {
+            if !self.inner.hung.load(Ordering::SeqCst) {
+                break;
+            }
+            // Register interest before re-checking, so a `release_hang` that
+            // lands between the load above and this point isn't missed.
+            let notified = self.inner.hang_notify.notified();
+            if !self.inner.hung.load(Ordering::SeqCst) {
+                break;
+            }
+            notified.await;
+        }
+
         let balances = self.inner.balances.read().await;
         Ok(balances.get(&address).copied().unwrap_or(U256::ZERO))
     }

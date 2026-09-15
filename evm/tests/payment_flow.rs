@@ -28,6 +28,7 @@ fn test_monitor_config(required_confirmations: u64) -> ChainMonitorConfig {
         // Short interval so confirmation checks happen quickly in tests
         confirmation_check_interval_secs: 1,
         stall_timeout_secs: 120,
+        loop_hang_timeout_secs: 300,
         monitor_native: true,
         monitor_erc20: true,
     }

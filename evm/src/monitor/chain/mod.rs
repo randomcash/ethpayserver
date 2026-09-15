@@ -56,6 +56,15 @@ pub struct ChainMonitor<S: BlockSource> {
     /// restart is far behind while receiving blocks perfectly well; a
     /// half-open WebSocket is exactly level and receiving nothing.
     last_block_at: RwLock<Instant>,
+    /// When the `start` event loop last completed a `select!` iteration.
+    ///
+    /// Unlike `last_block_at`, this moves on *every* completed iteration -
+    /// the confirmation-check tick as well as a delivered block - so it is
+    /// the one signal that keeps advancing as long as the loop itself is
+    /// alive. A watchdog running outside this loop (in the coordinator) polls
+    /// it to notice the loop wedged on a single iteration, which nothing
+    /// inside that same loop can ever detect.
+    loop_alive_at: RwLock<Instant>,
     /// Last processed block.
     last_block: RwLock<Option<u64>>,
     /// Block hash at last processed block (for reorg detection).
@@ -80,6 +89,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             watched: RwLock::new(HashMap::new()),
             pending: RwLock::new(HashMap::new()),
             last_block_at: RwLock::new(Instant::now()),
+            loop_alive_at: RwLock::new(Instant::now()),
             last_block: RwLock::new(None),
             last_block_hash: RwLock::new(None),
             event_tx,
