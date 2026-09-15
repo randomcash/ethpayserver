@@ -9,8 +9,12 @@ name: Scheduled audit
 
 on:
   schedule:
-    # Mondays 07:00 UTC — before the weekly retro, so findings are on the desk.
-    - cron: "0 7 * * 1"
+    # Daily 07:00 UTC, not weekly. RUSTSEC-2026-0285 was published into the
+    # advisory database on 2026-09-15, a Tuesday; this job had passed on the
+    # Monday and would not have run again until the following Monday, so the
+    # first thing to notice would have been - and was - a deploy that stopped
+    # happening. A day of exposure instead of a week, for one extra run.
+    - cron: "0 7 * * *"
   workflow_dispatch:
 
 permissions:

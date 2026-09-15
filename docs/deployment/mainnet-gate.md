@@ -31,37 +31,49 @@ Before clicking the manual deploy button in CI for the `main` branch:
       is green.
 - [ ] No open MRs with the `do-not-merge` label targeting `main`.
 
-## Manual approval step
+## What triggers a deploy
 
-The `notify:deploy` CI job for the `main` branch is configured with
-`when: manual`. This means the pipeline will pause at the notify stage
-and wait for a maintainer to click "Run" in the GitLab UI.
+`.github/workflows/ci.yml`, in GitHub Actions:
 
-The testnet deploy remains automatic — only mainnet requires manual
-approval.
+| job | runs when | deploys |
+|---|---|---|
+| `Notify Deploy (testnet)` | push to `testnet` | automatic |
+| `Notify Deploy (mainnet)` | `refs/tags/v*` only | on the tag |
 
-### How it works in CI
+Mainnet takes release tags and nothing else — there is no manual-approval
+button on a branch, and no `main`-branch deploy. Cut the tag with
+`scripts/release.sh`; that is the approval step.
 
-```yaml
-notify:deploy:
-  stage: notify
-  rules:
-    - if: $CI_COMMIT_BRANCH == "testnet"        # auto
-    - if: $CI_COMMIT_BRANCH == "main"
-      when: manual                               # human clicks "Run"
-      allow_failure: false                        # pipeline stays blocked
-```
+Both jobs POST a `repository_dispatch` to `central-infrastructure`, which
+owns the deploy itself. A 202 from that API means the event was accepted,
+not that anything deployed — which is what the health gate below is for.
 
 ## Post-deploy health gate
 
-After the deploy trigger fires, the `post-deploy:health-gate` CI job
-polls the deployed instance's `/health/deep` endpoint for up to 60
-seconds (configurable via `HEALTH_TIMEOUT`).
+For **testnet**, the `Verify testnet deploy` job runs
+`scripts/health-gate.sh` against
+`https://testnet.random.cash/api/health/deep` after the dispatch, polling
+for up to 600 seconds (`HEALTH_TIMEOUT`).
+
+The `/api` prefix matters: `testnet.random.cash` serves the client, whose
+SPA fallback answers `/health/deep` with HTTP 200 and a page of HTML. A
+gate pointed at the bare host would pass against a server that never
+restarted.
+
+For **mainnet** there is no automated gate yet. Run the same script by
+hand after a release and before closing the deploy out:
+
+```bash
+HEALTH_URL=https://api.random.cash/health/deep \
+EXPECTED_SHA=$(git rev-parse --short=7 HEAD) \
+HEALTH_TIMEOUT=600 ./scripts/health-gate.sh
+```
 
 The gate passes when ALL of the following are true:
 
 1. `/health/deep` returns HTTP 200.
-2. `build_sha` in the response matches `$CI_COMMIT_SHORT_SHA`.
+2. `build_sha` in the response matches the commit being deployed
+   (`EXPECTED_SHA`, the first 7 of `GITHUB_SHA`).
 3. Postgres reports `status: "ok"`.
 4. Redis reports `status: "ok"`.
 5. All RPC chains report `status: "ok"` (no chain in error, disconnected,
@@ -115,7 +127,8 @@ image:
 ```bash
 # On the VPS, check which image was running before:
 docker inspect ethpayserver_server --format='{{.Config.Image}}'
-# Or check GitLab CI for the last successful main pipeline's short SHA.
+# Or take the short SHA of the last release tag that deployed cleanly:
+#   gh run list --workflow ci.yml --limit 20 --json headSha,conclusion,headBranch
 ```
 
 ### 2. Retag and redeploy
