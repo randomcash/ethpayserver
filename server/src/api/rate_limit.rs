@@ -5,8 +5,8 @@
 //!
 //! # Environment Variables
 //!
-//! - `RATE_LIMIT_AUTH`  - Auth endpoint limit, req/min (default: 5)
-//! - `RATE_LIMIT_WRITE` - Write endpoint limit, req/min (default: 10)
+//! - `RATE_LIMIT_AUTH`  - Auth endpoint limit, req/min (default: 10)
+//! - `RATE_LIMIT_WRITE` - Write endpoint limit, req/min (default: 20)
 //! - `RATE_LIMIT_READ`  - Read endpoint limit, req/min (default: 60)
 //! - `RATE_LIMIT_WS`    - WebSocket upgrade limit, req/min (default: 5)
 
@@ -47,8 +47,8 @@ pub struct RateLimitConfig {
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            auth_rpm: 5,
-            write_rpm: 10,
+            auth_rpm: 10,
+            write_rpm: 20,
             read_rpm: 60,
             ws_rpm: 5,
         }
@@ -59,8 +59,8 @@ impl RateLimitConfig {
     /// Load from environment variables with defaults.
     pub fn from_env() -> Self {
         Self {
-            auth_rpm: parse_env_u32("RATE_LIMIT_AUTH", 5),
-            write_rpm: parse_env_u32("RATE_LIMIT_WRITE", 10),
+            auth_rpm: parse_env_u32("RATE_LIMIT_AUTH", 10),
+            write_rpm: parse_env_u32("RATE_LIMIT_WRITE", 20),
             read_rpm: parse_env_u32("RATE_LIMIT_READ", 60),
             ws_rpm: parse_env_u32("RATE_LIMIT_WS", 5),
         }
@@ -70,9 +70,13 @@ impl RateLimitConfig {
 /// Per-tier rate limiters.
 pub struct RateLimitState {
     auth: KeyedLimiter,
+    auth_rpm: u32,
     write: KeyedLimiter,
+    write_rpm: u32,
     read: KeyedLimiter,
+    read_rpm: u32,
     ws: KeyedLimiter,
+    ws_rpm: u32,
 }
 
 impl RateLimitState {
@@ -80,9 +84,13 @@ impl RateLimitState {
     pub fn from_config(config: &RateLimitConfig) -> Self {
         Self {
             auth: make_limiter(config.auth_rpm),
+            auth_rpm: config.auth_rpm,
             write: make_limiter(config.write_rpm),
+            write_rpm: config.write_rpm,
             read: make_limiter(config.read_rpm),
+            read_rpm: config.read_rpm,
             ws: make_limiter(config.ws_rpm),
+            ws_rpm: config.ws_rpm,
         }
     }
 }
@@ -157,12 +165,12 @@ pub async fn middleware(
 ) -> Response {
     let tier = classify(req.uri().path(), req.method());
 
-    let limiter = match tier {
+    let (limiter, rpm) = match tier {
         Tier::Health => return next.run(req).await,
-        Tier::Auth => &limiters.auth,
-        Tier::Write => &limiters.write,
-        Tier::Read => &limiters.read,
-        Tier::WebSocket => &limiters.ws,
+        Tier::Auth => (&limiters.auth, limiters.auth_rpm),
+        Tier::Write => (&limiters.write, limiters.write_rpm),
+        Tier::Read => (&limiters.read, limiters.read_rpm),
+        Tier::WebSocket => (&limiters.ws, limiters.ws_rpm),
     };
 
     let fallback_addr = req
@@ -175,6 +183,12 @@ pub async fn middleware(
     match limiter.check_key(&ip) {
         Ok(_) => next.run(req).await,
         Err(not_until) => {
+            tracing::warn!(
+                tier = tier.label(),
+                ip = %ip,
+                limit_rpm = rpm,
+                "rate limit exceeded"
+            );
             metrics::record_rate_limited(tier.label());
             let wait = not_until.wait_time_from(DefaultClock::default().now());
             let retry_after = (wait.as_secs() + 1).to_string();
@@ -254,8 +268,8 @@ mod tests {
     #[test]
     fn config_defaults() {
         let config = RateLimitConfig::default();
-        assert_eq!(config.auth_rpm, 5);
-        assert_eq!(config.write_rpm, 10);
+        assert_eq!(config.auth_rpm, 10);
+        assert_eq!(config.write_rpm, 20);
         assert_eq!(config.read_rpm, 60);
         assert_eq!(config.ws_rpm, 5);
     }
@@ -294,5 +308,79 @@ mod tests {
         assert_eq!(Tier::Write.label(), "write");
         assert_eq!(Tier::Read.label(), "read");
         assert_eq!(Tier::WebSocket.label(), "ws");
+    }
+
+    /// Captures `tracing` output into a shared buffer so a test can assert on
+    /// log lines without a full logging setup.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLogs {
+        fn as_string(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    /// A rate limit rejection is silent to anyone watching from outside the
+    /// process. This asserts it is not silent to the logs.
+    #[tokio::test]
+    async fn rate_limit_exceeded_logs_a_warning() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let state = Arc::new(RateLimitState::from_config(&RateLimitConfig {
+            auth_rpm: 1,
+            write_rpm: 1,
+            read_rpm: 1,
+            ws_rpm: 1,
+        }));
+        let app: Router = Router::new()
+            .route("/auth/login", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state, middleware));
+
+        let build_request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/auth/login")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(build_request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app.oneshot(build_request()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let output = logs.as_string();
+        assert!(
+            output.contains("rate limit exceeded"),
+            "expected a warning about the rejected request, got: {output}"
+        );
+        assert!(
+            output.contains("auth"),
+            "expected the tier that fired to be logged, got: {output}"
+        );
     }
 }
