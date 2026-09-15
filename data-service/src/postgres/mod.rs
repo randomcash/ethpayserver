@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 mod auth;
 mod conversions;
+mod email_change;
 mod invoice;
 mod invoice_creation;
 mod merchant_directory;

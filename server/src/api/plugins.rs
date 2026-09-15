@@ -160,6 +160,7 @@ mod tests {
             Arc::new(FakeSessions),
             None,
             Arc::new(NoOpRateProvider),
+            Arc::new(crate::services::email::NoopEmailSender),
         )
     }
 

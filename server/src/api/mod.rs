@@ -38,7 +38,7 @@ pub mod users;
 pub mod webhook_deliveries;
 pub mod ws;
 
-pub use extractors::{AdminAuth, AuthenticatedUser};
+pub use extractors::{AdminAuth, AuthenticatedUser, FreshlyAuthenticatedUser};
 
 /// A status, optionally with a reason the caller can read.
 ///
@@ -395,6 +395,16 @@ where
         // `users` cascades through `stores` into `invoices` and `payments`, so
         // deleting a merchant who traded would erase their financial history.
         .route("/me", delete(users::delete_account::<A>))
+        // Email change (sensitive - see server/src/api/users.rs).
+        // Set/change and remove require a fresh passkey or wallet login
+        // (`FreshlyAuthenticatedUser`); confirm is unauthenticated by design
+        // and gated on the verification token alone.
+        .route("/me/email", post(users::request_email_change::<A>))
+        .route("/me/email", delete(users::remove_email::<A>))
+        .route(
+            "/me/email/confirm",
+            post(users::confirm_email_change::<A>),
+        )
         .route("/api-keys", get(users::list_api_keys::<A>))
         .route("/api-keys", post(users::create_api_key::<A>))
         .route("/api-keys/{id}", delete(users::revoke_api_key::<A>))

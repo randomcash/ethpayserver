@@ -13,6 +13,7 @@ use evm::api::EvmDataService;
 use rates::RateProvider;
 
 use crate::api::ws::WsBroadcast;
+use crate::services::email::EmailSender;
 use crate::services::plugins::InvoiceCreationFilter;
 use crate::services::webhook::WebhookSink;
 
@@ -102,6 +103,14 @@ pub struct AppState<D, A, E> {
     /// to enforce a lapsed subscription. Empty when no such plugin is
     /// installed, in which case invoice creation is never filtered at all.
     pub invoice_creation_filters: Vec<Arc<dyn InvoiceCreationFilter>>,
+    /// Sender used to verify a pending email-address change.
+    ///
+    /// Unlike `webhook_sink` this is never `None`: `create_email_sender`
+    /// always returns something, real or a no-op, and the email-change
+    /// handler tells the two apart via `EmailSender::is_configured` rather
+    /// than by the field's presence - it must fail loudly on a no-op sender,
+    /// where a receipt would rather stay silent.
+    pub email_sender: Arc<dyn EmailSender>,
 }
 
 // Manual Clone impl since we only need Arc::clone
@@ -117,6 +126,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             webhook_sink: self.webhook_sink.clone(),
             webauthn: self.webauthn.clone(),
             invoice_creation_filters: self.invoice_creation_filters.clone(),
+            email_sender: Arc::clone(&self.email_sender),
         }
     }
 }
@@ -128,6 +138,7 @@ impl<D, A, E> AppState<D, A, E> {
         auth_service: Arc<A>,
         evm_monitor: Option<Arc<E>>,
         rate_provider: Arc<dyn RateProvider>,
+        email_sender: Arc<dyn EmailSender>,
     ) -> Self {
         Self {
             data_service,
@@ -139,6 +150,7 @@ impl<D, A, E> AppState<D, A, E> {
             webhook_sink: None,
             webauthn: None,
             invoice_creation_filters: Vec::new(),
+            email_sender,
         }
     }
 }

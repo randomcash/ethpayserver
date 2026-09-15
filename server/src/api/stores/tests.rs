@@ -535,6 +535,7 @@ fn handler_test_state(service: data_service::PgDataService) -> PgAppState<NoAuth
         std::sync::Arc::new(NoAuthSessionService),
         None,
         std::sync::Arc::new(rates::NoOpRateProvider),
+        std::sync::Arc::new(crate::services::email::NoopEmailSender),
     )
 }
 
