@@ -1,5 +1,6 @@
 //! Application services.
 
+pub mod chain_health_metrics;
 pub mod email;
 pub mod event_consumer;
 pub mod evm_monitor;
@@ -8,6 +9,7 @@ pub mod plugins;
 pub mod watch_retry;
 pub mod webhook;
 
+pub use chain_health_metrics::{ChainHealthMetricsConfig, ChainHealthMetricsService};
 pub use email::{EmailSender, create_email_sender};
 pub use event_consumer::{EventConsumer, EventConsumerError};
 pub use evm_monitor::{EVMMonitor, EVMMonitorError, RedisEVMMonitor};

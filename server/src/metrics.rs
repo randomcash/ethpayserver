@@ -142,6 +142,22 @@ fn describe_gauges() {
         "Current number of watched addresses per chain"
     );
     describe_gauge!(
+        "payserver_chain_current_block",
+        "Current block height on chain, as reported by the RPC source"
+    );
+    describe_gauge!(
+        "payserver_chain_last_processed_block",
+        "Last block height processed by the monitor"
+    );
+    describe_gauge!(
+        "payserver_chain_block_lag",
+        "Blocks between chain head and the last block the monitor has processed"
+    );
+    describe_gauge!(
+        "payserver_chain_healthy",
+        "Whether the chain's monitor connection is healthy (1) or not (0)"
+    );
+    describe_gauge!(
         "ethpayserver_registered_users",
         "Total number of registered users"
     );
@@ -297,6 +313,38 @@ pub fn set_watched_addresses(chain_id: u64, count: usize) {
         "chain_id" => chain_id.to_string()
     )
     .set(count as f64);
+}
+
+/// Update the per-chain block gauges: current head, last processed, and the
+/// lag between them. `None` values (source not yet connected) are skipped
+/// rather than recorded as zero, which would read as fully caught up.
+pub fn set_chain_blocks(
+    chain_id: u64,
+    current_block: Option<u64>,
+    last_processed_block: Option<u64>,
+) {
+    let chain_id = chain_id.to_string();
+
+    if let Some(current) = current_block {
+        gauge!("payserver_chain_current_block", "chain_id" => chain_id.clone()).set(current as f64);
+    }
+    if let Some(last_processed) = last_processed_block {
+        gauge!("payserver_chain_last_processed_block", "chain_id" => chain_id.clone())
+            .set(last_processed as f64);
+    }
+    if let (Some(current), Some(last_processed)) = (current_block, last_processed_block) {
+        let lag = current.saturating_sub(last_processed);
+        gauge!("payserver_chain_block_lag", "chain_id" => chain_id).set(lag as f64);
+    }
+}
+
+/// Update the per-chain healthy gauge (1 = healthy, 0 = not).
+pub fn set_chain_healthy(chain_id: u64, is_healthy: bool) {
+    gauge!(
+        "payserver_chain_healthy",
+        "chain_id" => chain_id.to_string()
+    )
+    .set(if is_healthy { 1.0 } else { 0.0 });
 }
 
 /// Update the registered users gauge.
@@ -489,5 +537,40 @@ mod tests {
             output.contains("ethpayserver_rpc_errors_total"),
             "missing rpc_errors_total"
         );
+
+        // Reproduces the ticket's "be seen to fail" check: a chain that is
+        // caught up and healthy, then one whose monitor has stalled while
+        // the chain head keeps moving, must show the lag climbing and
+        // health flipping to unhealthy - not a gauge stuck at its first
+        // value.
+        set_chain_blocks(1, Some(100), Some(100));
+        set_chain_healthy(1, true);
+        let output = handle.render();
+        assert!(output.contains("payserver_chain_block_lag{chain_id=\"1\"} 0"));
+        assert!(output.contains("payserver_chain_healthy{chain_id=\"1\"} 1"));
+
+        // Monitor stalls: chain head advances, last_processed_block does not.
+        set_chain_blocks(1, Some(103), Some(100));
+        set_chain_healthy(1, false);
+        let output = handle.render();
+        assert!(
+            output.contains("payserver_chain_block_lag{chain_id=\"1\"} 3"),
+            "lag did not climb when the monitor fell behind: {output}"
+        );
+        assert!(
+            output.contains("payserver_chain_healthy{chain_id=\"1\"} 0"),
+            "healthy gauge did not flip to 0 when the chain fell behind: {output}"
+        );
+    }
+
+    #[test]
+    fn test_chain_gauges_do_not_panic() {
+        // Mirrors test_db_pool_connections_gauge: confirms the recording
+        // functions run cleanly, including the "source not connected yet"
+        // case where both block numbers are `None`.
+        set_chain_blocks(1, Some(100), Some(95));
+        set_chain_blocks(1, None, None);
+        set_chain_healthy(1, true);
+        set_chain_healthy(1, false);
     }
 }

@@ -193,11 +193,6 @@ where
         Ok(chains) => {
             let all_healthy = chains.iter().all(|c| c.is_healthy);
 
-            // Update watched addresses gauge for each chain
-            for chain in &chains {
-                metrics::set_watched_addresses(chain.chain_id, chain.watched_addresses);
-            }
-
             // Everyone may know a chain is down; only an admin may know how far
             // behind it is or which endpoint failed.
             let chain_infos: Vec<ChainHealthInfo> = chains
