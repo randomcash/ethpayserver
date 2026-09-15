@@ -60,11 +60,21 @@ SPA fallback answers `/health/deep` with HTTP 200 and a page of HTML. A
 gate pointed at the bare host would pass against a server that never
 restarted.
 
-For **mainnet** there is no automated gate yet. Run the same script by
-hand after a release and before closing the deploy out:
+For **mainnet**, the deploy itself verifies: `central-infrastructure`'s
+`deploy.yml` asserts database and Redis connectivity, waits for every chain
+monitor to reach `connected` + `is_healthy`, and checks the WebAuthn relying
+party both on the container and as the running server resolved it — then
+records `.deployed-sha` only once all of that passes, so the rollback target
+is never a build that came up broken.
+
+Mainnet has not been deployed yet: nothing resolves at `pay.random.cash`, and
+the only tag in the repository is `v0.1.0-alpha`, which the release filter
+refuses. The first real release is the first exercise of that path.
+
+To check a mainnet deploy by hand:
 
 ```bash
-HEALTH_URL=https://api.random.cash/health/deep \
+HEALTH_URL=https://pay.random.cash/api/health/deep \
 EXPECTED_SHA=$(git rev-parse --short=7 HEAD) \
 HEALTH_TIMEOUT=600 ./scripts/health-gate.sh
 ```
@@ -100,7 +110,7 @@ test suite (`scripts/smoke-prod.sh`) against the deployed instance:
 | Variable | Description |
 |----------|-------------|
 | `DEPLOY_HEALTH_URL` | Full URL to `/health/deep` on the target env |
-| `DEPLOY_SMOKE_URL` | Base URL for smoke tests (e.g. `https://api.random.cash`) |
+| `DEPLOY_SMOKE_URL` | Base URL for smoke tests (e.g. `https://pay.random.cash`) |
 | `DEPLOY_SMOKE_API_KEY` | API key with invoice create/read permissions |
 | `DEPLOY_SMOKE_STORE_ID` | Store UUID the smoke API key is scoped to |
 
@@ -152,7 +162,7 @@ docker compose -f docker-compose.prod.yml up -d
 ### 3. Verify the rollback
 
 ```bash
-curl -s https://api.random.cash/health/deep | python3 -c \
+curl -s https://pay.random.cash/api/health/deep | python3 -c \
   "import json,sys; d=json.load(sys.stdin); print(f'sha={d[\"build_sha\"]} pg={d[\"postgres\"][\"status\"]} redis={d[\"redis\"][\"status\"]}')"
 ```
 
