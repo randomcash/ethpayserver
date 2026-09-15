@@ -71,7 +71,7 @@ pub struct CleanupConfig {
     /// watched addresses (see `find_survived_tx_hashes`), so an address
     /// unwatched too soon after confirmation makes a relocated-but-still-paid
     /// transaction indistinguishable from a genuinely gone one, and it gets
-    /// retracted — the "opposite error" RCS-295 warns about. This keeps the
+    /// retracted — the "opposite error", and the worse one. This keeps the
     /// address watched long enough to cover the realistic window in which a
     /// deep reorg would be detected and re-validated.
     ///
@@ -752,8 +752,8 @@ mod tests {
     }
 
     /// A payment that confirmed moments ago must keep its address watched:
-    /// unwatching it immediately is exactly the gap the reviewer flagged in
-    /// RCS-295 — a reorg arriving right after confirmation would find no
+    /// unwatching it immediately is exactly the gap a reviewer flagged — a
+    /// reorg arriving right after confirmation would find no
     /// watched address to re-validate the relocated transaction against, and
     /// retract a payment that is still genuinely on chain.
     #[tokio::test]

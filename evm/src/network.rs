@@ -190,7 +190,7 @@ impl ChainConfig {
     }
 
     /// Minimum time a confirmed payment's address should stay watched before
-    /// `InvoiceCleanupService` is allowed to unwatch it (RCS-295).
+    /// `InvoiceCleanupService` is allowed to unwatch it.
     ///
     /// A reorg re-validates candidates by re-scanning currently watched
     /// addresses, so unwatching too soon after confirmation makes a
@@ -198,7 +198,7 @@ impl ChainConfig {
     /// genuinely gone one. `confirmations_required * block_time_secs` is
     /// this chain's own estimate of how long it takes to reach the depth we
     /// already treat as final; a reorg reaching that deep *again* after
-    /// confirmation is the tail event RCS-295 exists to catch, so the floor
+    /// confirmation is the tail event this floor exists to catch, so it
     /// here doubles it rather than pulling a chain-agnostic number out of
     /// thin air. This is a floor, not the actual grace period — callers
     /// combine it with their own configured value (typically much larger)

@@ -364,7 +364,7 @@ async fn test_no_watched_addresses_no_events() {
 }
 
 // ============================================================================
-// Reorg detection and re-validation (RCS-295)
+// Reorg detection and re-validation
 // ============================================================================
 
 /// Wait for the next `ReorgDetected` event, skipping anything else.
