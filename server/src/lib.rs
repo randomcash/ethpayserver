@@ -48,7 +48,7 @@ pub use services::{
     PluginCoreDataApi, PluginEngine, PluginHost, PluginHostError, PluginInstance, PluginLoadError,
     PluginRegistry, PluginSchema, PluginStatusSnapshot, PluginStorage, PluginStorageError,
     PluginStoreSummary, PluginWasmError, RedisEVMMonitor, Viewer, WatchRetryConfig,
-    WatchRetryService, WebhookConfig, WebhookService, WebhookSink,
+    WatchRetryService, WebhookConfig, WebhookService, WebhookSink, host_version,
 };
 pub use state::{AppDataService, AppDataServiceReader, AppState};
 

@@ -9,7 +9,8 @@ use axum::{
     http::StatusCode,
 };
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use auth::{
     Role, ServerSettings, ServerSettingsRepository, SessionService, UserId, UserRepository,
@@ -31,6 +32,26 @@ pub use api_types::{
 pub struct ListUsersParams {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// Whether this boot has every plugin disabled.
+///
+/// Not in `api-types`: the full plugin admin surface a future page will
+/// build (listing plugins and disabling them individually) belongs in the
+/// shared contract once it exists. This is the minimal, honest slice of it
+/// that exists today - see `payserver-client`'s `src/api/types/local.rs` for
+/// the same "hand-mirror until it earns a shared contract" convention.
+///
+/// Consumed by `payserver-client`'s `AdminTab`
+/// (`src/pages/settings/admin.rs`), which fetches this endpoint and shows a
+/// banner when `safe_mode` is true - that UI ships in the same ticket's
+/// `payserver-client` PR, not this repository.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SafeModeResponse {
+    /// True when `ETHPAY_DISABLE_PLUGINS`/`--disable-plugins` was set at
+    /// boot. Plugins are disabled, not uninstalled - their files and data are
+    /// untouched, and clearing the flag on the next boot restores them.
+    pub safe_mode: bool,
 }
 
 // ============================================================================
@@ -311,6 +332,30 @@ where
     Ok(StatusCode::OK)
 }
 
+/// Whether this boot has every plugin disabled.
+#[utoipa::path(
+    get,
+    path = "/admin/safe-mode",
+    tag = "admin",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Safe mode status", body = SafeModeResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
+    )
+)]
+pub async fn get_safe_mode<A>(
+    AdminAuth(_admin): AdminAuth,
+    State(state): State<PgAppState<A>>,
+) -> Json<SafeModeResponse>
+where
+    A: SessionService + 'static,
+{
+    Json(SafeModeResponse {
+        safe_mode: state.safe_mode,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -352,5 +397,12 @@ mod tests {
             json["enabled_chain_ids"],
             serde_json::json!(["eip155:1", "eip155:137"])
         );
+    }
+
+    #[test]
+    fn test_safe_mode_response_serialization() {
+        let resp = SafeModeResponse { safe_mode: true };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["safe_mode"], true);
     }
 }
