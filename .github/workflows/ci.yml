@@ -213,11 +213,17 @@ jobs:
         # Gating. These were non-blocking and 18 of 27 had been failing
         # unnoticed on an FK the fixtures never satisfied, so CI reported green
         # over dead multi-chain and fractional-amount aggregation coverage.
+        #
+        # `-p server` covers the RCS-257 plugin-storage tests (schema
+        # creation, migration runner, search_path scoping): they were
+        # `#[ignore]`'d like the rest of this suite but, unlike data-service,
+        # had no CI job ever passing `--run-ignored`, so nothing here actually
+        # ran them.
         run: |
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
             cargo run --release --bin migrate_postgres
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
-            cargo nextest run -p data-service --no-fail-fast --run-ignored only -j 1
+            cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1
 
   audit:
     name: Audit

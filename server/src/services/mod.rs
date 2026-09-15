@@ -15,8 +15,9 @@ pub use event_consumer::{EventConsumer, EventConsumerError};
 pub use evm_monitor::{EVMMonitor, EVMMonitorError, RedisEVMMonitor};
 pub use invoice_cleanup::{CleanupConfig, CleanupError, CleanupStats, InvoiceCleanupService};
 pub use plugins::{
-    FilterOutcome, PluginCallError, PluginEngine, PluginHost, PluginHostError, PluginInstance,
-    PluginLoadError, PluginRegistry, PluginStatusSnapshot, PluginWasmError,
+    FilterOutcome, PluginCallError, PluginCoreDataApi, PluginEngine, PluginHost, PluginHostError,
+    PluginInstance, PluginLoadError, PluginRegistry, PluginSchema, PluginStatusSnapshot,
+    PluginStorage, PluginStorageError, PluginStoreSummary, PluginWasmError,
 };
 pub use watch_retry::{WatchRetryConfig, WatchRetryService};
 pub use webhook::{WebhookConfig, WebhookService, WebhookSink};
