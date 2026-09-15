@@ -2,11 +2,6 @@
 # Review periodically and remove once upstream fixes land.
 [advisories]
 ignore = [
-    "RUSTSEC-2026-0046", # aws-lc-sys: PKCS7_verify bypass (via alloy → rustls)
-    "RUSTSEC-2026-0047", # aws-lc-sys (via alloy → rustls)
-    "RUSTSEC-2026-0045", # aws-lc-sys (via alloy → rustls)
-    "RUSTSEC-2026-0044", # aws-lc-sys (via alloy → rustls)
-    "RUSTSEC-2026-0048", # aws-lc-sys (via alloy → rustls)
     "RUSTSEC-2026-0007", # upstream transitive dep
     "RUSTSEC-2022-0083", # unmaintained crate in dep tree
     "RUSTSEC-2026-0037", # upstream transitive dep
