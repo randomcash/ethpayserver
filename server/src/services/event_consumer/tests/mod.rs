@@ -45,7 +45,7 @@ fn test_event_consumer_error_display() {
 
 /// 2^96 base units - one past the largest integer `rust_decimal::Decimal`
 /// (96-bit mantissa) can represent exactly. `convert_smallest_to_human` is the
-/// function RCS-286 names as the bug site; a version that round-tripped
+/// function where the overflow was found; a version that round-tripped
 /// through `Decimal` here would fail to parse this amount at all rather than
 /// merely round it (see the sibling handler tests), so this asserts the exact
 /// digit string comes back unchanged.

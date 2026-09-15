@@ -98,7 +98,7 @@ async fn test_handle_payment_confirmed_transitions_to_paid() {
 /// (96-bit mantissa) can represent exactly. A payment for exactly the
 /// invoice's expected amount at this magnitude must still be recognized as
 /// fully paid: the comparison that decides paid/underpaid/overpaid must not
-/// round or fail just because the number is large. RCS-286.
+/// round or fail just because the number is large.
 #[tokio::test]
 async fn test_handle_payment_confirmed_exact_amount_beyond_decimal_precision() {
     let ds = Arc::new(InMemoryDataService::new());
@@ -176,7 +176,7 @@ async fn test_handle_payment_confirmed_exact_amount_beyond_decimal_precision() {
 /// `test_handle_payment_confirmed_exact_amount_beyond_decimal_precision`. A
 /// fix that rounds everything at this magnitude up to "paid" would pass that
 /// test alone; this catches it by requiring the shortfall to still read as
-/// unpaid. RCS-286.
+/// unpaid.
 #[tokio::test]
 async fn test_handle_payment_confirmed_one_unit_below_exact_amount_stays_unpaid() {
     let ds = Arc::new(InMemoryDataService::new());
