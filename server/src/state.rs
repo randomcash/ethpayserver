@@ -119,6 +119,12 @@ pub struct AppState<D, A, E> {
     /// see that module's docs. Every request 404s until then, which is
     /// correct: there is no plugin code to invoke yet.
     pub plugin_pages: Arc<PageHost>,
+    /// Safe mode: this boot has every plugin disabled.
+    ///
+    /// Resolved once at startup from `Config::safe_mode` and copied in here,
+    /// the same way `webauthn` is - not re-read from the environment on
+    /// request, since the environment is the thing being reported on.
+    pub safe_mode: bool,
 }
 
 // Manual Clone impl since we only need Arc::clone
@@ -136,6 +142,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             invoice_creation_filters: self.invoice_creation_filters.clone(),
             email_sender: Arc::clone(&self.email_sender),
             plugin_pages: Arc::clone(&self.plugin_pages),
+            safe_mode: self.safe_mode,
         }
     }
 }
@@ -161,6 +168,7 @@ impl<D, A, E> AppState<D, A, E> {
             invoice_creation_filters: Vec::new(),
             email_sender,
             plugin_pages: Arc::new(PageHost::new()),
+            safe_mode: false,
         }
     }
 }

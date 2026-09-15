@@ -18,7 +18,7 @@ pub use plugins::{
     FilterOutcome, PageElement, PageError, PageHost, PageRenderer, PluginCallError,
     PluginCoreDataApi, PluginEngine, PluginHost, PluginHostError, PluginInstance, PluginLoadError,
     PluginRegistry, PluginSchema, PluginStatusSnapshot, PluginStorage, PluginStorageError,
-    PluginStoreSummary, PluginWasmError, Viewer,
+    PluginStoreSummary, PluginWasmError, Viewer, host_version,
 };
 pub use watch_retry::{WatchRetryConfig, WatchRetryService};
 pub use webhook::{WebhookConfig, WebhookService, WebhookSink};

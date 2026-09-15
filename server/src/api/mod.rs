@@ -162,6 +162,7 @@ impl From<(StatusCode, String)> for ApiErr {
         admin::unlock_user,
         admin::get_settings,
         admin::update_settings,
+        admin::get_safe_mode,
     ),
     components(schemas(
         health::HealthResponse,
@@ -220,6 +221,7 @@ impl From<(StatusCode, String)> for ApiErr {
         admin::UpdateRoleRequest,
         admin::ServerSettingsResponse,
         admin::UpdateServerSettingsRequest,
+        admin::SafeModeResponse,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -449,6 +451,7 @@ where
         )
         .route("/settings", get(admin::get_settings::<A>))
         .route("/settings", axum::routing::put(admin::update_settings::<A>))
+        .route("/safe-mode", get(admin::get_safe_mode::<A>))
         .with_state(state.clone());
 
     // Auth API from auth crate (with optional CAPTCHA provider)

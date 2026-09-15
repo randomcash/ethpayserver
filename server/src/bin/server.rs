@@ -49,6 +49,14 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting ETHPayServer v{}", env!("CARGO_PKG_VERSION"));
 
+    if config.safe_mode {
+        tracing::warn!(
+            "SAFE MODE: ETHPAY_DISABLE_PLUGINS is set - every plugin (including billing) is \
+             disabled for this boot. Plugins are not uninstalled and their data is untouched; \
+             clear the flag and restart to bring them back."
+        );
+    }
+
     // Connect to database
     tracing::info!("Connecting to database...");
     let data_service = Arc::new(PgDataService::connect(config.database_url.expose_secret()).await?);
@@ -234,6 +242,7 @@ async fn main() -> Result<()> {
     state.webhook_sink = Some(webhook_service);
     state.captcha_provider = captcha_provider;
     state.webauthn = Some(webauthn_health);
+    state.safe_mode = config.safe_mode;
 
     // Create rate limiters
     let rate_limit_config = RateLimitConfig::from_env();

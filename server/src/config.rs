@@ -39,6 +39,10 @@
 //! ## Watch Retry Service
 //! - `WATCH_RETRY_INTERVAL_SECS` - Retry interval in seconds (default: 30)
 //! - `WATCH_RETRY_ENABLED` - Enable/disable retry service (default: true)
+//!
+//! ## Plugins
+//! - `ETHPAY_DISABLE_PLUGINS` - Safe mode: boot with every plugin disabled
+//!   (default: false). Same effect as the `--disable-plugins` CLI flag.
 
 use secrecy::{ExposeSecret, SecretString};
 use std::env;
@@ -65,6 +69,13 @@ pub struct Config {
 
     /// Enable Swagger UI at /swagger-ui.
     pub enable_swagger: bool,
+
+    /// Safe mode: boot with every plugin disabled.
+    ///
+    /// Set via `ETHPAY_DISABLE_PLUGINS=1` or the `--disable-plugins` CLI flag.
+    /// Disables plugins for this boot only - it does not uninstall them or
+    /// touch their data, and clearing the flag restores them.
+    pub safe_mode: bool,
 }
 
 /// Valid log levels.
@@ -102,6 +113,9 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(true);
 
+        let cli_args: Vec<String> = env::args().collect();
+        let safe_mode = safe_mode_requested(|key| env::var(key).ok(), &cli_args);
+
         let config = Self {
             database_url,
             redis_url,
@@ -109,6 +123,7 @@ impl Config {
             port,
             log_level,
             enable_swagger,
+            safe_mode,
         };
 
         config.validate()?;
@@ -199,6 +214,21 @@ pub fn parse_captcha_env() -> anyhow::Result<Option<(String, String, String)>> {
     parse_captcha(|key| env::var(key).ok())
 }
 
+/// Whether safe mode (every plugin disabled) was requested, via either
+/// `ETHPAY_DISABLE_PLUGINS=1`/`true` or a bare `--disable-plugins` argument.
+///
+/// The env lookup and the argument list are parameters, like [`parse_captcha`],
+/// so this can be exercised without mutating process-global environment or
+/// `std::env::args`, which race when tests run in parallel threads.
+pub fn safe_mode_requested<F>(lookup: F, args: &[String]) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let env_disabled = lookup("ETHPAY_DISABLE_PLUGINS").is_some_and(|v| v == "true" || v == "1");
+    let flag_present = args.iter().any(|a| a == "--disable-plugins");
+    env_disabled || flag_present
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -217,6 +247,7 @@ mod tests {
             port: 3000,
             log_level: "info".to_string(),
             enable_swagger: false,
+            safe_mode: false,
         };
         let rendered = format!("{config:?}");
         assert!(
@@ -358,5 +389,44 @@ mod tests {
                 .to_string()
                 .contains("Unknown CAPTCHA_PROVIDER")
         );
+    }
+
+    // ========================================================================
+    // Safe mode (plugins disabled)
+    // ========================================================================
+
+    #[test]
+    fn safe_mode_off_by_default() {
+        assert!(!safe_mode_requested(lookup(&[]), &[]));
+    }
+
+    #[test]
+    fn safe_mode_via_env_var_1() {
+        assert!(safe_mode_requested(
+            lookup(&[("ETHPAY_DISABLE_PLUGINS", "1")]),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn safe_mode_via_env_var_true() {
+        assert!(safe_mode_requested(
+            lookup(&[("ETHPAY_DISABLE_PLUGINS", "true")]),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn safe_mode_env_var_other_value_is_not_enabled() {
+        assert!(!safe_mode_requested(
+            lookup(&[("ETHPAY_DISABLE_PLUGINS", "yes")]),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn safe_mode_via_cli_flag() {
+        let args = vec!["ethpayserver".to_string(), "--disable-plugins".to_string()];
+        assert!(safe_mode_requested(lookup(&[]), &args));
     }
 }
