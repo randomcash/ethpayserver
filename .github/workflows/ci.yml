@@ -2,6 +2,19 @@ name: CI
 
 on:
   pull_request:
+  # A merge queue tests the *merged* result before it lands, which is the only
+  # thing that catches a pull request that is green against a base it no longer
+  # merges into. Required checks here are not strict, so a branch is never
+  # re-tested against the base it actually joins: on 2026-09-15 a change adding
+  # a parameter to `PgAppState::new` was green on its own branch while four
+  # callsites merged in the meantime had not been updated, and two branches
+  # picked the same migration version, each green alone.
+  #
+  # Without this trigger a queue would hang forever - Lint, Test and Audit are
+  # required, and on a `refs/heads/gh-readonly-queue/...` ref they would never
+  # be asked to run. The trigger is safe before the queue is switched on and
+  # necessary before it is.
+  merge_group:
   push:
     branches: [main, testnet]
     tags: ["v*"]

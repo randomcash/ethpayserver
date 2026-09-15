@@ -15,12 +15,20 @@
 #   4. The working tree is clean and the tag does not already exist
 #   5. The deployed build matches the commit being tagged (skippable)
 #
-# WARNING - tagging deploys. `gh release create` pushes the tag, and
-# .github/workflows/ci.yml triggers on `tags: ["v*"]` and resolves ANY v* tag
-# to environment=production, dispatching a deploy to central-infrastructure.
-# -alpha is not exempt: --prerelease changes the label on the releases page,
-# not where the code goes. Every tag is therefore confirmed interactively, and
-# --dry-run runs every check and stops before the tag is created.
+# WARNING - tagging a release deploys to mainnet, which holds real merchant
+# funds. `gh release create` pushes the tag, ci.yml triggers on `tags: ["v*"]`,
+# and a tag matching vMAJOR.MINOR.PATCH exactly dispatches a mainnet deploy to
+# central-infrastructure.
+#
+# A prerelease does NOT deploy. ci.yml matches `^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$`
+# and stops at the resolve step for anything else, so -alpha/-beta/-rc build and
+# publish an image but go nowhere. That is the opposite of what this warning
+# said until 2026-09-15, when the release filter was tightened and this comment
+# was not: it claimed every v* tag reached production, which would have had an
+# operator cutting an alpha believe they had just deployed to mainnet.
+#
+# Every tag is still confirmed interactively, and --dry-run runs every check and
+# stops before the tag is created.
 #
 # Usage:
 #   scripts/release.sh --dry-run v0.2.0-alpha
@@ -117,15 +125,22 @@ PRERELEASE_FLAG="--prerelease"
 if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     PRERELEASE_FLAG=""
     echo "This is a STABLE release ($VERSION), not a pre-release."
-    echo "For a payment processor that asserts production readiness for real funds."
+    echo "For a payment processor that asserts readiness for real funds."
 else
     echo "This is a pre-release ($VERSION)."
 fi
 
-# Confirm unconditionally: --prerelease only affects the label on the releases
-# page. The tag itself dispatches a production deploy either way, so a
-# pre-release is not the safer path it reads as.
-echo "Tagging dispatches a PRODUCTION deploy (ci.yml maps every v* tag to it)."
+# Confirm unconditionally, including for a prerelease. A prerelease does not
+# deploy - ci.yml resolves only ^v[0-9]+\.[0-9]+\.[0-9]+$ to a mainnet dispatch -
+# but the confirmation is not really about the deploy: the tag is pushed and the
+# image published either way, and the version typed here is the only thing
+# standing between "v0.2.0-alpha" and "v0.2.0", which differ by exactly one
+# mainnet deploy.
+if [ -z "$PRERELEASE_FLAG" ]; then
+    echo "Tagging $VERSION DISPATCHES A MAINNET DEPLOY - mainnet holds real merchant funds."
+else
+    echo "$VERSION is a prerelease: the image is published, no deploy is dispatched."
+fi
 if [ -n "$DRY_RUN" ]; then
     echo "dry run: skipping confirmation."
 else
@@ -167,7 +182,11 @@ echo
 if [ -n "$DRY_RUN" ]; then
     echo "dry run: all checks passed."
     echo "would publish $VERSION from origin/$TARGET_BRANCH @ $TARGET_SHA${PRERELEASE_FLAG:+ (pre-release)}"
-    echo "would dispatch a production deploy via ci.yml."
+    if [ -z "$PRERELEASE_FLAG" ]; then
+        echo "would dispatch a mainnet deploy via ci.yml."
+    else
+        echo "would NOT dispatch a deploy: ci.yml resolves only vX.Y.Z to mainnet."
+    fi
     exit 0
 fi
 
