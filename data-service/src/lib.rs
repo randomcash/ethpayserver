@@ -35,11 +35,11 @@ pub use invoice_creation::InvoiceCreationWriter;
 pub use merchant_directory::{MerchantAccount, MerchantDirectoryReader, MerchantStore};
 pub use payment_tx_index::{PaymentTxIndexReader, PaymentTxIndexWriter};
 pub use payout_claims::PayoutClaimReader;
+pub use reorg::{ReorgCandidateReader, ReorgWriter};
 pub use webhook_delivery::{
     UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,
     WebhookDeliveryWriter,
 };
-pub use reorg::{ReorgCandidateReader, ReorgWriter};
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
