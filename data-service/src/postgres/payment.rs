@@ -266,53 +266,72 @@ impl PaymentReader for PgDataService {
     }
 }
 
+/// Insert or merge a payment row, keyed by `(chain_id, tx_hash, tx_index)`.
+///
+/// `tx_index` distinguishes two transfers batched into one transaction - see
+/// `payment_tx_index::PaymentTxIndexWriter`. Callers that don't know their
+/// transfer's position (everything reaching this through the plain
+/// `PaymentWriter::upsert` trait method) pass 0, which is correct for the
+/// overwhelming majority of payments: one transfer per transaction.
+async fn upsert_payment_row(
+    pool: &sqlx::PgPool,
+    payment: &PaymentData,
+    tx_index: i32,
+) -> RepositoryResult<()> {
+    // ON CONFLICT (chain_id, tx_hash, tx_index) handles a redelivered
+    // PaymentDetected for a transfer already on file (tx_index is
+    // recomputed the same way both times, so the same transfer always maps
+    // to the same key) rather than inserting a second row for it. This is
+    // the unique constraint in the DB.
+    sqlx::query(
+        r#"
+        INSERT INTO payments (
+            id, invoice_id, payment_option_id, chain_id, asset_type, amount, asset_symbol,
+            token_address, tx_hash, tx_index, block_number, detected_at, confirmed_at, from_address, extra,
+            credited_amount, rate_used, rate_applied_at
+        ) VALUES (
+            $1, $2, $3, $4, $5::asset_type, $6::numeric, $7,
+            $8, $9, $10, $11, $12, $13, $14, $15,
+            $16::numeric, $17::numeric, $18
+        )
+        ON CONFLICT (chain_id, tx_hash, tx_index) DO UPDATE SET
+            block_number = COALESCE(EXCLUDED.block_number, payments.block_number),
+            confirmed_at = COALESCE(EXCLUDED.confirmed_at, payments.confirmed_at),
+            extra = COALESCE(EXCLUDED.extra, payments.extra),
+            credited_amount = COALESCE(EXCLUDED.credited_amount, payments.credited_amount),
+            rate_used = COALESCE(EXCLUDED.rate_used, payments.rate_used),
+            rate_applied_at = COALESCE(EXCLUDED.rate_applied_at, payments.rate_applied_at)
+        "#,
+    )
+    .bind(payment.id)
+    .bind(payment.invoice_id.as_str())
+    .bind(payment.payment_option_id)
+    .bind(payment.chain_id.as_str())
+    .bind(asset_type_to_db(payment.asset_type))
+    .bind(&payment.amount)
+    .bind(&payment.asset_symbol)
+    .bind(&payment.token_address)
+    .bind(&payment.tx_hash)
+    .bind(tx_index)
+    .bind(payment.block_number.map(|n| n as i64))
+    .bind(payment.detected_at)
+    .bind(payment.confirmed_at)
+    .bind(&payment.from_address)
+    .bind(&payment.extra)
+    .bind(&payment.credited_amount)
+    .bind(&payment.rate_used)
+    .bind(payment.rate_applied_at)
+    .execute(pool)
+    .await
+    .map_err(sqlx_to_repo_error)?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl PaymentWriter for PgDataService {
     async fn upsert(&self, payment: &PaymentData) -> RepositoryResult<()> {
-        // Use ON CONFLICT (tx_hash, chain_id) to handle duplicate PaymentDetected events
-        // (e.g., after service restart). This is the unique constraint in the DB.
-        sqlx::query(
-            r#"
-            INSERT INTO payments (
-                id, invoice_id, payment_option_id, chain_id, asset_type, amount, asset_symbol,
-                token_address, tx_hash, block_number, detected_at, confirmed_at, from_address, extra,
-                credited_amount, rate_used, rate_applied_at
-            ) VALUES (
-                $1, $2, $3, $4, $5::asset_type, $6::numeric, $7,
-                $8, $9, $10, $11, $12, $13, $14,
-                $15::numeric, $16::numeric, $17
-            )
-            ON CONFLICT (tx_hash, chain_id) DO UPDATE SET
-                block_number = COALESCE(EXCLUDED.block_number, payments.block_number),
-                confirmed_at = COALESCE(EXCLUDED.confirmed_at, payments.confirmed_at),
-                extra = COALESCE(EXCLUDED.extra, payments.extra),
-                credited_amount = COALESCE(EXCLUDED.credited_amount, payments.credited_amount),
-                rate_used = COALESCE(EXCLUDED.rate_used, payments.rate_used),
-                rate_applied_at = COALESCE(EXCLUDED.rate_applied_at, payments.rate_applied_at)
-            "#,
-        )
-        .bind(payment.id)
-        .bind(payment.invoice_id.as_str())
-        .bind(payment.payment_option_id)
-        .bind(payment.chain_id.as_str())
-        .bind(asset_type_to_db(payment.asset_type))
-        .bind(&payment.amount)
-        .bind(&payment.asset_symbol)
-        .bind(&payment.token_address)
-        .bind(&payment.tx_hash)
-        .bind(payment.block_number.map(|n| n as i64))
-        .bind(payment.detected_at)
-        .bind(payment.confirmed_at)
-        .bind(&payment.from_address)
-        .bind(&payment.extra)
-        .bind(&payment.credited_amount)
-        .bind(&payment.rate_used)
-        .bind(payment.rate_applied_at)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
-        Ok(())
+        upsert_payment_row(&self.pool, payment, 0).await
     }
 
     async fn mark_confirmed(&self, id: Uuid, confirmed_at: DateTime<Utc>) -> RepositoryResult<()> {
@@ -529,5 +548,22 @@ impl PaymentAnalyticsReader for PgDataService {
                 })
             })
             .collect()
+    }
+}
+
+// =============================================================================
+// Payment upsert keyed by transfer
+// =============================================================================
+
+use crate::payment_tx_index::PaymentTxIndexWriter;
+
+#[async_trait]
+impl PaymentTxIndexWriter for PgDataService {
+    async fn upsert_with_tx_index(
+        &self,
+        payment: &PaymentData,
+        tx_index: i32,
+    ) -> RepositoryResult<()> {
+        upsert_payment_row(&self.pool, payment, tx_index).await
     }
 }

@@ -14,7 +14,7 @@ mod tests;
 use std::sync::Arc;
 
 use auth::StoreRepository;
-use data_service::PaymentOptionReader;
+use data_service::{PaymentOptionReader, PaymentTxIndexWriter};
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::MonitorEvent;
 use rust_decimal::Decimal;
@@ -36,6 +36,7 @@ pub trait EventConsumerDataService:
     + InvoiceWriter
     + PaymentReader
     + PaymentWriter
+    + PaymentTxIndexWriter
     + PaymentOptionReader
     + TokenReader
     + WatchedAddressReader
@@ -52,6 +53,7 @@ impl<T> EventConsumerDataService for T where
         + InvoiceWriter
         + PaymentReader
         + PaymentWriter
+        + PaymentTxIndexWriter
         + PaymentOptionReader
         + TokenReader
         + WatchedAddressReader

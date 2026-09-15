@@ -22,6 +22,7 @@ pub mod analytics;
 pub mod email_change;
 pub mod invoice_creation;
 pub mod merchant_directory;
+pub mod payment_tx_index;
 pub mod payout_claims;
 pub mod store_creation;
 pub mod webhook_delivery;
@@ -31,6 +32,7 @@ pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQu
 pub use email_change::{EmailChangeRequest, EmailChangeWriter};
 pub use invoice_creation::InvoiceCreationWriter;
 pub use merchant_directory::{MerchantAccount, MerchantDirectoryReader, MerchantStore};
+pub use payment_tx_index::PaymentTxIndexWriter;
 pub use payout_claims::PayoutClaimReader;
 pub use webhook_delivery::{
     UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,
