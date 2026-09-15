@@ -15,9 +15,12 @@
 //! creation, and creating an invoice on the instance's own store. None of the
 //! three depends on wasmtime; each is written and tested against directly.
 //!
-//! `storage` and `core_data` are the storage slice: a schema per plugin, a
-//! migration runner, and typed host calls for a plugin's own schema and for
-//! the core data it is allowed to read.
+//! `storage` is the storage slice: a schema per plugin, created on install,
+//! and a migration runner that runs the plugin's own migrations against it
+//! on install and upgrade. Typed reads of core data are not a second surface
+//! here - a plugin already reaches them through capability 1
+//! (`merchant_directory`) below, via `PluginHostApi`, so an unreachable
+//! duplicate next to it would only be a second read surface to maintain.
 //! `page` and `pages` are the static page descriptor and the renderer host
 //! that serves it. No plugin is registered against the renderer until a
 //! runtime can produce one, so every page request 404s until then.
@@ -26,7 +29,6 @@
 //! (action vs. filter dispatch, disable-on-repeated-failure, admin-visible
 //! status) are the wasmtime layer that calls into all of the above.
 
-mod core_data;
 mod error;
 mod filter;
 mod host;
@@ -38,7 +40,6 @@ mod registry;
 mod runtime;
 mod storage;
 
-pub use core_data::{PluginCoreDataApi, PluginStoreSummary};
 pub use error::PluginLoadError;
 pub use filter::{
     FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest,
