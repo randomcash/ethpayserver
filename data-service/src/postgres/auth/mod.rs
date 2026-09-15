@@ -13,6 +13,8 @@ pub(crate) mod store;
 mod user;
 mod wallet;
 
+pub use wallet::WalletReauthChallenge;
+
 #[cfg(test)]
 mod integration_tests;
 #[cfg(test)]

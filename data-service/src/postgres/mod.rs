@@ -25,7 +25,7 @@ mod wallet_rotation;
 mod watched_address;
 mod webhook_delivery;
 
-pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository};
+pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository, WalletReauthChallenge};
 pub use wallet_rotation::WalletRotation;
 pub use watched_address::PendingWatch;
 

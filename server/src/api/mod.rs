@@ -151,6 +151,9 @@ impl From<(StatusCode, String)> for ApiErr {
         users::revoke_api_key,
         users::update_api_key,
         users::rotate_api_key,
+        users::list_wallet_credentials,
+        users::create_wallet_reauth_challenge,
+        users::set_primary_wallet_credential,
         // Admin
         admin::list_users,
         admin::update_user_role,
@@ -208,6 +211,9 @@ impl From<(StatusCode, String)> for ApiErr {
         users::CreateApiKeyResponsePayload,
         users::UpdateApiKeyPayload,
         users::RotateApiKeyResponsePayload,
+        users::WalletCredentialResponse,
+        users::WalletReauthChallengeResponse,
+        users::PromoteWalletCredentialRequest,
         admin::UserListResponse,
         admin::AdminUserInfo,
         admin::UpdateRoleRequest,
@@ -398,6 +404,15 @@ where
         .route(
             "/api-keys/{id}/rotate",
             axum::routing::post(users::rotate_api_key::<A>),
+        )
+        .route("/wallets", get(users::list_wallet_credentials::<A>))
+        .route(
+            "/wallets/{id}/reauth-challenge",
+            axum::routing::post(users::create_wallet_reauth_challenge::<A>),
+        )
+        .route(
+            "/wallets/{id}/primary",
+            axum::routing::patch(users::set_primary_wallet_credential::<A>),
         )
         .with_state(state.clone());
     // Admin endpoints (ServerAdmin only)

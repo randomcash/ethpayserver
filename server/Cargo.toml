@@ -68,6 +68,8 @@ dashmap = "6"
 
 # Ethereum primitives
 alloy-primitives = "1"
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }

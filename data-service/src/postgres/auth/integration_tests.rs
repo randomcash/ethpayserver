@@ -375,6 +375,120 @@ async fn integration_wallet_unique_constraint() {
     service.delete_user(user2.id).await.unwrap();
 }
 
+/// Swapping the primary wallet credential must demote the old one,
+/// promote the new one, keep `users.primary_wallet_address` (what wallet
+/// *login* actually resolves accounts by) in step, and - the regression that
+/// matters - leave the pinned `kdf_salt_identifier` untouched so recovery
+/// keeps working.
+#[tokio::test]
+#[ignore]
+async fn integration_set_primary_wallet_credential() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    // A wallet-only account shaped the way `complete_new_user_wallet_registration`
+    // actually creates one: pinned salt identifier, primary_wallet_address
+    // matching the sole (primary) wallet credential.
+    let mut user = test_user();
+    user.email = None;
+    let primary_address = unique_wallet_address();
+    user.primary_wallet_address = Some(primary_address.clone());
+    user.kdf_salt_identifier = format!("wallet:{primary_address}");
+    service.create_user(&user).await.unwrap();
+
+    let mut primary_wallet = test_wallet(user.id);
+    primary_wallet.address = primary_address;
+    primary_wallet.is_primary = true;
+    service.create_wallet(&primary_wallet).await.unwrap();
+
+    let mut other_wallet = test_wallet(user.id);
+    other_wallet.id = WalletCredentialId::new();
+    other_wallet.address = unique_wallet_address();
+    other_wallet.is_primary = false;
+    service.create_wallet(&other_wallet).await.unwrap();
+
+    let promoted = service
+        .set_primary_wallet_credential(user.id, other_wallet.id)
+        .await
+        .unwrap();
+    assert!(promoted.is_primary);
+    assert_eq!(promoted.address, other_wallet.address);
+
+    // The old primary is demoted, not deleted or deactivated.
+    let old = service
+        .get_wallet(primary_wallet.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!old.is_primary);
+    assert!(old.is_active);
+
+    let stored_user = service.get_user(user.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored_user.primary_wallet_address,
+        Some(other_wallet.address.clone())
+    );
+    assert_eq!(stored_user.kdf_salt_identifier, user.kdf_salt_identifier);
+
+    // Idempotent: naming the already-primary wallet is a no-op, not an error.
+    let again = service
+        .set_primary_wallet_credential(user.id, other_wallet.id)
+        .await
+        .unwrap();
+    assert!(again.is_primary);
+
+    // A wallet id that exists, but not on this account, is not found - never
+    // silently repointed onto the caller's account.
+    let mut stranger = test_user();
+    stranger.id = UserId::new();
+    stranger.email = Some(unique_email());
+    service.create_user(&stranger).await.unwrap();
+    let err = service
+        .set_primary_wallet_credential(stranger.id, primary_wallet.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::WalletNotFound(_)));
+
+    // Cleanup
+    service.delete_user(user.id).await.unwrap();
+    service.delete_user(stranger.id).await.unwrap();
+}
+
+/// The invariant the migration exists for, asserted against Postgres
+/// directly rather than through `set_primary_wallet_credential` - which
+/// never produces this state itself. Two active primaries for one account
+/// must be impossible even for code that bypasses the Rust layer entirely.
+#[tokio::test]
+#[ignore]
+async fn integration_wallet_credentials_one_primary_is_db_enforced() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut user = test_user();
+    user.email = Some(unique_email());
+    service.create_user(&user).await.unwrap();
+
+    let mut a = test_wallet(user.id);
+    a.address = unique_wallet_address();
+    a.is_primary = true;
+    service.create_wallet(&a).await.unwrap();
+
+    let second_id = WalletCredentialId::new();
+    let second_address = unique_wallet_address();
+    let err = sqlx::query(
+        "INSERT INTO wallet_credentials (id, user_id, address, name, is_primary, created_at, is_active) \
+         VALUES ($1, $2, $3, $4, TRUE, NOW(), TRUE)",
+    )
+    .bind(second_id.0)
+    .bind(user.id.0)
+    .bind(&second_address)
+    .bind("Second primary attempt")
+    .execute(service.pool())
+    .await
+    .unwrap_err();
+    assert!(matches!(&err, sqlx::Error::Database(e) if e.is_unique_violation()));
+
+    service.delete_user(user.id).await.unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn integration_wallet_challenge() {
@@ -401,6 +515,68 @@ async fn integration_wallet_challenge() {
     // Challenge should be gone after taking
     let fetched = service.take_wallet_challenge(user_id).await.unwrap();
     assert!(fetched.is_none());
+}
+
+/// The wallet-reauth-challenge table backing `POST .../reauth-challenge` and
+/// `PATCH .../primary` — a separate slot from `wallet_challenges` above, and
+/// with the same single-use, one-row-per-user shape.
+#[tokio::test]
+#[ignore]
+async fn integration_wallet_reauth_challenge() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut user = test_user();
+    user.email = Some(unique_email());
+    service.create_user(&user).await.unwrap();
+
+    let address = unique_wallet_address();
+    let created_at = Utc::now();
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "abc123", created_at)
+        .await
+        .unwrap();
+
+    let fetched = service
+        .take_wallet_reauth_challenge(user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.address, address);
+    assert_eq!(fetched.challenge, "abc123");
+    assert_eq!(fetched.created_at.timestamp(), created_at.timestamp());
+
+    // Single-use: taken once, gone after.
+    let fetched = service.take_wallet_reauth_challenge(user.id).await.unwrap();
+    assert!(fetched.is_none());
+
+    // A second challenge request overwrites the first rather than stacking -
+    // only the most recent one this user asked for should ever be answerable.
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "first", Utc::now())
+        .await
+        .unwrap();
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "second", Utc::now())
+        .await
+        .unwrap();
+    let fetched = service
+        .take_wallet_reauth_challenge(user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.challenge, "second");
+
+    // Past the freshness window, the challenge is no longer answerable - the
+    // same rule `take_wallet_challenge` enforces for login challenges.
+    let stale = Utc::now() - Duration::minutes(10);
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "stale", stale)
+        .await
+        .unwrap();
+    let fetched = service.take_wallet_reauth_challenge(user.id).await.unwrap();
+    assert!(fetched.is_none());
+
+    service.delete_user(user.id).await.unwrap();
 }
 
 #[tokio::test]
