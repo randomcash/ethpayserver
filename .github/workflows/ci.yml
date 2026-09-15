@@ -32,6 +32,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the session-URL guard scans a commit range.
+          fetch-depth: 0
 
       # This repository is public. A ticket id in a source file leaks the
       # title and shape of unreleased work, and an outside reader cannot open
@@ -109,6 +112,20 @@ jobs:
       # refused on every startup from then on, not just the first. Two branches
       # opened the same afternoon can each be green alone and only collide once
       # both have merged - which is exactly what two branches did on 2026-09-15.
+      # Commit messages, not just files. CLAUDE.md has forbidden session URLs
+      # in commits since long before this check existed, and 58 commits carry
+      # one anyway - the rule was written down and nothing read it. Needs the
+      # full history, hence fetch-depth 0 on the checkout above.
+      - name: No session URLs in commits or source
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'testnet' }}
+        run: |
+          git fetch -q origin "${{ github.base_ref || 'testnet' }}" || true
+          ./scripts/check-no-session-urls.sh
+
+      - name: Session URL guard self-test
+        run: ./scripts/check-no-session-urls.test.sh
+
       - name: Migration versions are distinct
         run: ./scripts/check-migrations.sh
 
