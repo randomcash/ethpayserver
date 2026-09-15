@@ -15,7 +15,7 @@ default = []
 api = ["axum", "utoipa", "types", "data-service", "auth"]
 redis = ["dep:redis"]
 test-utils = []
-# Sentry/errex `before_send` PII scrubber. Shared by the `server` and
+# Sentry `before_send` PII scrubber. Shared by the `server` and
 # `evmmonitor` binaries so both run one audited scrubber implementation.
 sentry-scrub = ["dep:sentry", "dep:regex"]
 monitor-bin = ["redis", "types", "data-service", "data-service/redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "dep:sentry", "dep:sentry-tracing", "sentry-scrub", "tokio/full"]
