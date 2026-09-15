@@ -52,9 +52,9 @@ against your working copy, so a green build proves nothing about the pin.
 
 ## The gate
 
-Exactly what CI's `lint` and unit-test steps run — the `test` job also runs a
-separate, gating integration-test step against a real Postgres instance; see
-"End-to-end tests" below for that one:
+Exactly what CI's `lint` and unit-test steps run (`.github/workflows/ci.yml`)
+— the `test` job also runs a separate, gating integration-test step against a
+real Postgres instance; see "End-to-end tests" below for that one:
 
 ```bash
 cargo fmt --all -- --check
@@ -77,11 +77,12 @@ that are not in CI's path. Several people have lost an hour to this.
   move in the same commit.** Split apart, one half looks for controls the other
   half no longer labels that way — and whoever bumps the pin next inherits
   failures they did not cause.
-- **Rate limits will fail the suite for the wrong reason.** Defaults are
-  `auth_rpm: 5`, `write_rpm: 10`. A full run makes far more than ten writes a
-  minute, and the limiter returns 429 **without logging anything** — so the
-  server looks healthy while tests fail in no pattern. Run a local server with
-  every `RATE_LIMIT_*` at `10000`, as CI does. See `e2e/README.md`.
+- **Rate limits will fail the suite for the wrong reason.** Defaults
+  (`server/src/api/rate_limit.rs`) are `auth_rpm: 5`, `write_rpm: 10`. A full
+  run makes far more than ten writes a minute, and the limiter returns 429
+  **without logging anything** — so the server looks healthy while tests fail
+  in no pattern. Run a local server with every `RATE_LIMIT_*` at `10000`, as
+  CI does. See `e2e/README.md`.
 - Integration tests are `#[ignore]` by convention and need `DATABASE_URL`. CI
   *does* run them — the `test` job migrates a real Postgres service and runs
   `cargo nextest run -p data-service --no-fail-fast --run-ignored only -j 1` —
