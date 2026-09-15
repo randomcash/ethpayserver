@@ -123,6 +123,6 @@ an image built from a tree that contains the edited migrations, and keep
 ### Every environment, not just the one in front of you
 
 Run it wherever the database has those migrations applied. Nothing in CI does it
-for you, and `main` dispatches staging while tags dispatch production, so an
+for you, and `main` dispatches testnet while tags dispatch mainnet, so an
 edit that only got refreshed on testnet takes the next environment down at the
 first already-applied version it reaches.
