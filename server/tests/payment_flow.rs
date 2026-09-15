@@ -316,6 +316,7 @@ async fn test_payment_confirmed_marks_invoice_paid() {
     // Step 2: PaymentConfirmed
     bridge
         .publish(&MonitorEvent::PaymentConfirmed(PaymentConfirmed {
+            tx_index: 0,
             chain_id: TEST_EIP155,
             invoice_id: invoice_uuid,
             payment_address,
@@ -406,6 +407,7 @@ async fn test_underpayment_stays_processing() {
     // Confirm the half payment
     bridge
         .publish(&MonitorEvent::PaymentConfirmed(PaymentConfirmed {
+            tx_index: 0,
             chain_id: TEST_EIP155,
             invoice_id: invoice_uuid,
             payment_address,

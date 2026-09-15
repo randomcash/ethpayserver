@@ -67,6 +67,7 @@ async fn test_handle_payment_confirmed_transitions_to_paid() {
 
     // Create PaymentConfirmed event
     let event = PaymentConfirmed {
+        tx_index: 0,
         chain_id: 1,
         invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
         payment_address: Address::ZERO,
@@ -149,6 +150,7 @@ async fn test_handle_payment_confirmed_exact_amount_beyond_decimal_precision() {
     PaymentWriter::upsert(&*ds, &payment).await.unwrap();
 
     let event = PaymentConfirmed {
+        tx_index: 0,
         chain_id: 1,
         invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
         payment_address: Address::ZERO,
@@ -228,6 +230,7 @@ async fn test_handle_payment_confirmed_one_unit_below_exact_amount_stays_unpaid(
     PaymentWriter::upsert(&*ds, &payment).await.unwrap();
 
     let event = PaymentConfirmed {
+        tx_index: 0,
         chain_id: 1,
         invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
         payment_address: Address::ZERO,
@@ -309,6 +312,7 @@ async fn test_handle_payment_confirmed_skips_cancelled_invoice() {
 
     // Create PaymentConfirmed event
     let event = PaymentConfirmed {
+        tx_index: 0,
         chain_id: 1,
         invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
         payment_address: Address::ZERO,
@@ -381,6 +385,7 @@ async fn test_handle_payment_confirmed_late_payment_on_expired_invoice() {
 
     // Create PaymentConfirmed event for the late payment
     let event = PaymentConfirmed {
+        tx_index: 0,
         chain_id: 1,
         invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
         payment_address: Address::ZERO,
@@ -468,6 +473,7 @@ async fn test_receipt_sent_on_paid_with_email() {
 
     // Handle payment confirmed event
     let event = PaymentConfirmed {
+        tx_index: 0,
         chain_id: 1,
         invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
         payment_address: Address::ZERO,
@@ -546,6 +552,7 @@ async fn test_no_receipt_when_email_absent() {
 
     // Handle payment confirmed event
     let event = PaymentConfirmed {
+        tx_index: 0,
         chain_id: 1,
         invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
         payment_address: Address::ZERO,
@@ -628,6 +635,7 @@ async fn test_receipt_sent_from_customer_email_column() {
 
     consumer
         .handle_payment_confirmed(PaymentConfirmed {
+            tx_index: 0,
             chain_id: 1,
             invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
             payment_address: Address::ZERO,
@@ -646,4 +654,103 @@ async fn test_receipt_sent_from_customer_email_column() {
         "receipt must be sent from the column"
     );
     assert_eq!(mock_email.calls()[0].0, "column@example.com");
+}
+
+/// Two transfers to the *same* invoice in one transaction must both be
+/// confirmed.
+///
+/// A transaction can pay one invoice twice - a native transfer plus an ERC20
+/// transfer, or two ERC20 transfers from a batching contract. Since the
+/// payments table gained `tx_index` both rows are stored, but the handler
+/// still resolved a confirmation with `find(|p| p.tx_hash == tx_hash)` over
+/// the invoice's payments. That returns whichever row came first, so the
+/// second confirmation re-confirmed the first row - `mark_confirmed` is a
+/// no-op once set - and the second transfer stayed unconfirmed for good, with
+/// no confirmed webhook and no receipt.
+///
+/// Scoping by invoice is not enough to disambiguate here, which is why this
+/// case and not the two-invoice one is what pins the handler down.
+#[tokio::test]
+async fn two_transfers_to_one_invoice_in_one_transaction_are_both_confirmed() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    let store_id = StoreId::new();
+    let tx_hash = B256::repeat_byte(0xcd);
+    let chain = ChainId::parse("eip155:1").unwrap();
+
+    let invoice = InvoiceData {
+        id: invoice_id.clone(),
+        store_id,
+        amount: "2".to_string(),
+        currency: "ETH".to_string(),
+        amount_received: "2".to_string(),
+        status: InvoiceStatus::Processing,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        customer_email: None,
+        metadata: None,
+        extra: None,
+    };
+    InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
+
+    // Two transfers, one transaction, one invoice - distinguished only by the
+    // log index within the transaction.
+    let mut payment_ids = Vec::new();
+    for tx_index in [0i32, 1i32] {
+        let payment = PaymentData {
+            id: Uuid::new_v4(),
+            invoice_id: invoice_id.clone(),
+            payment_option_id: None,
+            chain_id: chain.clone(),
+            asset_type: types::AssetType::ERC20,
+            amount: "1000000000000000000".to_string(),
+            asset_symbol: "ETH".to_string(),
+            token_address: Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()),
+            tx_hash: format!("{:#x}", tx_hash),
+            block_number: Some(12_345_678),
+            detected_at: Utc::now(),
+            confirmed_at: None,
+            from_address: Some("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd".to_string()),
+            reorged: false,
+            extra: None,
+            credited_amount: Some("1".to_string()),
+            rate_used: None,
+            rate_applied_at: None,
+        };
+        payment_ids.push(payment.id);
+        // Written the way the monitor writes them: keyed by the transfer.
+        data_service::PaymentTxIndexWriter::upsert_with_tx_index(&*ds, &payment, tx_index)
+            .await
+            .unwrap();
+    }
+
+    for tx_index in [0i32, 1i32] {
+        consumer
+            .handle_payment_confirmed(PaymentConfirmed {
+                tx_index,
+                chain_id: 1,
+                invoice_id: Uuid::parse_str(invoice_id.as_str()).unwrap(),
+                payment_address: Address::ZERO,
+                amount: U256::from(1_000_000_000_000_000_000u64),
+                tx_hash,
+                block_number: 12_345_678,
+                confirmations: 12,
+                confirmed_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    let confirmed = payments.iter().filter(|p| p.confirmed_at.is_some()).count();
+    assert_eq!(
+        confirmed, 2,
+        "both transfers in the transaction must be confirmed; matching on tx_hash \
+         alone re-confirms the first row and leaves the second unconfirmed forever"
+    );
 }

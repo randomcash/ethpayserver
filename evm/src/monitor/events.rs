@@ -174,9 +174,41 @@ impl PaymentDetected {
     }
 }
 
+impl PaymentDetected {
+    /// Which transfer within the transaction this is: the EVM log index for an
+    /// ERC20 transfer, or -1 for a native one.
+    ///
+    /// Native transfers are found by scanning each transaction's top-level
+    /// `to`/`value`, one per hash, so a fixed sentinel can never collide with
+    /// another native transfer in the same transaction. It must not be 0,
+    /// which is a real and reachable ERC20 log index.
+    ///
+    /// Branches on `is_native` rather than on `log_index.is_none()`: an ERC20
+    /// log that arrived without an index is malformed, not native, and must
+    /// not be silently filed on the native sentinel where it would collide
+    /// with a genuine native transfer. `None` here is rejected by the
+    /// consumer the same way a missing `token_address` already is.
+    #[must_use]
+    pub fn tx_index(&self) -> Option<i32> {
+        if self.is_native {
+            Some(-1)
+        } else {
+            self.log_index.map(|i| i as i32)
+        }
+    }
+}
+
 /// Payment confirmed event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentConfirmed {
+    /// Which transfer within the transaction this confirms.
+    ///
+    /// The EVM log index for an ERC20 transfer, or -1 for a native one. A
+    /// transaction can carry two transfers to two different watched
+    /// addresses, so `tx_hash` alone does not identify a payment - the
+    /// consumer needs this to mark the right row confirmed.
+    pub tx_index: i32,
+
     /// Chain ID.
     pub chain_id: u64,
     /// Invoice ID.
