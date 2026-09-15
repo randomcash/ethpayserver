@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use auth::StoreRepository;
 use bigdecimal::{BigDecimal, RoundingMode, Zero};
-use data_service::{PaymentOptionReader, PaymentTxIndexWriter};
+use data_service::{PaymentOptionReader, PaymentTxIndexReader, PaymentTxIndexWriter};
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::MonitorEvent;
 use tokio_stream::StreamExt;
@@ -37,6 +37,7 @@ pub trait EventConsumerDataService:
     + PaymentReader
     + PaymentWriter
     + PaymentTxIndexWriter
+    + PaymentTxIndexReader
     + PaymentOptionReader
     + TokenReader
     + WatchedAddressReader
@@ -54,6 +55,7 @@ impl<T> EventConsumerDataService for T where
         + PaymentReader
         + PaymentWriter
         + PaymentTxIndexWriter
+        + PaymentTxIndexReader
         + PaymentOptionReader
         + TokenReader
         + WatchedAddressReader

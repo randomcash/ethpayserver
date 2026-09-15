@@ -12,17 +12,17 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// Check confirmation status of pending payments.
     pub(super) async fn check_confirmations(&self) -> EvmResult<()> {
         let current_block = self.source.get_block_number().await?;
-        let mut confirmed = Vec::new();
+        let mut confirmed: Vec<(B256, i32)> = Vec::new();
 
         {
             let mut pending = self.pending.write().await;
 
-            for (tx_hash, payment) in pending.iter_mut() {
+            for ((tx_hash, tx_index), payment) in pending.iter_mut() {
                 let confirmations = current_block.saturating_sub(payment.event.block_number) + 1;
                 payment.event.confirmations = confirmations;
 
                 if confirmations >= payment.event.required_confirmations {
-                    confirmed.push(*tx_hash);
+                    confirmed.push((*tx_hash, *tx_index));
 
                     let confirm_event = PaymentConfirmed {
                         chain_id: payment.event.chain_id,
@@ -30,6 +30,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                         payment_address: payment.event.payment_address,
                         amount: payment.event.amount,
                         tx_hash: payment.event.tx_hash,
+                        tx_index: *tx_index,
                         block_number: payment.event.block_number,
                         confirmations,
                         confirmed_at: Utc::now(),
@@ -50,8 +51,8 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             }
 
             // Remove confirmed payments
-            for tx_hash in &confirmed {
-                pending.remove(tx_hash);
+            for key in &confirmed {
+                pending.remove(key);
             }
         }
 

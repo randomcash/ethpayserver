@@ -148,14 +148,20 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 "native payment detected"
             );
 
-            // Add to pending for confirmation tracking
-            self.pending.write().await.insert(
-                event.tx_hash,
-                PendingPayment {
-                    event: event.clone(),
-                    last_check_block: block.number,
-                },
-            );
+            // Add to pending for confirmation tracking, keyed by the
+            // transfer rather than the transaction: one transaction can carry
+            // two transfers to two different watched addresses, and keying by
+            // hash alone meant the second detection evicted the first, so only
+            // one of them was ever confirmed.
+            if let Some(tx_index) = event.tx_index() {
+                self.pending.write().await.insert(
+                    (event.tx_hash, tx_index),
+                    PendingPayment {
+                        event: event.clone(),
+                        last_check_block: block.number,
+                    },
+                );
+            }
 
             let _ = self.event_tx.send(MonitorEvent::PaymentDetected(event));
         }
@@ -254,14 +260,29 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                     "ERC20 payment detected"
                 );
 
-                // Add to pending
-                self.pending.write().await.insert(
-                    event.tx_hash,
-                    PendingPayment {
-                        event: event.clone(),
-                        last_check_block: block.number,
-                    },
-                );
+                // Add to pending, keyed by the transfer. `tx_index` is
+                // `None` only for an ERC20 log the node returned without a log
+                // index, which is malformed rather than native - tracking it
+                // on the native sentinel would evict a real native transfer in
+                // the same transaction.
+                match event.tx_index() {
+                    Some(tx_index) => {
+                        self.pending.write().await.insert(
+                            (event.tx_hash, tx_index),
+                            PendingPayment {
+                                event: event.clone(),
+                                last_check_block: block.number,
+                            },
+                        );
+                    }
+                    None => {
+                        warn!(
+                            chain_id = self.chain_id(),
+                            tx = %event.tx_hash,
+                            "ERC20 transfer has no log index; not tracking it for confirmation"
+                        );
+                    }
+                }
 
                 let _ = self.event_tx.send(MonitorEvent::PaymentDetected(event));
             }

@@ -27,3 +27,27 @@ pub trait PaymentTxIndexWriter: Send + Sync {
         tx_index: i32,
     ) -> RepositoryResult<()>;
 }
+
+/// Read a payment back by the transfer it came from.
+///
+/// The confirmation handler used to find its row with
+/// `payments.iter().find(|p| p.tx_hash == tx_hash)`, which was well defined
+/// only while `unique_payment_tx` guaranteed one row per `(chain_id,
+/// tx_hash)`. Once two transfers in one transaction each get a row, "the first
+/// one with this hash" confirms an arbitrary one of them and leaves the other
+/// unconfirmed for good - `mark_confirmed` is a no-op once set, so a repeat
+/// event does not rescue it.
+///
+/// `PaymentData` carries no `tx_index` field, for the reason the writer above
+/// describes, so the selection happens in SQL rather than by filtering rows in
+/// the caller.
+#[async_trait]
+pub trait PaymentTxIndexReader: Send + Sync {
+    /// The payment for one specific transfer, or `None` if no row matches.
+    async fn get_by_tx_index(
+        &self,
+        invoice_id: &types::InvoiceId,
+        tx_hash: &str,
+        tx_index: i32,
+    ) -> RepositoryResult<Option<PaymentData>>;
+}

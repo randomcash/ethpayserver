@@ -555,7 +555,7 @@ impl PaymentAnalyticsReader for PgDataService {
 // Payment upsert keyed by transfer
 // =============================================================================
 
-use crate::payment_tx_index::PaymentTxIndexWriter;
+use crate::payment_tx_index::{PaymentTxIndexReader, PaymentTxIndexWriter};
 
 #[async_trait]
 impl PaymentTxIndexWriter for PgDataService {
@@ -565,5 +565,37 @@ impl PaymentTxIndexWriter for PgDataService {
         tx_index: i32,
     ) -> RepositoryResult<()> {
         upsert_payment_row(&self.pool, payment, tx_index).await
+    }
+}
+
+#[async_trait]
+impl PaymentTxIndexReader for PgDataService {
+    async fn get_by_tx_index(
+        &self,
+        invoice_id: &types::InvoiceId,
+        tx_hash: &str,
+        tx_index: i32,
+    ) -> RepositoryResult<Option<PaymentData>> {
+        // Scoped to the invoice as well as the transfer: the same transaction
+        // can pay two different invoices, and a confirmation is always about
+        // one of them.
+        let query = format!(
+            "SELECT {} FROM payments \
+             WHERE invoice_id = $1 AND tx_hash = $2 AND tx_index = $3 \
+             AND reorged = FALSE",
+            PAYMENT_SELECT_COLS
+        );
+        let row = sqlx::query(&query)
+            .bind(invoice_id.as_str())
+            .bind(tx_hash)
+            .bind(tx_index)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+
+        match row {
+            Some(r) => Ok(Some(try_row_to_payment(&r)?)),
+            None => Ok(None),
+        }
     }
 }

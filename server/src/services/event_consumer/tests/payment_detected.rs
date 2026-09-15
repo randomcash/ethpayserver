@@ -148,8 +148,15 @@ async fn test_handle_payment_detected_two_transfers_in_one_tx_both_survive() {
         block_number: 12345678,
         block_hash: B256::ZERO,
         log_index: Some(0),
-        is_native: true,
-        token_address: None,
+        // ERC20, not native: this is the batched-transfer case - a multicall
+        // or an exchange sweep emitting two Transfer logs in one transaction.
+        // Two *native* transfers in one transaction cannot happen, because
+        // `check_native_payments` reads each transaction's top-level
+        // `to`/`value`, one entry per hash, so a native event's log index is
+        // meaningless and the fixture used to lean on one that production
+        // never produces.
+        is_native: false,
+        token_address: Some(Address::repeat_byte(0xde)),
         from_address: Address::repeat_byte(0xab),
         confirmations: 1,
         required_confirmations: 12,

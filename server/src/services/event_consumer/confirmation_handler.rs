@@ -3,11 +3,12 @@
 use auth::StoreRepository;
 use bigdecimal::BigDecimal;
 use chrono::Utc;
+use data_service::PaymentTxIndexReader;
 use evm::get_any_chain_config;
 use evm::monitor::events::PaymentConfirmed;
 use types::{
     InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentData,
-    PaymentReader, PaymentWriter, StoreSettingsReader,
+    PaymentWriter, StoreSettingsReader,
 };
 
 use crate::api::ws::StatusUpdate;
@@ -38,16 +39,28 @@ impl<
         let invoice_id = InvoiceId::from_string(event.invoice_id.to_string());
         let tx_hash = format!("{:#x}", event.tx_hash);
 
-        // Find the payment by invoice_id + tx_hash (only non-reorged payments)
-        let payments =
-            PaymentReader::get_valid_for_invoice(&*self.data_service, &invoice_id).await?;
-        let payment = match payments.iter().find(|p| p.tx_hash == tx_hash) {
+        // Find the payment by the transfer this confirms, not merely by its
+        // transaction. `find(|p| p.tx_hash == tx_hash)` was well defined only
+        // while the unique key guaranteed one row per (chain_id, tx_hash); two
+        // transfers batched into one transaction now each have a row, and
+        // picking the first would confirm an arbitrary one of them and leave
+        // the other unconfirmed for good, since `mark_confirmed` is a no-op
+        // once set. Still excludes reorged rows, as the previous reader did.
+        let found = PaymentTxIndexReader::get_by_tx_index(
+            &*self.data_service,
+            &invoice_id,
+            &tx_hash,
+            event.tx_index,
+        )
+        .await?;
+        let payment = match found.as_ref() {
             Some(p) => p,
             None => {
                 // Payment not found or was reorged - log and skip
                 tracing::debug!(
                     invoice_id = %event.invoice_id,
                     tx_hash = %tx_hash,
+                    tx_index = event.tx_index,
                     "Payment not found or reorged, skipping confirmation"
                 );
                 return Ok(());

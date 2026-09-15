@@ -325,6 +325,16 @@ impl PaymentWriter for InMemoryDataService {
     async fn upsert(&self, payment: &PaymentData) -> RepositoryResult<()> {
         let mut payments = self.payments.write().unwrap();
         payments.insert(payment.id, payment.clone());
+        // Record it on the transfer index too, at tx_index 0 - the same value
+        // `PgDataService::upsert` passes for a caller that does not know which
+        // transfer within the transaction this was. Without this the fake and
+        // the real store disagree about whether a plainly-upserted payment is
+        // findable by transfer, and a test would pass against a lookup that
+        // returns nothing in production.
+        self.payment_tx_index.write().unwrap().insert(
+            (payment.chain_id.clone(), payment.tx_hash.clone(), 0),
+            payment.id,
+        );
         Ok(())
     }
 
@@ -358,6 +368,33 @@ impl PaymentWriter for InMemoryDataService {
             }
         }
         Ok(count)
+    }
+}
+
+#[async_trait]
+impl crate::payment_tx_index::PaymentTxIndexReader for InMemoryDataService {
+    async fn get_by_tx_index(
+        &self,
+        invoice_id: &types::InvoiceId,
+        tx_hash: &str,
+        tx_index: i32,
+    ) -> RepositoryResult<Option<PaymentData>> {
+        // Resolved through `payment_tx_index` rather than by scanning
+        // `payments` for a matching hash, so a test that writes two transfers
+        // of one transaction sees them as two distinct rows here exactly as
+        // Postgres does. A scan would find the first and make the collision
+        // this models invisible.
+        let index = self.payment_tx_index.read().unwrap();
+        let payments = self.payments.read().unwrap();
+
+        let found = index
+            .iter()
+            .filter(|((_, hash, idx), _)| hash == tx_hash && *idx == tx_index)
+            .filter_map(|(_, id)| payments.get(id))
+            .find(|p| p.invoice_id == *invoice_id && !p.reorged)
+            .cloned();
+
+        Ok(found)
     }
 }
 

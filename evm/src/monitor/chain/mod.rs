@@ -39,8 +39,15 @@ pub struct ChainMonitor<S: BlockSource> {
     /// Addresses being watched, keyed by (address, token_contract).
     /// This allows the same address to be watched for different tokens.
     watched: RwLock<HashMap<WatchKey, WatchedAddress>>,
-    /// Payments pending confirmation.
-    pending: RwLock<HashMap<B256, PendingPayment>>,
+    /// Payments pending confirmation, keyed by `(tx_hash, tx_index)`.
+    ///
+    /// Keyed by transaction alone, two transfers batched into one transaction
+    /// overwrote each other here, so only the last-inserted one was ever
+    /// confirmed. The payments themselves stopped colliding when the database
+    /// key gained `tx_index`; this is the same collision one layer up, and it
+    /// left the other invoice fully funded and stuck in `Processing` forever,
+    /// because `Processing -> Paid` happens only when a confirmation arrives.
+    pending: RwLock<HashMap<(B256, i32), PendingPayment>>,
     /// Last processed block.
     last_block: RwLock<Option<u64>>,
     /// Block hash at last processed block (for reorg detection).

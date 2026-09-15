@@ -213,7 +213,20 @@ impl<
         // index, and a contract that both receives ETH directly (top-level
         // `to`) and emits a Transfer log at index 0 in that same transaction
         // would otherwise collide two unrelated payments onto tx_index = 0.
-        let tx_index = event.log_index.map_or(-1, |i| i as i32);
+        // Derived by `PaymentDetected::tx_index`, which branches on
+        // `is_native` rather than on whether a log index is present. An ERC20
+        // log that arrived without one is malformed, not native: filing it on
+        // the -1 sentinel would merge it with a genuine native transfer in the
+        // same transaction, which is precisely the collision the sentinel
+        // exists to prevent. Rejected here the same way a missing
+        // `token_address` already is.
+        let tx_index = event.tx_index().ok_or_else(|| {
+            EventConsumerError::InvalidData(format!(
+                "ERC20 transfer in {:#x} has no log index; cannot tell it apart from \
+                 other transfers in the same transaction",
+                event.tx_hash
+            ))
+        })?;
         PaymentTxIndexWriter::upsert_with_tx_index(&*self.data_service, &payment, tx_index).await?;
 
         // Broadcast payment detected via WebSocket

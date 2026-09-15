@@ -32,7 +32,7 @@ pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQu
 pub use email_change::{EmailChangeRequest, EmailChangeWriter};
 pub use invoice_creation::InvoiceCreationWriter;
 pub use merchant_directory::{MerchantAccount, MerchantDirectoryReader, MerchantStore};
-pub use payment_tx_index::PaymentTxIndexWriter;
+pub use payment_tx_index::{PaymentTxIndexReader, PaymentTxIndexWriter};
 pub use payout_claims::PayoutClaimReader;
 pub use webhook_delivery::{
     UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,
