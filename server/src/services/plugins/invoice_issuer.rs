@@ -297,6 +297,7 @@ mod tests {
             Arc::new(UnusedSessionService),
             None,
             Arc::new(rates::NoOpRateProvider),
+            Arc::new(crate::services::email::NoopEmailSender),
         );
         PluginHostApi::new(state, own_store)
     }

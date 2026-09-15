@@ -13,8 +13,8 @@ use evm::api::EvmDataService;
 use rates::RateProvider;
 
 use crate::api::ws::WsBroadcast;
-use crate::services::plugins::InvoiceCreationFilter;
 use crate::services::email::EmailSender;
+use crate::services::plugins::InvoiceCreationFilter;
 use crate::services::webhook::WebhookSink;
 
 /// Read-only data service trait for the application.

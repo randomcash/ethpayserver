@@ -138,6 +138,7 @@ fn app_state(
         Arc::new(UnusedSessionService),
         None::<Arc<RedisEVMMonitor>>,
         Arc::new(NoOpRateProvider),
+        Arc::new(server::services::email::NoopEmailSender),
     );
     state.invoice_creation_filters = filters;
     state
