@@ -45,10 +45,10 @@ pub use services::{
     ChainHealthMetricsConfig, ChainHealthMetricsService, CleanupConfig, CleanupError, CleanupStats,
     EVMMonitor, EVMMonitorError, EventConsumer, EventConsumerError, FilterOutcome,
     InvoiceCleanupService, PageElement, PageError, PageHost, PageRenderer, PluginCallError,
-    PluginCoreDataApi, PluginEngine, PluginHost, PluginHostError, PluginInstance, PluginLoadError,
-    PluginRegistry, PluginSchema, PluginStatusSnapshot, PluginStorage, PluginStorageError,
-    PluginStoreSummary, PluginWasmError, RedisEVMMonitor, Viewer, WatchRetryConfig,
-    WatchRetryService, WebhookConfig, WebhookService, WebhookSink, host_version,
+    PluginEngine, PluginHost, PluginHostError, PluginInstance, PluginLoadError, PluginRegistry,
+    PluginSchema, PluginStatusSnapshot, PluginStorage, PluginStorageError, PluginWasmError,
+    RedisEVMMonitor, Viewer, WatchRetryConfig, WatchRetryService, WebhookConfig, WebhookService,
+    WebhookSink, host_version,
 };
 pub use state::{AppDataService, AppDataServiceReader, AppState};
 
