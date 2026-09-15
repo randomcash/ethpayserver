@@ -330,7 +330,7 @@ async fn integration_payment_search_anchors_the_hash_but_not_the_sender() {
     );
 }
 
-/// RCS-282: a batching contract, a multicall, or an exchange sweep can pay two
+/// A batching contract, a multicall, or an exchange sweep can pay two
 /// different watched addresses in a single transaction. `unique_payment_tx`
 /// used to be `(tx_hash, chain_id)` alone, so the second transfer's
 /// `ON CONFLICT` silently overwrote the first instead of inserting - one of

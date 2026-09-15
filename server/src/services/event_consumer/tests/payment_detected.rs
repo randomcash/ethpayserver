@@ -118,7 +118,7 @@ async fn test_handle_payment_detected_unknown_chain() {
     assert_eq!(payments[0].asset_symbol, "ETH"); // Fallback for unknown chains
 }
 
-/// RCS-282: a batching contract, a multicall, or an exchange sweep can settle
+/// A batching contract, a multicall, or an exchange sweep can settle
 /// two transfers to two watched addresses in a single transaction. Both must
 /// be recorded - before the fix, `payments` had no way to tell them apart
 /// (`unique_payment_tx` was `(tx_hash, chain_id)` alone), so the second
@@ -186,7 +186,7 @@ async fn test_handle_payment_detected_two_transfers_in_one_tx_both_survive() {
     assert!(amounts.contains(&second_amount.to_string()));
 }
 
-/// RCS-282 follow-up: a native transfer (`log_index: None`) and an ERC20
+/// A native transfer (`log_index: None`) and an ERC20
 /// transfer whose *real* log index happens to be 0 can share a `tx_hash` -
 /// e.g. a contract that receives ETH directly at the top level and, in the
 /// same transaction, emits a Transfer log at index 0 to a different watched
