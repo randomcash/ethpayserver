@@ -13,6 +13,7 @@ use evm::api::EvmDataService;
 use rates::RateProvider;
 
 use crate::api::ws::WsBroadcast;
+use crate::services::plugins::InvoiceCreationFilter;
 use crate::services::webhook::WebhookSink;
 
 /// Read-only data service trait for the application.
@@ -96,6 +97,11 @@ pub struct AppState<D, A, E> {
     /// request: the environment is the thing being verified, and reading it back
     /// would confirm only that a variable was set, not that it took effect.
     pub webauthn: Option<api_types::WebAuthnHealth>,
+
+    /// Plugins that may refuse invoice creation (RCS-300 capability 2), e.g.
+    /// to enforce a lapsed subscription. Empty when no such plugin is
+    /// installed, in which case invoice creation is never filtered at all.
+    pub invoice_creation_filters: Vec<Arc<dyn InvoiceCreationFilter>>,
 }
 
 // Manual Clone impl since we only need Arc::clone
@@ -110,6 +116,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             captcha_provider: self.captcha_provider.clone(),
             webhook_sink: self.webhook_sink.clone(),
             webauthn: self.webauthn.clone(),
+            invoice_creation_filters: self.invoice_creation_filters.clone(),
         }
     }
 }
@@ -131,6 +138,7 @@ impl<D, A, E> AppState<D, A, E> {
             captcha_provider: None,
             webhook_sink: None,
             webauthn: None,
+            invoice_creation_filters: Vec::new(),
         }
     }
 }

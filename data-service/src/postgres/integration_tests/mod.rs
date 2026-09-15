@@ -16,12 +16,14 @@
 //! - `payout_claims`: which invoices a store's payouts already hold
 //! - `webhook_delivery`: retries of one job collapse to one row, and a
 //!   store's deliveries stay scoped to it
+//! - `merchant_directory`: the plugin host's server-wide account/store list
 
 mod account_deletion;
 mod aggregation;
 mod analytics;
 mod invoice;
 mod invoice_creation;
+mod merchant_directory;
 mod payment;
 mod payout_claims;
 mod store_creation;

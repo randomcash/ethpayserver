@@ -8,6 +8,9 @@ use rust_decimal::Decimal;
 
 use crate::api::extractors::AuthenticatedUser;
 use crate::metrics;
+use crate::services::plugins::{
+    FilterVerdict, InvoiceCreationFilterRequest, run_invoice_creation_filters,
+};
 use crate::state::PgAppState;
 use ::types::currency::DEFAULT_INVOICE_EXPIRATION_SECS;
 use rates::{RateError, is_fiat_currency};
@@ -66,6 +69,24 @@ where
             StatusCode::FORBIDDEN,
             "forbidden",
             "Insufficient permissions to create invoices for this store",
+        ));
+    }
+
+    // A plugin (RCS-300 capability 2) may refuse invoice creation - e.g. to
+    // enforce a lapsed subscription. The merchant keeps every other
+    // capability; only this endpoint is ever filtered.
+    if let FilterVerdict::Deny { reason } = run_invoice_creation_filters(
+        &state.invoice_creation_filters,
+        InvoiceCreationFilterRequest {
+            store_id: StoreId(req.store_id),
+        },
+    )
+    .await
+    {
+        return Err(invoice_error(
+            StatusCode::FORBIDDEN,
+            "invoice_creation_blocked",
+            &reason,
         ));
     }
 
