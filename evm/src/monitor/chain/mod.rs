@@ -13,6 +13,7 @@ use crate::network::ChainConfig;
 use alloy::primitives::{Address, B256};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::debug;
 
@@ -48,6 +49,13 @@ pub struct ChainMonitor<S: BlockSource> {
     /// left the other invoice fully funded and stuck in `Processing` forever,
     /// because `Processing -> Paid` happens only when a confirmation arrives.
     pending: RwLock<HashMap<(B256, i32), PendingPayment>>,
+    /// When the block stream last delivered a block.
+    ///
+    /// Liveness of the subscription, which is a different question from how
+    /// far behind the chain head the monitor is. A monitor catching up after a
+    /// restart is far behind while receiving blocks perfectly well; a
+    /// half-open WebSocket is exactly level and receiving nothing.
+    last_block_at: RwLock<Instant>,
     /// Last processed block.
     last_block: RwLock<Option<u64>>,
     /// Block hash at last processed block (for reorg detection).
@@ -71,6 +79,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             source: Arc::new(source),
             watched: RwLock::new(HashMap::new()),
             pending: RwLock::new(HashMap::new()),
+            last_block_at: RwLock::new(Instant::now()),
             last_block: RwLock::new(None),
             last_block_hash: RwLock::new(None),
             event_tx,

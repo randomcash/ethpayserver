@@ -27,6 +27,7 @@ fn test_monitor_config(required_confirmations: u64) -> ChainMonitorConfig {
         max_blocks_per_scan: 100,
         // Short interval so confirmation checks happen quickly in tests
         confirmation_check_interval_secs: 1,
+        stall_timeout_secs: 120,
         monitor_native: true,
         monitor_erc20: true,
     }

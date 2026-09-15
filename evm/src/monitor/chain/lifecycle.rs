@@ -5,6 +5,7 @@ use crate::error::{EvmError, EvmResult};
 use crate::monitor::events::MonitorEvent;
 use crate::monitor::source::{BlockSource, BlockStream, ChainHealth, SourceStatus};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
 
@@ -79,6 +80,12 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 Some(block_result) = block_stream.next() => {
                     match block_result {
                         Ok(block) => {
+                            // Liveness of the *stream*, recorded before any
+                            // processing: a block that arrives but fails to
+                            // process still proves the subscription is alive,
+                            // and resubscribing would not fix it.
+                            *self.last_block_at.write().await = Instant::now();
+
                             if let Err(e) = self.process_block(&block).await {
                                 error!(chain_id, error = %e, "error processing block");
                                 let _ = self.event_tx.send(MonitorEvent::MonitorError {
@@ -115,23 +122,51 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         Ok(())
     }
 
-    /// Notice an unhealthy chain - stalled or disconnected - and reconnect it.
+    /// How long a silent subscription is tolerated before it is assumed dead.
+    fn stall_timeout(&self) -> Duration {
+        Duration::from_secs(self.config.stall_timeout_secs)
+    }
+
+    /// Reconnect a block stream that has stopped delivering.
     ///
-    /// Two failure shapes land here. A dropped or half-open WebSocket doesn't
+    /// Two failure shapes land here. A dropped or half-open WebSocket does not
     /// always deliver a close frame - sometimes the subscription just stops
-    /// yielding blocks forever, with no error to log and nothing to select!
-    /// on, leaving the RPC reachable (health checks that ask it directly
-    /// still succeed) while the block stream is dead. Or the connection
-    /// itself goes down (`Disconnected`/`Failed`), and nothing retries it:
-    /// `subscribe_blocks` is otherwise only ever called once, at startup.
-    /// Both cases are indistinguishable from a healthy chain unless something
-    /// checks, so this reuses `is_healthy` - which already covers "not
-    /// connected" and "connected but lagging" - rather than invent a second
-    /// definition of "unhealthy". This runs on the confirmation-check timer
-    /// because that's the one thing already on a clock here.
+    /// yielding blocks, with no error to log and nothing to `select!` on,
+    /// leaving the RPC reachable (health checks that ask it directly still
+    /// succeed) while the stream is dead. Or the connection itself goes down
+    /// and nothing retries it: `subscribe_blocks` is otherwise called once, at
+    /// startup.
+    ///
+    /// Both are liveness failures, which is why this asks about liveness
+    /// rather than about `is_healthy`. That flag is false whenever the chain
+    /// is lagging more than a few blocks, and lagging is what ordinary
+    /// catch-up looks like - so keying on it would resubscribe on every tick
+    /// while the monitor works through a backlog, churning the provider's
+    /// subscription at precisely the moment it can least afford it, and doing
+    /// nothing to help it catch up.
+    ///
+    /// Runs on the confirmation-check timer because that is the one thing
+    /// already on a clock here.
     async fn resubscribe_if_stalled(&self, block_stream: &mut BlockStream) -> EvmResult<()> {
         let health = self.get_health().await;
-        if health.is_healthy {
+
+        // `is_healthy` is the wrong question here. It is false whenever the
+        // chain is lagging more than a few blocks, and lagging is what ordinary
+        // catch-up looks like: after a restart, or a brief outage, the monitor
+        // is behind and working through blocks that are arriving perfectly
+        // well. Resubscribing then churns the provider's subscription on every
+        // confirmation tick, at exactly the moment the monitor can least afford
+        // it, and does nothing to help it catch up.
+        //
+        // What this exists to catch is a subscription that has stopped
+        // delivering: a half-open WebSocket that yields no blocks and no error,
+        // with nothing to select! on. That is a liveness question, not a
+        // progress one, so ask it of the stream rather than of the lag.
+        let disconnected = health.status != SourceStatus::Connected;
+        let silent_for = self.last_block_at.read().await.elapsed();
+        let stalled = silent_for >= self.stall_timeout();
+
+        if !disconnected && !stalled {
             return Ok(());
         }
 
@@ -140,10 +175,13 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             status = ?health.status,
             current_block = ?health.current_block,
             last_processed_block = ?health.last_processed_block,
-            "chain unhealthy; resubscribing"
+            silent_for_secs = silent_for.as_secs(),
+            reason = if disconnected { "disconnected" } else { "no blocks received" },
+            "block stream is not delivering; resubscribing"
         );
 
         *block_stream = self.source.subscribe_blocks().await?;
+        *self.last_block_at.write().await = Instant::now();
         Ok(())
     }
 }

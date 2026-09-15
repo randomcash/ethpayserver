@@ -28,6 +28,9 @@ fn fast_confirm_config() -> ChainMonitorConfig {
         // Short interval so the stall watchdog (piggybacked on this timer)
         // fires quickly in the test.
         confirmation_check_interval_secs: 1,
+        // Short so the stall watchdog fires quickly in the test; production
+        // defaults to 120s.
+        stall_timeout_secs: 1,
         monitor_native: true,
         monitor_erc20: true,
     }
@@ -205,14 +208,85 @@ async fn healthy_chain_never_resubscribes() {
         "expected MonitorStarted"
     );
 
-    test_source.push_block(make_block(1));
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // A live chain keeps delivering. The watchdog asks whether the stream is
+    // still producing blocks, not how far behind the head the monitor is, so
+    // "healthy" has to be exercised as continued delivery rather than as one
+    // block followed by silence - silence past the timeout is exactly what it
+    // is supposed to act on.
+    for height in 1..=8 {
+        test_source.push_block(make_block(height));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
 
-    // Several confirmation-check ticks have elapsed with the monitor caught
-    // up to the head throughout - the watchdog must not have reconnected.
+    // Several confirmation-check ticks have elapsed, each of them finding a
+    // stream that delivered recently - the watchdog must not have reconnected.
     assert_eq!(
         test_source.subscribe_count(),
         1,
-        "a healthy stream must not be torn down and resubscribed"
+        "a stream that is still delivering blocks must not be torn down and resubscribed"
+    );
+}
+
+/// Catching up is not stalling.
+///
+/// After a restart, or a brief outage, the monitor is a long way behind the
+/// chain head and working through the backlog. Blocks are arriving perfectly
+/// well; it simply has not caught up yet.
+///
+/// Keying the watchdog on `is_healthy` conflates that with a dead
+/// subscription, because `is_healthy` is false whenever the monitor is more
+/// than ten blocks behind. It would then resubscribe on *every* confirmation
+/// tick for the whole of the catch-up — churning the provider's subscription
+/// at precisely the moment the monitor can least afford it, and doing nothing
+/// to help it catch up, since the backlog is not a delivery problem.
+///
+/// Goes red against a watchdog that asks about lag instead of liveness.
+#[tokio::test]
+async fn a_lagging_but_delivering_chain_is_not_resubscribed() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        fast_confirm_config(),
+    ));
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let _monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+
+    let started = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+    assert!(
+        matches!(started, Ok(Ok(MonitorEvent::MonitorStarted { .. }))),
+        "expected MonitorStarted"
+    );
+
+    let subscribes_before = test_source.subscribe_count();
+
+    // A monitor mid-catch-up: the head is far ahead of anything it has
+    // processed, and blocks keep arriving the whole time. The stream is alive;
+    // the monitor is simply behind.
+    //
+    // The head is re-asserted after each push because `push_block` advances
+    // the mock's head to the block it delivered - without this the lag closes
+    // and the state under test never exists.
+    for height in 1..=8 {
+        test_source.push_block(make_block(height));
+        test_source.set_block_number(1000);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    let health = monitor.get_health().await;
+    assert!(
+        !health.is_healthy,
+        "precondition: this is the lagging state the old watchdog would have \
+         acted on - if it reads healthy the test proves nothing"
+    );
+    assert_eq!(
+        test_source.subscribe_count(),
+        subscribes_before,
+        "a monitor that is merely behind must not have its subscription torn \
+         down; blocks were arriving throughout"
     );
 }
