@@ -97,7 +97,8 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     // Initialize Sentry (no-op when SENTRY_DSN is unset)
-    let _sentry_guard = init_sentry();
+    let (_sentry_guard, sentry_dsn_configured, sentry_environment) =
+        evm::telemetry::init_sentry(option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from));
 
     // Parse CLI args
     let args = Args::parse();
@@ -106,6 +107,12 @@ async fn main() -> anyhow::Result<()> {
     init_logging(&args.log_format, &args.log_level)?;
 
     info!("starting evmmonitor");
+
+    // Report whether error reporting is actually on. Must come after
+    // `init_logging`: `info!`/`error!` before that has no subscriber to write
+    // to. This is the component that failed silently for 10.5 hours, so it
+    // must not also be silently unreported.
+    evm::telemetry::report_reporting_status(sentry_dsn_configured, &sentry_environment)?;
 
     // Load configuration
     let config = load_config(&args)?;
@@ -236,23 +243,6 @@ async fn main() -> anyhow::Result<()> {
     info!("evmmonitor stopped");
 
     Ok(())
-}
-
-fn init_sentry() -> sentry::ClientInitGuard {
-    sentry::init(sentry::ClientOptions {
-        dsn: std::env::var("SENTRY_DSN")
-            .ok()
-            .and_then(|s| s.parse().ok()),
-        release: option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from),
-        environment: std::env::var("SENTRY_ENVIRONMENT").ok().map(Cow::from),
-        // Never attach default PII (IP, cookies, request bodies). This is a
-        // payment processor — see `evm::telemetry::scrub_event`.
-        send_default_pii: false,
-        // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
-        // API keys, emails and on-chain addresses before events leave the host.
-        before_send: Some(Arc::new(evm::telemetry::scrub_event)),
-        ..Default::default()
-    })
 }
 
 fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {

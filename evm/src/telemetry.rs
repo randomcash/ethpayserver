@@ -23,7 +23,8 @@
 //! where both implementations compile: `evm` pulls in alloy/sqlx and does not
 //! build for `wasm32`, which is the whole reason there are two.
 
-use std::sync::OnceLock;
+use std::borrow::Cow;
+use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use sentry::protocol::{Event, Value};
@@ -208,6 +209,117 @@ pub fn scrub_event(mut event: Event<'static>) -> Option<Event<'static>> {
     }
 
     Some(event)
+}
+
+/// Whether error reporting is on, and — when it is off — whether that is
+/// acceptable for the environment reporting failed to catch this itself once:
+/// a disabled integration looks identical to a working one unless something
+/// says so at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportingStatus {
+    /// A DSN is configured.
+    Enabled,
+    /// No DSN, but that's permitted in this (known-safe) environment.
+    DisabledPermitted,
+    /// No DSN in an environment that must not boot like this: `mainnet`,
+    /// or anything unrecognised. An unset/unknown environment is the exact
+    /// shape the incident that motivated this took — nothing said it was
+    /// wrong — so it fails closed rather than being allowlisted as safe.
+    DisabledRefused,
+}
+
+/// Decide whether error reporting is enabled and, if not, whether that's
+/// permitted. Only `testnet` and `dev` are permitted to run disabled;
+/// `mainnet` *and every other value, including unset*, are refused. Fails
+/// closed: a typo'd or missing `SENTRY_ENVIRONMENT` must not be silently
+/// treated as safe the way a missing `SENTRY_DSN` was.
+///
+/// Pure and side-effect free: the caller is responsible for logging the
+/// result and, for [`ReportingStatus::DisabledRefused`], for refusing to
+/// continue booting.
+#[must_use]
+pub fn reporting_status(dsn_configured: bool, environment: &str) -> ReportingStatus {
+    if dsn_configured {
+        ReportingStatus::Enabled
+    } else if matches!(environment, "testnet" | "dev") {
+        ReportingStatus::DisabledPermitted
+    } else {
+        ReportingStatus::DisabledRefused
+    }
+}
+
+/// Resolve the `SENTRY_ENVIRONMENT` tag. A single source of truth so
+/// [`init_sentry`] (what gets sent to Sentry) and
+/// [`report_reporting_status`] (what a human sees at boot) cannot default it
+/// two different ways and drift apart.
+///
+/// An unset variable resolves to the empty string, **not** to a permitted
+/// value like `"dev"`. `reporting_status` already treats `""` the same as any
+/// other unrecognised environment (refused). Defaulting it to `"dev"` here
+/// used to silently launder "nobody set this" into "known safe to run
+/// disabled" before `reporting_status` ever saw it — the exact failure shape
+/// this ticket exists to close, one layer up.
+#[must_use]
+pub fn resolve_environment() -> String {
+    std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
+}
+
+/// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
+/// `before_send` hook and tagging events with [`resolve_environment`]. Shared
+/// by the `server` and `evmmonitor` binaries so the mainnet boot-gate and the
+/// PII scrubber live in exactly one place each, instead of two copies that
+/// can quietly diverge.
+///
+/// Returns the init guard, whether a DSN was actually configured, and the
+/// resolved environment tag — pass the latter two to
+/// [`report_reporting_status`].
+pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGuard, bool, String) {
+    let dsn = std::env::var("SENTRY_DSN")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let dsn_configured = dsn.is_some();
+    let environment = resolve_environment();
+    let guard = sentry::init(sentry::ClientOptions {
+        dsn,
+        release,
+        environment: Some(Cow::Owned(environment.clone())),
+        // Never attach default PII (IP, cookies, request bodies). This is a
+        // payment processor.
+        send_default_pii: false,
+        // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
+        // API keys, emails and on-chain addresses before events leave the host.
+        before_send: Some(Arc::new(scrub_event)),
+        ..Default::default()
+    });
+    (guard, dsn_configured, environment)
+}
+
+/// Log whether error reporting is on, at INFO, always — never the DSN itself
+/// — and refuse to continue when [`reporting_status`] says this environment
+/// must not run disabled.
+pub fn report_reporting_status(dsn_configured: bool, environment: &str) -> anyhow::Result<()> {
+    let environment = if environment.is_empty() {
+        "(unset)"
+    } else {
+        environment
+    };
+    match reporting_status(dsn_configured, environment) {
+        ReportingStatus::Enabled => {
+            tracing::info!(environment = %environment, "error reporting enabled");
+        }
+        ReportingStatus::DisabledPermitted => {
+            tracing::info!(
+                environment = %environment,
+                "error reporting DISABLED (no DSN configured); permitted in this environment"
+            );
+        }
+        ReportingStatus::DisabledRefused => {
+            anyhow::bail!(
+                "error reporting DISABLED (no DSN configured) in environment={environment}; refusing to start"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -444,6 +556,97 @@ mod tests {
                 scrub::redact_secrets(input),
                 "shared `scrub` diverged from the audited regex table on: {input}"
             );
+        }
+    }
+
+    #[test]
+    fn no_dsn_is_disabled_but_permitted_outside_mainnet() {
+        assert_eq!(
+            reporting_status(false, "testnet"),
+            ReportingStatus::DisabledPermitted
+        );
+        assert_eq!(
+            reporting_status(false, "dev"),
+            ReportingStatus::DisabledPermitted
+        );
+    }
+
+    #[test]
+    fn no_dsn_in_mainnet_is_refused() {
+        assert_eq!(
+            reporting_status(false, "mainnet"),
+            ReportingStatus::DisabledRefused
+        );
+    }
+
+    #[test]
+    fn no_dsn_with_unset_or_unrecognised_environment_fails_closed() {
+        // The exact shape of the incident this exists for: nothing said the
+        // environment was wrong, so an absent or misspelled
+        // `SENTRY_ENVIRONMENT` must not be treated as a known-safe one.
+        for environment in ["", "mainet", "prod", "MAINNET"] {
+            assert_eq!(
+                reporting_status(false, environment),
+                ReportingStatus::DisabledRefused,
+                "environment={environment:?} should fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configured_dsn_flips_every_environment_to_enabled() {
+        for environment in ["mainnet", "testnet", "dev"] {
+            assert_eq!(
+                reporting_status(true, environment),
+                ReportingStatus::Enabled,
+                "environment={environment}"
+            );
+        }
+    }
+
+    #[test]
+    fn report_reporting_status_is_ok_when_permitted_and_err_when_refused() {
+        assert!(report_reporting_status(true, "mainnet").is_ok());
+        assert!(report_reporting_status(false, "testnet").is_ok());
+        assert!(report_reporting_status(false, "dev").is_ok());
+        assert!(report_reporting_status(false, "mainnet").is_err());
+        assert!(report_reporting_status(false, "").is_err());
+    }
+
+    #[test]
+    fn resolve_environment_does_not_default_an_absent_var_to_a_permitted_value() {
+        // Owns SENTRY_ENVIRONMENT for the duration of the test and restores
+        // whatever was there before, since this is a process-global var and
+        // no other test touches it.
+        let previous = std::env::var("SENTRY_ENVIRONMENT").ok();
+
+        // SAFETY: no other test reads or writes SENTRY_ENVIRONMENT.
+        unsafe {
+            std::env::remove_var("SENTRY_ENVIRONMENT");
+        }
+        let absent = resolve_environment();
+        assert_ne!(
+            absent, "dev",
+            "an absent SENTRY_ENVIRONMENT must not resolve to a permitted value"
+        );
+        assert_eq!(
+            reporting_status(false, &absent),
+            ReportingStatus::DisabledRefused,
+            "the resolved value for an absent var must fail closed, not boot disabled on mainnet"
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_ENVIRONMENT", "testnet");
+        }
+        assert_eq!(resolve_environment(), "testnet");
+
+        // SAFETY: see above.
+        unsafe {
+            match &previous {
+                Some(value) => std::env::set_var("SENTRY_ENVIRONMENT", value),
+                None => std::env::remove_var("SENTRY_ENVIRONMENT"),
+            }
         }
     }
 }
