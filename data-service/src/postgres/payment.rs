@@ -416,6 +416,53 @@ impl PgDataService {
     }
 }
 
+// =============================================================================
+// Reorg candidate finding and retraction
+// =============================================================================
+
+use crate::reorg::{ReorgCandidateReader, ReorgWriter};
+
+#[async_trait]
+impl ReorgCandidateReader for PgDataService {
+    async fn reorg_candidates(
+        &self,
+        chain_id: &types::ChainId,
+        fork_block: u64,
+    ) -> RepositoryResult<Vec<PaymentData>> {
+        let query = format!(
+            "SELECT {} FROM payments WHERE chain_id = $1 AND block_number >= $2 AND reorged = FALSE",
+            PAYMENT_SELECT_COLS
+        );
+        let rows = sqlx::query(&query)
+            .bind(chain_id.as_str())
+            .bind(fork_block as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+
+        rows.iter().map(try_row_to_payment).collect()
+    }
+}
+
+#[async_trait]
+impl ReorgWriter for PgDataService {
+    async fn mark_payment_reorged(&self, id: Uuid) -> RepositoryResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE payments
+            SET reorged = TRUE, confirmed_at = NULL
+            WHERE id = $1 AND reorged = FALSE
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(())
+    }
+}
+
 /// Convert a database row to PaymentData.
 fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentData> {
     let chain_id = chain_id_from_row(row, "chain_id");
