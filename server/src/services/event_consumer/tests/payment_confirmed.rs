@@ -94,6 +94,170 @@ async fn test_handle_payment_confirmed_transitions_to_paid() {
     assert!(payments[0].confirmed_at.is_some());
 }
 
+/// 2^96 base units - one past the largest integer `rust_decimal::Decimal`
+/// (96-bit mantissa) can represent exactly. A payment for exactly the
+/// invoice's expected amount at this magnitude must still be recognized as
+/// fully paid: the comparison that decides paid/underpaid/overpaid must not
+/// round or fail just because the number is large.
+#[tokio::test]
+async fn test_handle_payment_confirmed_exact_amount_beyond_decimal_precision() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    let store_id = StoreId::new();
+
+    let exact_amount = "79228162514264337593543950336"; // 2^96
+
+    let invoice = InvoiceData {
+        id: invoice_id.clone(),
+        store_id,
+        currency: "ETH".to_string(),
+        status: InvoiceStatus::Processing,
+        amount: exact_amount.to_string(),
+        amount_received: exact_amount.to_string(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        metadata: None,
+        customer_email: None,
+        extra: None,
+    };
+    InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
+
+    let tx_hash = B256::repeat_byte(0x11);
+    let payment = PaymentData {
+        id: Uuid::new_v4(),
+        invoice_id: invoice_id.clone(),
+        payment_option_id: None,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
+        asset_type: types::AssetType::Native,
+        amount: exact_amount.to_string(),
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        tx_hash: format!("{:#x}", tx_hash),
+        block_number: Some(1),
+        detected_at: Utc::now(),
+        confirmed_at: None,
+        from_address: Some("0x1111111111111111111111111111111111111111".to_string()),
+        reorged: false,
+        extra: None,
+        credited_amount: Some(exact_amount.to_string()),
+        rate_used: None,
+        rate_applied_at: None,
+    };
+    PaymentWriter::upsert(&*ds, &payment).await.unwrap();
+
+    let event = PaymentConfirmed {
+        chain_id: 1,
+        invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+        payment_address: Address::ZERO,
+        amount: U256::from_str_radix(exact_amount, 10).unwrap(),
+        tx_hash,
+        block_number: 1,
+        confirmations: 12,
+        confirmed_at: Utc::now(),
+    };
+
+    consumer.handle_payment_confirmed(event).await.unwrap();
+
+    let invoice = InvoiceReader::get(&*ds, &invoice_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        invoice.status,
+        InvoiceStatus::Paid,
+        "a payment matching the invoice exactly at 2^96 base units must be marked paid"
+    );
+}
+
+/// One base unit short of the exact amount in
+/// `test_handle_payment_confirmed_exact_amount_beyond_decimal_precision`. A
+/// fix that rounds everything at this magnitude up to "paid" would pass that
+/// test alone; this catches it by requiring the shortfall to still read as
+/// unpaid.
+#[tokio::test]
+async fn test_handle_payment_confirmed_one_unit_below_exact_amount_stays_unpaid() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    let store_id = StoreId::new();
+
+    let expected_amount = "79228162514264337593543950336"; // 2^96
+    let received_amount = "79228162514264337593543950335"; // one base unit short
+
+    let invoice = InvoiceData {
+        id: invoice_id.clone(),
+        store_id,
+        currency: "ETH".to_string(),
+        status: InvoiceStatus::Processing,
+        amount: expected_amount.to_string(),
+        amount_received: received_amount.to_string(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        metadata: None,
+        customer_email: None,
+        extra: None,
+    };
+    InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
+
+    let tx_hash = B256::repeat_byte(0x22);
+    let payment = PaymentData {
+        id: Uuid::new_v4(),
+        invoice_id: invoice_id.clone(),
+        payment_option_id: None,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
+        asset_type: types::AssetType::Native,
+        amount: received_amount.to_string(),
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        tx_hash: format!("{:#x}", tx_hash),
+        block_number: Some(1),
+        detected_at: Utc::now(),
+        confirmed_at: None,
+        from_address: Some("0x2222222222222222222222222222222222222222".to_string()),
+        reorged: false,
+        extra: None,
+        credited_amount: Some(received_amount.to_string()),
+        rate_used: None,
+        rate_applied_at: None,
+    };
+    PaymentWriter::upsert(&*ds, &payment).await.unwrap();
+
+    let event = PaymentConfirmed {
+        chain_id: 1,
+        invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+        payment_address: Address::ZERO,
+        amount: U256::from_str_radix(received_amount, 10).unwrap(),
+        tx_hash,
+        block_number: 1,
+        confirmations: 12,
+        confirmed_at: Utc::now(),
+    };
+
+    consumer.handle_payment_confirmed(event).await.unwrap();
+
+    let invoice = InvoiceReader::get(&*ds, &invoice_id)
+        .await
+        .unwrap()
+        .unwrap();
+    // There is no `Underpaid` status to assert against - `InvoiceStatus` has
+    // no such variant, since the handler simply leaves a not-fully-paid
+    // invoice's status untouched. Paired with the exact-match test above
+    // (which does verify a transition to `Paid` happens), asserting the
+    // status is still exactly the pre-event `Processing` rules out both a
+    // wrongly-early `Paid` transition and a handler that transitions
+    // nothing at all.
+    assert_eq!(
+        invoice.status,
+        InvoiceStatus::Processing,
+        "one base unit short of the invoice amount must not be marked paid"
+    );
+}
+
 #[tokio::test]
 async fn test_handle_payment_confirmed_skips_cancelled_invoice() {
     let ds = Arc::new(InMemoryDataService::new());

@@ -14,10 +14,10 @@ mod tests;
 use std::sync::Arc;
 
 use auth::StoreRepository;
+use bigdecimal::{BigDecimal, RoundingMode, Zero};
 use data_service::{PaymentOptionReader, PaymentTxIndexWriter};
 use evm::monitor::bridge::EventBridge;
 use evm::monitor::events::MonitorEvent;
-use rust_decimal::Decimal;
 use tokio_stream::StreamExt;
 use types::{
     InvoiceReader, InvoiceWriter, PaymentReader, PaymentWriter, StoreSettingsReader, TokenReader,
@@ -215,6 +215,13 @@ impl<
     ///
     /// The rate represents: 1 invoice_currency = rate asset_units
     /// So to get invoice currency: asset_amount / rate
+    ///
+    /// A raw amount is up to 78 digits (`NUMERIC(78,0)`), well past what
+    /// `rust_decimal::Decimal`'s 96-bit mantissa (~28-29 digits) can hold
+    /// exactly. `BigDecimal` is arbitrary-precision, so parsing and the
+    /// power-of-ten division never round; only the division by `rate` (a
+    /// genuinely fractional value) can produce a non-terminating result, and
+    /// that's inherent to rate conversion, not a precision bug.
     fn convert_payment_to_invoice_currency(
         &self,
         raw_amount: &str,
@@ -222,12 +229,12 @@ impl<
         decimals: u8,
     ) -> Result<String, String> {
         // Parse raw amount (in smallest units, e.g., wei)
-        let raw: Decimal = raw_amount
+        let raw: BigDecimal = raw_amount
             .parse()
             .map_err(|e| format!("Invalid raw amount '{}': {}", raw_amount, e))?;
 
         // Parse exchange rate
-        let rate: Decimal = rate_str
+        let rate: BigDecimal = rate_str
             .parse()
             .map_err(|e| format!("Invalid rate '{}': {}", rate_str, e))?;
 
@@ -236,39 +243,59 @@ impl<
         }
 
         // Convert to human-readable amount: raw / 10^decimals
-        let divisor = Self::compute_decimal_divisor(decimals)?;
+        let divisor = Self::compute_decimal_divisor(decimals);
         let human_amount = raw / divisor;
 
         // Convert to invoice currency: human_amount / rate
         let invoice_amount = human_amount / rate;
 
-        Ok(invoice_amount.to_string())
+        Ok(Self::format_amount(&invoice_amount))
     }
 
     /// Convert a smallest unit amount to human-readable format.
     ///
     /// Used for asset-denominated invoices where no rate conversion is needed.
+    /// This is an exact power-of-ten division (moving the decimal point), so
+    /// `BigDecimal` never rounds here regardless of how large `raw_amount` is.
     fn convert_smallest_to_human(&self, raw_amount: &str, decimals: u8) -> Result<String, String> {
-        let raw: Decimal = raw_amount
+        let raw: BigDecimal = raw_amount
             .parse()
             .map_err(|e| format!("Invalid raw amount '{}': {}", raw_amount, e))?;
 
-        let divisor = Self::compute_decimal_divisor(decimals)?;
+        let divisor = Self::compute_decimal_divisor(decimals);
         let human_amount = raw / divisor;
 
-        Ok(human_amount.to_string())
+        Ok(Self::format_amount(&human_amount))
     }
 
-    /// Compute 10^decimals safely using checked multiplication.
-    fn compute_decimal_divisor(decimals: u8) -> Result<Decimal, String> {
-        let ten = Decimal::from(10);
-        let mut divisor = Decimal::ONE;
-        for _ in 0..decimals {
-            divisor = divisor
-                .checked_mul(ten)
-                .ok_or_else(|| format!("Overflow computing 10^{}", decimals))?;
-        }
-        Ok(divisor)
+    /// Compute 10^decimals. `BigDecimal` is arbitrary-precision, so this is
+    /// always exact and cannot overflow the way a fixed-mantissa type would.
+    fn compute_decimal_divisor(decimals: u8) -> BigDecimal {
+        BigDecimal::from(10u8).powi(i64::from(decimals))
+    }
+
+    /// Render an amount the way the rest of the system already reads it.
+    ///
+    /// Two things `BigDecimal::to_string` does that `rust_decimal` did not,
+    /// and that reach a user:
+    ///
+    /// - It switches to scientific notation past five leading zeros, so one
+    ///   wei of an 18-decimal token stringifies as `1E-18`. That value is
+    ///   broadcast over the checkout and dashboard WebSocket, where a plain
+    ///   decimal was shown before.
+    /// - Division runs at 100 significant digits rather than 28, so a rate
+    ///   conversion can produce a 100-plus character string. It is stored in
+    ///   `NUMERIC(78,18)`, so everything past the 18th decimal is dropped on
+    ///   write - rounding here means the number sent over the WebSocket and
+    ///   the number the invoice API returns later are the same number.
+    ///
+    /// `normalized` strips the trailing zeros the fixed scale introduces, so
+    /// a whole amount stays `1` rather than `1.000000000000000000`.
+    fn format_amount(value: &BigDecimal) -> String {
+        value
+            .with_scale_round(18, RoundingMode::HalfUp)
+            .normalized()
+            .to_plain_string()
     }
 }
 

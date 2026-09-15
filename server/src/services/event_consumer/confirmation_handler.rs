@@ -1,10 +1,10 @@
 //! Handler for `PaymentConfirmed` events and customer receipt emails.
 
 use auth::StoreRepository;
+use bigdecimal::BigDecimal;
 use chrono::Utc;
 use evm::get_any_chain_config;
 use evm::monitor::events::PaymentConfirmed;
-use rust_decimal::Decimal;
 use types::{
     InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentData,
     PaymentReader, PaymentWriter, StoreSettingsReader,
@@ -82,14 +82,18 @@ impl<
                 EventConsumerError::InvalidData(format!("Invoice not found: {}", event.invoice_id))
             })?;
 
-        // Compare amounts using rust_decimal
-        let amount_received: Decimal = invoice.amount_received.parse().map_err(|e| {
+        // Compare amounts exactly. These columns are NUMERIC(78,18) and can
+        // carry more significant digits than rust_decimal::Decimal's 96-bit
+        // mantissa (~28-29 digits) can hold, so this uses the
+        // arbitrary-precision BigDecimal instead - a fixed-mantissa type here
+        // would silently round the amount that decides paid/underpaid/overpaid.
+        let amount_received: BigDecimal = invoice.amount_received.parse().map_err(|e| {
             EventConsumerError::InvalidData(format!(
                 "Invalid amount_received '{}': {}",
                 invoice.amount_received, e
             ))
         })?;
-        let amount_expected: Decimal = invoice.amount.parse().map_err(|e| {
+        let amount_expected: BigDecimal = invoice.amount.parse().map_err(|e| {
             EventConsumerError::InvalidData(format!("Invalid amount '{}': {}", invoice.amount, e))
         })?;
 
