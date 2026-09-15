@@ -1,7 +1,7 @@
 //! Confirmation tracking and reorg handling.
 
 use super::ChainMonitor;
-use crate::error::EvmResult;
+use crate::error::{EvmError, EvmResult};
 use crate::monitor::events::{MonitorEvent, PaymentConfirmed, ReorgDetected};
 use crate::monitor::source::{BlockNotification, BlockSource, LogFilter};
 use alloy::primitives::{Address, B256};
@@ -164,7 +164,20 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     async fn find_survived_tx_hashes(&self, from: u64, to: u64) -> EvmResult<Vec<B256>> {
         let watched = self.watched.read().await;
         if watched.is_empty() {
-            return Ok(Vec::new());
+            // "Nothing survived" and "could not check" are different answers,
+            // and the caller retracts on the first one. With no watched
+            // addresses there is nothing to scan *for*, which is not evidence
+            // that the database's candidates are gone - a quiet server whose
+            // invoices are all settled and past their grace period watches
+            // nothing at all, and would otherwise retract every payment on the
+            // chain at or above the fork block, un-paying settled invoices.
+            //
+            // Erring here is the same fail-closed the RPC path already uses:
+            // `handle_reorg` leaves `last_block` untouched, so the reorg is
+            // re-evaluated on the next block rather than acted on blind.
+            return Err(EvmError::Monitor(
+                "cannot verify reorg survivors: no watched addresses".to_string(),
+            ));
         }
         let native_addresses: Vec<Address> = watched
             .keys()
@@ -178,14 +191,23 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             .collect();
         drop(watched);
 
-        // Unlike ordinary block processing, this cannot be clamped to
-        // `max_blocks_per_scan`: a relocated transaction can land anywhere in
-        // `[from, to]`, so truncating the window silently drops survivors
-        // from the truncated part, and an unreported survivor gets retracted
-        // by the caller — the opposite error the ticket warns about. A reorg
-        // wide enough to make this expensive is already a reorg wide enough
-        // that a wrong retraction matters more than the extra RPC calls.
+        // The window cannot be *truncated* to `max_blocks_per_scan`: a
+        // relocated transaction can land anywhere in `[from, to]`, so dropping
+        // part of the range silently loses survivors, and an unreported
+        // survivor gets retracted by the caller — the opposite error, and the
+        // worse one.
+        //
+        // It is chunked instead. One `eth_getLogs` spanning an arbitrarily
+        // wide range is rejected outright by hosted providers ("more than
+        // 10000 results"), and because this path fails closed that rejection
+        // stalls the chain: `handle_reorg` errs, `process_block` errs,
+        // `last_block` never advances, and every subsequent notification
+        // retries the identical failing query. The monitor would stop
+        // detecting payments entirely until someone intervened. Chunking keeps
+        // the whole range covered while keeping each call inside what a
+        // provider will answer.
         let mut survived = Vec::new();
+        let chunk = self.config.max_blocks_per_scan.max(1);
 
         if !native_addresses.is_empty() {
             for block_number in from..=to {
@@ -198,9 +220,18 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         }
 
         if !erc20_addresses.is_empty() {
-            let filter = LogFilter::erc20_transfers_to(erc20_addresses).with_block_range(from, to);
-            let logs = self.source.get_logs(&filter).await?;
-            survived.extend(logs.into_iter().filter_map(|l| l.transaction_hash));
+            let mut start = from;
+            while start <= to {
+                let end = start.saturating_add(chunk - 1).min(to);
+                let filter = LogFilter::erc20_transfers_to(erc20_addresses.clone())
+                    .with_block_range(start, end);
+                let logs = self.source.get_logs(&filter).await?;
+                survived.extend(logs.into_iter().filter_map(|l| l.transaction_hash));
+                if end == to {
+                    break;
+                }
+                start = end + 1;
+            }
         }
 
         Ok(survived)

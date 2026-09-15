@@ -508,3 +508,101 @@ fn reorgable_payment(invoice_id: &InvoiceId, tx_hash: &str, block: u64) -> Payme
         rate_applied_at: None,
     }
 }
+
+/// A reorg must not make a refunded invoice payable again.
+///
+/// Before confirmed payments were reorg candidates, this loop only ever saw
+/// the monitor's `pending` map, which holds unconfirmed payments — so a
+/// settled invoice was out of reach. Now that a confirmed payment can be
+/// retracted, a reorg at or below its block reaches invoices the merchant has
+/// already closed out, and `InvoiceWriter::update_status` is a bare
+/// `UPDATE invoices SET status` that will happily walk one backwards.
+///
+/// The damage is concrete: a refunded invoice flipped to `Pending` is payable
+/// again, and the refund the merchant already sent from their own wallet is
+/// orphaned against it.
+///
+/// Goes red without the closed-status guard: the invoice comes back `Pending`.
+#[tokio::test]
+async fn a_reorg_does_not_reopen_a_refunded_invoice() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    let chain = ChainId::evm(1);
+
+    let invoice = InvoiceData {
+        id: invoice_id.clone(),
+        store_id: StoreId::new(),
+        amount: "1".to_string(),
+        currency: "ETH".to_string(),
+        amount_received: "1".to_string(),
+        // The merchant has already refunded this from their own wallet.
+        status: InvoiceStatus::Refunded,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        customer_email: None,
+        metadata: None,
+        extra: None,
+    };
+    InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
+
+    let payment = PaymentData {
+        id: Uuid::new_v4(),
+        invoice_id: invoice_id.clone(),
+        payment_option_id: None,
+        chain_id: chain.clone(),
+        asset_type: types::AssetType::Native,
+        amount: "1000000000000000000".to_string(),
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        tx_hash: format!("{:#x}", B256::repeat_byte(0x7a)),
+        block_number: Some(500),
+        detected_at: Utc::now(),
+        confirmed_at: Some(Utc::now()),
+        from_address: Some("0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a".to_string()),
+        reorged: false,
+        extra: None,
+        credited_amount: Some("1".to_string()),
+        rate_used: None,
+        rate_applied_at: None,
+    };
+    PaymentWriter::upsert(&*ds, &payment).await.unwrap();
+
+    consumer
+        .handle_reorg_detected(ReorgDetected {
+            chain_id: 1,
+            fork_block: 499,
+            old_hash: B256::repeat_byte(0x01),
+            new_hash: B256::repeat_byte(0x02),
+            depth: 2,
+            // Nothing survived the re-scan: the payment really is gone from
+            // the canonical chain.
+            survived_tx_hashes: vec![],
+            affected_invoices: vec![Uuid::parse_str(invoice_id.as_str()).unwrap()],
+            detected_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let after = InvoiceReader::get(&*ds, &invoice_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.status,
+        InvoiceStatus::Refunded,
+        "a refunded invoice must stay refunded; reopening it makes it payable \
+         again and orphans the refund the merchant already sent"
+    );
+
+    // The retraction itself is still recorded - the chain really did drop it.
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert!(
+        payments[0].reorged,
+        "the payment must still be marked reorged; only the status transition is suppressed"
+    );
+}

@@ -100,7 +100,9 @@ impl<
                 InvoiceStatus::Pending
             };
 
-            InvoiceWriter::update_status(&*self.data_service, &invoice_id, new_status).await?;
+            let new_status = self
+                .apply_reorg_status(&invoice_id, new_status, event.fork_block)
+                .await?;
 
             // Broadcast reorg-induced status change via WebSocket
             if let Some(ref ws) = self.ws_broadcast {
@@ -154,6 +156,62 @@ impl<
         let store_id = invoice.store_id.0;
         let payload = WebhookPayload::payment_reorged(&invoice, retracted);
         self.queue_payload(store_id, payload).await;
+    }
+    /// Write the post-reorg invoice status, unless the invoice is closed.
+    ///
+    /// Some statuses must not be walked backwards, and
+    /// `InvoiceWriter::update_status` will not stop it - it is a bare
+    /// `UPDATE invoices SET status` with no state guard.
+    ///
+    /// This did not matter while the reorg loop ran over the monitor's
+    /// `pending` map, which never held a confirmed payment. Making confirmed
+    /// payments reorg candidates puts settled invoices in reach: a reorg at or
+    /// below a refunded payment's block would otherwise flip that invoice to
+    /// `Pending` - payable again, with the refund the merchant already sent
+    /// from their own wallet orphaned against it. `Cancelled` has the same
+    /// shape, and an expired invoice must not reopen because a payment that
+    /// arrived for it was retracted.
+    ///
+    /// `Paid` is deliberately not treated as closed. Un-paying an invoice
+    /// whose payment the chain retracted is exactly what this handler exists
+    /// to do; that is a correction, not a reopening.
+    ///
+    /// Returns the status the invoice is actually left in, which the caller
+    /// reports onward.
+    async fn apply_reorg_status(
+        &self,
+        invoice_id: &InvoiceId,
+        computed: InvoiceStatus,
+        fork_block: u64,
+    ) -> Result<InvoiceStatus, EventConsumerError> {
+        let current = InvoiceReader::get(&*self.data_service, invoice_id)
+            .await?
+            .ok_or_else(|| {
+                EventConsumerError::InvalidData(format!("Invoice not found: {invoice_id}"))
+            })?;
+
+        let closed = matches!(
+            current.status,
+            InvoiceStatus::Refunded
+                | InvoiceStatus::Cancelled
+                | InvoiceStatus::Expired
+                | InvoiceStatus::LatePaid
+        );
+
+        if closed {
+            tracing::warn!(
+                invoice_id = %invoice_id,
+                status = ?current.status,
+                would_have_been = ?computed,
+                fork_block,
+                "reorg retracted a payment on a closed invoice; the payments are \
+                 marked reorged but the invoice status is left alone"
+            );
+            return Ok(current.status);
+        }
+
+        InvoiceWriter::update_status(&*self.data_service, invoice_id, computed).await?;
+        Ok(computed)
     }
 }
 
