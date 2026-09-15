@@ -122,7 +122,10 @@ jobs:
             exit 0
           fi
 
-          api() { curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${CLIENT_REPO}/$1"; }
+          # --max-time bounds a stalled/slow API call: without it, curl can hang
+          # past this job's timeout-minutes and get killed as a failed step -
+          # exactly the hard failure this check exists to avoid.
+          api() { curl -sf --max-time 10 -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${CLIENT_REPO}/$1"; }
 
           CURRENT_SHA="$(api branches/main | jq -r '.commit.sha // empty')"
           if [ -z "$CURRENT_SHA" ]; then
@@ -142,7 +145,7 @@ jobs:
           echo "distance: $AHEAD_BY commit(s) behind main"
 
           if [ "$AHEAD_BY" -gt "$MAX_COMMITS_BEHIND" ]; then
-            echo "::warning::ops/client-image.pin is $AHEAD_BY commits behind payserver-client main (pinned sha-$PIN_SHA, current $CURRENT_TAG) - past $MAX_COMMITS_BEHIND, e2e may no longer exercise what the client actually ships. Bump it: edit ops/client-image.pin to ghcr.io/randomcash/payserver-client:$CURRENT_TAG"
+            echo "::warning::ops/client-image.pin is $AHEAD_BY commits behind payserver-client main (pinned sha-$PIN_SHA, current $CURRENT_TAG) - past $MAX_COMMITS_BEHIND, e2e may no longer exercise what the client actually ships. Bump it: sed -i '\$ s|.*|ghcr.io/randomcash/payserver-client:$CURRENT_TAG|' ops/client-image.pin"
           fi
 
   test:
