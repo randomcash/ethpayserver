@@ -52,7 +52,9 @@ against your working copy, so a green build proves nothing about the pin.
 
 ## The gate
 
-Exactly what CI runs, and nothing more:
+Exactly what CI's `lint` and unit-test steps run — the `test` job also runs a
+separate, gating integration-test step against a real Postgres instance; see
+"End-to-end tests" below for that one:
 
 ```bash
 cargo fmt --all -- --check
