@@ -1,10 +1,84 @@
 # Merchant API Integration Guide
 
-ETHPayServer is a self-hosted Ethereum payment processor. This guide covers the
-full merchant integration lifecycle: authentication, store setup, invoice
-creation, payment monitoring, and webhook handling.
+This is the one page you need to integrate with ETHPayServer. It has no
+sequel — anything an integration needs (setup, invoices, webhooks, checkout,
+errors, a full working example) is below, not on another page.
+
+## What this is
+
+ETHPayServer is a self-hosted Ethereum and EVM-chain payment processor. It is
+**non-custodial**: a merchant registers an extended public key (an **xpub**,
+never a private key), and every payment address is derived from it. The
+server can compute addresses and watch the chain for payments to them, but it
+holds no spending key for any of them.
+
+Two consequences that follow directly from that, not incidentally:
+
+- **The server cannot move your funds.** It never sends a transaction that
+  spends merchant funds. Nothing in this API broadcasts a payout or a refund
+  — see [What ETHPayServer does not do](#10-what-ethpayserver-does-not-do).
+- **The server cannot recover your keys.** Only a public key is ever stored.
+  If you lose the wallet that holds the matching private key, nothing here
+  can get your funds back.
+
+`POST /wallets` and `POST /stores/{id}/payment-methods` both reject a
+pasted `xprv` outright — it fails the extended-key version-byte check before
+it is ever stored. That is enforced in code, not just convention: see
+[Add a Wallet](#add-a-wallet-hd-wallet-via-xpub).
 
 **Base URL:** `https://your-instance.example.com`
+
+## Machine-readable spec
+
+The full OpenAPI 3 schema is generated from the same request/response types
+the server actually serializes — it is never hand-maintained, so it cannot
+drift the way prose can. On any instance with `ENABLE_SWAGGER=true` (the
+server's own default; `docker/docker-compose.prod.yml` in this repo sets it
+to `false`, so check with your operator if you're integrating against
+someone else's deployment):
+
+- Interactive docs: `GET /swagger-ui`
+- Raw spec: `GET /api-docs/openapi.json`
+
+Prefer the spec over this page for exact field names, optionality, and
+types. This page exists for the things a schema cannot say: what order to
+call things in, what a webhook delivery guarantees, what the server refuses
+to do.
+
+## Critical constraints
+
+Read this section before writing any integration code — these are the
+places a plausible-looking guess is wrong.
+
+- **Amounts are strings, never JSON numbers, and two different kinds exist.**
+  - `Invoice.amount` and `Invoice.amount_received` are decimal strings in the
+    invoice's own `currency` (e.g. `"25.00"` for a `"USD"` invoice, `"0.1"`
+    for an asset-denominated `"ETH"` invoice) — human-readable, always,
+    regardless of whether `currency` is fiat or a crypto asset symbol. Never
+    send a pre-converted (smallest-unit) value as the request `amount`; a
+    same-asset invoice runs it through `convert_human_to_smallest_unit`
+    server-side (`server/src/api/invoices/crud.rs`). The upstream doc comment
+    on `CreateInvoiceRequest.amount` in `payserver-commons` was
+    self-contradictory on this exact point; it is fixed at the source
+    (`api-types/src/invoice.rs`), and the generated spec will carry the
+    correct description once this repo's commons pin moves to that revision.
+    Until then, trust this page and the linked server code over the spec's
+    field description for this one field.
+  - `PaymentOption.amount`, `Payment.amount`, and refund/payout `amount`
+    fields are integer strings in the asset's **smallest unit** (wei for
+    ETH, the ERC20's own base unit for a token) — divide by `10^decimals` to
+    get a display value, using integer or bignum arithmetic. Never parse
+    either kind as a float: float rounding on a value that settles a payment
+    is a bug, not a rounding error.
+- **The server never sends funds.** `POST /invoices/{id}/refund` and
+  `POST /stores/{id}/payouts` create ledger records only. See
+  [What ETHPayServer does not do](#10-what-ethpayserver-does-not-do).
+- **Chain IDs are [CAIP-2](https://standards.chainagnostic.org/CAIPs/caip-2)
+  strings** (`"eip155:1"`), not bare integers. See
+  [Chain identifiers](#chain-identifiers).
+- **Webhook delivery is at-least-once.** You will sometimes receive the same
+  logical event twice. Dedupe on `idempotency_key`, not `event_id`. See
+  [Webhooks](#6-webhooks).
 
 ---
 
@@ -14,11 +88,14 @@ creation, payment monitoring, and webhook handling.
 2. [Store Setup](#2-store-setup)
 3. [Payment Methods](#3-payment-methods)
 4. [Creating Invoices](#4-creating-invoices)
-5. [Monitoring Payments](#5-monitoring-payments)
+5. [Retrying Safely: the `Idempotency-Key` Header](#5-retrying-safely-the-idempotency-key-header)
 6. [Webhooks](#6-webhooks)
-7. [WebSocket (Real-Time)](#7-websocket-real-time)
-8. [Error Handling](#8-error-handling)
-9. [Full Integration Example](#9-full-integration-example)
+7. [Monitoring Payments](#7-monitoring-payments)
+8. [WebSocket (Real-Time)](#8-websocket-real-time)
+9. [Checkout: What the Customer Sees](#9-checkout-what-the-customer-sees)
+10. [What ETHPayServer Does Not Do](#10-what-ethpayserver-does-not-do)
+11. [Error Handling](#11-error-handling)
+12. [Full Integration Example](#12-full-integration-example)
 
 ---
 
@@ -146,6 +223,12 @@ Response (`201 Created`):
 }
 ```
 
+If `xpub` fails the extended-key version-byte check — including every
+`xprv`, which is a spending key and uses a different version byte on
+purpose — this returns `400 Bad Request` and nothing is stored. There is no
+way to register a spending key through this or any other endpoint; that is
+what makes the non-custodial guarantee true rather than aspirational.
+
 The first wallet you add becomes the primary. `PATCH /wallets/{wallet_id}` with
 `{"is_primary": true}` moves it later.
 
@@ -193,7 +276,7 @@ curl -X POST https://your-instance.example.com/stores/{store_id}/payment-methods
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "chain_id": 1,
+    "chain_id": "eip155:1",
     "asset_symbol": "ETH",
     "decimals": 18,
     "token_address": null,
@@ -205,11 +288,17 @@ Common configurations:
 
 | Asset | Chain | `chain_id` | `token_address` | `decimals` |
 |-------|-------|-----------|-----------------|-----------|
-| ETH | Ethereum | `1` | `null` | `18` |
-| ETH | Sepolia (testnet) | `11155111` | `null` | `18` |
-| USDC | Ethereum | `1` | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | `6` |
-| USDC | Polygon | `137` | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | `6` |
-| USDT | Ethereum | `1` | `0xdAC17F958D2ee523a2206206994597C13D831ec7` | `6` |
+| ETH | Ethereum | `eip155:1` | `null` | `18` |
+| ETH | Sepolia (testnet) | `eip155:11155111` | `null` | `18` |
+| USDC | Ethereum | `eip155:1` | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | `6` |
+| USDC | Polygon | `eip155:137` | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` | `6` |
+| USDT | Ethereum | `eip155:1` | `0xdAC17F958D2ee523a2206206994597C13D831ec7` | `6` |
+
+`xpub` here is optional: omit it to use whatever wallet the store already
+resolves to (its pinned wallet, or the account's primary). Pass it only to
+set a different key for this specific method than the store otherwise uses.
+When given, it is checked the same way as in
+[Add a Wallet](#add-a-wallet-hd-wallet-via-xpub) — an `xprv` is refused.
 
 ### List Payment Methods
 
@@ -267,8 +356,8 @@ Response (`201 Created`):
   "payment_options": [
     {
       "id": "po_d4e5f6a7-b8c9-0123-def4-567890123456",
-      "payment_method_id": "ETH-1",
-      "chain_id": 1,
+      "payment_method_id": "ETH@eip155:1",
+      "chain_id": "eip155:1",
       "asset_symbol": "ETH",
       "token_address": null,
       "decimals": 18,
@@ -280,6 +369,16 @@ Response (`201 Created`):
   ]
 }
 ```
+
+`amount` on the invoice itself is `"25.00"` — a decimal string in `USD`, the
+invoice's `currency`. `payment_options[].amount` is `"7142857142857142"` — an
+integer string of wei, the smallest unit of `ETH`. These are two different
+kinds of amount on the same object; see
+[Critical constraints](#critical-constraints).
+
+Send the customer to `payment_options[].payment_address` for the amount and
+asset they choose, or to the hosted checkout page — see
+[Checkout: What the Customer Sees](#9-checkout-what-the-customer-sees).
 
 **Parameters:**
 
@@ -332,62 +431,56 @@ curl -X POST https://your-instance.example.com/invoices/{invoice_id}/cancel \
 
 ---
 
-## 5. Monitoring Payments
+## 5. Retrying Safely: the `Idempotency-Key` Header
 
-### Poll Invoice Status
+Network errors and timeouts can make it impossible to know whether a request
+succeeded. This is a *client-supplied* key for safe retries of a mutation —
+distinct from the *server-supplied* `idempotency_key` on webhook deliveries
+covered in [Webhooks](#6-webhooks); the two solve different problems and
+neither substitutes for the other.
 
-```bash
-curl https://your-instance.example.com/invoices/{invoice_id}/status \
-  -H "Authorization: Bearer <token>"
+### How it works
+
+Include an `Idempotency-Key` header on the request:
+
+```
+POST /invoices HTTP/1.1
+Authorization: Bearer <token>
+Idempotency-Key: <unique-key>
+Content-Type: application/json
+
+{"store_id": "...", "currency": "USD", "amount": "100.00"}
 ```
 
-Response:
+The key can be any ASCII string up to 255 characters. A UUID or ULID is
+recommended.
 
-```json
-{
-  "id": "inv_c3d4e5f6-a7b8-9012-cdef-345678901234",
-  "status": "processing",
-  "amount": "25.00",
-  "amount_received": "25.00",
-  "currency": "USD",
-  "expires_at": "2026-04-01T12:20:00Z",
-  "payment_count": 1,
-  "confirmed_count": 0,
-  "is_paid": false,
-  "is_expired": false,
-  "payment_options": [...],
-  "payments": [
-    {
-      "id": "pay_e5f6a7b8-c9d0-1234-ef56-789012345678",
-      "chain_id": 1,
-      "invoice_id": "inv_c3d4e5f6-a7b8-9012-cdef-345678901234",
-      "tx_hash": "0xabc123def456...",
-      "amount": "7142857142857142",
-      "asset_symbol": "ETH",
-      "token_address": null,
-      "block_number": 19500000,
-      "from_address": "0x1234567890abcdef...",
-      "detected_at": "2026-04-01T12:08:30Z",
-      "confirmed_at": null,
-      "reorged": false
-    }
-  ]
-}
-```
+### Behaviour
 
-### List All Payments
+| Scenario | Response |
+|----------|----------|
+| First request with this key | Normal response (e.g. `201 Created`) |
+| Retry with same key + same body | Cached response replayed with `Idempotency-Replayed: true` header |
+| Retry with same key + different body | `409 Conflict` `{"error": "idempotency_key_reuse"}` |
+| Second request while first is still in-flight | `425 Too Early` `{"error": "idempotency_in_progress"}` |
+| Invalid key (empty, >255 chars, non-ASCII) | `400 Bad Request` `{"error": "idempotency_key_invalid"}` |
 
-```bash
-curl "https://your-instance.example.com/payments?store_id={store_id}&status=confirmed&limit=50" \
-  -H "Authorization: Bearer <token>"
-```
+### Details
 
-### Get a Single Payment
-
-```bash
-curl https://your-instance.example.com/payments/{payment_id} \
-  -H "Authorization: Bearer <token>"
-```
+- Keys are scoped per authentication credential (session or API key).
+- Only **successful** (2xx) responses are cached. Server errors can be retried
+  with the same key.
+- Cached responses expire after **24 hours** (configurable via
+  `IDEMPOTENCY_TTL_SECS` environment variable).
+- The `Idempotency-Key` header is optional. Requests without it are processed
+  normally with no caching.
+- Supported on every POST under `/invoices`: create (`POST /invoices`),
+  cancel (`POST /invoices/{id}/cancel`), and refund
+  (`POST /invoices/{id}/refund` — see
+  [What ETHPayServer does not do](#10-what-ethpayserver-does-not-do) for what
+  that endpoint actually does).
+- Maximum request body size is 1 MiB; larger POSTs with an idempotency
+  key return `413 Payload Too Large`.
 
 ---
 
@@ -547,20 +640,103 @@ function verifyWebhook(body, signature, secret) {
 ### Retry Policy
 
 Failed deliveries (non-2xx response or timeout) are retried with exponential
-backoff:
+backoff, up to a fixed number of attempts, then the delivery is dropped and
+recorded in the payment events log for later inspection. The exact delays and
+attempt count are `WebhookJob::RETRY_DELAYS_SECS` and `max_attempts` in
+`server/src/services/webhook/job.rs` — read those rather than this paragraph
+if you need to reason about worst-case delivery latency, since this prose
+copy is exactly the kind of restatement that drifts the moment the code
+changes.
 
-| Attempt | Delay |
-|---------|-------|
-| 1 | 10 seconds |
-| 2 | 30 seconds |
-| 3 | 90 seconds |
+### Webhook Delivery Idempotency
 
-After 3 failed attempts, the delivery is abandoned. The event is recorded in
-the payment events log for later inspection.
+**Webhook delivery is at-least-once**, not exactly-once. A delivery is
+retried on any non-2xx response or transport error, and a handler that
+re-runs after a restart can emit the same logical event again. You will
+sometimes receive an event twice. There is no ordering guarantee between
+events for different invoices.
+
+Dedupe on `idempotency_key` (also sent as the `X-Webhook-Idempotency-Key`
+header, so you can drop a repeat before parsing the body). It is derived from
+what happened -- the event type, the invoice, and the specific transition --
+so the same logical event always carries the same key. Record the keys you
+have processed and skip repeats.
+
+Do **not** dedupe on `event_id`: it identifies one queued delivery, and a
+re-emission of the same logical event carries a fresh one.
+
+This is a different mechanism from the `Idempotency-Key` *request* header in
+[section 5](#5-retrying-safely-the-idempotency-key-header) — that one is a
+key you send when creating an invoice; this one is a key the server sends you
+on a webhook delivery. Don't conflate them.
 
 ---
 
-## 7. WebSocket (Real-Time)
+## 7. Monitoring Payments
+
+### Poll Invoice Status
+
+```bash
+curl https://your-instance.example.com/invoices/{invoice_id}/status \
+  -H "Authorization: Bearer <token>"
+```
+
+Response:
+
+```json
+{
+  "id": "inv_c3d4e5f6-a7b8-9012-cdef-345678901234",
+  "status": "processing",
+  "amount": "25.00",
+  "amount_received": "25.00",
+  "currency": "USD",
+  "expires_at": "2026-04-01T12:20:00Z",
+  "payment_count": 1,
+  "confirmed_count": 0,
+  "is_paid": false,
+  "is_expired": false,
+  "payment_options": [...],
+  "payments": [
+    {
+      "id": "pay_e5f6a7b8-c9d0-1234-ef56-789012345678",
+      "chain_id": "eip155:1",
+      "invoice_id": "inv_c3d4e5f6-a7b8-9012-cdef-345678901234",
+      "tx_hash": "0xabc123def456...",
+      "amount": "7142857142857142",
+      "asset_symbol": "ETH",
+      "token_address": null,
+      "block_number": 19500000,
+      "from_address": "0x1234567890abcdef...",
+      "detected_at": "2026-04-01T12:08:30Z",
+      "confirmed_at": null,
+      "reorged": false
+    }
+  ]
+}
+```
+
+Webhooks are strictly preferred over polling for anything that runs on a
+schedule: polling costs a request per check and still lags real-time,
+whereas a webhook fires the moment the state changes. Use polling for a
+one-off status check, not as the primary mechanism.
+
+### List All Payments
+
+```bash
+curl "https://your-instance.example.com/payments?store_id={store_id}&status=confirmed&limit=50" \
+  -H "Authorization: Bearer <token>"
+```
+
+### Get a Single Payment
+
+```bash
+curl https://your-instance.example.com/payments/{payment_id} \
+  -H "Authorization: Bearer <token>"
+```
+
+---
+
+## 8. WebSocket (Real-Time)
 
 For real-time updates without polling, connect via WebSocket.
 
@@ -631,7 +807,72 @@ ws.onmessage = (event) => {
 
 ---
 
-## 8. Error Handling
+## 9. Checkout: What the Customer Sees
+
+You are not required to build a payment UI. The companion
+[payserver-client](https://github.com/randomcash/payserver-client) ships a
+hosted checkout page at `/checkout/{invoice_id}`; redirect your customer
+there. Its reference nginx setup proxies that page's data calls to the API's
+own `GET /api/checkout/{invoice_id}`, which strips to `GET /checkout/{invoice_id}`
+on the bare ethpayserver server — adjust the prefix to match how your
+deployment fronts the two services.
+
+This endpoint is public and needs no authentication — an invoice ID is
+enough to view it, and it exposes payment-relevant fields only (no store
+internals, no merchant account data). Call it directly if you'd rather build
+your own checkout UI instead of using the hosted page.
+
+On this page the customer sees:
+
+- **A chain/asset selector**, when the invoice has more than one active
+  payment option (e.g. pay in ETH or in USDC) — one tab per option.
+- **A QR code**, encoded as an [EIP-681](https://eips.ethereum.org/EIPS/eip-681)
+  payment request URI rather than a bare address, so a wallet that scans it
+  prefills the chain, the address, and the exact amount.
+- **The payment address and amount**, in the selected asset, with a
+  copy-to-clipboard control for wallets that don't scan.
+- **A countdown timer** to the invoice's `expires_at`.
+- Live status updates over the same WebSocket described in
+  [section 8](#8-websocket-real-time) — the page updates itself when a
+  payment is detected and confirmed, with no reload.
+
+If you build your own checkout UI instead of using the hosted page, the
+`payment_options` array from [Creating Invoices](#4-creating-invoices) or
+[Monitoring Payments](#7-monitoring-payments) has everything you need to
+reproduce it: address, amount, asset, chain.
+
+---
+
+## 10. What ETHPayServer Does Not Do
+
+Restated plainly, because a model asked to fill a gap will otherwise invent
+a plausible-sounding answer:
+
+- **No custody, ever.** The server never holds a spending key for any
+  merchant funds. See [What this is](#what-this-is).
+- **No refunds are sent.** `POST /invoices/{invoice_id}/refund` validates the
+  request (invoice is paid, amount doesn't exceed what's left after prior
+  refunds, a destination address is known) and writes a `Refund` record with
+  status `Pending`. **That is all it does.** No transaction is signed or
+  broadcast — the server holds no spending key to sign one with. The record
+  exists so you have somewhere to track a refund you send yourself, from
+  whatever wallet actually holds the funds. Refunds are the merchant's job.
+- **No payouts are sent.** `POST /stores/{store_id}/payouts` is the same
+  shape: it validates which confirmed, unclaimed invoice payments the
+  request covers and writes a `Payout` record with status `Pending`. It does
+  not sweep funds anywhere. Moving the funds it describes is, again, on you.
+- **No automatic settlement or sweeping.** There is no background process
+  that moves confirmed payments out of payment addresses. Funds sit at the
+  addresses they were paid to until you spend them with the key that
+  controls that xpub.
+
+If your integration needs refunds or payouts to actually move money,
+build that against your own wallet infrastructure — this API's refund and
+payout endpoints are bookkeeping for that process, not a substitute for it.
+
+---
+
+## 11. Error Handling
 
 ### HTTP Status Codes
 
@@ -644,7 +885,10 @@ ws.onmessage = (event) => {
 | `401` | Missing or invalid authentication |
 | `403` | Insufficient permissions |
 | `404` | Resource not found |
-| `422` | Validation passed but business logic rejected |
+| `409` | Conflict (e.g. duplicate xpub, idempotency key reuse) |
+| `413` | Request body too large |
+| `422` | Well-formed JSON body, but a field fails validation while deserializing — e.g. a `chain_id` that isn't valid CAIP-2 in a `POST /stores/{id}/payment-methods` body. This is axum's default response for that class of error. A malformed `chain_id` in a URL path segment (e.g. `GET /invoices/by-tx/{chain_id}/{tx_hash}`) is parsed explicitly by the handler instead and returns `400`. |
+| `425` | Idempotent request already in flight |
 | `500` | Internal server error |
 
 ### Common Error Patterns
@@ -677,26 +921,17 @@ HTTP/1.1 400 Bad Request
 
 ### Idempotency
 
-**Webhook delivery is at-least-once.** A delivery is retried on any non-2xx
-response or transport error (1m, 5m, 30m, 2h, 12h, 24h -- about 38.6 hours in
-total, then the job is dropped), and a handler that re-runs after a restart can
-emit the same logical event again. You will sometimes receive an event twice.
-There is no ordering guarantee between events for different invoices.
+See [section 5](#5-retrying-safely-the-idempotency-key-header) for safe
+request retries and [Webhook Delivery Idempotency](#webhook-delivery-idempotency)
+for deduping webhook deliveries — they are separate mechanisms, covered in
+full where they're most relevant rather than restated here.
 
-Dedupe on `idempotency_key` (also sent as the `X-Webhook-Idempotency-Key`
-header, so you can drop a repeat before parsing the body). It is derived from
-what happened -- the event type, the invoice, and the specific transition --
-so the same logical event always carries the same key. Record the keys you
-have processed and skip repeats.
-
-Do **not** dedupe on `event_id`: it identifies one queued delivery, and a
-re-emission of the same logical event carries a fresh one.
-
-Invoice IDs are stable and can be used as idempotency keys for status polling.
+Invoice IDs are themselves stable and can be used as your own idempotency
+keys for status polling.
 
 ---
 
-## 9. Full Integration Example
+## 12. Full Integration Example
 
 This example walks through a complete payment flow in Python.
 
@@ -746,7 +981,7 @@ app = Flask(__name__)
 def handle_webhook():
     body = request.get_data()
     signature = request.headers.get("X-Webhook-Signature", "")
-    event_id = request.headers.get("X-Webhook-Id", "")
+    idempotency_key = request.headers.get("X-Webhook-Idempotency-Key", "")
 
     # Verify signature
     expected = "sha256=" + hmac.new(
@@ -754,6 +989,12 @@ def handle_webhook():
     ).hexdigest()
     if not hmac.compare_digest(expected, signature):
         return "Invalid signature", 401
+
+    # Dedupe on idempotency_key before doing anything else (see section 6) --
+    # `already_processed` and `mark_processed` are your own storage, not part
+    # of this API.
+    if already_processed(idempotency_key):
+        return "OK", 200
 
     payload = json.loads(body)
     event_type = payload["event_type"]
@@ -767,6 +1008,7 @@ def handle_webhook():
         print(f"Invoice {payload['invoice_id']} expired")
         # Handle expiration (e.g., release reserved inventory)
 
+    mark_processed(idempotency_key)
     return "OK", 200
 ```
 
@@ -785,12 +1027,6 @@ Store members have role-based permissions:
 | `canmodifystoreusers` | Add, update, or remove store members |
 
 ---
-
-## OpenAPI / Swagger
-
-Interactive API documentation is available at `/swagger-ui` when enabled on
-your instance. The OpenAPI spec is served at `/api-docs/openapi.json`.
-
 
 ## Chain identifiers
 
