@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
-use auth::{Store, StoreId, UserId};
+use auth::{ServerSettings, Store, StoreId, UserId};
 use chrono::Utc;
 use data_service::StorePaymentMethod;
 use types::ChainId;
@@ -140,6 +140,487 @@ fn test_payment_method_response_erc20() {
     assert_eq!(response.asset_symbol, "USDC");
     assert_eq!(response.token_address, Some(token_addr));
     assert!(!response.enabled);
+}
+
+// =========================================================================
+// chain_has_no_adapter (RCS-281)
+// =========================================================================
+
+/// A settings row enabling only mainnet Ethereum and Polygon - no Tron
+/// adapter registered, and notably no Sepolia either (see the
+/// `an_unconfigured_server_still_accepts_evm` test below for why that
+/// matters).
+fn evm_only_settings() -> ServerSettings {
+    ServerSettings {
+        default_confirmations: 3,
+        invoice_expiry_minutes: 60,
+        rate_limit_rpm: 100,
+        enabled_chain_ids: [1u64, 137].into_iter().map(ChainId::evm).collect(),
+    }
+}
+
+/// The hole this ticket closes: a chain with no adapter (here, Tron) must be
+/// refused. Without this predicate returning `true` here, `tron:728126428`
+/// sails through create/update, gets a `0x...` address from the EVM deriver
+/// regardless of namespace, and is never watched - see `derive_payment_address`
+/// and `eip155_for_watch`.
+#[test]
+fn a_chain_with_no_adapter_is_refused() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    assert!(chain_has_no_adapter(
+        &tron,
+        Some(&evm_only_settings()),
+        ChainCheckContext::New
+    ));
+}
+
+/// The predicate must not also catch a chain the server does serve - a gate
+/// that refused everything would pass the test above trivially.
+#[test]
+fn a_registered_chain_is_not_refused() {
+    let settings = ServerSettings {
+        enabled_chain_ids: [1u64, 11_155_111].into_iter().map(ChainId::evm).collect(),
+        ..evm_only_settings()
+    };
+    let sepolia = ChainId::parse("eip155:11155111").unwrap();
+    assert!(!chain_has_no_adapter(
+        &sepolia,
+        Some(&settings),
+        ChainCheckContext::New
+    ));
+}
+
+/// This is deliberately not "is it eip155": the predicate is membership in
+/// the operator's registered set, not a namespace check. So the day a Tron
+/// adapter exists, it is satisfied by the operator adding `tron:...` to
+/// `enabled_chain_ids`, not by editing this function - an eip155 chain that
+/// was never enabled is refused just the same as Tron is today.
+#[test]
+fn an_eip155_chain_outside_the_enabled_set_is_still_refused() {
+    let untracked = ChainId::parse("eip155:999999").unwrap();
+    assert!(chain_has_no_adapter(
+        &untracked,
+        Some(&evm_only_settings()),
+        ChainCheckContext::New
+    ));
+}
+
+// -------------------------------------------------------------------------
+// `settings: None`, `ChainCheckContext::New` - a request introducing a chain
+// id (`create`'s `req.chain_id`). Must not guess which environment this
+// binary is running as: testnet's one real chain stays accepted, but
+// nothing wider does, so an unconfigured mainnet deployment refuses
+// everything rather than mistake some other environment's chain for its own.
+// -------------------------------------------------------------------------
+
+/// `None` means nobody has ever written a `server_settings` row - true of
+/// the live testnet database as of this ticket. Falling back to
+/// `ServerSettings::default()` there (a Rust-side, EVM-mainnet chain list)
+/// would refuse `eip155:11155111` too, since Sepolia isn't in it - turning
+/// this ticket's fix into an outage for the only chain testnet actually
+/// serves. `evm::testnet::get_testnet_config` is the fallback used instead:
+/// a real testnet chain is accepted when nothing has been explicitly
+/// configured yet (see `an_unconfigured_server_refuses_a_mainnet_evm_chain_for_a_new_request`
+/// below for why mainnet chains are deliberately excluded from this
+/// fallback).
+#[test]
+fn an_unconfigured_server_still_accepts_evm_for_a_new_request() {
+    let sepolia = ChainId::parse("eip155:11155111").unwrap();
+    assert!(!chain_has_no_adapter(
+        &sepolia,
+        None,
+        ChainCheckContext::New
+    ));
+}
+
+/// The unconfigured fallback is EVM-testnet-only, not "accept anything" -
+/// Tron must still be refused even before an operator has written a settings
+/// row.
+#[test]
+fn an_unconfigured_server_still_refuses_tron_for_a_new_request() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    assert!(chain_has_no_adapter(&tron, None, ChainCheckContext::New));
+}
+
+/// The bug an earlier version of this predicate reopened: falling back to
+/// the full compiled chain registry (mainnet and testnet) accepts any
+/// mainnet chain id the binary recognizes, not just the testnet chains this
+/// (Sepolia-only) deployment actually serves. A merchant on testnet could
+/// register `eip155:1` - Ethereum mainnet - get quoted a `0x...` address,
+/// and have nothing on the testnet box watching it: the exact hole this
+/// ticket exists to close, reopened for any recognized mainnet chain instead
+/// of only Tron. Mainnet chains must be refused here; an operator turns one
+/// on explicitly via `enabled_chain_ids`, same as Tron would be. Ablated
+/// locally (swapped the fallback back to `evm::get_any_chain_config`) and
+/// watched this test go red before restoring the testnet-scoped fix.
+#[test]
+fn an_unconfigured_server_refuses_a_mainnet_evm_chain_for_a_new_request() {
+    let ethereum_mainnet = ChainId::parse("eip155:1").unwrap();
+    assert!(chain_has_no_adapter(
+        &ethereum_mainnet,
+        None,
+        ChainCheckContext::New
+    ));
+}
+
+/// The bug in an earlier version of this predicate: falling back to
+/// `is_evm()` accepts ANY eip155 number, not just ones this codebase has a
+/// config for. `eip155:999999` names no real chain - `evm::testnet::get_testnet_config`
+/// returns `None` for it - so it must still be refused even with no settings
+/// row, exactly like Tron. Ablated locally (swapped the fallback back to
+/// `is_evm()`) and watched this test go red before restoring the fix.
+#[test]
+fn an_unconfigured_server_refuses_an_unregistered_eip155_id_for_a_new_request() {
+    let untracked = ChainId::parse("eip155:999999").unwrap();
+    assert!(chain_has_no_adapter(
+        &untracked,
+        None,
+        ChainCheckContext::New
+    ));
+}
+
+// -------------------------------------------------------------------------
+// `settings: None`, `ChainCheckContext::Existing` - a chain already stored
+// on a row (`update`'s `existing.chain_id`). Never a value the request
+// chose, so there is no environment to guess wrong; the only thing left to
+// catch is a namespace with no adapter anywhere (Tron).
+// -------------------------------------------------------------------------
+
+/// The bug this context split fixes: with the `New`-style testnet-only
+/// fallback applied here too, an unconfigured *mainnet* deployment would
+/// 400 on every update to an already-working `eip155:1` row - re-enabling
+/// it, rotating its xpub - the moment this ticket shipped, since mainnet
+/// chain ids are never in `evm::testnet`'s registry. `Existing` uses the
+/// full compiled registry instead, so a stored chain this codebase actually
+/// has adapter code for is left alone. Ablated locally (used
+/// `ChainCheckContext::New` for this call site too) and watched this test go
+/// red before restoring the fix.
+#[test]
+fn an_unconfigured_server_leaves_an_existing_mainnet_evm_chain_alone() {
+    let ethereum_mainnet = ChainId::parse("eip155:1").unwrap();
+    assert!(!chain_has_no_adapter(
+        &ethereum_mainnet,
+        None,
+        ChainCheckContext::Existing
+    ));
+}
+
+/// Same widening, still refuses what has no adapter anywhere - Tron isn't in
+/// the compiled registry under any name, so an unconfigured deployment still
+/// refuses to leave a legacy Tron row alone.
+#[test]
+fn an_unconfigured_server_still_refuses_an_existing_tron_chain() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    assert!(chain_has_no_adapter(
+        &tron,
+        None,
+        ChainCheckContext::Existing
+    ));
+}
+
+/// A testnet chain already stored on a row must still pass under `Existing`:
+/// widening the fallback for updates must not narrow it for the chain `New`
+/// already accepted.
+#[test]
+fn an_unconfigured_server_leaves_an_existing_testnet_chain_alone() {
+    let sepolia = ChainId::parse("eip155:11155111").unwrap();
+    assert!(!chain_has_no_adapter(
+        &sepolia,
+        None,
+        ChainCheckContext::Existing
+    ));
+}
+
+/// An invented eip155 number is still refused under `Existing` too - the
+/// compiled registry doesn't recognize it any more than `evm::testnet` did.
+#[test]
+fn an_unconfigured_server_refuses_an_unregistered_eip155_id_for_an_existing_chain() {
+    let untracked = ChainId::parse("eip155:999999").unwrap();
+    assert!(chain_has_no_adapter(
+        &untracked,
+        None,
+        ChainCheckContext::Existing
+    ));
+}
+
+/// The ticket's example, `tron:728126428`, happens to be Tron's real
+/// EVM-compatible chain id - the same number as a genuine `eip155` chain
+/// somewhere. `chain_has_no_adapter`'s `None` branch only feeds a namespace's
+/// numeric reference to `evm::testnet::get_testnet_config` after `evm_chain_id()`
+/// checks `is_evm()` (`types::ChainId::evm_chain_id`, see its doc comment:
+/// "`None` for any other namespace ... whose reference is also numeric but is
+/// emphatically not an EIP-155 id"), so the collision can't leak `tron:...`
+/// through as if it were the eip155 chain of the same number - confirmed
+/// directly here rather than only inferred from that doc comment.
+#[test]
+fn evm_chain_id_does_not_leak_across_the_tron_eip155_number_collision() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    assert_eq!(tron.evm_chain_id(), None);
+}
+
+// =========================================================================
+// unsupported_chain_error (RCS-281)
+// =========================================================================
+
+/// The wiring the predicate alone can't prove: the 400 the handlers actually
+/// send names the chain and says `unsupported_chain`, not just "some 400".
+/// A refusal that 400s for the wrong reason (or a wrong field name) would
+/// pass every `chain_has_no_adapter` test above and still fail a merchant
+/// trying to read the error.
+#[tokio::test]
+async fn unsupported_chain_error_names_the_chain() {
+    let tron = ChainId::parse("tron:728126428").unwrap();
+    let (status, body) = body_of(unsupported_chain_error(&tron)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body,
+        "unsupported_chain: no adapter is registered for tron:728126428"
+    );
+}
+
+// =========================================================================
+// update_should_check_chain (RCS-281)
+// =========================================================================
+
+/// Disabling a legacy bad row must always be reachable through the API -
+/// otherwise the only remediation left is direct database surgery.
+#[test]
+fn disabling_skips_the_chain_check() {
+    assert!(!update_should_check_chain(Some(false)));
+}
+
+/// Re-enabling a legacy bad row is still refused - only turning one off is
+/// safe.
+#[test]
+fn enabling_still_checks_the_chain() {
+    assert!(update_should_check_chain(Some(true)));
+}
+
+/// An update that doesn't touch `enabled` at all (e.g. rotating the xpub)
+/// must still be checked - omitting the field is not the same as disabling.
+#[test]
+fn an_unspecified_enabled_still_checks_the_chain() {
+    assert!(update_should_check_chain(None));
+}
+
+// =========================================================================
+// create_payment_method - through the handler, against a real database
+// (RCS-281)
+//
+// Every test above calls `chain_has_no_adapter` or `update_should_check_chain`
+// directly. None of them would notice if `create_payment_method` itself
+// stopped calling the predicate, checked the wrong field, or placed the check
+// after a different early return - the exact "guard written but never
+// exercised" gap three review passes on this ticket flagged. These go through
+// the handler function itself, against the real `rcs-test-postgres` fixture
+// (see `DATABASE_URL` below), so that class of bug actually fails a test.
+//
+// `#[ignore]`d and skipped with no `DATABASE_URL`, matching every other
+// database-backed test in this codebase (`data-service/src/postgres/
+// integration_tests/*`) - the `cargo test --workspace` gate does not touch
+// this container.
+//
+// `AuthenticatedUser` is constructed by hand rather than produced by
+// `FromRequestParts`: `require_store_settings_permission` returns `Ok(())`
+// for `Role::ServerAdmin` before it touches the database (see
+// `stores/mod.rs`), so no session and no store-membership row is needed to
+// reach the code under test. `NoAuthSessionService` only exists to give
+// `PgAppState<A>` a concrete `A` - `create_payment_method` never calls it.
+//
+// Ablation performed locally against this same fixture before writing this
+// comment: with the `if chain_has_no_adapter(...)` block in
+// `create_payment_method` deleted, `a_tron_payment_method_is_refused_by_the_
+// handler` failed with `Ok(StatusCode::CREATED, ...)` instead of the expected
+// `Err`, i.e. tron:728126428 was created - proving this test is sensitive to
+// the gate and not to some unrelated 400. The block was then restored.
+// =========================================================================
+
+use crate::api::extractors::AuthenticatedUser;
+use crate::state::PgAppState;
+use auth::{Role, SessionId, SessionService, UserInfo};
+use axum::Json;
+use axum::extract::{Path, State};
+
+/// Exists only to give `PgAppState<A>` a concrete auth-service type; never
+/// called because `AuthenticatedUser` below is constructed directly.
+struct NoAuthSessionService;
+
+#[async_trait::async_trait]
+impl SessionService for NoAuthSessionService {
+    async fn validate_session(
+        &self,
+        _session_id: SessionId,
+    ) -> auth::Result<(UserInfo, auth::Session)> {
+        Err(auth::AuthError::InvalidCredentials)
+    }
+
+    async fn logout(&self, _session_id: SessionId) -> auth::Result<()> {
+        Err(auth::AuthError::InvalidCredentials)
+    }
+
+    async fn logout_all(&self, _session_id: SessionId) -> auth::Result<()> {
+        Err(auth::AuthError::InvalidCredentials)
+    }
+
+    async fn cleanup_stale_sessions(&self) -> auth::Result<u64> {
+        Err(auth::AuthError::InvalidCredentials)
+    }
+}
+
+async fn handler_test_service() -> Option<data_service::PgDataService> {
+    let database_url = std::env::var("DATABASE_URL").ok()?;
+    data_service::PgDataService::connect(&database_url)
+        .await
+        .ok()
+}
+
+fn admin_user(user_id: Uuid) -> AuthenticatedUser {
+    AuthenticatedUser(UserInfo {
+        id: UserId(user_id),
+        email: None,
+        primary_wallet_address: None,
+        created_at: Utc::now(),
+        last_login_at: None,
+        role: Role::ServerAdmin,
+    })
+}
+
+async fn seed_handler_test_user(pool: &sqlx::PgPool) -> Uuid {
+    let user_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, kdf_params, encrypted_symmetric_key, \
+         recovery_verification_hash, kdf_salt_identifier) \
+         VALUES ($1, '{}'::jsonb, '{}'::jsonb, 'h', 'passkey:' || $1::text)",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .expect("seed user");
+    user_id
+}
+
+async fn seed_handler_test_store(pool: &sqlx::PgPool, owner: Uuid) -> Uuid {
+    let store_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO stores (id, name, owner_id) VALUES ($1, $2, $3)")
+        .bind(store_id)
+        .bind(format!("store-{store_id}"))
+        .bind(owner)
+        .execute(pool)
+        .await
+        .expect("seed store");
+    store_id
+}
+
+/// So the create call's xpub-less branch resolves to something, without a
+/// real BIP-32 key: the `wallets.xpub` column is text the repository never
+/// parses (see `data-service/src/postgres/integration_tests/wallet.rs`'s
+/// `unique_xpub`) - only `create_payment_method`'s own `validate_xpub` check
+/// parses the request body's xpub, and this bypasses that by seeding the
+/// store's resolution directly. Unique per call so repeated runs against the
+/// shared fixture don't collide on the account-uniqueness constraint that
+/// `wallet_for_store_xpub` enforces on this same table.
+async fn seed_handler_test_primary_wallet(pool: &sqlx::PgPool, owner: Uuid) {
+    sqlx::query("INSERT INTO wallets (id, user_id, xpub, is_primary) VALUES ($1, $2, $3, true)")
+        .bind(Uuid::new_v4())
+        .bind(owner)
+        .bind(format!("xpub-test-{}", Uuid::new_v4()))
+        .execute(pool)
+        .await
+        .expect("seed wallet");
+}
+
+fn handler_test_state(service: data_service::PgDataService) -> PgAppState<NoAuthSessionService> {
+    PgAppState::new(
+        std::sync::Arc::new(service),
+        std::sync::Arc::new(NoAuthSessionService),
+        None,
+        std::sync::Arc::new(rates::NoOpRateProvider),
+    )
+}
+
+/// BIP-32 test vector 1's account xpub - real, valid, and reused from
+/// `evm::wallet`'s own `an_xprv_is_never_accepted_as_an_xpub` test so this
+/// file needs no key material of its own. Passed explicitly so the request
+/// takes the "pin to this key" branch of `create_payment_method` rather than
+/// the "resolve the store's existing wallet" branch - the chain gate must
+/// refuse tron before either branch runs.
+const HANDLER_TEST_XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+
+/// Test 1 of the ticket: `tron:728126428` must 400, naming the chain.
+///
+/// Ablation: with the `if chain_has_no_adapter(...)` block in
+/// `create_payment_method` replaced by `let _ = chain_has_no_adapter(...);`,
+/// this test's `expect_err` panicked with `Ok((StatusCode::CREATED, ..))` -
+/// tron:728126428 was created, pinned to `HANDLER_TEST_XPUB` via the same
+/// `wallet_for_store_xpub` path Sepolia uses below. Restored before
+/// committing. That is the "hole" this ticket closes: once created, an
+/// invoice against this method would derive a `0x...` address from that xpub
+/// regardless of namespace (`server/src/api/invoices/payment_options.rs`'s
+/// `derive_payment_address` builds an `evm::XpubDeriver` unconditionally) and
+/// nothing would ever watch it.
+#[tokio::test]
+#[ignore]
+async fn a_tron_payment_method_is_refused_by_the_handler() {
+    let Some(service) = handler_test_service().await else {
+        return;
+    };
+    let pool = service.pool().clone();
+    let user_id = seed_handler_test_user(&pool).await;
+    let store_id = seed_handler_test_store(&pool, user_id).await;
+    let state = handler_test_state(service);
+
+    let req = CreatePaymentMethodRequest {
+        chain_id: ChainId::parse("tron:728126428").unwrap(),
+        token_address: None,
+        asset_symbol: "USDT".to_string(),
+        decimals: 6,
+        xpub: Some(HANDLER_TEST_XPUB.to_string()),
+    };
+
+    let err = create_payment_method(admin_user(user_id), State(state), Path(store_id), Json(req))
+        .await
+        .expect_err("tron has no adapter and must be refused, not created");
+
+    let (status, body) = body_of(err).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("unsupported_chain"), "wrong reason: {body}");
+    assert!(
+        body.contains("tron:728126428"),
+        "the error must name the refused chain: {body}"
+    );
+}
+
+/// Test 2 of the ticket: `eip155:11155111` (Sepolia) is unchanged - still 201.
+#[tokio::test]
+#[ignore]
+async fn a_sepolia_payment_method_is_still_created_by_the_handler() {
+    let Some(service) = handler_test_service().await else {
+        return;
+    };
+    let pool = service.pool().clone();
+    let user_id = seed_handler_test_user(&pool).await;
+    let store_id = seed_handler_test_store(&pool, user_id).await;
+    seed_handler_test_primary_wallet(&pool, user_id).await;
+    let state = handler_test_state(service);
+
+    let req = CreatePaymentMethodRequest {
+        chain_id: ChainId::parse("eip155:11155111").unwrap(),
+        token_address: None,
+        asset_symbol: "ETH".to_string(),
+        decimals: 18,
+        xpub: None,
+    };
+
+    let (status, response) =
+        create_payment_method(admin_user(user_id), State(state), Path(store_id), Json(req))
+            .await
+            .expect("sepolia has a compiled-in adapter and must still be accepted");
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        response.0.chain_id,
+        ChainId::parse("eip155:11155111").unwrap()
+    );
 }
 
 // =========================================================================
