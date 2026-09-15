@@ -383,6 +383,12 @@ where
         .route("/", get(rates::get_rate::<A>))
         .with_state(state.clone());
 
+    // Plugin static pages. Same route for merchant and admin views - the
+    // handler resolves the viewer from the authenticated identity.
+    let plugin_routes = Router::new()
+        .route("/{id}/pages/{*path}", get(plugins::get_page::<A>))
+        .with_state(state.clone());
+
     // Dashboard endpoint
     let dashboard_routes = Router::new()
         .route("/stats", get(dashboard::get_stats::<A>))
@@ -471,6 +477,7 @@ where
         .nest("/payments", payment_routes)
         .merge(ws_route)
         .nest("/rates", rates_routes)
+        .nest("/plugins", plugin_routes)
         .nest("/dashboard", dashboard_routes)
         .nest("/users", user_routes)
         .nest("/admin", admin_routes)

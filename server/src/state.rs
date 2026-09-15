@@ -15,6 +15,7 @@ use rates::RateProvider;
 use crate::api::ws::WsBroadcast;
 use crate::services::email::EmailSender;
 use crate::services::plugins::InvoiceCreationFilter;
+use crate::services::plugins::PageHost;
 use crate::services::webhook::WebhookSink;
 
 /// Read-only data service trait for the application.
@@ -111,6 +112,13 @@ pub struct AppState<D, A, E> {
     /// than by the field's presence - it must fail loudly on a no-op sender,
     /// where a receipt would rather stay silent.
     pub email_sender: Arc<dyn EmailSender>,
+    /// The plugin page host for `GET /plugins/{id}/pages/{path}`.
+    ///
+    /// Starts empty and stays empty in production until a wasmtime runtime
+    /// exists to register a real [`PageRenderer`](crate::services::plugins::PageRenderer) -
+    /// see that module's docs. Every request 404s until then, which is
+    /// correct: there is no plugin code to invoke yet.
+    pub plugin_pages: Arc<PageHost>,
 }
 
 // Manual Clone impl since we only need Arc::clone
@@ -127,6 +135,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             webauthn: self.webauthn.clone(),
             invoice_creation_filters: self.invoice_creation_filters.clone(),
             email_sender: Arc::clone(&self.email_sender),
+            plugin_pages: Arc::clone(&self.plugin_pages),
         }
     }
 }
@@ -151,6 +160,7 @@ impl<D, A, E> AppState<D, A, E> {
             webauthn: None,
             invoice_creation_filters: Vec::new(),
             email_sender,
+            plugin_pages: Arc::new(PageHost::new()),
         }
     }
 }
