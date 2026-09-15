@@ -4,4 +4,4 @@
 -- live on payment_options. Left in place, it invites the next reader to
 -- assume an invoice has a chain and build on a column that has always been
 -- NULL.
-ALTER TABLE invoices DROP COLUMN IF EXISTS chain_id;
+ALTER TABLE invoices DROP COLUMN chain_id;
