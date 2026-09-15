@@ -1,4 +1,4 @@
-//! Capability 3 (RCS-300): create an invoice, on the instance's own store
+//! Capability 3: create an invoice, on the instance's own store
 //! only.
 //!
 //! SENSITIVE: this is a write to the money path, granted to a plugin. The
@@ -107,8 +107,8 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// The host side of the plugin API's write capability, bound to one
 /// instance's own store.
 ///
-/// Not yet wired to a plugin runtime - RCS-269 provides the wasmtime
-/// dispatch this will eventually sit behind. This is the host-side
+/// Not yet wired to a plugin runtime - the wasmtime dispatch this will
+/// eventually sit behind does not call it yet. This is the host-side
 /// implementation the interface can be, and is, written and tested against
 /// first.
 pub struct PluginHostApi<A> {
@@ -302,7 +302,7 @@ mod tests {
         PluginHostApi::new(state, own_store)
     }
 
-    /// RCS-300 review finding, fixed: the earlier tests here only exercised
+    /// Review finding, fixed: the earlier tests here only exercised
     /// the isolated `enforce_own_store` helper. Nothing called
     /// `HostInvoiceIssuer::invoice_create` itself - the method a plugin
     /// actually invokes - so a regression that dropped the `?`, ignored the

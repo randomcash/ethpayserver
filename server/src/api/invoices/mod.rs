@@ -31,7 +31,7 @@ pub(crate) use csv_export::{csv_escape_field, csv_row};
 #[cfg(test)]
 pub(crate) use lookup::is_valid_tx_hash;
 
-// Reused by the plugin host API's own-store invoice creation (RCS-300), so a
+// Reused by the plugin host API's own-store invoice creation, so a
 // plugin-issued invoice derives its address exactly the way this endpoint
 // does rather than through a second implementation that could drift from it.
 pub(crate) use payment_options::derive_payment_options;

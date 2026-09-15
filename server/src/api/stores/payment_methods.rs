@@ -1,8 +1,9 @@
 //! Store payment method CRUD endpoints: list, create, get, update, delete.
 //!
-//! RCS-281's pre-close audit (see the ticket and PR description for the
-//! query and result - not repeated here, since this file ships in a public
-//! repository and the result would go stale the moment a new row appears).
+//! The audit that preceded this gate - which existing rows named a chain
+//! with no adapter - is deliberately not reproduced here: this file ships in
+//! a public repository, and the result would go stale the moment a new row
+//! appears.
 
 use axum::{
     Json,
@@ -337,7 +338,7 @@ where
     // Same gate as creation, against the chain already stored on this method -
     // `UpdatePaymentMethodRequest` carries no chain_id of its own, so there is
     // nothing to validate on the request. This only bites a row from before
-    // this check existed (see the RCS-281 commit message for the audit); a
+    // this check existed (this file's history carries the audit); a
     // fresh row can never have an unsupported chain. `ChainCheckContext::Existing`
     // (not `::New`) because this chain id was never a value this request
     // chose - see `chain_has_no_adapter`'s doc comment for why the two

@@ -1,9 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! RCS-300 review finding, fixed: the filter's own unit tests exercised
+//! Review finding, fixed: the filter's own unit tests exercised
 //! `run_invoice_creation_filters` in isolation, but nothing called the actual
 //! `create_invoice` handler with a `Deny`-returning filter registered on
-//! `AppState` and checked what a merchant would actually see. Ticket test 2
+//! `AppState` and checked what a merchant would actually see. The behaviour
 //! ("a filter refusing invoice creation actually blocks it, and the merchant
 //! sees a reason naming the subscription") is about behavior observable
 //! through the endpoint, not the filter runner alone - the status code, the
@@ -16,7 +16,7 @@
 //! extractors produce, so nothing about this assertion depends on routing or
 //! middleware, only on `create_invoice`'s own body.
 //!
-//! RCS-300 review finding, fixed: this comment used to claim the filter
+//! Review finding, fixed: this comment used to claim the filter
 //! "runs after a real permission check has already passed rather than being
 //! indistinguishable from an auth rejection" without a test asserting it.
 //! Both rejections actually share HTTP 403 - `permission_denies_before_the_filter_is_ever_consulted`
@@ -177,7 +177,7 @@ async fn a_denying_filter_blocks_the_real_endpoint_with_the_reason() {
     );
 }
 
-/// RCS-300 review finding, fixed: the module comment claimed the filter runs
+/// Review finding, fixed: the module comment claimed the filter runs
 /// after the permission check without a test pinning the order. A denying
 /// filter is installed here too, so if the filter ran first - or the
 /// permission check were skipped - this request would come back

@@ -72,7 +72,7 @@ where
         ));
     }
 
-    // A plugin (RCS-300 capability 2) may refuse invoice creation - e.g. to
+    // A plugin (host capability 2) may refuse invoice creation - e.g. to
     // enforce a lapsed subscription. The merchant keeps every other
     // capability; only this endpoint is ever filtered.
     if let FilterVerdict::Deny { reason } = run_invoice_creation_filters(

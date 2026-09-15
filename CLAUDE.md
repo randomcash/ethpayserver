@@ -18,6 +18,14 @@ forget:
   and the property now enforced; the exploit belongs in the private tracker.
 - No session URLs in commits or PR bodies.
 - No secrets, obviously — but also no internal hostnames, no private paths.
+- **No ticket ids or tracker links in source files** — no `RCS-123`, no
+  `linear.app` URL, in code, comments, doc comments or test names. A ticket id
+  here leaks the title and shape of unreleased work to anyone reading, and it
+  is useless to the only audience the code has: an outside reader cannot open
+  it. Write the reason the code exists, not a pointer to where someone once
+  explained it. The ticket id belongs in the commit message and the PR title,
+  both of which already carry it. `scripts/check-no-ticket-refs.sh` enforces
+  this in CI; `CLAUDE.md`, `AGENTS.md` and `docs/` are exempt.
 
 `central-infrastructure` and `payserver-billing` are private. Deploy config and
 billing logic live there and must not migrate here.
@@ -78,8 +86,8 @@ that are not in CI's path. Several people have lost an hour to this.
   half no longer labels that way — and whoever bumps the pin next inherits
   failures they did not cause.
 - **Rate limits will fail the suite for the wrong reason.** Defaults
-  (`server/src/api/rate_limit.rs`) are `auth_rpm: 5`, `write_rpm: 10`. A full
-  run makes far more than ten writes a minute, and the limiter returns 429
+  (`server/src/api/rate_limit.rs`) are `auth_rpm: 10`, `write_rpm: 20`. A full
+  run makes far more than twenty writes a minute, and the limiter returns 429
   **without logging anything** — so the server looks healthy while tests fail
   in no pattern. Run a local server with every `RATE_LIMIT_*` at `10000`, as
   CI does. See `e2e/README.md`.

@@ -1,4 +1,4 @@
-//! Capability 1 (RCS-300), reachable from the host API surface.
+//! Capability 1, reachable from the host API surface.
 //!
 //! The reader itself is `data_service::MerchantDirectoryReader` (see that
 //! module's doc for why it lives there rather than here or in `auth`) - what

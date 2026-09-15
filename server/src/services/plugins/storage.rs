@@ -1,5 +1,5 @@
 //! Schema-per-plugin storage: creation, migrations, and a scoped connection
-//! handle (RCS-257 work items 1-3).
+//! handle.
 //!
 //! Copies BTCPay's `BaseDbContextFactory<T>` shape: each plugin gets its own
 //! Postgres schema and ships its own migrations, which the host runs on
@@ -135,7 +135,7 @@ impl PluginStorage {
     }
 
     /// Uninstall `id`. Dropping the schema is opt-in via `drop_schema`
-    /// (RCS-257 work item 5): an admin who uninstalls a plugin to debug it
+    /// because an admin who uninstalls a plugin to debug it
     /// should not lose its data — the billing plugin's subscription records
     /// most of all. When `drop_schema` is `false` this leaves the schema and
     /// its data in place for a future reinstall to resume against.
@@ -202,8 +202,8 @@ impl PluginSchema {
     /// because the connection runs as the same database role as the rest of
     /// the host. Real enforcement would mean a per-plugin database role with
     /// grants revoked on every other schema, which is out of scope here and
-    /// unnecessary for the threat this actually defends against — per
-    /// RCS-257, the admin installing a plugin already trusts it. What
+    /// unnecessary for the threat this actually defends against: the admin
+    /// installing a plugin already trusts it. What
     /// schema-scoping buys is blast radius and upgradability: a plugin that
     /// only ever names its own tables cannot be broken by a core migration,
     /// and core migrations stay free to change core tables however they
