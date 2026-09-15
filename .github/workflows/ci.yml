@@ -231,12 +231,18 @@ jobs:
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
             cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1
 
+  # Runs on pull requests too, deliberately. This used to be branch-only, so a
+  # dependency a PR introduced was invisible until after it merged - and then
+  # it did not fail anything, it made the deploy jobs skip. That is exactly how
+  # the plugin runtime's cranelift crates (Apache-2.0 WITH LLVM-exception,
+  # which deny.toml did not allow) reached testnet on 2026-09-15 and stopped
+  # deploys: every check on that PR was green, because the job that would have
+  # objected could not run on a PR.
   audit:
     name: Audit
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [lint]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     env:
       RUSTFLAGS: ""
     steps:
@@ -255,7 +261,10 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    needs: [lint, audit]
+    # `test` included: without it a push whose tests fail still builds, pushes
+    # an image and deploys. Tests gate merging a PR, but nothing gated the
+    # branch itself.
+    needs: [lint, audit, test]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
@@ -666,3 +675,80 @@ jobs:
             https://api.github.com/repos/randomcash/central-infrastructure/dispatches \
             -d '{"event_type": "deploy", "client_payload": {"service": "ethpayserver", "environment": "${{ steps.resolve.outputs.environment }}", "sha": "${{ github.sha }}", "tag": "${{ steps.resolve.outputs.tag }}"}}'
           echo "dispatched mainnet deploy ${{ steps.resolve.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # The dispatch above is fire-and-forget: a 202 from GitHub's API means the
+  # event was accepted, not that anything deployed. `scripts/health-gate.sh`
+  # was written for exactly this and documented in
+  # docs/deployment/mainnet-gate.md as a `post-deploy:health-gate` job - but
+  # that job description was GitLab CI and never came across, so the script has
+  # been in the tree unreferenced. This is the reference.
+  deploy-verify-testnet:
+    name: Verify testnet deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [notify-deploy-testnet]
+    if: github.ref == 'refs/heads/testnet'
+    permissions: {}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Poll /health/deep until it reports this commit
+        env:
+          # The `/api` prefix is load-bearing. testnet.random.cash serves the
+          # client, whose SPA fallback answers `/health/deep` with 200 and a
+          # page of HTML - a gate pointed there would pass on a server that
+          # never restarted. The API lives under `/api`.
+          HEALTH_URL: https://testnet.random.cash/api/health/deep
+          # Long enough for the dispatch to be picked up, the image pulled and
+          # migrations to run. Short enough that a deploy which never lands is
+          # reported on the same run that should have produced it.
+          HEALTH_TIMEOUT: "600"
+        run: |
+          set -e
+          export EXPECTED_SHA="${GITHUB_SHA::7}"
+          echo "expecting build_sha=$EXPECTED_SHA at $HEALTH_URL"
+          bash scripts/health-gate.sh
+
+  # The one red X that names the deploy.
+  #
+  # A failed `audit` does not fail the deploy - it makes every job after it
+  # `skipped`, which in the UI reads as "nothing to do here" rather than "we
+  # did not ship". On 2026-09-15 twenty-two merges landed on testnet while the
+  # deployed image stayed on a commit from two days earlier, and no job
+  # anywhere was red for the deploy. This job is.
+  testnet-deploy-status:
+    name: Testnet deploy status
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [audit, build, docker, notify-deploy-testnet, deploy-verify-testnet]
+    if: always() && github.ref == 'refs/heads/testnet'
+    permissions: {}
+    steps:
+      - name: Fail if testnet did not deploy this commit
+        run: |
+          audit="${{ needs['audit'].result }}"
+          build="${{ needs['build'].result }}"
+          image="${{ needs['docker'].result }}"
+          dispatch="${{ needs['notify-deploy-testnet'].result }}"
+          verify="${{ needs['deploy-verify-testnet'].result }}"
+
+          printf 'audit=%s build=%s docker=%s dispatch=%s verify=%s\n' \
+            "$audit" "$build" "$image" "$dispatch" "$verify"
+
+          if [ "$verify" = "success" ]; then
+            echo "testnet is serving ${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Name the first link that broke rather than the last, so the message
+          # points at the cause and not at the skip it produced.
+          for pair in "audit:$audit" "build:$build" "docker:$image" \
+                      "dispatch:$dispatch" "verify:$verify"; do
+            stage="${pair%%:*}"
+            result="${pair#*:}"
+            if [ "$result" != "success" ]; then
+              echo "::error::testnet did NOT deploy ${GITHUB_SHA::7} - '$stage' was '$result'. The branch has moved; the running image has not."
+              exit 1
+            fi
+          done
+          exit 1
