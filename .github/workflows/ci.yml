@@ -91,6 +91,17 @@ jobs:
       - name: Commons pin is on commons main
         run: scripts/check-commons-pin.sh
 
+      # A collision here is not a naming nit: sqlx keys applied migrations by
+      # the version in the filename, so the second file to claim a version is
+      # refused on every startup from then on, not just the first. Two branches
+      # opened the same afternoon can each be green alone and only collide once
+      # both have merged - which is exactly what two branches did on 2026-09-15.
+      - name: Migration versions are distinct
+        run: ./scripts/check-migrations.sh
+
+      - name: Migration guard self-test
+        run: ./scripts/check-migrations.test.sh
+
       - name: Format check
         run: cargo fmt --all -- --check
 
