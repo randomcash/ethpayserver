@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use evm::monitor::{
-    ChainMonitor, ChainMonitorConfig, MockBlockSource, MonitorEvent, SourceStatus, WatchedAddress,
-    make_block,
+    ChainMonitor, ChainMonitorConfig, CoordinatorConfig, MockBlockSource, MonitorCoordinator,
+    MonitorEvent, SourceStatus, WatchedAddress, make_block,
 };
 use evm::{Address, U256};
 
@@ -375,6 +375,87 @@ async fn event_loop_hang_is_detected_from_outside_it() {
     );
 
     // Let the wedged call return so the background task can exit instead of
+    // leaking past the end of this test.
+    test_source.release_hang();
+}
+
+/// The test above drives `loop_stalled_for`/`loop_hang_timeout` directly on a
+/// bare `ChainMonitor`. Production never calls those on their own - it's
+/// `MonitorCoordinator::add_chain` that spawns the watchdog task which polls
+/// them and decides to exit the process. That wiring (the `chain_id` it logs,
+/// the `Arc<ChainMonitor>` it polls, the check-interval it computes from
+/// `loop_hang_timeout`) has its own way to be wrong even if the primitives
+/// underneath are correct, and nothing exercises it by going through
+/// `add_chain`.
+///
+/// `std::process::exit` can't be called from a test without taking the whole
+/// test binary down with it, so this swaps in `CoordinatorConfig::on_loop_hang`
+/// - an observable stand-in for the exit decision - to prove the watchdog
+/// spawned by `add_chain` actually reaches that decision point when the loop
+/// hangs.
+#[tokio::test]
+async fn coordinator_watchdog_reacts_to_a_hung_event_loop() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let config = ChainMonitorConfig {
+        // Short so the test doesn't have to wait long; production defaults
+        // to 300s.
+        loop_hang_timeout_secs: 1,
+        ..fast_confirm_config()
+    };
+
+    let monitor = Arc::new(ChainMonitor::new(test_chain_config(), source, config));
+
+    let (hang_tx, mut hang_rx) = tokio::sync::mpsc::unbounded_channel();
+    let coordinator_config = CoordinatorConfig {
+        on_loop_hang: Some(Arc::new(move |chain_id, stalled_for| {
+            let _ = hang_tx.send((chain_id, stalled_for));
+        })),
+        ..CoordinatorConfig::new()
+    };
+    let coordinator = Arc::new(MonitorCoordinator::new(coordinator_config));
+
+    let mut event_rx = monitor.subscribe();
+    coordinator
+        .add_chain(monitor.clone())
+        .await
+        .expect("add_chain must accept a fresh monitor");
+
+    let started = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+    assert!(
+        matches!(started, Ok(Ok(MonitorEvent::MonitorStarted { .. }))),
+        "expected MonitorStarted"
+    );
+
+    // A watched native address makes `process_block` call `get_balance` -
+    // the RPC call this test hangs, wedging the loop `add_chain` spawned.
+    monitor
+        .watch(WatchedAddress {
+            address: Address::random(),
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: None,
+            token_contract: None,
+            created_at: Utc::now(),
+            last_known_balance: U256::ZERO,
+        })
+        .await;
+
+    test_source.hang_get_balance();
+    test_source.push_block(make_block(1));
+
+    let (chain_id, stalled_for) = tokio::time::timeout(Duration::from_secs(3), hang_rx.recv())
+        .await
+        .expect("the coordinator's watchdog must reach its decision point before this timeout")
+        .expect("on_loop_hang must fire, not just be dropped");
+
+    assert_eq!(chain_id, TEST_CHAIN_ID);
+    assert!(
+        stalled_for >= Duration::from_secs(1),
+        "must only fire once the loop has actually cleared loop_hang_timeout, not before"
+    );
+
+    // Let the wedged call return so the background tasks can exit instead of
     // leaking past the end of this test.
     test_source.release_hang();
 }

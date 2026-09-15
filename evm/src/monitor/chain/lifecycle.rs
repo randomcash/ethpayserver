@@ -54,8 +54,13 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             .take()
             .ok_or_else(|| EvmError::Monitor("monitor already started".to_string()))?;
 
-        // Subscribe to blocks
+        // Subscribe to blocks. `last_block_at` is constructed at `new()` time,
+        // which can be well before this actually runs; reset it here so the
+        // stall clock starts at the subscription that makes it meaningful,
+        // not at construction - otherwise a slow gap between the two counts
+        // against a connection that was never given a chance.
         let mut block_stream = self.source.subscribe_blocks().await?;
+        *self.last_block_at.write().await = Instant::now();
 
         // Emit start event
         let _ = self

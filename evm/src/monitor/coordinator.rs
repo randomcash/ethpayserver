@@ -14,18 +14,38 @@ use tokio::sync::{RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
+/// What to do when the watchdog decides a chain monitor's event loop has
+/// hung. Takes the chain ID and how long the loop had been stalled.
+pub type HangHook = Arc<dyn Fn(u64, Duration) + Send + Sync>;
+
 /// Configuration for the monitor coordinator.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CoordinatorConfig {
     /// Event channel capacity.
     pub event_channel_capacity: usize,
+    /// Overrides the watchdog's reaction to a hung event loop. Production
+    /// leaves this `None`, which logs and exits the process so Docker
+    /// restarts it - there is no in-process fix for an arbitrary hung await.
+    /// Tests set this to observe that the watchdog reached the decision
+    /// without killing the test binary via `process::exit`.
+    pub on_loop_hang: Option<HangHook>,
 }
 
 impl CoordinatorConfig {
     pub fn new() -> Self {
         Self {
             event_channel_capacity: 4096,
+            on_loop_hang: None,
         }
+    }
+}
+
+impl std::fmt::Debug for CoordinatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoordinatorConfig")
+            .field("event_channel_capacity", &self.event_channel_capacity)
+            .field("on_loop_hang", &self.on_loop_hang.is_some())
+            .finish()
     }
 }
 
@@ -126,6 +146,7 @@ impl<S: BlockSource + 'static> MonitorCoordinator<S> {
         // whatever restarts this process (Docker's restart policy) to bring
         // it back.
         let watchdog_monitor = monitor.clone();
+        let on_hang = self.config.on_loop_hang.clone();
         let watchdog_task = tokio::spawn(async move {
             let hang_timeout = watchdog_monitor.loop_hang_timeout();
             let check_interval = (hang_timeout / 4).max(Duration::from_millis(50));
@@ -139,7 +160,10 @@ impl<S: BlockSource + 'static> MonitorCoordinator<S> {
                         stalled_secs = stalled_for.as_secs(),
                         "chain monitor event loop made no progress for too long; exiting so the process can be restarted"
                     );
-                    std::process::exit(1);
+                    match &on_hang {
+                        Some(hook) => hook(chain_id, stalled_for),
+                        None => std::process::exit(1),
+                    }
                 }
             }
         });
