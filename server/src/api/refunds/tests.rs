@@ -162,10 +162,23 @@ fn a_refund_request_is_refused_not_queued() {
 }
 
 #[test]
-fn the_refusal_names_the_reason() {
+fn the_refusal_tells_the_merchant_what_to_do_instead() {
     // A bare status with no body reaches a caller as "HTTP error 501:" and
     // nothing else — the same dead end `ApiErr`'s own doc comment describes
     // for a reasonless 409. A merchant hitting this endpoint needs to learn
     // to refund from their own wallet, not guess why the request failed.
-    assert!(!REFUND_UNSUPPORTED_REASON.is_empty());
+    //
+    // Asserting the constant is non-empty could not fail: it is a literal.
+    // What can regress is someone shortening this to "refunds are not
+    // supported", which is accurate, reasonless, and leaves the merchant
+    // exactly where the bare 501 did. So assert the two things that make it
+    // actionable — why the server cannot, and what the merchant should do.
+    assert!(
+        REFUND_UNSUPPORTED_REASON.contains("holds no spending key"),
+        "the reason must say why this server cannot refund, not merely that it will not: {REFUND_UNSUPPORTED_REASON}"
+    );
+    assert!(
+        REFUND_UNSUPPORTED_REASON.contains("your own wallet"),
+        "the reason must name the action the merchant can actually take: {REFUND_UNSUPPORTED_REASON}"
+    );
 }
