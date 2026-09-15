@@ -18,6 +18,7 @@ use types::{
 use uuid::Uuid;
 
 use crate::analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
+use crate::{UpsertDeliveryParams, WebhookDeliveryWriter};
 
 /// In-memory implementation of all repository traits for testing.
 #[derive(Default)]
@@ -897,6 +898,16 @@ impl PaymentEventWriter for InMemoryDataService {
     ) -> RepositoryResult<Uuid> {
         // No-op for tests - just return a new UUID
         Ok(Uuid::new_v4())
+    }
+}
+
+/// No-op, matching `PaymentEventWriter` above: `EventConsumer`'s tests need
+/// something that satisfies `WebhookDataService`, not a double that records
+/// what was written and lets a test read it back.
+#[async_trait]
+impl WebhookDeliveryWriter for InMemoryDataService {
+    async fn upsert_delivery(&self, _params: UpsertDeliveryParams) -> RepositoryResult<()> {
+        Ok(())
     }
 }
 

@@ -4,16 +4,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use data_service::PaymentEventWriter;
+use data_service::{
+    PaymentEventWriter, UpsertDeliveryParams, WebhookDeliveryStatus, WebhookDeliveryWriter,
+};
 
 use crate::metrics;
 
 use super::{WebhookConfig, WebhookError, WebhookJob};
 
 /// Trait for data service requirements in WebhookService.
-pub trait WebhookDataService: PaymentEventWriter + Send + Sync {}
+pub trait WebhookDataService: PaymentEventWriter + WebhookDeliveryWriter + Send + Sync {}
 
-impl<T> WebhookDataService for T where T: PaymentEventWriter + Send + Sync {}
+impl<T> WebhookDataService for T where T: PaymentEventWriter + WebhookDeliveryWriter + Send + Sync {}
 
 /// The queue an emitter hands a job to.
 ///
@@ -101,6 +103,9 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             "Queued webhook job"
         );
         metrics::record_webhook_queued(&job.payload.event_type.to_string());
+
+        self.write_delivery_record(&job, WebhookDeliveryStatus::Pending, 0, None)
+            .await;
 
         Ok(())
     }
@@ -203,6 +208,13 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                 metrics::record_webhook_delivery_status("delivered");
                 self.record_delivery_event(&job, "webhook_delivered", None)
                     .await;
+                self.write_delivery_record(
+                    &job,
+                    WebhookDeliveryStatus::Delivered,
+                    job.attempts as i32,
+                    None,
+                )
+                .await;
             }
             Err(e) => {
                 let error_msg = truncate_error(&e.to_string(), 500);
@@ -229,12 +241,26 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     );
                     metrics::record_webhook_failed(&job.payload.event_type.to_string());
                     metrics::record_webhook_delivery_status("permanent_failed");
+                    self.write_delivery_record(
+                        &job,
+                        WebhookDeliveryStatus::Failed,
+                        job.attempts as i32,
+                        Some(error_msg.clone()),
+                    )
+                    .await;
                     self.record_delivery_event(&job, "webhook_permanent_failed", Some(error_msg))
                         .await;
                 } else {
                     // Schedule retry.
                     metrics::record_webhook_delivery_status("retrying");
                     metrics::record_webhook_retry_attempt(job.attempts);
+                    self.write_delivery_record(
+                        &job,
+                        WebhookDeliveryStatus::Retrying,
+                        job.attempts as i32,
+                        Some(error_msg.clone()),
+                    )
+                    .await;
                     self.record_delivery_event(&job, "webhook_retrying", Some(error_msg))
                         .await;
 
@@ -381,6 +407,52 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                 error = %e,
                 invoice_id = %job.payload.invoice_id,
                 "Failed to record webhook delivery event"
+            );
+        }
+    }
+
+    /// Write (insert or update) this job's row in `webhook_deliveries`.
+    ///
+    /// Keyed by `job.id`, so the pending insert and every later attempt of
+    /// the same job update one row rather than accumulating a row per retry.
+    /// Best-effort like `record_delivery_event`: a failure here must not stop
+    /// or retry the delivery itself, only leave its history incomplete.
+    async fn write_delivery_record(
+        &self,
+        job: &WebhookJob,
+        status: WebhookDeliveryStatus,
+        attempts: i32,
+        last_error: Option<String>,
+    ) {
+        let payload = match serde_json::to_value(&job.payload) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job.id,
+                    error = %e,
+                    "Failed to serialize webhook payload for delivery record"
+                );
+                return;
+            }
+        };
+
+        let params = UpsertDeliveryParams {
+            id: job.id,
+            store_webhook_id: job.store_webhook_id,
+            invoice_id: job.payload.invoice_id.clone(),
+            event_type: job.payload.event_type.to_string(),
+            status,
+            attempts,
+            max_attempts: job.max_attempts as i32,
+            last_error,
+            payload,
+        };
+
+        if let Err(e) = WebhookDeliveryWriter::upsert_delivery(&*self.data_service, params).await {
+            tracing::warn!(
+                job_id = %job.id,
+                error = %e,
+                "Failed to record webhook delivery"
             );
         }
     }

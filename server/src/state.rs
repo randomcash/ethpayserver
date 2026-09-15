@@ -7,7 +7,7 @@ use auth::StoreRoleRepository;
 use data_service::{
     InvoiceReader, InvoiceWriter, PaymentReader, PaymentWriter, PayoutReader, PayoutWriter,
     RefundReader, RefundWriter, StoreWebhookReader, TokenReader, TokenWriter, WalletReader,
-    WalletWriter, WatchedAddressReader, WatchedAddressWriter,
+    WalletWriter, WatchedAddressReader, WatchedAddressWriter, WebhookDeliveryReader,
 };
 use evm::api::EvmDataService;
 use rates::RateProvider;
@@ -29,6 +29,7 @@ pub trait AppDataServiceReader:
     + StoreRoleRepository
     + RefundReader
     + PayoutReader
+    + WebhookDeliveryReader
     + Send
     + Sync
 {

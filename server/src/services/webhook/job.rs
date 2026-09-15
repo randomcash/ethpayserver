@@ -12,7 +12,13 @@ use super::WebhookPayload;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookJob {
     /// Unique job ID.
+    ///
+    /// Also the primary key of its `webhook_deliveries` row: every attempt of
+    /// this job writes to the same row rather than inserting a new one.
     pub id: Uuid,
+
+    /// The store webhook this job is delivering to.
+    pub store_webhook_id: Uuid,
 
     /// Webhook URL to deliver to.
     pub webhook_url: String,
@@ -42,10 +48,16 @@ impl WebhookJob {
     const RETRY_DELAYS_SECS: [u64; 6] = [60, 300, 1800, 7200, 43200, 86400];
 
     /// Create a new webhook job.
-    pub fn new(webhook_url: String, webhook_secret: String, payload: WebhookPayload) -> Self {
+    pub fn new(
+        store_webhook_id: Uuid,
+        webhook_url: String,
+        webhook_secret: String,
+        payload: WebhookPayload,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            store_webhook_id,
             webhook_url,
             webhook_secret,
             payload,
@@ -109,6 +121,7 @@ mod tests {
     #[test]
     fn test_webhook_job_new() {
         let job = WebhookJob::new(
+            Uuid::new_v4(),
             "https://example.com/webhook".to_string(),
             "secret123".to_string(),
             test_payload(),
@@ -123,6 +136,7 @@ mod tests {
     #[test]
     fn test_webhook_job_retry_delay() {
         let mut job = WebhookJob::new(
+            Uuid::new_v4(),
             "https://example.com/webhook".to_string(),
             "secret123".to_string(),
             test_payload(),
@@ -156,6 +170,7 @@ mod tests {
     #[test]
     fn test_webhook_job_is_exhausted() {
         let mut job = WebhookJob::new(
+            Uuid::new_v4(),
             "https://example.com/webhook".to_string(),
             "secret123".to_string(),
             test_payload(),
@@ -187,6 +202,7 @@ mod tests {
         );
 
         let job = WebhookJob::new(
+            Uuid::new_v4(),
             "https://example.com/hook".to_string(),
             "secret".to_string(),
             payload,

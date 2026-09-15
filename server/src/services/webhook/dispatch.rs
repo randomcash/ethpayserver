@@ -61,6 +61,7 @@ where
 
     let invoice_id = payload.invoice_id.clone();
     let job = WebhookJob::new(
+        webhook_config.id,
         webhook_config.webhook_url,
         webhook_config.webhook_secret,
         payload,
