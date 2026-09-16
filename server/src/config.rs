@@ -43,9 +43,12 @@
 //! ## Plugins
 //! - `ETHPAY_DISABLE_PLUGINS` - Safe mode: boot with every plugin disabled
 //!   (default: false). Same effect as the `--disable-plugins` CLI flag.
+//! - `ETHPAY_PLUGIN_DIR` - Where installed plugins' wasm lives
+//!   (default: ./plugins)
 
 use secrecy::{ExposeSecret, SecretString};
 use std::env;
+use std::path::PathBuf;
 
 /// Server configuration loaded from environment variables.
 #[derive(Debug, Clone)]
@@ -76,6 +79,15 @@ pub struct Config {
     /// Disables plugins for this boot only - it does not uninstall them or
     /// touch their data, and clearing the flag restores them.
     pub safe_mode: bool,
+
+    /// Where installed plugins' wasm artifacts live.
+    ///
+    /// Set via `ETHPAY_PLUGIN_DIR`. Defaults to `./plugins` rather than a
+    /// path under `/var`, so a development run and a test need no privileged
+    /// directory to exist; a container image sets it explicitly to whatever
+    /// volume survives a redeploy. A missing directory is not an error -
+    /// it is what a server with no plugins installed looks like.
+    pub plugin_dir: PathBuf,
 }
 
 /// Valid log levels.
@@ -93,6 +105,7 @@ impl Config {
     /// - `PORT` - Server port (default: 3000)
     /// - `LOG_LEVEL` - Log level (default: info)
     /// - `ENABLE_SWAGGER` - Enable Swagger UI (default: true)
+    /// - `ETHPAY_PLUGIN_DIR` - Plugin artifact directory (default: ./plugins)
     pub fn from_env() -> anyhow::Result<Self> {
         let database_url = SecretString::from(
             env::var("DATABASE_URL")
@@ -116,6 +129,8 @@ impl Config {
         let cli_args: Vec<String> = env::args().collect();
         let safe_mode = safe_mode_requested(|key| env::var(key).ok(), &cli_args);
 
+        let plugin_dir = plugin_dir_from(|key| env::var(key).ok());
+
         let config = Self {
             database_url,
             redis_url,
@@ -124,6 +139,7 @@ impl Config {
             log_level,
             enable_swagger,
             safe_mode,
+            plugin_dir,
         };
 
         config.validate()?;
@@ -214,6 +230,29 @@ pub fn parse_captcha_env() -> anyhow::Result<Option<(String, String, String)>> {
     parse_captcha(|key| env::var(key).ok())
 }
 
+/// Where installed plugins' wasm lives.
+///
+/// An empty value is treated as unset, not as the empty path. A compose file
+/// that declares `ETHPAY_PLUGIN_DIR` and an `.env` that does not fill it in
+/// produces an empty string rather than an absent variable - and the empty
+/// path resolves relative to the process working directory, so every plugin
+/// would be looked for at `./<id>/<version>.wasm` and none would be found.
+/// The cost of getting this wrong is paid at the next boot, not at the
+/// misconfiguration, which is what makes it worth a line here.
+pub fn plugin_dir_from<F>(lookup: F) -> PathBuf
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lookup("ETHPAY_PLUGIN_DIR")
+        .filter(|value| !value.trim().is_empty())
+        .map_or_else(|| PathBuf::from(DEFAULT_PLUGIN_DIR), PathBuf::from)
+}
+
+/// Relative on purpose: a development run and a test need no privileged
+/// directory to exist. A container image sets `ETHPAY_PLUGIN_DIR` explicitly
+/// to a volume that survives a redeploy.
+const DEFAULT_PLUGIN_DIR: &str = "./plugins";
+
 /// Whether safe mode (every plugin disabled) was requested, via either
 /// `ETHPAY_DISABLE_PLUGINS=1`/`true` or a bare `--disable-plugins` argument.
 ///
@@ -248,6 +287,7 @@ mod tests {
             log_level: "info".to_string(),
             enable_swagger: false,
             safe_mode: false,
+            plugin_dir: PathBuf::from(DEFAULT_PLUGIN_DIR),
         };
         let rendered = format!("{config:?}");
         assert!(
@@ -394,6 +434,33 @@ mod tests {
     // ========================================================================
     // Safe mode (plugins disabled)
     // ========================================================================
+
+    /// A declared-but-empty variable is the normal result of a compose file
+    /// whose `.env` does not fill it in, and the empty path would send every
+    /// artifact lookup to the process working directory instead.
+    #[test]
+    fn an_empty_plugin_dir_falls_back_to_the_default() {
+        assert_eq!(
+            plugin_dir_from(lookup(&[("ETHPAY_PLUGIN_DIR", "")])),
+            PathBuf::from("./plugins")
+        );
+        assert_eq!(
+            plugin_dir_from(lookup(&[("ETHPAY_PLUGIN_DIR", "   ")])),
+            PathBuf::from("./plugins")
+        );
+    }
+
+    #[test]
+    fn plugin_dir_defaults_when_unset_and_is_used_when_set() {
+        assert_eq!(plugin_dir_from(lookup(&[])), PathBuf::from("./plugins"));
+        assert_eq!(
+            plugin_dir_from(lookup(&[(
+                "ETHPAY_PLUGIN_DIR",
+                "/var/lib/ethpayserver/plugins"
+            )])),
+            PathBuf::from("/var/lib/ethpayserver/plugins")
+        );
+    }
 
     #[test]
     fn safe_mode_off_by_default() {

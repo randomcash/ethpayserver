@@ -54,6 +54,51 @@ pub struct SafeModeResponse {
     pub safe_mode: bool,
 }
 
+/// One installed plugin, as an admin needs to see it.
+///
+/// Carries `enabled` and `loaded` separately because they answer different
+/// questions and routinely disagree. `enabled` is what the database records
+/// and what the next boot will honour; `loaded` is whether this process has
+/// a live, non-disabled instance right now. A plugin that is enabled but not
+/// loaded is either a safe-mode boot or one that has failed since startup,
+/// and collapsing the two into one field is how an admin ends up restarting
+/// a server to fix something a restart will not fix.
+///
+/// `loaded` deliberately does not say *running*. It means the host compiled
+/// and instantiated the module and would dispatch to it - but nothing in
+/// this build dispatches to a plugin at all: `run_action` and `run_filter`
+/// have no callers outside the host's own tests, and the one wired call site
+/// (`invoice_creation_filters`, consulted on invoice creation) is populated
+/// in tests and never in the live server. Calling this field `running` would
+/// tell an admin their plugin is doing something, when what is true is that
+/// it loaded and is waiting for a dispatch path that does not exist yet.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminPluginInfo {
+    pub id: String,
+    pub version: String,
+    /// What the install record says about the next boot.
+    pub enabled: bool,
+    /// Whether this process holds a live, enabled instance right now. Not a
+    /// claim that any request path invokes it - see the type's docs.
+    pub loaded: bool,
+    /// Why it is off, when the host was the one that turned it off.
+    pub disabled_reason: Option<String>,
+    /// Consecutive failed calls, from the host. `0` when it is not loaded.
+    pub consecutive_failures: u32,
+    pub installed_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+/// The installed-plugins list.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminPluginListResponse {
+    pub plugins: Vec<AdminPluginInfo>,
+    /// Repeated from `GET /admin/safe-mode` so the list is self-explaining:
+    /// without it, every plugin reading `enabled: true, loaded: false` looks
+    /// like a fleet of crashes rather than one flag.
+    pub safe_mode: bool,
+}
+
 // ============================================================================
 // Handlers
 // ============================================================================
@@ -356,11 +401,154 @@ where
     })
 }
 
+/// List installed plugins, what the next boot will do with each, and what
+/// the host is doing with each right now.
+///
+/// The database is the authority on what is installed - the host only knows
+/// what it managed to load, so asking it alone would silently omit exactly
+/// the plugins an admin opened this page to find.
+#[utoipa::path(
+    get,
+    path = "/admin/plugins",
+    tag = "admin",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Installed plugins", body = AdminPluginListResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
+    )
+)]
+pub async fn list_plugins<A>(
+    AdminAuth(_admin): AdminAuth,
+    State(state): State<PgAppState<A>>,
+) -> Result<Json<AdminPluginListResponse>, super::ApiErr>
+where
+    A: SessionService + 'static,
+{
+    let installed =
+        data_service::InstalledPluginReader::list_installed_plugins(&*state.data_service)
+            .await
+            .map_err(|e| {
+                super::ApiErr::from((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("could not read installed plugins: {e}"),
+                ))
+            })?;
+
+    let plugins = installed
+        .into_iter()
+        .map(|row| {
+            // A row whose id no longer parses cannot be looked up in the
+            // host, but it is still installed and still the admin's to
+            // remove - so it is listed as not loaded rather than hidden.
+            let snapshot = payserver_plugin_api::PluginId::new(row.id.clone())
+                .ok()
+                .and_then(|id| state.plugin_host.as_ref().and_then(|h| h.status(&id)));
+
+            AdminPluginInfo {
+                id: row.id,
+                version: row.version,
+                enabled: row.enabled,
+                loaded: snapshot.as_ref().is_some_and(|s| s.enabled),
+                // The host's live reason wins over the stored one: if a
+                // plugin was disabled after this boot started, the database
+                // still says why it was disabled last time, which is the
+                // wrong answer to "why is it off now".
+                disabled_reason: snapshot
+                    .as_ref()
+                    .and_then(|s| s.disabled_reason.clone())
+                    .or(row.disabled_reason),
+                consecutive_failures: snapshot.as_ref().map_or(0, |s| s.consecutive_failures),
+                installed_at: row.installed_at,
+                updated_at: row.updated_at,
+            }
+        })
+        .collect();
+
+    Ok(Json(AdminPluginListResponse {
+        plugins,
+        safe_mode: state.safe_mode,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use types::ChainId;
+
+    /// `GET /admin/plugins` must be mounted on the router the server serves.
+    ///
+    /// Three pieces of this repository have shipped fully tested and reachable
+    /// from nothing - `api::plugins::router()` among them, with nine passing
+    /// tests and no mount - so a handler with green unit tests is not evidence
+    /// that a request can reach it. This asks the production `api::router()`.
+    ///
+    /// Probed with POST, which the route does not accept: axum answers 405 for
+    /// a path that is registered under another method and 404 for one that is
+    /// not registered at all, which separates "mounted" from "missing" without
+    /// a database, a session or an admin.
+    #[tokio::test]
+    async fn the_plugin_list_is_mounted_on_the_real_router() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://admin-route-test-unused/db")
+            .expect("connect_lazy only validates the URL, it does not connect");
+        let data_service = std::sync::Arc::new(data_service::PgDataService::new(pool));
+        let auth_service = std::sync::Arc::new(auth::AuthService::with_config(
+            std::sync::Arc::clone(&data_service),
+            auth::AuthConfig::default(),
+        ));
+        let state = crate::state::AppState::new(
+            data_service,
+            auth_service,
+            None,
+            std::sync::Arc::new(NoRatesForRouting),
+            std::sync::Arc::new(crate::services::email::NoopEmailSender),
+        );
+        let app = crate::api::router(state, false, None, None, None);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST") // the route is GET-only
+                    .uri("/admin/plugins")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "/admin/plugins is not mounted on the production router; an admin \
+             cannot see what is installed through a handler nothing routes to"
+        );
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// The router needs a rate provider; the probe above never reaches one,
+    /// because the request is refused on method before any handler runs.
+    struct NoRatesForRouting;
+
+    #[async_trait::async_trait]
+    impl rates::RateProvider for NoRatesForRouting {
+        async fn get_rate(
+            &self,
+            _from: &str,
+            _to: &str,
+        ) -> Result<rates::ExchangeRate, rates::RateError> {
+            unreachable!("a 405 is decided by the router, before any handler runs")
+        }
+
+        fn name(&self) -> &'static str {
+            "none"
+        }
+    }
 
     #[test]
     fn test_user_list_response_serialization() {
