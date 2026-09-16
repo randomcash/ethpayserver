@@ -282,6 +282,7 @@ async fn main() -> Result<()> {
         ),
     }
     state.plugin_host = plugin_host;
+    state.plugin_dir = config.plugin_dir.clone();
 
     // Create rate limiters
     let rate_limit_config = RateLimitConfig::from_env();

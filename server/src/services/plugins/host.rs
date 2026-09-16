@@ -148,9 +148,24 @@ impl PluginEntry {
                 consecutive_failures = failures,
                 "plugin disabled after repeated failure"
             );
-            *self.status.write().unwrap_or_else(PoisonError::into_inner) =
-                EntryStatus::Disabled { reason };
+            self.disable(reason);
         }
+    }
+
+    /// Switch this entry off and record why.
+    ///
+    /// Shared by the repeated-failure path and by an admin's explicit
+    /// disable, so there is one representation of "off" rather than two that
+    /// could report differently.
+    fn disable(&self, reason: String) {
+        *self.status.write().unwrap_or_else(PoisonError::into_inner) =
+            EntryStatus::Disabled { reason };
+    }
+
+    /// Switch this entry back on and forgive its failure history.
+    fn enable(&self) {
+        self.failures.store(0, Ordering::SeqCst);
+        *self.status.write().unwrap_or_else(PoisonError::into_inner) = EntryStatus::Enabled;
     }
 
     fn snapshot(&self, id: PluginId) -> PluginStatusSnapshot {
@@ -239,6 +254,62 @@ impl PluginHost {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, entry);
         Ok(())
+    }
+
+    /// Stop dispatching to a plugin, now, in this process.
+    ///
+    /// The install record is what the next boot honours, but an admin
+    /// disabling a misbehaving plugin means *stop running it*, not "stop
+    /// running it after I restart the server". Without this, the one
+    /// recovery path that does not require a restart would not actually
+    /// recover anything - the row would say disabled while the plugin kept
+    /// being consulted on every request until someone bounced the process.
+    ///
+    /// Takes the same route a repeated-failure disable takes, so a plugin
+    /// switched off by an admin and one switched off by the host are in the
+    /// same state and report the same way.
+    ///
+    /// Returns whether a plugin with that id was loaded at all. `false` is
+    /// not an error: a plugin installed but never loaded - safe mode, or a
+    /// boot that could not read its artifact - has nothing here to disable,
+    /// and the caller still has a row to update.
+    ///
+    /// Deliberately does not drop the instance. Freeing the wasmtime store
+    /// while a detached `run_action` may still be inside it is a different
+    /// problem; a disabled entry is never dispatched to again, which is the
+    /// property that matters.
+    pub fn disable(&self, id: &PluginId, reason: impl Into<String>) -> bool {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let Some(entry) = entries.get(id) else {
+            return false;
+        };
+        entry.disable(reason.into());
+        true
+    }
+
+    /// Resume dispatching to a plugin this process already loaded.
+    ///
+    /// The mirror of [`Self::disable`], and it exists because without it
+    /// enabling is not the inverse of disabling: the module is still
+    /// compiled and instantiated, so there is nothing to rebuild, and
+    /// leaving the entry switched off would mean an admin who disabled a
+    /// plugin by mistake could not undo it without restarting the server.
+    ///
+    /// Resets the consecutive-failure count. A plugin disabled by repeated
+    /// failure is at or past the threshold, so re-enabling without clearing
+    /// it would re-disable on the very next failure - which is not "enabled"
+    /// in any sense an admin would recognise.
+    ///
+    /// Returns whether a plugin with that id was loaded at all. `false` means
+    /// this process never compiled it - a plugin installed since boot, or a
+    /// safe-mode run - and enabling then genuinely does need a restart.
+    pub fn enable(&self, id: &PluginId) -> bool {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let Some(entry) = entries.get(id) else {
+            return false;
+        };
+        entry.enable();
+        true
     }
 
     /// A point-in-time health read for one plugin. Never touches the
@@ -737,5 +808,130 @@ mod tests {
 
         host.register(manifest, &fixtures::echo_module()).unwrap();
         assert!(host.status(&id).unwrap().enabled);
+    }
+}
+
+#[cfg(test)]
+mod admin_toggle_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::time::Duration;
+
+    use super::super::registry::host_version;
+    use super::super::runtime::fixtures::echo_module;
+    use super::*;
+
+    fn manifest_for(id: &str) -> Manifest {
+        let host = host_version();
+        format!(
+            r#"
+            id = "{id}"
+            version = "0.1.0"
+            dependencies = ["ethpayserver:^{}.{}"]
+            kind = "action"
+            "#,
+            host.major, host.minor
+        )
+        .parse()
+        .unwrap()
+    }
+
+    fn loaded_host(id: &PluginId) -> PluginHost {
+        let host = PluginHost::new(host_version(), 3, Duration::from_secs(2));
+        host.register(manifest_for(id.as_str()), &echo_module())
+            .unwrap();
+        host
+    }
+
+    /// An admin disabling a plugin means stop running it, now.
+    ///
+    /// Without this the only recovery that does not need a restart would not
+    /// actually recover anything: the row would say disabled while the
+    /// plugin kept being consulted until someone bounced the process.
+    #[test]
+    fn disabling_takes_effect_immediately() {
+        let id = PluginId::new("cash.random.billing").unwrap();
+        let host = loaded_host(&id);
+
+        assert!(host.status(&id).unwrap().enabled);
+        assert!(host.disable(&id, "suspected of eating invoices"));
+
+        let after = host.status(&id).unwrap();
+        assert!(!after.enabled);
+        assert_eq!(
+            after.disabled_reason.as_deref(),
+            Some("suspected of eating invoices")
+        );
+    }
+
+    /// And enabling is its inverse, in the same process.
+    ///
+    /// Found by driving the real HTTP API: enable cleared the database row
+    /// but left the live entry disabled, so the plugin list came back reading
+    /// `enabled=true, loaded=false` with the old disable reason still
+    /// attached - which looks exactly like the enable having failed. The
+    /// module is already compiled and instantiated, so there is nothing to
+    /// rebuild and no reason an accidental disable should cost a restart to
+    /// undo.
+    #[test]
+    fn enabling_undoes_a_disable_without_a_restart() {
+        let id = PluginId::new("cash.random.billing").unwrap();
+        let host = loaded_host(&id);
+
+        host.disable(&id, "a mistake");
+        assert!(host.enable(&id));
+
+        let after = host.status(&id).unwrap();
+        assert!(after.enabled, "enable must be the inverse of disable");
+        assert!(
+            after.disabled_reason.is_none(),
+            "a running plugin must not still carry the reason it was stopped, which an \
+             admin would read as it still being stopped; got {:?}",
+            after.disabled_reason
+        );
+    }
+
+    /// Re-enabling forgives the failure history.
+    ///
+    /// A plugin disabled by repeated failure sits at or past the threshold,
+    /// so enabling without clearing the count would re-disable it on the very
+    /// next failure - which is not "enabled" in any sense an admin would
+    /// recognise.
+    #[test]
+    fn enabling_resets_the_failure_count_that_disabled_it() {
+        let id = PluginId::new("cash.random.billing").unwrap();
+        let host = loaded_host(&id);
+
+        // Drive it to the disable threshold the way a misbehaving plugin
+        // would, rather than setting the state directly.
+        let entries = host.entries.read().unwrap();
+        let entry = entries.get(&id).unwrap().clone();
+        drop(entries);
+        for _ in 0..3 {
+            entry.record_failure("trapped".to_string());
+        }
+        assert!(!host.status(&id).unwrap().enabled);
+        assert_eq!(host.status(&id).unwrap().consecutive_failures, 3);
+
+        host.enable(&id);
+
+        let after = host.status(&id).unwrap();
+        assert!(after.enabled);
+        assert_eq!(
+            after.consecutive_failures, 0,
+            "a re-enabled plugin that keeps its failure count is one failure from being \
+             disabled again"
+        );
+    }
+
+    /// Neither toggle invents a plugin that was never loaded. `false` is the
+    /// honest answer, and the caller still has a database row to update.
+    #[test]
+    fn toggling_a_plugin_this_process_never_loaded_reports_false() {
+        let host = PluginHost::new(host_version(), 3, Duration::from_secs(2));
+        let absent = PluginId::new("cash.random.absent").unwrap();
+
+        assert!(!host.disable(&absent, "whatever"));
+        assert!(!host.enable(&absent));
     }
 }

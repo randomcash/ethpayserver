@@ -133,6 +133,14 @@ pub struct AppState<D, A, E> {
     /// which is what makes safe mode a property of the process rather than
     /// a flag every call site has to remember to check.
     pub plugin_host: Option<Arc<PluginHost>>,
+    /// Where installed plugins' wasm artifacts live.
+    ///
+    /// Carried on the state rather than re-read from the environment per
+    /// request, the same way `webauthn` and `safe_mode` are: the resolved
+    /// value is what the boot loader actually used, and reading the variable
+    /// back later would confirm only that it was set, not that this process
+    /// agreed with it.
+    pub plugin_dir: std::path::PathBuf,
     /// Safe mode: this boot has every plugin disabled.
     ///
     /// Resolved once at startup from `Config::safe_mode` and copied in here,
@@ -157,6 +165,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             email_sender: Arc::clone(&self.email_sender),
             plugin_pages: Arc::clone(&self.plugin_pages),
             plugin_host: self.plugin_host.clone(),
+            plugin_dir: self.plugin_dir.clone(),
             safe_mode: self.safe_mode,
         }
     }
@@ -184,6 +193,7 @@ impl<D, A, E> AppState<D, A, E> {
             email_sender,
             plugin_pages: Arc::new(PageHost::new()),
             plugin_host: None,
+            plugin_dir: std::path::PathBuf::from("./plugins"),
             safe_mode: false,
         }
     }
