@@ -144,6 +144,33 @@ impl PluginArtifacts {
         Ok(bytes)
     }
 
+    /// Remove `id`'s artifact for `version`, and the plugin's directory if
+    /// that leaves it empty.
+    ///
+    /// Returns whether a file was actually removed. A missing artifact is
+    /// not an error: uninstalling a plugin whose file is already gone should
+    /// succeed, since the outcome the caller wants is the outcome that
+    /// already holds.
+    ///
+    /// The directory is removed only when empty, with `remove_dir` rather
+    /// than `remove_dir_all` - an upgrade keeps older versions alongside the
+    /// current one, and recursively deleting here would take a build the
+    /// admin may still want to roll back to.
+    pub fn remove(&self, id: &PluginId, version: &str) -> Result<bool, ArtifactError> {
+        let path = self.path_for(id, version)?;
+        let removed = match std::fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(source) => return Err(ArtifactError::Unwritable { path, source }),
+        };
+
+        // Best effort, and deliberately ignored: a non-empty directory is the
+        // ordinary case after an upgrade, and `remove_dir` failing for that
+        // reason is not something the caller can or should act on.
+        let _ = std::fs::remove_dir(self.root.join(id.as_str()));
+        Ok(removed)
+    }
+
     /// Write `wasm` as `id`'s artifact for `version`, returning its digest.
     ///
     /// Writes to a temporary file in the same directory and renames it into
@@ -274,6 +301,37 @@ mod tests {
         artifacts
             .read_verified(&id(), "0.1.0", &sha.to_uppercase())
             .expect("the same digest in a different case is the same digest");
+    }
+
+    #[test]
+    fn removing_an_artifact_reports_whether_there_was_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = PluginArtifacts::new(dir.path());
+
+        artifacts.write(&id(), "0.1.0", b"bytes").unwrap();
+        assert!(artifacts.remove(&id(), "0.1.0").unwrap());
+        assert!(
+            !artifacts.remove(&id(), "0.1.0").unwrap(),
+            "uninstalling twice is not an error; the second one just had nothing to do"
+        );
+    }
+
+    /// An uninstall must not take other versions with it. `remove_dir_all`
+    /// here would delete a build an admin may still want to roll back to.
+    #[test]
+    fn removing_one_version_leaves_the_others_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = PluginArtifacts::new(dir.path());
+
+        let keep = artifacts.write(&id(), "0.1.0", b"the old build").unwrap();
+        artifacts.write(&id(), "0.2.0", b"the new build").unwrap();
+
+        artifacts.remove(&id(), "0.2.0").unwrap();
+
+        assert_eq!(
+            artifacts.read_verified(&id(), "0.1.0", &keep).unwrap(),
+            b"the old build"
+        );
     }
 
     #[test]

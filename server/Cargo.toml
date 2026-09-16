@@ -84,6 +84,9 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+# Already in the dependency tree; taken as a direct dependency rather than
+# adding `multer` for one plugin-upload endpoint. See api/admin/plugins.rs.
+base64 = "0.22"
 getrandom = "0.3"
 
 # Email

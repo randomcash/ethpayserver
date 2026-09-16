@@ -163,7 +163,12 @@ impl From<(StatusCode, String)> for ApiErr {
         admin::get_settings,
         admin::update_settings,
         admin::get_safe_mode,
-        admin::list_plugins,
+        admin::plugins::list_plugins,
+        admin::plugins::install_plugin,
+        admin::plugins::enable_plugin,
+        admin::plugins::disable_plugin,
+        admin::plugins::uninstall_plugin,
+        admin::plugins::plugin_events,
     ),
     components(schemas(
         health::HealthResponse,
@@ -223,8 +228,13 @@ impl From<(StatusCode, String)> for ApiErr {
         admin::ServerSettingsResponse,
         admin::UpdateServerSettingsRequest,
         admin::SafeModeResponse,
-        admin::AdminPluginInfo,
-        admin::AdminPluginListResponse,
+        admin::plugins::AdminPluginInfo,
+        admin::plugins::AdminPluginListResponse,
+        admin::plugins::InstallPluginRequest,
+        admin::plugins::DisablePluginRequest,
+        admin::plugins::PluginMutationResponse,
+        admin::plugins::PluginEventInfo,
+        admin::plugins::PluginEventListResponse,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -467,7 +477,26 @@ where
         .route("/settings", get(admin::get_settings::<A>))
         .route("/settings", axum::routing::put(admin::update_settings::<A>))
         .route("/safe-mode", get(admin::get_safe_mode::<A>))
-        .route("/plugins", get(admin::list_plugins::<A>))
+        .route(
+            "/plugins",
+            get(admin::plugins::list_plugins::<A>).post(admin::plugins::install_plugin::<A>),
+        )
+        .route(
+            "/plugins/{id}",
+            delete(admin::plugins::uninstall_plugin::<A>),
+        )
+        .route(
+            "/plugins/{id}/enable",
+            post(admin::plugins::enable_plugin::<A>),
+        )
+        .route(
+            "/plugins/{id}/disable",
+            post(admin::plugins::disable_plugin::<A>),
+        )
+        .route(
+            "/plugins/{id}/events",
+            get(admin::plugins::plugin_events::<A>),
+        )
         .with_state(state.clone());
 
     // Auth API from auth crate (with optional CAPTCHA provider)
