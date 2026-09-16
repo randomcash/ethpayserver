@@ -254,7 +254,14 @@ jobs:
           curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
 
       - name: Unit tests
-        run: cargo nextest run --workspace --lib --no-fail-fast -j 2
+        # Every test binary, not just `--lib`. The integration binaries -
+        # evm/tests, server/tests - were compiled by clippy and never run, so
+        # they could go red and stay red without anything noticing: on
+        # 2026-09-16 three tests in evm/tests/payment_flow.rs and two in
+        # server/tests/payment_flow.rs were failing on testnet while this job
+        # reported green. `#[ignore]`d tests still need a database and are run
+        # separately below.
+        run: cargo nextest run --workspace --no-fail-fast -j 2
 
       - name: Integration tests
         # Gating. These were non-blocking and 18 of 27 had been failing
