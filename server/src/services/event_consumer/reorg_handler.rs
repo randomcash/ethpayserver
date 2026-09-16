@@ -1,6 +1,6 @@
 //! Handler for `ReorgDetected` events.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use evm::monitor::events::ReorgDetected;
 use types::{InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentData, PaymentReader};
@@ -19,14 +19,27 @@ impl<
 {
     /// Handle ReorgDetected event.
     ///
+    /// The candidate set comes from the database (`ReorgCandidateReader`),
+    /// not `event.affected_invoices`. That list is the monitor's in-memory
+    /// pending-payment map: it is empty right after a monitor restart, and it
+    /// never includes a payment that has already confirmed and dropped out
+    /// of that map. Either hole left an invoice stuck `paid` for money that
+    /// had already been reorged away. The database is what survives both.
+    ///
+    /// `event.survived_tx_hashes` are transactions the monitor re-validated
+    /// against the chain and found still present, merely relocated to a
+    /// different block by the reorg. Those are excluded from retraction —
+    /// retracting a payment that is genuinely still paid is the opposite
+    /// error, and it un-pays an invoice a customer actually settled.
+    ///
     /// Marks affected payments as reorged and reverts invoice status:
     /// - If other valid payments exist → `processing`
     /// - If no valid payments → `pending`
     ///
-    /// Emits `payment_reorged` for each invoice whose payments were retracted.
-    /// A subscriber was told about those payments and has no other way to
-    /// learn they are gone: the invoice silently moving backwards is not a
-    /// notification.
+    /// Emits `payment_reorged` for each invoice whose payments were
+    /// retracted. A subscriber was told about those payments and has no
+    /// other way to learn they are gone: the invoice silently moving
+    /// backwards is not a notification.
     #[allow(clippy::cognitive_complexity)]
     pub(super) async fn handle_reorg_detected(
         &self,
@@ -34,55 +47,46 @@ impl<
     ) -> Result<(), EventConsumerError> {
         let chain_id = types::ChainId::evm(event.chain_id);
 
+        let candidates = self
+            .data_service
+            .reorg_candidates(&chain_id, event.fork_block)
+            .await?;
+
         tracing::warn!(
             chain_id = %chain_id,
             fork_block = event.fork_block,
             depth = event.depth,
-            affected_invoices = event.affected_invoices.len(),
+            candidates = candidates.len(),
             "Chain reorganization detected"
         );
 
-        for invoice_uuid in &event.affected_invoices {
-            let invoice_id = InvoiceId::from_string(invoice_uuid.to_string());
-
-            // Which payments were already reorged before this event, so that
-            // the retraction lists only what *this* reorg invalidated. Read
-            // rather than re-derived: `mark_reorged` returns a count, and
-            // restating its WHERE clause here would be a second copy of the
-            // rule that could drift from the first.
-            let already_reorged: HashSet<_> =
-                PaymentReader::get_for_invoice(&*self.data_service, &invoice_id)
-                    .await?
-                    .into_iter()
-                    .filter(|p| p.reorged)
-                    .map(|p| p.id)
-                    .collect();
-
-            // Mark payments from this chain at or after the fork block as reorged
-            let reorged_count = self
-                .data_service
-                .mark_reorged(&invoice_id, &chain_id, event.fork_block)
-                .await?;
-
-            if reorged_count == 0 {
-                tracing::debug!(
-                    invoice_id = %invoice_uuid,
-                    fork_block = event.fork_block,
-                    "No payments affected by reorg"
-                );
+        let mut by_invoice: HashMap<InvoiceId, Vec<PaymentData>> = HashMap::new();
+        for payment in candidates {
+            let survived = event
+                .survived_tx_hashes
+                .iter()
+                .any(|hash| tx_hash_eq(hash, &payment.tx_hash));
+            if survived {
                 continue;
             }
+            by_invoice
+                .entry(payment.invoice_id.clone())
+                .or_default()
+                .push(payment);
+        }
 
-            let retracted: Vec<PaymentData> =
-                PaymentReader::get_for_invoice(&*self.data_service, &invoice_id)
-                    .await?
-                    .into_iter()
-                    .filter(|p| p.reorged && !already_reorged.contains(&p.id))
-                    .collect();
+        for (invoice_id, mut to_retract) in by_invoice {
+            for payment in &mut to_retract {
+                self.data_service.mark_payment_reorged(payment.id).await?;
+                // Mirror the write we just made, rather than re-reading: the
+                // webhook payload below reports what this reorg just did.
+                payment.reorged = true;
+                payment.confirmed_at = None;
+            }
 
             tracing::info!(
-                invoice_id = %invoice_uuid,
-                reorged_count,
+                invoice_id = %invoice_id,
+                reorged_count = to_retract.len(),
                 fork_block = event.fork_block,
                 "Marked payments as reorged"
             );
@@ -96,23 +100,25 @@ impl<
                 InvoiceStatus::Pending
             };
 
-            InvoiceWriter::update_status(&*self.data_service, &invoice_id, new_status).await?;
+            let new_status = self
+                .apply_reorg_status(&invoice_id, new_status, event.fork_block)
+                .await?;
 
             // Broadcast reorg-induced status change via WebSocket
             if let Some(ref ws) = self.ws_broadcast {
                 ws.send(StatusUpdate::InvoiceStatus {
-                    invoice_id: invoice_uuid.to_string(),
+                    invoice_id: invoice_id.as_str().to_string(),
                     status: new_status.to_string(),
                 });
             }
 
             tracing::info!(
-                invoice_id = %invoice_uuid,
+                invoice_id = %invoice_id,
                 new_status = ?new_status,
                 "Reverted invoice status after reorg"
             );
 
-            self.notify_reorg(&invoice_id, &retracted).await;
+            self.notify_reorg(&invoice_id, &to_retract).await;
         }
 
         Ok(())
@@ -151,4 +157,76 @@ impl<
         let payload = WebhookPayload::payment_reorged(&invoice, retracted);
         self.queue_payload(store_id, payload).await;
     }
+    /// Write the post-reorg invoice status, unless the invoice is closed.
+    ///
+    /// Some statuses must not be walked backwards, and
+    /// `InvoiceWriter::update_status` will not stop it - it is a bare
+    /// `UPDATE invoices SET status` with no state guard.
+    ///
+    /// This did not matter while the reorg loop ran over the monitor's
+    /// `pending` map, which never held a confirmed payment. Making confirmed
+    /// payments reorg candidates puts settled invoices in reach: a reorg at or
+    /// below a refunded payment's block would otherwise flip that invoice to
+    /// `Pending` - payable again, with the refund the merchant already sent
+    /// from their own wallet orphaned against it. `Cancelled` has the same
+    /// shape, and an expired invoice must not reopen because a payment that
+    /// arrived for it was retracted.
+    ///
+    /// `Paid` is deliberately not treated as closed. Un-paying an invoice
+    /// whose payment the chain retracted is exactly what this handler exists
+    /// to do; that is a correction, not a reopening.
+    ///
+    /// Returns the status the invoice is actually left in, which the caller
+    /// reports onward.
+    async fn apply_reorg_status(
+        &self,
+        invoice_id: &InvoiceId,
+        computed: InvoiceStatus,
+        fork_block: u64,
+    ) -> Result<InvoiceStatus, EventConsumerError> {
+        let current = InvoiceReader::get(&*self.data_service, invoice_id)
+            .await?
+            .ok_or_else(|| {
+                EventConsumerError::InvalidData(format!("Invoice not found: {invoice_id}"))
+            })?;
+
+        let closed = matches!(
+            current.status,
+            InvoiceStatus::Refunded
+                | InvoiceStatus::Cancelled
+                | InvoiceStatus::Expired
+                | InvoiceStatus::LatePaid
+        );
+
+        if closed {
+            tracing::warn!(
+                invoice_id = %invoice_id,
+                status = ?current.status,
+                would_have_been = ?computed,
+                fork_block,
+                "reorg retracted a payment on a closed invoice; the payments are \
+                 marked reorged but the invoice status is left alone"
+            );
+            return Ok(current.status);
+        }
+
+        InvoiceWriter::update_status(&*self.data_service, invoice_id, computed).await?;
+        Ok(computed)
+    }
+}
+
+/// Whether `hash`, as the monitor observed it on chain, names the same
+/// transaction as `stored`, as persisted in `payments.tx_hash`.
+///
+/// Parses `stored` back into a `B256` and compares bytes, rather than
+/// formatting `hash` to a string and comparing text: two independently
+/// formatted strings degrade silently the moment either representation
+/// drifts (case, `0x` prefix, …), and a silent mismatch here means "nothing
+/// survived" — retracting a payment that is still genuinely on chain. A
+/// parse failure means `stored` isn't a well-formed hash at all, which is a
+/// data problem no string comparison would have caught either.
+fn tx_hash_eq(hash: &evm::B256, stored: &str) -> bool {
+    stored
+        .parse::<evm::B256>()
+        .is_ok_and(|parsed| parsed == *hash)
 }
