@@ -10,6 +10,7 @@ use types::ChainId;
 
 use evm::monitor::{ChainHealth, SourceStatus};
 
+use super::deep::{build_rpc_map, chains_are_fresh};
 use super::{
     ChainHealthInfo, DeepHealthResponse, DependencyHealth, MonitorHealth, ReadinessResponse,
     RpcHealth,
@@ -324,4 +325,89 @@ fn redaction_leaves_a_healthy_chain_readable() {
 
     assert_eq!(public.status, "connected");
     assert!(public.is_healthy);
+}
+
+// ===========================================================================
+// data_fresh must reflect actual freshness, not "the health key parsed".
+//
+// The bug this guards against: a monitor that stopped processing blocks
+// hours ago but is still connected reports a non-empty chains Vec, so
+// `!chains.is_empty()` was true the entire time. These pin `data_fresh` to
+// the one field that was ever telling the truth: `is_healthy`.
+// ===========================================================================
+
+fn chain(chain_id: u64, is_healthy: bool) -> ChainHealth {
+    ChainHealth {
+        chain_id,
+        chain_name: "Sepolia".to_string(),
+        status: SourceStatus::Connected,
+        current_block: Some(11_702_564),
+        last_processed_block: Some(if is_healthy { 11_702_560 } else { 11_699_377 }),
+        watched_addresses: 0,
+        is_healthy,
+    }
+}
+
+#[test]
+fn empty_chains_are_never_fresh() {
+    assert!(
+        !chains_are_fresh(&[]),
+        "no chains means the check answered nothing"
+    );
+}
+
+#[test]
+fn all_healthy_chains_are_fresh() {
+    assert!(chains_are_fresh(&[chain(1, true), chain(11_155_111, true)]));
+}
+
+#[test]
+fn one_stalled_chain_makes_the_whole_snapshot_stale() {
+    // This is the exact shape of the incident: RPC reachable (Connected),
+    // current_block advancing, but 3,187 blocks behind. A monitor that only
+    // checked "did the list parse" would call this fresh.
+    assert!(!chains_are_fresh(&[
+        chain(1, true),
+        chain(11_155_111, false)
+    ]));
+}
+
+#[test]
+fn connected_but_lagging_reports_the_lag_not_a_bare_unhealthy() {
+    let rpcs = build_rpc_map(vec![chain(11_155_111, false)], 5);
+    let rpc = &rpcs["11155111"];
+    assert_eq!(rpc.status, "error");
+    assert_eq!(
+        rpc.error.as_deref(),
+        Some("connected but 3187 blocks behind")
+    );
+}
+
+#[test]
+fn healthy_chain_reports_no_error() {
+    let rpcs = build_rpc_map(vec![chain(1, true)], 5);
+    assert_eq!(rpcs["1"].status, "ok");
+    assert!(rpcs["1"].error.is_none());
+}
+
+#[test]
+fn connected_with_no_processed_block_reports_that_not_a_bare_unhealthy() {
+    // Connected but neither block number is known yet - the fallback arm of
+    // `build_rpc_map`'s Connected match, otherwise never exercised by a test.
+    let chain = ChainHealth {
+        chain_id: 11_155_111,
+        chain_name: "Sepolia".to_string(),
+        status: SourceStatus::Connected,
+        current_block: None,
+        last_processed_block: None,
+        watched_addresses: 0,
+        is_healthy: false,
+    };
+    let rpcs = build_rpc_map(vec![chain], 5);
+    let rpc = &rpcs["11155111"];
+    assert_eq!(rpc.status, "error");
+    assert_eq!(
+        rpc.error.as_deref(),
+        Some("connected but has not processed a block yet")
+    );
 }
