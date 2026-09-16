@@ -241,7 +241,28 @@ pub struct ReorgDetected {
     /// Depth of the reorg (number of blocks replaced).
     pub depth: u64,
     /// Invoice IDs that may be affected.
+    ///
+    /// Best-effort, drawn from payments the monitor still has in memory: it
+    /// is empty right after a restart and never includes a payment that has
+    /// already confirmed. Not the source of truth for which payments the
+    /// reorg touches — a consumer needing that should query its own durable
+    /// store for this chain and fork block instead of trusting this list.
     pub affected_invoices: Vec<uuid::Uuid>,
+    /// Transaction hashes the monitor re-validated against the chain and
+    /// found still present between `fork_block` and the new head — merely
+    /// relocated to a different block, not dropped. A consumer must not
+    /// retract one of these: doing so would un-pay an invoice that is still
+    /// genuinely paid.
+    pub survived_tx_hashes: Vec<B256>,
+    /// Whether the survivor scan could actually verify anything.
+    ///
+    /// `false` when the monitor had no watched addresses to scan, which is the
+    /// ordinary state of a quiet server - every invoice settled and past its
+    /// grace period. An empty `survived_tx_hashes` then means "nothing was
+    /// checked", not "nothing survived", and the two must not be confused:
+    /// the consumer retracts what it cannot find, so treating the first as the
+    /// second un-pays every settled invoice above `fork_block`.
+    pub survivors_verifiable: bool,
     /// When detected.
     pub detected_at: DateTime<Utc>,
 }
@@ -288,12 +309,14 @@ mod tests {
     #[test]
     fn test_reorg_significance() {
         let reorg = ReorgDetected {
+            survivors_verifiable: true,
             chain_id: 1,
             fork_block: 100,
             old_hash: B256::ZERO,
             new_hash: B256::ZERO,
             depth: 2,
             affected_invoices: vec![],
+            survived_tx_hashes: vec![],
             detected_at: Utc::now(),
         };
 

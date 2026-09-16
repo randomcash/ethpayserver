@@ -12,6 +12,7 @@ use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::Block;
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::RwLock as SyncRwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, RwLock, broadcast};
@@ -49,6 +50,18 @@ struct Inner {
     /// stream but leaves ordinary request/response calls answering.
     hung: AtomicBool,
     hang_notify: Notify,
+    /// Hash of every block pushed so far, keyed by number. Backs
+    /// `get_block_hash`, which reorg detection uses to check chain
+    /// continuity across a gap.
+    block_hashes: SyncRwLock<HashMap<u64, B256>>,
+    /// When set, `find_native_transfers_to` returns this error instead of
+    /// looking anything up. Lets a test simulate an RPC failure during reorg
+    /// re-validation without disturbing ordinary payment detection.
+    find_native_transfers_error: SyncRwLock<Option<String>>,
+    /// When set, `get_block_hash` returns this error instead of looking
+    /// anything up. Lets a test simulate an RPC failure during the
+    /// block-gap continuity check without disturbing ordinary processing.
+    get_block_hash_error: SyncRwLock<Option<String>>,
 }
 
 /// A mock block source for testing payment detection.
@@ -87,6 +100,9 @@ impl MockBlockSource {
                 reachable: AtomicBool::new(true),
                 hung: AtomicBool::new(false),
                 hang_notify: Notify::new(),
+                block_hashes: SyncRwLock::new(HashMap::new()),
+                find_native_transfers_error: SyncRwLock::new(None),
+                get_block_hash_error: SyncRwLock::new(None),
             }),
         }
     }
@@ -97,11 +113,28 @@ impl MockBlockSource {
         self.inner.subscribe_count.load(Ordering::SeqCst)
     }
 
+    /// Make `find_native_transfers_to` fail with `message` until cleared with
+    /// `None`. Simulates an RPC error during reorg re-validation.
+    pub fn set_find_native_transfers_error(&self, message: Option<&str>) {
+        *self.inner.find_native_transfers_error.write().unwrap() = message.map(ToString::to_string);
+    }
+
+    /// Make `get_block_hash` fail with `message` until cleared with `None`.
+    /// Simulates an RPC error during the block-gap continuity check.
+    pub fn set_get_block_hash_error(&self, message: Option<&str>) {
+        *self.inner.get_block_hash_error.write().unwrap() = message.map(ToString::to_string);
+    }
+
     /// Push a block notification to all subscribers.
     pub fn push_block(&self, block: BlockNotification) {
         self.inner
             .current_block
             .store(block.number, Ordering::SeqCst);
+        self.inner
+            .block_hashes
+            .write()
+            .unwrap()
+            .insert(block.number, block.hash);
         let _ = self
             .inner
             .block_tx
@@ -181,6 +214,20 @@ impl MockBlockSource {
     pub fn release_hang(&self) {
         self.inner.hung.store(false, Ordering::SeqCst);
         self.inner.hang_notify.notify_waiters();
+    }
+
+    /// Directly set the canonical hash the mock reports for a given height,
+    /// without pushing a block notification.
+    ///
+    /// Lets a test simulate a reorg that replaced a block the monitor has
+    /// already processed: `push_block` alone cannot express "block N now has
+    /// a different hash" without also moving the current block forward.
+    pub fn set_block_hash(&self, number: u64, hash: B256) {
+        self.inner
+            .block_hashes
+            .write()
+            .unwrap()
+            .insert(number, hash);
     }
 }
 
@@ -285,11 +332,35 @@ impl BlockSource for MockBlockSource {
         Ok(None)
     }
 
+    async fn get_block_hash(&self, number: u64) -> EvmResult<Option<B256>> {
+        if let Some(message) = self.inner.get_block_hash_error.read().unwrap().clone() {
+            return Err(EvmError::Rpc(message));
+        }
+
+        Ok(self
+            .inner
+            .block_hashes
+            .read()
+            .unwrap()
+            .get(&number)
+            .copied())
+    }
+
     async fn find_native_transfers_to(
         &self,
         block_number: u64,
         addresses: &[Address],
     ) -> EvmResult<Vec<NativeTransfer>> {
+        if let Some(message) = self
+            .inner
+            .find_native_transfers_error
+            .read()
+            .unwrap()
+            .clone()
+        {
+            return Err(EvmError::Rpc(message));
+        }
+
         let transfers = self.inner.native_transfers.read().await;
         Ok(transfers
             .get(&block_number)

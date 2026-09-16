@@ -20,16 +20,68 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         if let Some(last_hash) = *self.last_block_hash.read().await
             && let Some(last_num) = *self.last_block.read().await
         {
-            // If this block's parent doesn't match our last block, potential reorg
-            if block.number == last_num + 1 && block.parent_hash != last_hash {
+            // The common case: this block is the immediate successor of the
+            // last one we processed, so its parent hash must match exactly.
+            //
+            // Any other arrival — a gap (blocks skipped, e.g. catching up
+            // after a stall) or a block at or behind a height we already
+            // processed — means `parent_hash` cannot be compared directly
+            // against `last_hash`. That used to mean no check ran at all, so
+            // a fork arriving more than one block ahead went unnoticed. Ask
+            // the chain instead whether the block we last processed is still
+            // canonical.
+            let fork_block = if block.number == last_num + 1 {
+                (block.parent_hash != last_hash).then_some(last_num)
+            } else {
+                // A failure here must not be treated as "no reorg": `Ok(_)
+                // => None` and a swallowed `Err` are indistinguishable to
+                // the caller, but only one of them actually checked. Silently
+                // falling through to `None` would advance `last_block` below
+                // as if continuity were confirmed, permanently losing the one
+                // chance to catch a reorg that coincided with an RPC hiccup.
+                // Propagating instead leaves `last_block`/`last_block_hash`
+                // untouched, so the same gap is re-checked on the next block
+                // — the same fail-closed, free-retry pattern `handle_reorg`
+                // uses for re-validation failures.
+                match self.source.get_block_hash(last_num).await {
+                    // `min(last_num, block.number)` is a best-effort guess,
+                    // not a verified fork point: this call only tells us
+                    // `last_num`'s canonical hash changed, and for a block
+                    // arriving *behind* `last_num` (rather than the gap-ahead
+                    // case this branch mainly exists for) we have no recorded
+                    // hash below `last_num` to check against. If the true
+                    // fork is deeper than `block.number`, this under-guesses
+                    // it and misses candidates between the true fork and
+                    // `block.number` — the dangerous direction. Closing that
+                    // would need retained per-block history to walk back
+                    // through, which this monitor does not keep; accepted as
+                    // residual scope for the rare backward-jump case (see
+                    // `test_reorg_backward_jump_guesses_fork_block_from_incoming_block_number`).
+                    Ok(Some(hash)) if hash != last_hash => Some(last_num.min(block.number)),
+                    Ok(_) => None,
+                    Err(e) => {
+                        warn!(
+                            chain_id,
+                            block = block.number,
+                            last_num,
+                            error = %e,
+                            "failed to verify chain continuity across a block gap; will retry on the next block"
+                        );
+                        return Err(e);
+                    }
+                }
+            };
+
+            if let Some(fork_block) = fork_block {
                 warn!(
                     chain_id,
                     block = block.number,
+                    fork_block,
                     expected_parent = %last_hash,
                     actual_parent = %block.parent_hash,
                     "potential reorg detected"
                 );
-                self.handle_reorg(last_num, last_hash, block).await?;
+                self.handle_reorg(fork_block, last_hash, block).await?;
             }
         }
 

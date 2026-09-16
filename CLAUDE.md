@@ -67,8 +67,13 @@ real Postgres instance; see "End-to-end tests" below for that one:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace --lib --no-fail-fast -j 2
+cargo nextest run --workspace --no-fail-fast -j 2
 ```
+
+`--workspace` without `--lib` on purpose: the integration binaries under
+`evm/tests/` and `server/tests/` used to be compiled by clippy and never run,
+so they could sit red indefinitely while the gate reported green. Five of them
+were, on 2026-09-16.
 
 **Do not add `--all-features`.** It surfaces pre-existing errors in `evmmonitor`
 that are not in CI's path. Several people have lost an hour to this.
