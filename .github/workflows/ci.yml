@@ -840,3 +840,83 @@ jobs:
             fi
           done
           exit 1
+
+  # A red check that nobody reads is not a signal.
+  #
+  # The E2E job sat red on every testnet push for a day without anyone
+  # noticing, because it gates nothing: `notify-deploy-testnet` needs only
+  # `docker`, so the deploy went out regardless and no other job turned red.
+  #
+  # Gating the deploy on it is the wrong trade - testnet deploys on every push
+  # and is the development feedback loop, so a flaky browser suite would block
+  # the thing it exists to verify. Instead this leaves a durable artefact,
+  # the same mechanism `e2e-scheduled.yml` already uses for the nightly run
+  # against live testnet: an issue survives being ignored, and shows up in
+  # `gh issue list` long after a run has scrolled out of view.
+  e2e-status:
+    name: E2E status
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [e2e]
+    # `failure` specifically, not `!= success`. When an upstream job breaks,
+    # `e2e` is skipped rather than run, and filing an E2E issue for that would
+    # blame the browser suite for a build that never produced a binary -
+    # `testnet-deploy-status` already reports that case.
+    if: always() && github.ref == 'refs/heads/testnet' && needs.e2e.result == 'failure'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: File or update the E2E issue
+        uses: actions/github-script@v7
+        env:
+          E2E_RESULT: ${{ needs.e2e.result }}
+        with:
+          script: |
+            const title = 'CI E2E is failing on testnet';
+            const body = [
+              `The \`E2E\` job in \`ci.yml\` was **${process.env.E2E_RESULT}** for ` +
+              `\`${context.sha.slice(0, 7)}\` on \`testnet\`.`,
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'This job starts a local server from the built binaries. If the',
+              'failure is "frontend proxy is not reaching the API", read the',
+              '`Start server` step first - the server printing a reason and',
+              'exiting looks identical from nginx, and that is what it was the',
+              'last time this fired.',
+              '',
+              'Distinct from the nightly run in `e2e-scheduled.yml`, which tests',
+              'live testnet and starts no local server.',
+            ].join('\n');
+
+            // Reuse an open issue rather than filing one per push: testnet
+            // takes several pushes a day, and a fresh issue for each would bury
+            // the signal it exists to carry. Same reason, and the same
+            // per_page: 100, as e2e-scheduled.yml - the default 30 includes
+            // pull requests, so an exact-title match silently misses once the
+            // repo has 30+ open e2e-labelled items.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'e2e',
+              per_page: 100,
+            });
+            const match = existing.data.find(i => i.title === title);
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['e2e'],
+              });
+            }
