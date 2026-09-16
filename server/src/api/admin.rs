@@ -56,21 +56,31 @@ pub struct SafeModeResponse {
 
 /// One installed plugin, as an admin needs to see it.
 ///
-/// Carries `enabled` and `running` separately because they answer different
+/// Carries `enabled` and `loaded` separately because they answer different
 /// questions and routinely disagree. `enabled` is what the database records
-/// and what the next boot will honour; `running` is whether the host has a
-/// live, non-disabled instance right now. A plugin that is enabled but not
-/// running is either a safe-mode boot or one that has crashed since startup,
+/// and what the next boot will honour; `loaded` is whether this process has
+/// a live, non-disabled instance right now. A plugin that is enabled but not
+/// loaded is either a safe-mode boot or one that has failed since startup,
 /// and collapsing the two into one field is how an admin ends up restarting
 /// a server to fix something a restart will not fix.
+///
+/// `loaded` deliberately does not say *running*. It means the host compiled
+/// and instantiated the module and would dispatch to it - but nothing in
+/// this build dispatches to a plugin at all: `run_action` and `run_filter`
+/// have no callers outside the host's own tests, and the one wired call site
+/// (`invoice_creation_filters`, consulted on invoice creation) is populated
+/// in tests and never in the live server. Calling this field `running` would
+/// tell an admin their plugin is doing something, when what is true is that
+/// it loaded and is waiting for a dispatch path that does not exist yet.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AdminPluginInfo {
     pub id: String,
     pub version: String,
     /// What the install record says about the next boot.
     pub enabled: bool,
-    /// Whether the host holds a live, enabled instance right now.
-    pub running: bool,
+    /// Whether this process holds a live, enabled instance right now. Not a
+    /// claim that any request path invokes it - see the type's docs.
+    pub loaded: bool,
     /// Why it is off, when the host was the one that turned it off.
     pub disabled_reason: Option<String>,
     /// Consecutive failed calls, from the host. `0` when it is not loaded.
@@ -84,7 +94,7 @@ pub struct AdminPluginInfo {
 pub struct AdminPluginListResponse {
     pub plugins: Vec<AdminPluginInfo>,
     /// Repeated from `GET /admin/safe-mode` so the list is self-explaining:
-    /// without it, every plugin reading `enabled: true, running: false` looks
+    /// without it, every plugin reading `enabled: true, loaded: false` looks
     /// like a fleet of crashes rather than one flag.
     pub safe_mode: bool,
 }
@@ -430,7 +440,7 @@ where
         .map(|row| {
             // A row whose id no longer parses cannot be looked up in the
             // host, but it is still installed and still the admin's to
-            // remove - so it is listed as not running rather than hidden.
+            // remove - so it is listed as not loaded rather than hidden.
             let snapshot = payserver_plugin_api::PluginId::new(row.id.clone())
                 .ok()
                 .and_then(|id| state.plugin_host.as_ref().and_then(|h| h.status(&id)));
@@ -439,7 +449,7 @@ where
                 id: row.id,
                 version: row.version,
                 enabled: row.enabled,
-                running: snapshot.as_ref().is_some_and(|s| s.enabled),
+                loaded: snapshot.as_ref().is_some_and(|s| s.enabled),
                 // The host's live reason wins over the stored one: if a
                 // plugin was disabled after this boot started, the database
                 // still says why it was disabled last time, which is the

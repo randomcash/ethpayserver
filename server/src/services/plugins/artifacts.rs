@@ -33,6 +33,17 @@ pub enum ArtifactError {
         source: std::io::Error,
     },
 
+    /// Kept separate from [`ArtifactError::Unreadable`] because the two
+    /// describe opposite operations and the distinction is the whole
+    /// message: a read-only mount or a full volume reported as "could not
+    /// read" sends an admin looking at the wrong thing.
+    #[error("could not write plugin artifact at {path}: {source}")]
+    Unwritable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The file on disk is not the file that was installed.
     #[error(
         "plugin artifact at {path} does not match the digest recorded at install \

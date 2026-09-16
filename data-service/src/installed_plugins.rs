@@ -123,12 +123,18 @@ pub trait InstalledPluginWriter: Send + Sync {
     /// Turn a plugin on or off for future boots.
     ///
     /// `reason` is recorded only when disabling; enabling clears it.
+    ///
+    /// Returns whether a row was actually updated, the same way
+    /// [`Self::remove_installed_plugin`] does. The boot loader always has a
+    /// row in hand, but the admin endpoint this exists for takes a plugin id
+    /// from a request, and reporting success for an id that does not exist
+    /// is how an admin concludes they have disabled something they have not.
     async fn set_plugin_enabled(
         &self,
         id: &str,
         enabled: bool,
         reason: Option<&str>,
-    ) -> RepositoryResult<()>;
+    ) -> RepositoryResult<bool>;
 
     /// Returns whether a row was actually removed.
     async fn remove_installed_plugin(&self, id: &str) -> RepositoryResult<bool>;

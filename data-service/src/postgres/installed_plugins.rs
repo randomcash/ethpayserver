@@ -109,12 +109,12 @@ impl InstalledPluginWriter for PgDataService {
         id: &str,
         enabled: bool,
         reason: Option<&str>,
-    ) -> RepositoryResult<()> {
+    ) -> RepositoryResult<bool> {
         // Enabling always clears the reason, whatever the caller passed: a
         // plugin that is on must not still carry an explanation for being
         // off, which an admin would reasonably read as still being off.
         let stored_reason = if enabled { None } else { reason };
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE installed_plugins \
              SET enabled = $2, disabled_reason = $3, updated_at = NOW() \
              WHERE id = $1",
@@ -125,7 +125,7 @@ impl InstalledPluginWriter for PgDataService {
         .execute(self.pool())
         .await
         .map_err(sqlx_to_repo_error)?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     async fn remove_installed_plugin(&self, id: &str) -> RepositoryResult<bool> {

@@ -84,9 +84,12 @@ async fn a_disable_and_its_reason_persist() {
         .await
         .expect("install");
 
-    svc.set_plugin_enabled(&id, false, Some("trapped 3 times in a row"))
-        .await
-        .expect("disable");
+    assert!(
+        svc.set_plugin_enabled(&id, false, Some("trapped 3 times in a row"))
+            .await
+            .expect("disable"),
+        "disabling an installed plugin should report that it updated a row"
+    );
 
     let row = svc.get_installed_plugin(&id).await.unwrap().unwrap();
     assert!(!row.enabled);
@@ -245,5 +248,28 @@ async fn uninstalling_an_absent_plugin_reports_that_nothing_was_removed() {
         !svc.remove_installed_plugin(&unique_id("absent"))
             .await
             .expect("delete")
+    );
+}
+
+/// So does enabling or disabling one. The admin endpoint these exist for
+/// takes a plugin id from a request, and reporting success for an id that
+/// does not exist is how an admin concludes they have disabled something
+/// they have not.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL"]
+async fn toggling_an_absent_plugin_reports_that_nothing_changed() {
+    let Some(svc) = service().await else {
+        return;
+    };
+    let absent = unique_id("absent-toggle");
+    assert!(
+        !svc.set_plugin_enabled(&absent, false, Some("never installed"))
+            .await
+            .expect("disable")
+    );
+    assert!(
+        !svc.set_plugin_enabled(&absent, true, None)
+            .await
+            .expect("enable")
     );
 }
