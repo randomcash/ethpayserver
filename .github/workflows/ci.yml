@@ -459,9 +459,49 @@ jobs:
           RATE_LIMIT_WRITE: "10000"
           RATE_LIMIT_READ: "10000"
           RATE_LIMIT_WS: "10000"
+          # Without this the server refuses to start outright. Error reporting
+          # fails closed: no SENTRY_DSN plus an unset or unrecognised
+          # SENTRY_ENVIRONMENT is a hard exit, so that a missing DSN can never
+          # be mistaken for a working one. "dev" is one of the two values
+          # permitted to run with reporting off, and is what this job wants -
+          # a CI run has nowhere to report to and nothing worth reporting.
+          #
+          # That gate landed while this job was already red-by-default (see
+          # the readiness check below), so it broke E2E on every testnet push
+          # from the moment it merged and the job stayed green-looking for two
+          # steps afterwards.
+          SENTRY_ENVIRONMENT: dev
+        # Fails here if the server does not come up, rather than letting a dead
+        # server surface two steps later as "frontend proxy is not reaching the
+        # API" - which reads as a client or nginx problem and is why this took
+        # a while to find. The old loop was:
+        #
+        #   for i in $(seq 1 30); do curl -sf .../health/live && break || sleep 1; done
+        #
+        # whose last command on total failure is `sleep 1`, so the step exited
+        # 0 having never reached the server once.
         run: |
           ./target/release/ethpayserver &
-          for i in $(seq 1 30); do curl -sf http://127.0.0.1:3000/health/live && break || sleep 1; done
+          server_pid=$!
+
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3000/health/live >/dev/null; then
+              echo "server is up"
+              exit 0
+            fi
+            # Distinguishes "still starting" from "exited": polling a process
+            # that is already gone for the full 30s only delays the report and
+            # loses the reason, which the server has already printed.
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "::error::the server exited during startup - see the lines above for why"
+              wait "$server_pid" || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "::error::the server did not answer /health/live within 30s"
+          exit 1
 
       # `npx serve` has no API proxy, so every /api call fell through to the SPA
       # fallback and the client parsed index.html as JSON ("Parse error: expected
