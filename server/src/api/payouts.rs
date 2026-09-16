@@ -1,12 +1,21 @@
 //! Payout/settlement API endpoints.
 //!
-//! POST /stores/{store_id}/payouts — Initiate a payout (sweep funds to merchant wallet).
+//! POST /stores/{store_id}/payouts — record a payout the merchant will make.
 //! GET  /stores/{store_id}/payouts — List payouts for a store.
 //! GET  /stores/{store_id}/payouts/{payout_id} — Get payout details.
+//! POST /stores/{store_id}/payouts/{payout_id}/settle — the merchant made it.
+//! POST /stores/{store_id}/payouts/{payout_id}/abandon — they will not.
 //!
-//! Two rules hold everything here together, and both are enforced below rather
-//! than assumed: a payout may only be computed from invoices the store in the
-//! path owns, and an invoice's money may only be claimed once.
+//! **This server never sends funds.** It holds public xpubs and no spending
+//! key, so a payout is something the merchant performs from their own wallet
+//! and this records. Nothing here signs or broadcasts a transaction, and the
+//! row a payout creates was never an instruction the server would act on.
+//!
+//! Three rules hold everything together, and all three are enforced below
+//! rather than assumed: a payout may only be computed from invoices the store
+//! in the path owns; an invoice's money may only be claimed once; and a claim
+//! can always be released, because a claim that outlives the intent it was
+//! protecting refuses every later payout of the same money.
 
 #[cfg(test)]
 mod tests;
@@ -322,4 +331,167 @@ where
     let payout = payout_for_store(&*state.data_service, store_id, payout_id).await?;
 
     Ok(Json(payout.into()))
+}
+
+/// What a merchant sends when recording a payout they made themselves.
+#[derive(Debug, serde::Deserialize)]
+pub struct SettlePayoutRequest {
+    /// The transaction the merchant broadcast from their own wallet.
+    pub tx_hash: String,
+}
+
+/// Why a payout is being abandoned.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AbandonPayoutRequest {
+    /// Free text, stored on the payout so the next reader knows why.
+    pub reason: Option<String>,
+}
+
+/// Record that the merchant has made this payout from their own wallet.
+///
+/// This server never sends funds. It holds public xpubs only and has no
+/// spending key, so a payout is something the merchant performs and this
+/// records — the row was never an instruction the server would act on.
+///
+/// Moves the payout to `Confirmed` and stores the transaction hash the
+/// merchant supplies. Deliberately not verified against the chain: the server
+/// cannot know which wallet the merchant paid from, and refusing a hash it
+/// cannot corroborate would leave the merchant unable to close out a payout
+/// they genuinely made. The hash is the merchant's own record.
+///
+/// Only a `Pending` payout can be settled. Settling one twice is refused
+/// rather than silently overwriting the first transaction hash.
+pub async fn settle_payout<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path((store_id, payout_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<SettlePayoutRequest>,
+) -> Result<Json<PayoutResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let store_id = StoreId(store_id);
+
+    if !user.role.is_admin()
+        && state
+            .data_service
+            .get_user_store(user.id, store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let tx_hash = body.tx_hash.trim();
+    if tx_hash.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let payout = payout_for_store(&*state.data_service, store_id, payout_id).await?;
+
+    if payout.status != PayoutStatus::Pending {
+        tracing::warn!(
+            payout_id = %payout_id,
+            status = ?payout.status,
+            "Settle refused: only a pending payout can be settled"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
+    PayoutWriter::update_payout_status(
+        &*state.data_service,
+        payout_id,
+        PayoutStatus::Confirmed,
+        Some(tx_hash),
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to settle payout");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!(
+        payout_id = %payout_id,
+        store_id = %store_id,
+        tx_hash = %tx_hash,
+        "Payout settled by the merchant"
+    );
+
+    let settled = payout_for_store(&*state.data_service, store_id, payout_id).await?;
+    Ok(Json(settled.into()))
+}
+
+/// Abandon a payout the merchant is not going to make.
+///
+/// Creating a payout claims its invoices so the same money cannot be paid out
+/// twice, and that claim covers every payout that is not `failed`. Without a
+/// way to release it, a payout recorded by mistake would hold those invoices
+/// for good and refuse every later payout of the same money — the claim
+/// outliving the intent it was protecting.
+///
+/// Moves the payout to `Failed`, which is what the claim query already treats
+/// as released.
+pub async fn abandon_payout<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path((store_id, payout_id)): Path<(Uuid, Uuid)>,
+    body: Option<Json<AbandonPayoutRequest>>,
+) -> Result<Json<PayoutResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let store_id = StoreId(store_id);
+
+    if !user.role.is_admin()
+        && state
+            .data_service
+            .get_user_store(user.id, store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let payout = payout_for_store(&*state.data_service, store_id, payout_id).await?;
+
+    if payout.status != PayoutStatus::Pending {
+        tracing::warn!(
+            payout_id = %payout_id,
+            status = ?payout.status,
+            "Abandon refused: only a pending payout can be abandoned"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .unwrap_or_else(|| "abandoned by the merchant".to_string());
+
+    PayoutWriter::update_payout_status(
+        &*state.data_service,
+        payout_id,
+        PayoutStatus::Failed,
+        None,
+        None,
+        Some(&reason),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to abandon payout");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!(
+        payout_id = %payout_id,
+        store_id = %store_id,
+        reason = %reason,
+        "Payout abandoned; its invoices are claimable again"
+    );
+
+    let abandoned = payout_for_store(&*state.data_service, store_id, payout_id).await?;
+    Ok(Json(abandoned.into()))
 }

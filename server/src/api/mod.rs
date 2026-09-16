@@ -309,6 +309,18 @@ where
         .route("/{store_id}/payouts", get(payouts::list_payouts::<A>))
         .route("/{store_id}/payouts", post(payouts::create_payout::<A>))
         .route("/{store_id}/payouts/{payout_id}", get(payouts::get_payout::<A>))
+        // The merchant makes the payout from their own wallet, then records it
+        // here; this server has no spending key and never broadcasts.
+        .route(
+            "/{store_id}/payouts/{payout_id}/settle",
+            post(payouts::settle_payout::<A>),
+        )
+        // Releases the invoice claim a payout holds, so a payout recorded by
+        // mistake does not lock that money out of every later payout.
+        .route(
+            "/{store_id}/payouts/{payout_id}/abandon",
+            post(payouts::abandon_payout::<A>),
+        )
         // Webhook deliveries
         .route(
             "/{store_id}/webhook-deliveries",

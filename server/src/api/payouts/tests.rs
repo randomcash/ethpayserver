@@ -347,3 +347,93 @@ async fn another_stores_payout_is_not_readable() {
         "a payout's amount and destination address belong to the store that owns it"
     );
 }
+
+/// The settle and abandon paths must be mounted on the router the server
+/// actually serves — not on one a test built to look like it.
+///
+/// Three things in this repository have shipped fully tested and wired to
+/// nothing, so a handler with green unit tests is not evidence that a request
+/// can reach it. This asks the production `api::router()` directly.
+///
+/// Probed with the wrong method on purpose: axum answers 405 when a path is
+/// registered but the method is not, and 404 when the path is not registered
+/// at all. That distinguishes "mounted" from "missing" without a database, a
+/// session, or a real payout — none of which this is trying to test.
+///
+/// Goes red if either `.route(...)` is dropped from `api::mod`.
+#[tokio::test]
+async fn settle_and_abandon_are_mounted_on_the_real_router() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let store_id = Uuid::new_v4();
+    let payout_id = Uuid::new_v4();
+
+    for path in [
+        format!("/stores/{store_id}/payouts/{payout_id}/settle"),
+        format!("/stores/{store_id}/payouts/{payout_id}/abandon"),
+    ] {
+        // The production router, built from the same function `bin/server.rs`
+        // calls - not a mirror of it assembled here, which could agree with
+        // itself while the served router has no such path.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://payout-route-test-unused/db")
+            .expect("connect_lazy only validates the URL, it does not connect");
+        let data_service = std::sync::Arc::new(data_service::PgDataService::new(pool));
+        let auth_service = std::sync::Arc::new(auth::AuthService::with_config(
+            std::sync::Arc::clone(&data_service),
+            auth::AuthConfig::default(),
+        ));
+        let state = crate::state::AppState::new(
+            data_service,
+            auth_service,
+            None,
+            std::sync::Arc::new(NoRatesForRouting),
+            std::sync::Arc::new(crate::services::email::NoopEmailSender),
+        );
+        let app = crate::api::router(state, false, None, None, None);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET") // both are POST-only
+                    .uri(&path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "{path} is not mounted on the production router; a handler nothing \
+             routes to is not reachable"
+        );
+        assert_eq!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{path} should exist as a POST-only route"
+        );
+    }
+}
+
+/// The router needs a rate provider; nothing in the reachability probe reaches
+/// one, because the request is refused on method before any handler runs.
+struct NoRatesForRouting;
+
+#[async_trait]
+impl rates::RateProvider for NoRatesForRouting {
+    async fn get_rate(
+        &self,
+        _from: &str,
+        _to: &str,
+    ) -> Result<rates::ExchangeRate, rates::RateError> {
+        unreachable!("a 405 is decided by the router, before any handler runs")
+    }
+
+    fn name(&self) -> &'static str {
+        "none"
+    }
+}
