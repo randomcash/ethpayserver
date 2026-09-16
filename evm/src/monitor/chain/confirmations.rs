@@ -1,7 +1,7 @@
 //! Confirmation tracking and reorg handling.
 
 use super::ChainMonitor;
-use crate::error::{EvmError, EvmResult};
+use crate::error::EvmResult;
 use crate::monitor::events::{MonitorEvent, PaymentConfirmed, ReorgDetected};
 use crate::monitor::source::{BlockNotification, BlockSource, LogFilter};
 use alloy::primitives::{Address, B256};
@@ -101,7 +101,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         // the error instead leaves `last_block`/`last_block_hash` untouched
         // (see `process_block`), so the same reorg is re-evaluated, and
         // re-validated, on the next block.
-        let survived_tx_hashes = self
+        let (survived_tx_hashes, survivors_verifiable) = self
             .find_survived_tx_hashes(fork_block, new_block.number)
             .await
             .inspect_err(|e| {
@@ -121,6 +121,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             depth,
             affected_invoices: affected.clone(),
             survived_tx_hashes,
+            survivors_verifiable,
             detected_at: Utc::now(),
         };
 
@@ -161,23 +162,28 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// need the server to hand the monitor the specific DB candidate set for
     /// a second round of validation, which the command/event bridge does not
     /// support today.
-    async fn find_survived_tx_hashes(&self, from: u64, to: u64) -> EvmResult<Vec<B256>> {
+    /// Returns the transactions still on chain in `[from, to]`, and whether
+    /// the scan could verify anything at all.
+    ///
+    /// The second half matters as much as the first: the consumer retracts a
+    /// payment it cannot find, so an empty list from a scan that checked
+    /// nothing must not read as an empty list from a scan that checked
+    /// everything.
+    async fn find_survived_tx_hashes(&self, from: u64, to: u64) -> EvmResult<(Vec<B256>, bool)> {
         let watched = self.watched.read().await;
         if watched.is_empty() {
-            // "Nothing survived" and "could not check" are different answers,
-            // and the caller retracts on the first one. With no watched
-            // addresses there is nothing to scan *for*, which is not evidence
-            // that the database's candidates are gone - a quiet server whose
-            // invoices are all settled and past their grace period watches
-            // nothing at all, and would otherwise retract every payment on the
-            // chain at or above the fork block, un-paying settled invoices.
+            // Nothing to scan *for*. Erring here wedged the monitor: the error
+            // propagates through `handle_reorg` into `process_block`, which
+            // then never advances `last_block`, so every subsequent block
+            // re-enters the gap branch and fails again - permanently, on any
+            // server quiet enough to have no watched addresses. A payment
+            // processor that stops detecting payments overnight is a worse
+            // failure than the one that was being guarded against.
             //
-            // Erring here is the same fail-closed the RPC path already uses:
-            // `handle_reorg` leaves `last_block` untouched, so the reorg is
-            // re-evaluated on the next block rather than acted on blind.
-            return Err(EvmError::Monitor(
-                "cannot verify reorg survivors: no watched addresses".to_string(),
-            ));
+            // Reported as "not verifiable" instead, which the consumer refuses
+            // to retract on. That keeps the guarantee - an unverified payment
+            // is never retracted - without stopping the chain.
+            return Ok((Vec::new(), false));
         }
         let native_addresses: Vec<Address> = watched
             .keys()
@@ -210,6 +216,18 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         let chunk = self.config.max_blocks_per_scan.max(1);
 
         if !native_addresses.is_empty() {
+            // Deliberately not capped, unlike the ERC20 branch's chunking.
+            // Chunking splits one wide query into several that together cover
+            // the same range; a cap would cover *less* of it. Since a survivor
+            // this scan misses is retracted by the consumer, dropping blocks
+            // trades an RPC-cost problem for a wrongly-retracted-payment
+            // problem, which is the worse of the two.
+            //
+            // The cost is real - one `eth_getBalance`-style call per block,
+            // run inline in `process_block` - and on a very wide window it can
+            // hold the monitor's `select!` loop. The bound that belongs here is
+            // on how wide a window is acted on at all, not on how much of an
+            // accepted window gets checked.
             for block_number in from..=to {
                 let transfers = self
                     .source
@@ -234,6 +252,6 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             }
         }
 
-        Ok(survived)
+        Ok((survived, true))
     }
 }

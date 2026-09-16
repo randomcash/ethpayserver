@@ -254,6 +254,15 @@ pub struct ReorgDetected {
     /// retract one of these: doing so would un-pay an invoice that is still
     /// genuinely paid.
     pub survived_tx_hashes: Vec<B256>,
+    /// Whether the survivor scan could actually verify anything.
+    ///
+    /// `false` when the monitor had no watched addresses to scan, which is the
+    /// ordinary state of a quiet server - every invoice settled and past its
+    /// grace period. An empty `survived_tx_hashes` then means "nothing was
+    /// checked", not "nothing survived", and the two must not be confused:
+    /// the consumer retracts what it cannot find, so treating the first as the
+    /// second un-pays every settled invoice above `fork_block`.
+    pub survivors_verifiable: bool,
     /// When detected.
     pub detected_at: DateTime<Utc>,
 }
@@ -300,6 +309,7 @@ mod tests {
     #[test]
     fn test_reorg_significance() {
         let reorg = ReorgDetected {
+            survivors_verifiable: true,
             chain_id: 1,
             fork_block: 100,
             old_hash: B256::ZERO,

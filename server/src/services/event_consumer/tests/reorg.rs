@@ -69,6 +69,7 @@ async fn test_handle_reorg_detected() {
 
     // Create ReorgDetected event at block 99 (affecting block 100)
     let event = ReorgDetected {
+        survivors_verifiable: true,
         chain_id: 1,
         fork_block: 99,
         old_hash: B256::ZERO,
@@ -157,6 +158,7 @@ async fn test_handle_reorg_with_remaining_valid_payments() {
 
     // Create ReorgDetected event at block 99
     let event = ReorgDetected {
+        survivors_verifiable: true,
         chain_id: 1,
         fork_block: 99,
         old_hash: B256::ZERO,
@@ -364,6 +366,7 @@ async fn test_reorg_retracts_an_already_confirmed_payment() {
 
     consumer
         .handle_reorg_detected(ReorgDetected {
+            survivors_verifiable: true,
             affected_invoices: vec![],
             ..reorg_at(&invoice_id, 99)
         })
@@ -406,6 +409,7 @@ async fn test_reorg_after_restart_still_finds_affected_payments() {
 
     consumer
         .handle_reorg_detected(ReorgDetected {
+            survivors_verifiable: true,
             affected_invoices: vec![],
             ..reorg_at(&invoice_id, 99)
         })
@@ -446,6 +450,7 @@ async fn test_reorg_does_not_retract_a_survived_transaction() {
 
     consumer
         .handle_reorg_detected(ReorgDetected {
+            survivors_verifiable: true,
             survived_tx_hashes: vec![survivor_hash],
             ..reorg_at(&invoice_id, 99)
         })
@@ -474,6 +479,7 @@ async fn test_reorg_does_not_retract_a_survived_transaction() {
 /// A reorg on this invoice at `fork_block`, on chain 1.
 fn reorg_at(invoice_id: &InvoiceId, fork_block: u64) -> ReorgDetected {
     ReorgDetected {
+        survivors_verifiable: true,
         chain_id: 1,
         fork_block,
         old_hash: B256::ZERO,
@@ -572,6 +578,7 @@ async fn a_reorg_does_not_reopen_a_refunded_invoice() {
 
     consumer
         .handle_reorg_detected(ReorgDetected {
+            survivors_verifiable: true,
             chain_id: 1,
             fork_block: 499,
             old_hash: B256::repeat_byte(0x01),
