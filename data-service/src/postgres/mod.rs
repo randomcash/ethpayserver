@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod auth;
 mod conversions;
 mod email_change;
+mod installed_plugins;
 mod invoice;
 mod invoice_creation;
 mod merchant_directory;

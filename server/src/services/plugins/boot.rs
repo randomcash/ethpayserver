@@ -1,0 +1,651 @@
+//! Loading, at startup, the plugins an admin installed.
+//!
+//! Until this module existed, `PluginHost` was constructed in tests and
+//! nowhere else: a manifest could be gated, a module compiled, an action
+//! dispatched and a filter consulted, and none of it was reachable from a
+//! running server, because nothing ever built a host or told it what to
+//! load. This is the seam that closes - the database says what is installed,
+//! the artifact directory holds the wasm, and this turns the two into a
+//! registered plugin.
+//!
+//! ## A failure here disables the plugin, it does not stop the boot
+//!
+//! A plugin that will not load is the admin's problem to fix, and the server
+//! refusing to start is the worst possible way to tell them: the UI they
+//! would fix it from is the thing that did not come up. BTCPay's users hit
+//! exactly this and their documented fallback is deleting the plugin out of
+//! a Docker volume by hand. So a load failure is recorded, the plugin is
+//! disabled, and the server comes up without it.
+//!
+//! ## And the disable is written down
+//!
+//! Disabling a crashed plugin only in memory is undone by the restart that
+//! disabling it was supposed to make safe - the plugin comes back, fails
+//! again, and the server is in a crash loop that looks like a mystery. The
+//! row is updated, so the next boot skips it and an admin can see why
+//! without reading logs.
+
+use data_service::{
+    InstalledPlugin, InstalledPluginReader, InstalledPluginWriter, NewPluginEvent, PluginEventKind,
+};
+use payserver_plugin_api::{Manifest, PluginId};
+
+use super::artifacts::PluginArtifacts;
+use super::host::PluginHost;
+
+/// Consecutive failed calls before the host disables a plugin by itself.
+///
+/// Low on purpose. A plugin that has trapped three times in a row is not
+/// having a bad moment, and the cost of being wrong is asymmetric: a
+/// wrongly-disabled plugin is one admin click from coming back, while a
+/// plugin left enabled through a crash loop takes a request path down with
+/// it every time it is consulted.
+pub const DEFAULT_MAX_FAILURES: u32 = 3;
+
+/// How long any single plugin call may run before the epoch deadline fires.
+///
+/// One knob for both call shapes today, set by the stricter of the two: an
+/// invoice-creation filter runs inline on a request a merchant is waiting
+/// on, so seconds here are seconds of latency on invoice creation. Actions
+/// are fire-and-forget and could tolerate more, and will want their own
+/// deadline once anything actually needs it - splitting it before then would
+/// be two numbers to tune with no evidence about either.
+pub const DEFAULT_CALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What a boot did about each installed plugin.
+///
+/// Returned rather than only logged so the caller can report it and a test
+/// can assert on it; the counts are what an admin page summarises.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PluginBootReport {
+    /// Registered, running, reachable.
+    pub loaded: Vec<PluginId>,
+    /// Installed but switched off - by an admin, or by a previous boot that
+    /// could not load it. Carries the recorded reason where there is one.
+    pub skipped: Vec<(PluginId, Option<String>)>,
+    /// Failed this boot. Each of these has just been disabled in the
+    /// database and will be in `skipped` next time.
+    pub failed: Vec<(PluginId, String)>,
+    /// Every plugin was skipped because this boot is in safe mode.
+    pub safe_mode: bool,
+}
+
+impl PluginBootReport {
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.loaded.len() + self.skipped.len() + self.failed.len()
+    }
+}
+
+/// Load every enabled installed plugin into `host`.
+///
+/// `host` is `None` in safe mode, because in safe mode there is no host:
+/// that boot builds no wasmtime engine at all. Representing safe mode as the
+/// absence of the thing that runs plugins, rather than as a flag next to it,
+/// means there is no state where a host exists and a caller has forgotten to
+/// check whether it was supposed to use it.
+///
+/// Safe mode short-circuits before any row is touched: it is a property of
+/// this boot, not a disable. Nothing is written, so clearing the flag and
+/// restarting brings every plugin back exactly as it was - which is the
+/// whole point of having a way in that does not require disk access.
+pub async fn load_installed_plugins<D>(
+    data: &D,
+    host: Option<&PluginHost>,
+    artifacts: &PluginArtifacts,
+) -> Result<PluginBootReport, types::RepositoryError>
+where
+    D: InstalledPluginReader + InstalledPluginWriter + ?Sized,
+{
+    let installed = data.list_installed_plugins().await?;
+    let mut report = PluginBootReport {
+        safe_mode: host.is_none(),
+        ..Default::default()
+    };
+
+    for row in installed {
+        // An id that no longer parses is a database that has been edited by
+        // hand, or a `PluginId` whose rules tightened since the install. It
+        // cannot be turned into a `PluginId` to report against, so it is
+        // logged and skipped rather than silently dropped.
+        let Ok(id) = PluginId::new(row.id.clone()) else {
+            tracing::error!(
+                plugin_id = %row.id,
+                "installed_plugins holds an id that is not a valid plugin id; skipping it"
+            );
+            continue;
+        };
+
+        let Some(host) = host else {
+            report.skipped.push((id, Some("safe mode".to_string())));
+            continue;
+        };
+
+        if !row.enabled {
+            report.skipped.push((id, row.disabled_reason.clone()));
+            continue;
+        }
+
+        match register_or_disable(data, host, artifacts, &id, &row).await {
+            Ok(()) => report.loaded.push(id),
+            Err(reason) => report.failed.push((id, reason)),
+        }
+    }
+
+    Ok(report)
+}
+
+/// Register one plugin, or disable it in the database and say why.
+///
+/// The disable happens here rather than at the call site so that failing to
+/// load and being switched off for next time are one step: a boot that
+/// reported a failure without recording it would retry the same broken
+/// plugin on every restart, which is the crash loop this whole module exists
+/// to avoid.
+async fn register_or_disable<D>(
+    data: &D,
+    host: &PluginHost,
+    artifacts: &PluginArtifacts,
+    id: &PluginId,
+    row: &InstalledPlugin,
+) -> Result<(), String>
+where
+    D: InstalledPluginWriter + ?Sized,
+{
+    match load_one(
+        host,
+        artifacts,
+        id,
+        &row.version,
+        &row.manifest_toml,
+        &row.artifact_sha256,
+    ) {
+        Ok(()) => {
+            tracing::info!(plugin_id = %id, version = %row.version, "plugin loaded");
+            Ok(())
+        }
+        Err(reason) => {
+            tracing::error!(
+                plugin_id = %id,
+                version = %row.version,
+                reason = %reason,
+                "plugin failed to load; disabling it so the next boot does not retry"
+            );
+            disable_after_failure(data, &row.id, &row.version, &reason).await;
+            Err(reason)
+        }
+    }
+}
+
+/// Parse, verify and register one plugin. The error is the admin-facing
+/// reason, already rendered, because that is what gets stored.
+fn load_one(
+    host: &PluginHost,
+    artifacts: &PluginArtifacts,
+    id: &PluginId,
+    version: &str,
+    manifest_toml: &str,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let manifest: Manifest = manifest_toml
+        .parse()
+        .map_err(|e| format!("stored manifest no longer parses: {e}"))?;
+
+    // The manifest is the authority on the plugin's own id, and the row is
+    // the authority on which artifact was installed. If they disagree, the
+    // install record does not describe the thing on disk and neither answer
+    // is safe to act on.
+    if manifest.id != *id {
+        return Err(format!(
+            "stored manifest declares id {}, but it is installed as {id}",
+            manifest.id
+        ));
+    }
+    if manifest.version.to_string() != version {
+        return Err(format!(
+            "stored manifest declares version {}, but it is installed as {version}",
+            manifest.version
+        ));
+    }
+
+    let wasm = artifacts
+        .read_verified(id, version, expected_sha256)
+        .map_err(|e| e.to_string())?;
+
+    host.register(manifest, &wasm)
+        .map_err(|e| format!("host refused it: {e}"))
+}
+
+/// Record the failure and switch the plugin off for future boots.
+///
+/// Deliberately infallible from the caller's point of view: the server is
+/// starting, the plugin is already not going to run, and a database write
+/// failing here must not be the thing that stops the boot. It is logged
+/// loudly instead, because the consequence - a retry on the next boot - is
+/// worth knowing about.
+async fn disable_after_failure<D>(data: &D, id: &str, version: &str, reason: &str)
+where
+    D: InstalledPluginWriter + ?Sized,
+{
+    if let Err(e) = data.set_plugin_enabled(id, false, Some(reason)).await {
+        tracing::error!(
+            plugin_id = %id,
+            error = %e,
+            "could not disable a plugin that failed to load; it will be retried on the next boot"
+        );
+    }
+    let event = NewPluginEvent {
+        plugin_id: id.to_string(),
+        kind: PluginEventKind::LoadFailed,
+        version: Some(version.to_string()),
+        detail: Some(reason.to_string()),
+        // No actor: the host did this to itself.
+        actor_user_id: None,
+    };
+    if let Err(e) = data.record_plugin_event(&event).await {
+        tracing::error!(plugin_id = %id, error = %e, "could not record a plugin load failure");
+    }
+}
+
+/// Log what the boot did, at a level that matches how bad it is.
+///
+/// `cognitive_complexity` is allowed because every branch here is a
+/// `tracing` macro, each of which expands to a conditional the lint counts
+/// and a reader does not. The function is a flat sequence of log lines.
+#[allow(clippy::cognitive_complexity)]
+pub fn report_boot(report: &PluginBootReport) {
+    if report.safe_mode {
+        tracing::warn!(
+            installed = report.total(),
+            "SAFE MODE: no plugin was loaded. Clear ETHPAY_DISABLE_PLUGINS and restart to \
+             bring them back; nothing has been uninstalled."
+        );
+        return;
+    }
+    if report.total() == 0 {
+        tracing::info!("no plugins installed");
+        return;
+    }
+    tracing::info!(
+        loaded = report.loaded.len(),
+        skipped = report.skipped.len(),
+        failed = report.failed.len(),
+        "plugin host ready"
+    );
+    for (id, reason) in &report.failed {
+        tracing::error!(plugin_id = %id, reason = %reason, "plugin disabled after failing to load");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use types::{RepositoryError, RepositoryResult};
+
+    use super::super::host::PluginHost;
+    use super::super::registry::host_version;
+    use super::super::runtime::fixtures::echo_module;
+    use super::*;
+
+    const PLUGIN_ID: &str = "cash.random.billing";
+
+    /// A manifest that this host will accept, built against the running
+    /// `host_version()` rather than a literal, so a crate version bump does
+    /// not quietly turn these tests into assertions about version rejection.
+    fn manifest_toml(id: &str, version: &str) -> String {
+        let host = host_version();
+        format!(
+            r#"
+            id = "{id}"
+            version = "{version}"
+            dependencies = ["ethpayserver:^{}.{}"]
+            kind = "action"
+            "#,
+            host.major, host.minor
+        )
+    }
+
+    /// The installed-plugin tables, in memory.
+    #[derive(Default)]
+    struct FakeStore {
+        rows: Mutex<Vec<InstalledPlugin>>,
+        events: Mutex<Vec<NewPluginEvent>>,
+    }
+
+    impl FakeStore {
+        fn with_row(row: InstalledPlugin) -> Self {
+            Self {
+                rows: Mutex::new(vec![row]),
+                events: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn row(&self, id: &str) -> InstalledPlugin {
+            self.rows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.id == id)
+                .cloned()
+                .expect("row should still exist")
+        }
+
+        fn event_kinds(&self) -> Vec<&'static str> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|e| e.kind.as_str())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl InstalledPluginReader for FakeStore {
+        async fn list_installed_plugins(&self) -> RepositoryResult<Vec<InstalledPlugin>> {
+            Ok(self.rows.lock().unwrap().clone())
+        }
+
+        async fn get_installed_plugin(
+            &self,
+            id: &str,
+        ) -> RepositoryResult<Option<InstalledPlugin>> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.id == id)
+                .cloned())
+        }
+
+        async fn plugin_events(
+            &self,
+            _id: &str,
+            _limit: i64,
+        ) -> RepositoryResult<Vec<data_service::PluginEvent>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl InstalledPluginWriter for FakeStore {
+        async fn upsert_installed_plugin(
+            &self,
+            _plugin: &data_service::NewInstalledPlugin,
+        ) -> RepositoryResult<()> {
+            Err(RepositoryError::InvalidData(
+                "not needed by these tests".to_string(),
+            ))
+        }
+
+        async fn set_plugin_enabled(
+            &self,
+            id: &str,
+            enabled: bool,
+            reason: Option<&str>,
+        ) -> RepositoryResult<()> {
+            let mut rows = self.rows.lock().unwrap();
+            if let Some(row) = rows.iter_mut().find(|r| r.id == id) {
+                row.enabled = enabled;
+                row.disabled_reason = if enabled {
+                    None
+                } else {
+                    reason.map(str::to_string)
+                };
+            }
+            Ok(())
+        }
+
+        async fn remove_installed_plugin(&self, _id: &str) -> RepositoryResult<bool> {
+            Err(RepositoryError::InvalidData(
+                "not needed by these tests".to_string(),
+            ))
+        }
+
+        async fn record_plugin_event(&self, event: &NewPluginEvent) -> RepositoryResult<()> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    fn row(version: &str, sha: &str) -> InstalledPlugin {
+        InstalledPlugin {
+            id: PLUGIN_ID.to_string(),
+            version: version.to_string(),
+            manifest_toml: manifest_toml(PLUGIN_ID, version),
+            artifact_sha256: sha.to_string(),
+            enabled: true,
+            disabled_reason: None,
+            installed_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn host() -> PluginHost {
+        PluginHost::new(host_version(), DEFAULT_MAX_FAILURES, DEFAULT_CALL_DEADLINE)
+    }
+
+    /// The baseline the rest of these tests ablate: an installed plugin
+    /// whose artifact is on disk and matches its digest is registered, and
+    /// after that the host will answer for it.
+    #[tokio::test]
+    async fn an_installed_plugin_is_loaded_and_reachable_through_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = PluginArtifacts::new(dir.path());
+        let id = PluginId::new(PLUGIN_ID).unwrap();
+        let sha = artifacts.write(&id, "0.1.0", &echo_module()).unwrap();
+
+        let store = FakeStore::with_row(row("0.1.0", &sha));
+        let host = host();
+
+        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+            .await
+            .unwrap();
+
+        assert_eq!(report.loaded, vec![id.clone()]);
+        assert!(report.failed.is_empty(), "failed: {:?}", report.failed);
+        assert!(
+            host.status(&id).is_some(),
+            "a loaded plugin must be one the host can answer about; that is what \
+             'installed' failing to survive a restart looked like before"
+        );
+    }
+
+    /// A plugin whose artifact no longer matches the digest recorded at
+    /// install is not loaded, is switched off for the next boot, and leaves
+    /// a record saying why.
+    ///
+    /// Ablation: drop the `disable_after_failure` call in
+    /// `register_or_disable` and the row stays enabled - the next boot
+    /// retries the same bad artifact, and every boot after that.
+    #[tokio::test]
+    async fn a_tampered_artifact_is_not_loaded_and_is_disabled_for_next_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = PluginArtifacts::new(dir.path());
+        let id = PluginId::new(PLUGIN_ID).unwrap();
+        let installed_sha = artifacts.write(&id, "0.1.0", &echo_module()).unwrap();
+
+        // The file changes after install.
+        std::fs::write(artifacts.path_for(&id, "0.1.0").unwrap(), b"\0asm not it").unwrap();
+
+        let store = FakeStore::with_row(row("0.1.0", &installed_sha));
+        let host = host();
+
+        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+            .await
+            .unwrap();
+
+        assert!(
+            report.loaded.is_empty(),
+            "a tampered artifact must not load"
+        );
+        assert_eq!(report.failed.len(), 1);
+        assert!(host.status(&id).is_none());
+
+        let after = store.row(PLUGIN_ID);
+        assert!(
+            !after.enabled,
+            "the plugin must be disabled for the next boot"
+        );
+        assert!(
+            after
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("digest")),
+            "the stored reason should name the digest, got {:?}",
+            after.disabled_reason
+        );
+        assert_eq!(store.event_kinds(), vec!["load_failed"]);
+    }
+
+    /// A plugin a previous boot disabled stays disabled.
+    ///
+    /// This is the BTCPay failure in one test: their crash handler disables
+    /// a plugin and restarts, and the disable does not survive the restart,
+    /// so the server walks straight back into the crash. Ablation: drop the
+    /// `!row.enabled` check and this loads.
+    #[tokio::test]
+    async fn a_plugin_disabled_by_a_previous_boot_is_not_loaded_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = PluginArtifacts::new(dir.path());
+        let id = PluginId::new(PLUGIN_ID).unwrap();
+        // The artifact is perfectly good. Being disabled is the only reason
+        // it must not load - otherwise this would pass for the wrong reason.
+        let sha = artifacts.write(&id, "0.1.0", &echo_module()).unwrap();
+
+        let mut disabled = row("0.1.0", &sha);
+        disabled.enabled = false;
+        disabled.disabled_reason = Some("trapped 3 times in a row".to_string());
+
+        let store = FakeStore::with_row(disabled);
+        let host = host();
+
+        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+            .await
+            .unwrap();
+
+        assert!(report.loaded.is_empty());
+        assert_eq!(
+            report.skipped,
+            vec![(id.clone(), Some("trapped 3 times in a row".to_string()))],
+            "the reason it is off must survive the restart along with the disable"
+        );
+        assert!(host.status(&id).is_none());
+    }
+
+    /// Safe mode loads nothing - and, just as importantly, records nothing.
+    ///
+    /// A safe-mode boot that disabled plugins on its way past would make the
+    /// recovery flag destructive: clearing it and restarting would come back
+    /// with everything still off, and an admin would have no way to tell
+    /// that from the plugins having genuinely failed.
+    #[tokio::test]
+    async fn safe_mode_loads_nothing_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = PluginArtifacts::new(dir.path());
+        let id = PluginId::new(PLUGIN_ID).unwrap();
+        let sha = artifacts.write(&id, "0.1.0", &echo_module()).unwrap();
+
+        let store = FakeStore::with_row(row("0.1.0", &sha));
+
+        let report = load_installed_plugins(&store, None, &artifacts)
+            .await
+            .unwrap();
+
+        assert!(report.safe_mode);
+        assert!(report.loaded.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+
+        let after = store.row(PLUGIN_ID);
+        assert!(
+            after.enabled && after.disabled_reason.is_none(),
+            "safe mode must leave the install record exactly as it found it"
+        );
+        assert!(
+            store.event_kinds().is_empty(),
+            "safe mode is a property of one boot, not an event in a plugin's history"
+        );
+    }
+
+    /// The row and the manifest must agree about which plugin this is. If
+    /// they do not, the install record does not describe the artifact on
+    /// disk and neither is safe to act on.
+    #[tokio::test]
+    async fn a_manifest_that_disagrees_with_its_install_record_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = PluginArtifacts::new(dir.path());
+        let id = PluginId::new(PLUGIN_ID).unwrap();
+        let sha = artifacts.write(&id, "0.1.0", &echo_module()).unwrap();
+
+        let mut mismatched = row("0.1.0", &sha);
+        mismatched.manifest_toml = manifest_toml("cash.random.somethingelse", "0.1.0");
+
+        let store = FakeStore::with_row(mismatched);
+        let host = host();
+
+        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+            .await
+            .unwrap();
+
+        assert!(report.loaded.is_empty());
+        assert!(
+            report.failed[0].1.contains("declares id"),
+            "got {:?}",
+            report.failed[0].1
+        );
+        assert!(!store.row(PLUGIN_ID).enabled);
+    }
+
+    /// A version mismatch is the same class of disagreement: the row names
+    /// the artifact that was installed, and a manifest claiming a different
+    /// version means one of the two is stale.
+    #[tokio::test]
+    async fn a_manifest_version_that_disagrees_with_the_record_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = PluginArtifacts::new(dir.path());
+        let id = PluginId::new(PLUGIN_ID).unwrap();
+        let sha = artifacts.write(&id, "0.1.0", &echo_module()).unwrap();
+
+        let mut mismatched = row("0.1.0", &sha);
+        mismatched.manifest_toml = manifest_toml(PLUGIN_ID, "0.2.0");
+
+        let store = FakeStore::with_row(mismatched);
+        let host = host();
+
+        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+            .await
+            .unwrap();
+
+        assert!(report.loaded.is_empty());
+        assert!(
+            report.failed[0].1.contains("declares version"),
+            "got {:?}",
+            report.failed[0].1
+        );
+    }
+
+    /// A missing artifact - the plugin directory wiped, a volume not
+    /// mounted - disables the plugin with a reason rather than taking the
+    /// boot down.
+    #[tokio::test]
+    async fn a_missing_artifact_disables_the_plugin_rather_than_failing_the_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = PluginArtifacts::new(dir.path());
+
+        let store = FakeStore::with_row(row("0.1.0", &super::super::artifacts::digest(b"gone")));
+        let host = host();
+
+        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+            .await
+            .expect("a missing artifact is not a boot failure");
+
+        assert_eq!(report.failed.len(), 1);
+        assert!(!store.row(PLUGIN_ID).enabled);
+    }
+}

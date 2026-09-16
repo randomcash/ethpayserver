@@ -16,6 +16,7 @@ use crate::api::ws::WsBroadcast;
 use crate::services::email::EmailSender;
 use crate::services::plugins::InvoiceCreationFilter;
 use crate::services::plugins::PageHost;
+use crate::services::plugins::PluginHost;
 use crate::services::webhook::WebhookSink;
 
 /// Read-only data service trait for the application.
@@ -119,6 +120,19 @@ pub struct AppState<D, A, E> {
     /// see that module's docs. Every request 404s until then, which is
     /// correct: there is no plugin code to invoke yet.
     pub plugin_pages: Arc<PageHost>,
+    /// The wasmtime plugin host, once a boot has built one.
+    ///
+    /// `None` outside a real server: `PluginHost::new` builds a wasmtime
+    /// engine and spawns its epoch ticker thread, which is the wrong price
+    /// for the many unit tests that construct an `AppState` and never touch
+    /// a plugin. The live server sets it in `server.rs` after
+    /// `load_installed_plugins` has populated it, so `Some` here means the
+    /// host exists and has already been told what is installed.
+    ///
+    /// It is also `None` in safe mode - that boot builds no host at all,
+    /// which is what makes safe mode a property of the process rather than
+    /// a flag every call site has to remember to check.
+    pub plugin_host: Option<Arc<PluginHost>>,
     /// Safe mode: this boot has every plugin disabled.
     ///
     /// Resolved once at startup from `Config::safe_mode` and copied in here,
@@ -142,6 +156,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             invoice_creation_filters: self.invoice_creation_filters.clone(),
             email_sender: Arc::clone(&self.email_sender),
             plugin_pages: Arc::clone(&self.plugin_pages),
+            plugin_host: self.plugin_host.clone(),
             safe_mode: self.safe_mode,
         }
     }
@@ -168,6 +183,7 @@ impl<D, A, E> AppState<D, A, E> {
             invoice_creation_filters: Vec::new(),
             email_sender,
             plugin_pages: Arc::new(PageHost::new()),
+            plugin_host: None,
             safe_mode: false,
         }
     }

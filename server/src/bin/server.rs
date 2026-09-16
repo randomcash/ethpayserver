@@ -28,6 +28,10 @@ use server::{
     config::Config,
     metrics,
 };
+use server::{
+    DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, PluginArtifacts, PluginHost, host_version,
+    load_installed_plugins, report_boot,
+};
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)] // server bootstrap — config, DB, services, routes in sequence
@@ -249,6 +253,35 @@ async fn main() -> Result<()> {
     state.captcha_provider = captcha_provider;
     state.webauthn = Some(webauthn_health);
     state.safe_mode = config.safe_mode;
+
+    // Bring up the plugin host and load whatever is installed.
+    //
+    // In safe mode there is no host at all - not an empty one. A boot that
+    // builds no wasmtime engine cannot run plugin code by any path, including
+    // one added later by someone who did not know to check the flag.
+    let plugin_host = if config.safe_mode {
+        None
+    } else {
+        Some(Arc::new(PluginHost::new(
+            host_version(),
+            DEFAULT_MAX_FAILURES,
+            DEFAULT_CALL_DEADLINE,
+        )))
+    };
+    let plugin_artifacts = PluginArtifacts::new(&config.plugin_dir);
+    // A failure to *read* the install list is different from a plugin failing
+    // to load: the database is not answering, which the rest of the boot is
+    // about to discover anyway. Log and continue with no plugins rather than
+    // refuse to start - a server that will not come up is the one state an
+    // admin cannot fix a plugin problem from.
+    match load_installed_plugins(&*data_service, plugin_host.as_deref(), &plugin_artifacts).await {
+        Ok(report) => report_boot(&report),
+        Err(e) => tracing::error!(
+            error = %e,
+            "could not read the installed-plugin list; starting with no plugins loaded"
+        ),
+    }
+    state.plugin_host = plugin_host;
 
     // Create rate limiters
     let rate_limit_config = RateLimitConfig::from_env();

@@ -28,7 +28,17 @@
 //! `runtime` (instantiate/call/deadline/trap on a single plugin) and `host`
 //! (action vs. filter dispatch, disable-on-repeated-failure, admin-visible
 //! status) are the wasmtime layer that calls into all of the above.
+//!
+//! `artifacts` and `boot` are what make any of it reachable from a running
+//! server. Every module above this line is in-memory and dies with the
+//! process; `artifacts` is the wasm on disk and the digest that says it is
+//! still the wasm that was installed, and `boot` reads the install records,
+//! verifies each artifact against its digest and registers it with the
+//! host - disabling, in the database, anything that fails, so a restart
+//! does not walk straight back into the same crash.
 
+mod artifacts;
+mod boot;
 mod error;
 mod filter;
 mod host;
@@ -40,6 +50,11 @@ mod registry;
 mod runtime;
 mod storage;
 
+pub use artifacts::{ArtifactError, PluginArtifacts, digest};
+pub use boot::{
+    DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, PluginBootReport, load_installed_plugins,
+    report_boot,
+};
 pub use error::PluginLoadError;
 pub use filter::{
     FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest,

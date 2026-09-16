@@ -10,3 +10,7 @@
 # Committing it would silently point everyone's build at one person's disk and
 # undo the revision pin in Cargo.toml.
 .cargo/config.toml
+
+# Installed plugins' wasm artifacts. `ETHPAY_PLUGIN_DIR` defaults to
+# ./plugins, so a local server that installs one drops binaries here.
+/plugins/

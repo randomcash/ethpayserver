@@ -18,11 +18,14 @@
 //! - `webhook_delivery`: retries of one job collapse to one row, and a
 //!   store's deliveries stay scoped to it
 //! - `merchant_directory`: the plugin host's server-wide account/store list
+//! - `installed_plugins`: what is installed survives a restart, and the
+//!   audit trail outlives the plugin it describes
 
 mod account_deletion;
 mod aggregation;
 mod analytics;
 mod email_change;
+mod installed_plugins;
 mod invoice;
 mod invoice_creation;
 mod merchant_directory;

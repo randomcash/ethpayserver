@@ -42,10 +42,12 @@
 //!
 //! ## Plugins
 //! - `ETHPAY_DISABLE_PLUGINS` - Safe mode: boot with every plugin disabled
+//! - `ETHPAY_PLUGIN_DIR` - Where installed plugins' wasm lives (default: ./plugins)
 //!   (default: false). Same effect as the `--disable-plugins` CLI flag.
 
 use secrecy::{ExposeSecret, SecretString};
 use std::env;
+use std::path::PathBuf;
 
 /// Server configuration loaded from environment variables.
 #[derive(Debug, Clone)]
@@ -76,6 +78,15 @@ pub struct Config {
     /// Disables plugins for this boot only - it does not uninstall them or
     /// touch their data, and clearing the flag restores them.
     pub safe_mode: bool,
+
+    /// Where installed plugins' wasm artifacts live.
+    ///
+    /// Set via `ETHPAY_PLUGIN_DIR`. Defaults to `./plugins` rather than a
+    /// path under `/var`, so a development run and a test need no privileged
+    /// directory to exist; a container image sets it explicitly to whatever
+    /// volume survives a redeploy. A missing directory is not an error -
+    /// it is what a server with no plugins installed looks like.
+    pub plugin_dir: PathBuf,
 }
 
 /// Valid log levels.
@@ -93,6 +104,7 @@ impl Config {
     /// - `PORT` - Server port (default: 3000)
     /// - `LOG_LEVEL` - Log level (default: info)
     /// - `ENABLE_SWAGGER` - Enable Swagger UI (default: true)
+    /// - `ETHPAY_PLUGIN_DIR` - Plugin artifact directory (default: ./plugins)
     pub fn from_env() -> anyhow::Result<Self> {
         let database_url = SecretString::from(
             env::var("DATABASE_URL")
@@ -116,6 +128,9 @@ impl Config {
         let cli_args: Vec<String> = env::args().collect();
         let safe_mode = safe_mode_requested(|key| env::var(key).ok(), &cli_args);
 
+        let plugin_dir = env::var("ETHPAY_PLUGIN_DIR")
+            .map_or_else(|_| PathBuf::from("./plugins"), PathBuf::from);
+
         let config = Self {
             database_url,
             redis_url,
@@ -124,6 +139,7 @@ impl Config {
             log_level,
             enable_swagger,
             safe_mode,
+            plugin_dir,
         };
 
         config.validate()?;
@@ -248,6 +264,7 @@ mod tests {
             log_level: "info".to_string(),
             enable_swagger: false,
             safe_mode: false,
+            plugin_dir: PathBuf::from("./plugins"),
         };
         let rendered = format!("{config:?}");
         assert!(
