@@ -190,6 +190,7 @@ impl From<(StatusCode, String)> for ApiErr {
         stores::SetStoreWalletRequest,
         stores::StoreWalletResponse,
         stores::WalletResponse,
+        stores::CreateWalletResponse,
         stores::WalletXpubResponse,
         stores::DerivedAddressEntry,
         stores::WalletAddressesResponse,

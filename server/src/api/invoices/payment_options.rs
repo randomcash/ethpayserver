@@ -184,14 +184,26 @@ async fn derive_payment_address<A: SessionService>(
                     tracing::warn!(
                         payment_method_id = %payment_method.id,
                         store_id = %payment_method.store_id,
-                        "payment method resolves to no wallet; cannot derive an address"
+                        chain_id = %payment_method.chain_id,
+                        namespace = %payment_method.chain_id.namespace(),
+                        "payment method resolves to no wallet in its chain family; \
+                         cannot derive an address"
                     );
+                    // The same refusal covers "no key at all" and "no key for
+                    // this chain's family". Both are the merchant's to fix, in
+                    // the same place, and the message names the chain so they
+                    // can tell which - a store paid in ETH and Tron that has
+                    // only an Ethereum key otherwise gets an error that looks
+                    // like a contradiction of a Wallets page listing a wallet.
                     return invoice_error(
                         StatusCode::CONFLICT,
                         "no_receiving_key",
-                        "This store's payment method has no receiving key to derive an \
-                         address from. Add one on the Wallets page, or set a key on the \
-                         payment method.",
+                        &format!(
+                            "This store's payment method has no receiving key for \
+                             {} to derive an address from. Add one on the Wallets \
+                             page, or set a key on the payment method.",
+                            payment_method.chain_id
+                        ),
                     );
                 }
                 tracing::error!(
@@ -206,20 +218,41 @@ async fn derive_payment_address<A: SessionService>(
                 )
             })?;
 
-    let deriver = XpubDeriver::from_xpub(&allocation.xpub).map_err(|_| {
-        invoice_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "Failed to derive payment address",
-        )
-    })?;
-    let address = deriver
-        .derive_address(allocation.index as u32)
-        .map_err(|_| {
+    // The namespace comes from the same statement as the key, so the family
+    // this derives under is by construction the family the key was registered
+    // for - not the one the chain id happens to say.
+    let deriver =
+        XpubDeriver::from_xpub(&allocation.namespace, &allocation.xpub).map_err(|_| {
             invoice_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "Failed to derive payment address",
+            )
+        })?;
+
+    // `derive_evm_address`, not the family-encoded string. Everything
+    // downstream of here - the watched-address table, the monitor, the reorg
+    // scanner - means an EVM address on an EVM chain, and this server has no
+    // adapter that can watch anything else. A non-EVM key reaching this point
+    // means an operator enabled a chain nothing monitors: quoting a customer
+    // an address no component will ever see paid is worse than refusing, since
+    // the invoice would sit unpaid with the money already spent.
+    let address = deriver
+        .derive_evm_address(allocation.index as u32)
+        .map_err(|e| {
+            tracing::error!(
+                payment_method_id = %payment_method.id,
+                wallet_id = %allocation.wallet_id,
+                namespace = %allocation.namespace,
+                error = %e,
+                "cannot derive a watchable address for this payment method's chain family"
+            );
+            invoice_error(
+                StatusCode::CONFLICT,
+                "unsupported_chain",
+                "This store's payment method is on a chain this server cannot yet \
+                 watch for payments. Disable it, or use a chain with a registered \
+                 adapter.",
             )
         })?;
 

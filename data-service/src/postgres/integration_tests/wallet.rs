@@ -13,6 +13,15 @@ use super::super::PgDataService;
 use super::super::tests::create_test_service;
 use crate::{RepositoryError, WalletReader, WalletWriter};
 
+/// The chain family every wallet in this file belongs to unless it says
+/// otherwise. Spelled out at each call rather than defaulted, because the
+/// whole point of these signatures is that the family is never assumed.
+const EVM: &str = types::NAMESPACE_EIP155;
+
+/// Tron, for the tests about a family this server has a key for but the store
+/// does not.
+const TRON: &str = types::NAMESPACE_TRON;
+
 /// A key no other test is using.
 ///
 /// An xpub may only be registered to one account, so tests that share a
@@ -129,7 +138,7 @@ async fn concurrent_allocation_on_one_wallet_issues_distinct_indices() {
     };
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
-    let wallet = WalletWriter::create_wallet(&service, user, &xpub_a, None)
+    let wallet = WalletWriter::create_wallet(&service, user, EVM, &xpub_a, None)
         .await
         .expect("create wallet");
 
@@ -182,14 +191,14 @@ async fn adding_a_known_xpub_does_not_create_a_second_counter() {
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
 
-    let first = WalletWriter::create_wallet(&service, user, &xpub_a, Some("first"))
+    let first = WalletWriter::create_wallet(&service, user, EVM, &xpub_a, Some("first"))
         .await
         .expect("create");
     WalletWriter::next_derivation_index(&service, first.id)
         .await
         .expect("allocate");
 
-    let again = WalletWriter::create_wallet(&service, user, &xpub_a, Some("again"))
+    let again = WalletWriter::create_wallet(&service, user, EVM, &xpub_a, Some("again"))
         .await
         .expect("re-add");
 
@@ -229,7 +238,7 @@ async fn a_store_without_an_override_uses_the_account_primary() {
     let store = seed_store_for(&service, user).await;
 
     assert!(
-        WalletReader::resolve_store_wallet(&service, store)
+        WalletReader::resolve_store_wallet(&service, store, EVM)
             .await
             .unwrap()
             .is_none(),
@@ -237,19 +246,19 @@ async fn a_store_without_an_override_uses_the_account_primary() {
     );
 
     // The first wallet on an account becomes its primary.
-    let primary = WalletWriter::create_wallet(&service, user, &xpub_a, Some("primary"))
+    let primary = WalletWriter::create_wallet(&service, user, EVM, &xpub_a, Some("primary"))
         .await
         .unwrap();
     assert!(primary.is_primary);
 
-    let resolved = WalletReader::resolve_store_wallet(&service, store)
+    let resolved = WalletReader::resolve_store_wallet(&service, store, EVM)
         .await
         .unwrap()
         .expect("resolves to the primary");
     assert_eq!(resolved.id, primary.id);
 
     // Pin the store elsewhere.
-    let other = WalletWriter::create_wallet(&service, user, &xpub_b, Some("other"))
+    let other = WalletWriter::create_wallet(&service, user, EVM, &xpub_b, Some("other"))
         .await
         .unwrap();
     assert!(!other.is_primary, "only the first wallet is primary");
@@ -258,7 +267,7 @@ async fn a_store_without_an_override_uses_the_account_primary() {
         .await
         .unwrap();
     assert_eq!(
-        WalletReader::resolve_store_wallet(&service, store)
+        WalletReader::resolve_store_wallet(&service, store, EVM)
             .await
             .unwrap()
             .unwrap()
@@ -275,7 +284,7 @@ async fn a_store_without_an_override_uses_the_account_primary() {
         .await
         .unwrap();
     assert_eq!(
-        WalletReader::resolve_store_wallet(&service, store)
+        WalletReader::resolve_store_wallet(&service, store, EVM)
             .await
             .unwrap()
             .unwrap()
@@ -284,11 +293,11 @@ async fn a_store_without_an_override_uses_the_account_primary() {
     );
 
     // And clearing it falls back to whatever the primary now is.
-    WalletWriter::clear_store_wallet(&service, store)
+    WalletWriter::clear_store_wallet(&service, store, EVM)
         .await
         .unwrap();
     assert_eq!(
-        WalletReader::resolve_store_wallet(&service, store)
+        WalletReader::resolve_store_wallet(&service, store, EVM)
             .await
             .unwrap()
             .unwrap()
@@ -310,7 +319,7 @@ async fn a_store_cannot_be_pinned_to_another_accounts_wallet() {
     let theirs = seed_user(&service).await;
     let store = seed_store_for(&service, mine).await;
 
-    let not_mine = WalletWriter::create_wallet(&service, theirs, &xpub_a, None)
+    let not_mine = WalletWriter::create_wallet(&service, theirs, EVM, &xpub_a, None)
         .await
         .unwrap();
 
@@ -338,10 +347,10 @@ async fn promoting_a_wallet_demotes_the_previous_primary() {
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
 
-    let a = WalletWriter::create_wallet(&service, user, &xpub_a, None)
+    let a = WalletWriter::create_wallet(&service, user, EVM, &xpub_a, None)
         .await
         .unwrap();
-    let b = WalletWriter::create_wallet(&service, user, &xpub_b, None)
+    let b = WalletWriter::create_wallet(&service, user, EVM, &xpub_b, None)
         .await
         .unwrap();
 
@@ -351,7 +360,7 @@ async fn promoting_a_wallet_demotes_the_previous_primary() {
     assert!(promoted.is_primary);
 
     assert_eq!(
-        WalletReader::get_primary_wallet(&service, user)
+        WalletReader::get_primary_wallet(&service, user, EVM)
             .await
             .unwrap()
             .unwrap()
@@ -441,7 +450,7 @@ async fn rotation_repoints_without_resetting_the_counter() {
     }
 
     // The account has used &xpub_b before and it is already at index 7.
-    let b = WalletWriter::create_wallet(&service, user, &xpub_b, None)
+    let b = WalletWriter::create_wallet(&service, user, EVM, &xpub_b, None)
         .await
         .unwrap();
     for _ in 0..7 {
@@ -451,7 +460,7 @@ async fn rotation_repoints_without_resetting_the_counter() {
     }
 
     let rotation = service
-        .rotate_payment_method_xpub(store, method.id, &xpub_b, Some("test"))
+        .rotate_payment_method_xpub(store, method.id, EVM, &xpub_b, Some("test"))
         .await
         .expect("rotate");
     assert_eq!(rotation.previous_xpub, xpub_a);
@@ -575,11 +584,11 @@ async fn an_xpub_another_account_holds_is_refused() {
     let theirs = seed_user(&service).await;
     let mine = seed_user(&service).await;
 
-    WalletWriter::create_wallet(&service, theirs, &xpub_a, None)
+    WalletWriter::create_wallet(&service, theirs, EVM, &xpub_a, None)
         .await
         .expect("they register it first");
 
-    let err = WalletWriter::create_wallet(&service, mine, &xpub_a, None)
+    let err = WalletWriter::create_wallet(&service, mine, EVM, &xpub_a, None)
         .await
         .expect_err("a key already registered elsewhere must be refused");
     assert!(
@@ -640,7 +649,7 @@ async fn concurrent_first_wallet_creates_do_not_collide_on_primary() {
     for xpub in [xpub_a, xpub_b] {
         let svc = service.clone();
         handles.push(tokio::spawn(async move {
-            WalletWriter::create_wallet(&*svc, user, &xpub, None).await
+            WalletWriter::create_wallet(&*svc, user, EVM, &xpub, None).await
         }));
     }
 
@@ -698,7 +707,7 @@ async fn setting_a_store_override_changes_where_derivation_happens() {
     assert_eq!(first.xpub, xpub_a);
 
     // Give the store its own wallet.
-    let other = WalletWriter::create_wallet(&service, user, &xpub_b, Some("other"))
+    let other = WalletWriter::create_wallet(&service, user, EVM, &xpub_b, Some("other"))
         .await
         .unwrap();
     WalletWriter::set_store_wallet(&service, store, other.id)
@@ -727,7 +736,7 @@ async fn setting_a_store_override_changes_where_derivation_happens() {
     assert_eq!(reread.xpub.as_deref(), Some(xpub_b.as_str()));
 
     // Clearing it falls back to the account primary, which is still &xpub_a.
-    WalletWriter::clear_store_wallet(&service, store)
+    WalletWriter::clear_store_wallet(&service, store, EVM)
         .await
         .unwrap();
     let back = StorePaymentMethodWriter::allocate_derivation(&service, method.id)
@@ -826,7 +835,7 @@ async fn allocation_returns_the_key_of_the_wallet_whose_counter_moved() {
     assert_eq!(stale.xpub.as_deref(), Some(xpub_a.as_str()));
 
     service
-        .rotate_payment_method_xpub(store, stale.id, &xpub_b, Some("test"))
+        .rotate_payment_method_xpub(store, stale.id, EVM, &xpub_b, Some("test"))
         .await
         .expect("rotate");
 
@@ -887,11 +896,11 @@ async fn rotation_moves_a_store_override_off_the_retired_key() {
         .unwrap();
 
     service
-        .rotate_payment_method_xpub(store, method.id, &xpub_b, Some("compromise"))
+        .rotate_payment_method_xpub(store, method.id, EVM, &xpub_b, Some("compromise"))
         .await
         .unwrap();
 
-    let resolved = WalletReader::resolve_store_wallet(&service, store)
+    let resolved = WalletReader::resolve_store_wallet(&service, store, EVM)
         .await
         .unwrap()
         .unwrap();
@@ -966,7 +975,7 @@ async fn a_wallet_is_deletable_once_only_history_refers_to_it() {
     StorePaymentMethodWriter::delete_payment_method(&service, method.id)
         .await
         .unwrap();
-    WalletWriter::clear_store_wallet(&service, store)
+    WalletWriter::clear_store_wallet(&service, store, EVM)
         .await
         .unwrap();
 
@@ -1080,7 +1089,7 @@ async fn rotating_a_store_records_no_rotation_from_a_key_to_itself() {
 
     // Hand the store its own wallet, which unpins all three methods - the
     // state that made every iteration after the first record a self-rotation.
-    let wallet_a = WalletReader::resolve_store_wallet(&service, store)
+    let wallet_a = WalletReader::resolve_store_wallet(&service, store, EVM)
         .await
         .unwrap()
         .unwrap();
@@ -1089,7 +1098,7 @@ async fn rotating_a_store_records_no_rotation_from_a_key_to_itself() {
         .unwrap();
 
     let rotations = service
-        .rotate_store_xpub(store, &xpub_b, Some("compromise"))
+        .rotate_store_xpub(store, EVM, &xpub_b, Some("compromise"))
         .await
         .expect("rotate the store");
 
@@ -1109,7 +1118,7 @@ async fn rotating_a_store_records_no_rotation_from_a_key_to_itself() {
          one per method the override overtook"
     );
 
-    let resolved = WalletReader::resolve_store_wallet(&service, store)
+    let resolved = WalletReader::resolve_store_wallet(&service, store, EVM)
         .await
         .unwrap()
         .unwrap();
@@ -1159,25 +1168,25 @@ async fn rotating_one_store_leaves_its_siblings_where_they_were() {
     )
     .await
     .unwrap();
-    WalletWriter::clear_store_wallet(&service, rotated)
+    WalletWriter::clear_store_wallet(&service, rotated, EVM)
         .await
         .unwrap();
-    WalletWriter::clear_store_wallet(&service, sibling)
+    WalletWriter::clear_store_wallet(&service, sibling, EVM)
         .await
         .unwrap();
 
     service
-        .rotate_store_xpub(rotated, &xpub_b, Some("compromise"))
+        .rotate_store_xpub(rotated, EVM, &xpub_b, Some("compromise"))
         .await
         .expect("rotate one store");
 
-    let moved = WalletReader::resolve_store_wallet(&service, rotated)
+    let moved = WalletReader::resolve_store_wallet(&service, rotated, EVM)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(moved.xpub, xpub_b, "the rotated store moves");
 
-    let untouched = WalletReader::resolve_store_wallet(&service, sibling)
+    let untouched = WalletReader::resolve_store_wallet(&service, sibling, EVM)
         .await
         .unwrap()
         .unwrap();
@@ -1204,7 +1213,7 @@ async fn a_refused_rotation_leaves_the_store_entirely_unmoved() {
     let theirs = unique_xpub("theirs");
 
     let other_user = seed_user(&service).await;
-    WalletWriter::create_wallet(&service, other_user, &theirs, None)
+    WalletWriter::create_wallet(&service, other_user, EVM, &theirs, None)
         .await
         .unwrap();
 
@@ -1225,7 +1234,7 @@ async fn a_refused_rotation_leaves_the_store_entirely_unmoved() {
     }
 
     let err = service
-        .rotate_store_xpub(store, &theirs, Some("compromise"))
+        .rotate_store_xpub(store, EVM, &theirs, Some("compromise"))
         .await
         .expect_err("another account holds that key");
     assert!(
@@ -1275,7 +1284,7 @@ async fn a_method_with_no_key_uses_the_account_primary() {
     let store = seed_store_for(&service, user).await;
 
     // The key arrives once, as a wallet on the account.
-    let wallet = WalletWriter::create_wallet(&service, user, &xpub, Some("main"))
+    let wallet = WalletWriter::create_wallet(&service, user, EVM, &xpub, Some("main"))
         .await
         .expect("create wallet");
 
@@ -1351,10 +1360,10 @@ async fn an_unpinned_method_follows_the_store_wallet() {
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
 
-    let primary = WalletWriter::create_wallet(&service, user, &unique_xpub("p"), None)
+    let primary = WalletWriter::create_wallet(&service, user, EVM, &unique_xpub("p"), None)
         .await
         .expect("primary");
-    let other = WalletWriter::create_wallet(&service, user, &unique_xpub("o"), None)
+    let other = WalletWriter::create_wallet(&service, user, EVM, &unique_xpub("o"), None)
         .await
         .expect("other");
 
@@ -1382,5 +1391,311 @@ async fn an_unpinned_method_follows_the_store_wallet() {
         reread[0].wallet_id,
         Some(other.id),
         "an unpinned method must follow the store's wallet, not the one it saw at creation"
+    );
+}
+
+// =========================================================================
+// Chain families
+// =========================================================================
+
+/// Insert a payment method directly, bypassing `create_payment_method`.
+///
+/// Needed because the repository now refuses to create an unpinned method on a
+/// family the store cannot resolve - which is the defence, and which means the
+/// state under test here cannot be reached through the front door. A row like
+/// this is still reachable: an account can register a Tron key, enable Tron,
+/// and later delete or re-primary that key.
+async fn seed_unpinned_method(
+    service: &PgDataService,
+    store_id: Uuid,
+    chain_id: &ChainId,
+    symbol: &str,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO store_payment_methods \
+         (id, store_id, chain_id, token_address, asset_symbol, decimals, wallet_id) \
+         VALUES ($1, $2, $3, NULL, $4, 6, NULL)",
+    )
+    .bind(id)
+    .bind(store_id)
+    .bind(chain_id.as_str())
+    .bind(symbol)
+    .execute(service.pool())
+    .await
+    .expect("seed payment method");
+    id
+}
+
+/// A `tron:` method on a store whose account holds only an Ethereum key must
+/// fail to allocate, not derive from that key.
+///
+/// The whole ticket in one assertion. An account xpub has its BIP-44 coin type
+/// baked in - 60 for the key this store has - and Tron's is 195. Deriving from
+/// it anyway succeeds at every step: the bytes are a valid secp256k1 address
+/// and base58check renders them as a checksum-correct `T...` string. The
+/// merchant's Tron wallet, which derives at `m/44'/195'`, never shows the
+/// money that arrives there.
+///
+/// `NotFound` is what `server/src/api/invoices/payment_options.rs` turns into
+/// the 409 `no_receiving_key` a merchant can act on.
+///
+/// The Ethereum method on the SAME store is asserted to still allocate. That
+/// is what makes this a test about families rather than about a broken store:
+/// remove the namespace filter from resolution and the Tron method starts
+/// allocating from the Ethereum wallet - the failure this exists to catch -
+/// while a test that only checked "Tron fails" would also pass if resolution
+/// had simply stopped working.
+#[tokio::test]
+#[ignore]
+async fn a_tron_method_will_not_derive_from_an_ethereum_wallet() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let user = seed_user(&service).await;
+    let store = seed_store_for(&service, user).await;
+
+    let evm_wallet = WalletWriter::create_wallet(&service, user, EVM, &unique_xpub("evm"), None)
+        .await
+        .expect("register an ethereum wallet");
+
+    let tron_method = seed_unpinned_method(
+        &service,
+        store,
+        &ChainId::parse("tron:728126428").unwrap(),
+        "USDT",
+    )
+    .await;
+    let evm_method = seed_unpinned_method(&service, store, &ChainId::evm(1), "ETH").await;
+
+    let refused = StorePaymentMethodWriter::allocate_derivation(&service, tron_method).await;
+    assert!(
+        matches!(refused, Err(RepositoryError::NotFound(_))),
+        "a tron method resolved to a wallet on an account that holds only an \
+         ethereum key: {refused:?}"
+    );
+
+    let allocated = StorePaymentMethodWriter::allocate_derivation(&service, evm_method)
+        .await
+        .expect("the ethereum method on the same store must still allocate");
+    assert_eq!(allocated.wallet_id, evm_wallet.id);
+    assert_eq!(allocated.namespace, EVM);
+
+    // And the counter was not burnt by the refusal. A wallet that advanced for
+    // an allocation nobody received would leak addresses the merchant is still
+    // watching for.
+    let after = WalletReader::get_wallet(&service, evm_wallet.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.derivation_index, 1);
+}
+
+/// Once the account holds a Tron key, the same method allocates from it - and
+/// from that one only.
+///
+/// The other half: the refusal above has to be "no key for this family", not
+/// "Tron is refused". Two wallets, two independent counters, and each method
+/// reaches its own.
+#[tokio::test]
+#[ignore]
+async fn each_family_allocates_from_its_own_wallet() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let user = seed_user(&service).await;
+    let store = seed_store_for(&service, user).await;
+
+    let evm_wallet = WalletWriter::create_wallet(&service, user, EVM, &unique_xpub("evm"), None)
+        .await
+        .expect("register an ethereum wallet");
+    let tron_wallet = WalletWriter::create_wallet(&service, user, TRON, &unique_xpub("tron"), None)
+        .await
+        .expect("register a tron wallet");
+
+    // The first wallet in each family is that family's primary, so neither
+    // needs promoting and neither demoted the other.
+    assert!(evm_wallet.is_primary && tron_wallet.is_primary);
+
+    let tron_method = seed_unpinned_method(
+        &service,
+        store,
+        &ChainId::parse("tron:728126428").unwrap(),
+        "USDT",
+    )
+    .await;
+    let evm_method = seed_unpinned_method(&service, store, &ChainId::evm(1), "ETH").await;
+
+    let from_tron = StorePaymentMethodWriter::allocate_derivation(&service, tron_method)
+        .await
+        .expect("allocate on tron");
+    let from_evm = StorePaymentMethodWriter::allocate_derivation(&service, evm_method)
+        .await
+        .expect("allocate on ethereum");
+
+    assert_eq!(from_tron.wallet_id, tron_wallet.id);
+    assert_eq!(from_tron.namespace, TRON);
+    assert_eq!(from_evm.wallet_id, evm_wallet.id);
+    assert_eq!(from_evm.namespace, EVM);
+
+    // Separate counters. Both start at 0 precisely because they are different
+    // keys on different chains: sharing a counter would be the only thing
+    // worth avoiding here, and sharing an index is not.
+    assert_eq!(from_tron.index, 0);
+    assert_eq!(from_evm.index, 0);
+    assert_ne!(from_tron.xpub, from_evm.xpub);
+}
+
+/// The same bytes registered for two families are two wallets, not one.
+///
+/// `create_wallet` documents that re-registering a key returns the existing
+/// row. Keyed on the account and the key alone, a merchant who pastes the same
+/// xpub for Tron that they already registered for Ethereum is handed the
+/// Ethereum wallet back - and every Tron address quoted afterwards is derived
+/// at coin type 60.
+#[tokio::test]
+#[ignore]
+async fn one_xpub_registered_for_two_families_is_two_wallets() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let user = seed_user(&service).await;
+    let shared = unique_xpub("shared");
+
+    let as_evm = WalletWriter::create_wallet(&service, user, EVM, &shared, Some("eth"))
+        .await
+        .expect("register for ethereum");
+    let as_tron = WalletWriter::create_wallet(&service, user, TRON, &shared, Some("tron"))
+        .await
+        .expect("register the same key for tron");
+
+    assert_ne!(
+        as_evm.id, as_tron.id,
+        "registering a key for tron returned the account's ethereum wallet"
+    );
+    assert_eq!(as_tron.namespace, TRON);
+
+    // Re-registering within one family still returns the existing row, which
+    // is the property that stops a second counter appearing on one key.
+    let again = WalletWriter::create_wallet(&service, user, EVM, &shared, None)
+        .await
+        .expect("re-register for ethereum");
+    assert_eq!(again.id, as_evm.id);
+}
+
+/// Pinning a store to a wallet says nothing about its other families.
+///
+/// `set_store_wallet` releases a store's payment methods so the override
+/// actually decides where money goes. Released account-wide, "pin this store
+/// to my Tron wallet" would unpin the store's ETH and USDC methods too and
+/// hand them to the account's Ethereum primary - a change of where real money
+/// is collected, ordered by a request that named a different chain.
+#[tokio::test]
+#[ignore]
+async fn pinning_a_store_for_one_family_leaves_the_others_alone() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let user = seed_user(&service).await;
+    let store = seed_store_for(&service, user).await;
+
+    let evm_primary = WalletWriter::create_wallet(&service, user, EVM, &unique_xpub("p"), None)
+        .await
+        .expect("ethereum primary");
+    let evm_pinned = WalletWriter::create_wallet(&service, user, EVM, &unique_xpub("q"), None)
+        .await
+        .expect("a second ethereum wallet");
+    let tron = WalletWriter::create_wallet(&service, user, TRON, &unique_xpub("t"), None)
+        .await
+        .expect("tron wallet");
+
+    // An ETH method pinned to the non-primary Ethereum wallet.
+    let eth = StorePaymentMethodWriter::create_payment_method(
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        Some(&evm_pinned.xpub),
+    )
+    .await
+    .expect("create eth method");
+    assert_eq!(eth.wallet_id, Some(evm_pinned.id));
+
+    WalletWriter::set_store_wallet(&service, store, tron.id)
+        .await
+        .expect("pin the store to its tron wallet");
+
+    let still_pinned = StorePaymentMethodReader::get_payment_method(&service, eth.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        still_pinned.wallet_id,
+        Some(evm_pinned.id),
+        "pinning a tron wallet moved where this store's ETH is collected"
+    );
+
+    // The store's Ethereum resolution is untouched too: still the account
+    // primary, not the wallet the tron override names.
+    let resolved = WalletReader::resolve_store_wallet(&service, store, EVM)
+        .await
+        .unwrap()
+        .expect("ethereum still resolves");
+    assert_eq!(resolved.id, evm_primary.id);
+
+    let tron_resolved = WalletReader::resolve_store_wallet(&service, store, TRON)
+        .await
+        .unwrap()
+        .expect("tron resolves to the override");
+    assert_eq!(tron_resolved.id, tron.id);
+}
+
+/// Promoting a wallet demotes its own family's primary and no other.
+///
+/// An account-wide demotion would leave every EVM store with no primary the
+/// moment a merchant made their first Tron wallet the main one, and they would
+/// find out when a customer tried to pay in ETH.
+#[tokio::test]
+#[ignore]
+async fn promoting_a_wallet_only_demotes_its_own_family() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let user = seed_user(&service).await;
+
+    let evm = WalletWriter::create_wallet(&service, user, EVM, &unique_xpub("e"), None)
+        .await
+        .expect("ethereum wallet");
+    let tron_first = WalletWriter::create_wallet(&service, user, TRON, &unique_xpub("t1"), None)
+        .await
+        .expect("first tron wallet");
+    let tron_second = WalletWriter::create_wallet(&service, user, TRON, &unique_xpub("t2"), None)
+        .await
+        .expect("second tron wallet");
+
+    assert!(evm.is_primary);
+    assert!(tron_first.is_primary);
+    assert!(!tron_second.is_primary);
+
+    WalletWriter::set_primary_wallet(&service, user, tron_second.id)
+        .await
+        .expect("promote the second tron wallet");
+
+    assert_eq!(
+        WalletReader::get_primary_wallet(&service, user, TRON)
+            .await
+            .unwrap()
+            .map(|w| w.id),
+        Some(tron_second.id)
+    );
+    assert_eq!(
+        WalletReader::get_primary_wallet(&service, user, EVM)
+            .await
+            .unwrap()
+            .map(|w| w.id),
+        Some(evm.id),
+        "promoting a tron wallet demoted the account's ethereum primary"
     );
 }

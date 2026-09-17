@@ -148,10 +148,16 @@ impl EthpayMcpServer {
                     .await
                     .map_err(|e| format!("Failed to allocate derivation index: {e}"))?;
 
-            let deriver = XpubDeriver::from_xpub(&allocation.xpub)
+            // Family and key from the same allocation, so the coin type this
+            // derives under is the one the key was registered for.
+            let deriver = XpubDeriver::from_xpub(&allocation.namespace, &allocation.xpub)
                 .map_err(|e| format!("Invalid xpub: {e}"))?;
+            // EVM bytes specifically: the address goes on to `notify` and the
+            // watched-address table, both of which mean an address on an EVM
+            // chain. A key from another family is refused here rather than
+            // quoted to a customer on a chain nothing watches.
             let address = deriver
-                .derive_address(allocation.index as u32)
+                .derive_evm_address(allocation.index as u32)
                 .map_err(|e| format!("Address derivation failed: {e}"))?;
 
             options.push(PaymentOptionData {

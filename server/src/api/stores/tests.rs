@@ -751,6 +751,7 @@ fn test_wallet_response_json() {
     let response = WalletResponse {
         id: Uuid::nil(),
         user_id: Uuid::nil(),
+        namespace: "eip155".to_string(),
         xpub_masked: "xpub6CUG...3fDVmz".to_string(),
         derivation_index: 42,
         is_primary: false,
@@ -808,6 +809,7 @@ fn test_list_wallets_response_serialization() {
         WalletResponse {
             id: Uuid::nil(),
             user_id: Uuid::nil(),
+            namespace: "eip155".to_string(),
             xpub_masked: mask_xpub(
                 "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt",
             ),
@@ -819,6 +821,7 @@ fn test_list_wallets_response_serialization() {
         WalletResponse {
             id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),
+            namespace: "eip155".to_string(),
             xpub_masked: mask_xpub(
                 "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5",
             ),
@@ -856,6 +859,7 @@ fn test_wallet_by_id_response_masks_xpub() {
     let response = WalletResponse {
         id: Uuid::new_v4(),
         user_id: Uuid::new_v4(),
+        namespace: "eip155".to_string(),
         xpub_masked: mask_xpub(xpub),
         derivation_index: 7,
         is_primary: false,
@@ -876,6 +880,7 @@ fn test_wallet_by_id_response_without_name() {
     let response = WalletResponse {
         id: Uuid::nil(),
         user_id: Uuid::nil(),
+        namespace: "eip155".to_string(),
         xpub_masked: "xpub6CUG...3fDVmz".to_string(),
         derivation_index: 0,
         is_primary: false,
@@ -894,6 +899,7 @@ fn test_wallet_by_id_response_contains_user_id() {
     let response = WalletResponse {
         id: Uuid::new_v4(),
         user_id,
+        namespace: "eip155".to_string(),
         xpub_masked: "xpub6D4B...cLW5".to_string(),
         derivation_index: 3,
         is_primary: false,
@@ -915,6 +921,7 @@ fn test_xpub_export_response_contains_full_xpub() {
     let response = WalletXpubResponse {
         id: Uuid::new_v4(),
         user_id: Uuid::new_v4(),
+        namespace: "eip155".to_string(),
         xpub: xpub.to_string(),
         derivation_index: 5,
         name: Some("Main Wallet".to_string()),
@@ -933,6 +940,7 @@ fn test_xpub_export_response_without_name() {
     let response = WalletXpubResponse {
         id: Uuid::nil(),
         user_id: Uuid::nil(),
+        namespace: "eip155".to_string(),
         xpub: "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5".to_string(),
         derivation_index: 0,
         name: None,
@@ -1475,5 +1483,188 @@ async fn a_reason_is_sent_as_text() {
     assert!(
         content_type.starts_with("text/plain"),
         "unexpected content-type: {content_type}"
+    );
+}
+
+// =========================================================================
+// Chain families: what a merchant is given to check a new key with
+// =========================================================================
+
+/// The account xpub the standard BIP-39 test mnemonic exports at
+/// `m/44'/195'/0'` - a Tron receiving key.
+const TRON_ACCOUNT_XPUB: &str = "xpub6D1AabNHCupeiLM65ZR9UStMhJ1vCpyV4XbZdyhMZBiJXALQtmn9p42VTQckoHVn8WNqS7dqnJokZHAHcHGoaQgmv8D45oNUKx6DZMNZBCd";
+
+/// The same seed at `m/44'/60'/0'` - an Ethereum receiving key. Note that
+/// nothing in either string says which is which.
+const EVM_ACCOUNT_XPUB: &str = "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
+
+fn wallet_row(namespace: &str, xpub: &str) -> data_service::Wallet {
+    data_service::Wallet {
+        id: Uuid::new_v4(),
+        user_id: Uuid::new_v4(),
+        namespace: namespace.to_string(),
+        xpub: xpub.to_string(),
+        derivation_index: 0,
+        name: None,
+        is_primary: true,
+        created_at: Utc::now(),
+    }
+}
+
+/// Registering a Tron wallet hands back three `T…` addresses that match a
+/// published derivation of that seed at `m/44'/195'/0'`.
+///
+/// This is the only defence there is. An account-level xpub cannot be asked
+/// which BIP-44 coin type it was exported under, and an Ethereum one is
+/// byte-indistinguishable from a Tron one, so a merchant who pastes into the
+/// wrong field is told nothing - the key validates, the addresses derive, and
+/// the failure surfaces when someone has already paid. Comparing the first few
+/// addresses against their own wallet before any invoice quotes one is the
+/// check, so these have to be right.
+///
+/// The values come from an independent derivation, not from this code. A
+/// self-consistently wrong implementation - one that re-encodes an Ethereum
+/// key in base58check and calls it Tron - produces valid `T…` addresses for
+/// every index and passes any assertion phrased relative to itself.
+#[test]
+fn a_tron_wallet_yields_the_published_tron_addresses_to_check_it_with() {
+    let wallet = wallet_row("tron", TRON_ACCOUNT_XPUB);
+    let entries = derive_entries(&wallet, 0, 3).expect("derive tron addresses");
+
+    let addresses: Vec<&str> = entries.iter().map(|e| e.address.as_str()).collect();
+    assert_eq!(
+        addresses,
+        vec![
+            "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH",
+            "TSeJkUh4Qv67VNFwY8LaAxERygNdy6NQZK",
+            "TYJPRrdB5APNeRs4R7fYZSwW3TcrTKw2gx",
+        ]
+    );
+
+    // The path is shown beside each address, and the coin type in it is the
+    // part the merchant's wallet has to agree with.
+    let paths: Vec<&str> = entries.iter().map(|e| e.derivation_path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec![
+            "m/44'/195'/0'/0/0",
+            "m/44'/195'/0'/0/1",
+            "m/44'/195'/0'/0/2",
+        ]
+    );
+    assert!(entries.iter().all(|e| !e.used));
+}
+
+/// The same seed's Ethereum key, filed as Tron, derives valid `T…` addresses
+/// that are none of the above.
+///
+/// The failure mode, stated. It is not that the wrong key produces an error,
+/// or a malformed address, or anything a merchant or this server could notice:
+/// it produces three perfectly good Tron addresses at coin type 60, which
+/// their wallet will never display. That is why the endpoint returns addresses
+/// rather than trying to validate the key.
+#[test]
+fn an_ethereum_key_filed_as_tron_derives_plausible_and_wrong_addresses() {
+    let misfiled = derive_entries(&wallet_row("tron", EVM_ACCOUNT_XPUB), 0, 3)
+        .expect("an ethereum key filed as tron still derives");
+    let correct = derive_entries(&wallet_row("tron", TRON_ACCOUNT_XPUB), 0, 3)
+        .expect("derive tron addresses");
+
+    assert!(misfiled.iter().all(|e| e.address.starts_with('T')));
+    for entry in &misfiled {
+        assert!(
+            !correct.iter().any(|c| c.address == entry.address),
+            "a coin-type-60 key produced a coin-type-195 address: {}",
+            entry.address
+        );
+    }
+}
+
+/// An Ethereum wallet still renders hex, at coin type 60.
+///
+/// The path used to be hardcoded as `m/44'/60'/0'/0/{i}` regardless of the
+/// key, which was a claim rather than a fact. It now comes from the wallet's
+/// own family, and for `eip155` the answer has to be unchanged.
+#[test]
+fn an_ethereum_wallet_still_renders_hex_at_coin_type_sixty() {
+    let entries = derive_entries(&wallet_row("eip155", EVM_ACCOUNT_XPUB), 0, 1)
+        .expect("derive ethereum addresses");
+
+    assert_eq!(
+        entries[0].address.to_lowercase(),
+        "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+    );
+    assert_eq!(entries[0].derivation_path, "m/44'/60'/0'/0/0");
+}
+
+/// A key registered for a family this build cannot derive for is refused at
+/// `POST /wallets`, before the row is written.
+///
+/// Storing it would leave a wallet on the merchant's account that no payment
+/// method can use, listed beside working ones, with nothing to explain why.
+#[tokio::test]
+async fn a_namespace_this_server_cannot_derive_for_is_refused() {
+    // No database is touched: the namespace check runs before any write, which
+    // is the property under test.
+    assert!(evm::family_for_namespace("solana").is_err());
+    assert!(evm::family_for_namespace("eip155").is_ok());
+    assert!(evm::family_for_namespace("tron").is_ok());
+}
+
+/// The same string means the same family to `evm` and to `types`.
+///
+/// `evm` spells the CAIP-2 namespaces itself rather than depending on `types`,
+/// so there are two copies of `"eip155"` in the tree. This module sees both,
+/// and a drift between them would resolve wallets for nothing while every test
+/// in either crate passed.
+#[test]
+fn the_namespace_constants_agree_across_crates() {
+    assert_eq!(evm::NAMESPACE_EIP155, types::NAMESPACE_EIP155);
+    assert_eq!(evm::NAMESPACE_TRON, types::NAMESPACE_TRON);
+}
+
+/// `POST /wallets` itself returns those addresses - the handler, not the
+/// helper underneath it.
+///
+/// A unit test on `derive_entries` proves the derivation; it does not prove
+/// that anything a merchant can reach calls it. This drives the endpoint.
+#[tokio::test]
+#[ignore]
+async fn the_create_wallet_endpoint_returns_addresses_to_verify_a_tron_key() {
+    let Some(service) = handler_test_service().await else {
+        return;
+    };
+    let pool = service.pool().clone();
+    let user_id = seed_handler_test_user(&pool).await;
+    let state = handler_test_state(service);
+
+    // Unique per run: an xpub may only belong to one account, and this test
+    // shares a database with every other.
+    let (status, Json(created)) = create_wallet(
+        admin_user(user_id),
+        State(state),
+        Json(CreateWalletRequest {
+            xpub: TRON_ACCOUNT_XPUB.to_string(),
+            name: Some("tron till".to_string()),
+            namespace: "tron".to_string(),
+        }),
+    )
+    .await
+    .expect("register a tron wallet");
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created.wallet.namespace, "tron");
+    assert_eq!(
+        created
+            .verification_addresses
+            .iter()
+            .map(|e| e.address.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH".to_string(),
+            "TSeJkUh4Qv67VNFwY8LaAxERygNdy6NQZK".to_string(),
+            "TYJPRrdB5APNeRs4R7fYZSwW3TcrTKw2gx".to_string(),
+        ],
+        "a merchant has nothing else to check the key with"
     );
 }

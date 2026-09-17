@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use super::PgDataService;
 use super::wallet::{
-    STORE_WALLET_RESOLUTION, lock_account, lock_xpub, reject_if_another_account_holds,
-    upsert_wallet,
+    METHOD_NAMESPACE, lock_account, lock_xpub, reject_if_another_account_holds,
+    store_wallet_resolution, upsert_wallet,
 };
 use crate::{RepositoryResult, sqlx_to_repo_error};
 
@@ -54,11 +54,18 @@ impl PgDataService {
         &self,
         store_id: Uuid,
         payment_method_id: Uuid,
+        namespace: &str,
         new_xpub: &str,
         reason: Option<&str>,
     ) -> RepositoryResult<WalletRotation> {
         let rotations = self
-            .rotate_methods(store_id, Some(&[payment_method_id]), new_xpub, reason)
+            .rotate_methods(
+                store_id,
+                Some(&[payment_method_id]),
+                namespace,
+                new_xpub,
+                reason,
+            )
             .await?;
 
         rotations.into_iter().next().ok_or_else(|| {
@@ -68,8 +75,17 @@ impl PgDataService {
         })
     }
 
-    /// Rotate every payment method in a store onto `new_xpub`, in one
-    /// transaction.
+    /// Rotate every payment method in a store *on one chain family* onto
+    /// `new_xpub`, in one transaction.
+    ///
+    /// Scoped by family because a key belongs to one. Rotating a store onto a
+    /// new Ethereum xpub must leave its Tron methods where they are: repointing
+    /// them would pin a coin-type-60 key to a chain whose wallets derive at
+    /// 195, so every address quoted afterwards would be unreachable by the
+    /// merchant. The schema refuses that pairing outright, so without the
+    /// filter this would not misroute quietly - it would fail the whole
+    /// rotation on a foreign key violation, which is a compromised-key
+    /// response that cannot complete.
     ///
     /// One transaction, not a loop of them, because rotation is a response to a
     /// compromised key: a partial rotation leaves some of the store still
@@ -82,10 +98,12 @@ impl PgDataService {
     pub async fn rotate_store_xpub(
         &self,
         store_id: Uuid,
+        namespace: &str,
         new_xpub: &str,
         reason: Option<&str>,
     ) -> RepositoryResult<Vec<WalletRotation>> {
-        self.rotate_methods(store_id, None, new_xpub, reason).await
+        self.rotate_methods(store_id, None, namespace, new_xpub, reason)
+            .await
     }
 
     /// Shared body. `only` restricts the rotation to specific method ids;
@@ -103,6 +121,7 @@ impl PgDataService {
         &self,
         store_id: Uuid,
         only: Option<&[Uuid]>,
+        namespace: &str,
         new_xpub: &str,
         reason: Option<&str>,
     ) -> RepositoryResult<Vec<WalletRotation>> {
@@ -124,9 +143,10 @@ impl PgDataService {
         lock_xpub(&mut tx, new_xpub).await?;
         reject_if_another_account_holds(&mut tx, owner_id, new_xpub).await?;
 
-        let new_wallet = upsert_wallet(&mut tx, owner_id, new_xpub, None).await?;
+        let new_wallet = upsert_wallet(&mut tx, owner_id, namespace, new_xpub, None).await?;
 
-        let methods = Self::methods_to_rotate(&mut tx, store_id, only, new_wallet.id).await?;
+        let methods =
+            Self::methods_to_rotate(&mut tx, store_id, only, namespace, new_wallet.id).await?;
 
         let mut rotations = Vec::with_capacity(methods.len());
         let mut needs_override = false;
@@ -184,13 +204,14 @@ impl PgDataService {
             // guesswork.
             sqlx::query(
                 r#"
-                INSERT INTO store_wallets (store_id, wallet_id)
-                VALUES ($1, $2)
-                ON CONFLICT (store_id) DO UPDATE SET wallet_id = EXCLUDED.wallet_id
+                INSERT INTO store_wallets (store_id, wallet_id, namespace)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (store_id, namespace) DO UPDATE SET wallet_id = EXCLUDED.wallet_id
                 "#,
             )
             .bind(store_id)
             .bind(new_wallet.id)
+            .bind(namespace)
             .execute(&mut *tx)
             .await
             .map_err(sqlx_to_repo_error)?;
@@ -213,10 +234,15 @@ impl PgDataService {
         conn: &mut PgConnection,
         store_id: Uuid,
         only: Option<&[Uuid]>,
+        namespace: &str,
         new_wallet_id: Uuid,
     ) -> RepositoryResult<Vec<MethodToRotate>> {
         // `$3::uuid[] IS NULL` is the "every method" case: a NULL array binding
         // rather than two spellings of the query that could drift apart.
+        //
+        // `pm.chain_namespace = $4` keeps a rotation inside the family of the
+        // key being rotated to. A method on another family keeps its own
+        // wallet; the new key could not be used for it in any case.
         let rows = sqlx::query(&format!(
             r#"
             SELECT pm.id AS payment_method_id,
@@ -225,17 +251,21 @@ impl PgDataService {
                    w.derivation_index
             FROM store_payment_methods pm
             JOIN stores s ON s.id = pm.store_id
-            JOIN wallets w ON w.id = COALESCE(pm.wallet_id, {STORE_WALLET_RESOLUTION})
+            JOIN wallets w ON w.id = COALESCE(pm.wallet_id, {})
+                          AND w.namespace = {METHOD_NAMESPACE}
             WHERE pm.store_id = $1
               AND w.id <> $2
               AND ($3::uuid[] IS NULL OR pm.id = ANY($3))
+              AND pm.chain_namespace = $4
             ORDER BY pm.id
             FOR UPDATE OF w
-            "#
+            "#,
+            store_wallet_resolution(METHOD_NAMESPACE)
         ))
         .bind(store_id)
         .bind(new_wallet_id)
         .bind(only)
+        .bind(namespace)
         .fetch_all(conn)
         .await
         .map_err(sqlx_to_repo_error)?;

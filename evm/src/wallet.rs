@@ -1,22 +1,29 @@
-//! HD wallet derivation for Ethereum addresses.
+//! HD wallet derivation for secp256k1 receiving addresses.
 //!
 //! This module implements BIP-32/BIP-44 hierarchical deterministic wallet derivation
-//! for generating unique Ethereum addresses. Each invoice gets a unique address
-//! derived from a master seed.
+//! for generating a unique receiving address per invoice.
 //!
 //! # Derivation Path
 //!
-//! We use BIP-44 with purpose 44' and coin type 60' (Ethereum):
+//! BIP-44 with purpose 44' and the coin type of the key's chain family - 60'
+//! for Ethereum, 195' for Tron (see [`crate::family`]):
 //! ```text
-//! m / 44' / 60' / account' / change / address_index
+//! m / 44' / coin' / account' / change / address_index
 //! ```
 //!
 //! For payment addresses, we use:
 //! - account = 0 (default account)
 //! - change = 0 (external chain, for receiving)
 //! - address_index = incrementing index per invoice
+//!
+//! The coin type is the load-bearing part, and it is *not* recoverable from
+//! the account-level xpub a merchant registers. Everything here therefore
+//! takes the family explicitly rather than assuming Ethereum - an assumption
+//! that, applied to a Tron key, derives addresses the merchant's own wallet
+//! will never show.
 
 use crate::error::{EvmError, EvmResult};
+use crate::family::ChainFamily;
 use alloy::primitives::Address;
 use coins_bip32::{
     enc::{MainnetEncoder, XKeyEncoder},
@@ -25,9 +32,6 @@ use coins_bip32::{
 };
 use coins_bip39::{English, Mnemonic};
 use std::str::FromStr;
-
-/// Standard BIP-44 coin type for Ethereum.
-pub const ETH_COIN_TYPE: u32 = 60;
 
 /// HD wallet for deriving Ethereum addresses.
 #[derive(Clone)]
@@ -93,8 +97,21 @@ impl HdWallet {
     ///
     /// The derived Ethereum address as a checksummed string.
     pub fn derive_address(&self, index: u32) -> EvmResult<Address> {
-        let path = format!("m/44'/60'/0'/0/{}", index);
-        self.derive_address_at_path(&path)
+        self.derive_address_for(ChainFamily::Evm, index)
+    }
+
+    /// Derive the receiving address bytes for one chain family at `index`.
+    ///
+    /// The family chooses the coin type, so the same seed produces entirely
+    /// different keys - and therefore entirely different addresses - for
+    /// Ethereum and for Tron. That is the property that makes the two
+    /// non-interchangeable, and re-encoding one family's address in the
+    /// other's alphabet does not produce the other's address.
+    ///
+    /// Returns raw address bytes; render them with
+    /// [`ChainFamily::encode_address`].
+    pub fn derive_address_for(&self, family: ChainFamily, index: u32) -> EvmResult<Address> {
+        self.derive_address_at_path(&family.derivation_path(index))
     }
 
     /// Derive an Ethereum address at a custom derivation path.
@@ -160,7 +177,18 @@ impl HdWallet {
     ///
     /// This can be used to derive addresses without the private key.
     pub fn account_xpub(&self) -> EvmResult<XPub> {
-        let path = DerivationPath::from_str("m/44'/60'/0'")
+        self.account_xpub_for(ChainFamily::Evm)
+    }
+
+    /// The account-level extended public key a merchant's wallet would export
+    /// for one chain family - `m/44'/60'/0'` or `m/44'/195'/0'`.
+    ///
+    /// The two are byte-indistinguishable in form: same version bytes, same
+    /// base58 alphabet, same length. Only the key material differs, and
+    /// nothing can read the coin type back out of it. That is why the family
+    /// is stored beside the key rather than inferred from it.
+    pub fn account_xpub_for(&self, family: ChainFamily) -> EvmResult<XPub> {
+        let path = DerivationPath::from_str(&family.account_path())
             .map_err(|e| EvmError::InvalidDerivationPath(e.to_string()))?;
 
         let account_key = self
@@ -236,33 +264,91 @@ pub fn validate_mnemonic(phrase: &str) -> bool {
     Mnemonic::<English>::new_from_phrase(phrase).is_ok()
 }
 
-/// Address deriver from an extended public key.
+/// Address deriver from an extended public key, bound to a chain family.
 ///
 /// Allows deriving payment addresses without access to private keys.
 /// Merchants provide their xpub and the server derives unique addresses
 /// for each invoice.
+///
+/// The family is carried, not guessed. An account xpub has its coin type
+/// already spent - the deriver only walks `0/{index}` below it - so by the
+/// time a key reaches here, which family it belongs to is no longer a
+/// question this code could answer from the bytes. Every constructor
+/// therefore demands it, and [`Self::derive_evm_address`] refuses to hand out
+/// EVM-typed bytes for a key that was not registered as EVM.
 #[derive(Clone)]
 pub struct XpubDeriver {
-    /// The account-level extended public key (at path m/44'/60'/0')
+    /// The account-level extended public key (at path m/44'/{coin}'/0')
     account_xpub: XPub,
+    /// The family the key was registered for. Decides how an address is
+    /// rendered, and which callers may use it at all.
+    family: ChainFamily,
 }
 
 impl XpubDeriver {
-    /// Create a new deriver from a base58-encoded xpub string.
+    /// Create a deriver for a key registered under `namespace`.
     ///
-    /// The xpub should be at the account level (m/44'/60'/0').
-    pub fn from_xpub(xpub_str: &str) -> EvmResult<Self> {
+    /// The namespace comes from the wallet row the key was read from - never
+    /// from the key, which cannot be asked, and never from a default. An
+    /// unknown namespace is an error rather than a fallback to Ethereum.
+    pub fn from_xpub(namespace: &str, xpub_str: &str) -> EvmResult<Self> {
+        Self::for_family(crate::family::family_for_namespace(namespace)?, xpub_str)
+    }
+
+    /// Create a deriver for a known family.
+    pub fn for_family(family: ChainFamily, xpub_str: &str) -> EvmResult<Self> {
         let account_xpub = MainnetEncoder::xpub_from_base58(xpub_str)
             .map_err(|e| EvmError::InvalidXpub(format!("failed to parse xpub: {}", e)))?;
 
-        Ok(Self { account_xpub })
+        Ok(Self {
+            account_xpub,
+            family,
+        })
     }
 
-    /// Derive an Ethereum address at the given index.
+    /// The family this key was registered for.
+    pub fn family(&self) -> ChainFamily {
+        self.family
+    }
+
+    /// The full BIP-44 path of the address at `index`, coin type included.
+    pub fn derivation_path(&self, index: u32) -> String {
+        self.family.derivation_path(index)
+    }
+
+    /// Derive the receiving address at `index`, rendered in this key's own
+    /// family encoding.
     ///
-    /// Derives at path: 0/{index} (relative to account xpub)
-    /// Full path would be: m/44'/60'/0'/0/{index}
-    pub fn derive_address(&self, index: u32) -> EvmResult<Address> {
+    /// `0x…` for `eip155`, `T…` for `tron`. This is what a merchant compares
+    /// against their own wallet, and what a customer is asked to pay.
+    pub fn derive_address(&self, index: u32) -> EvmResult<String> {
+        Ok(self
+            .family
+            .encode_address(self.derive_address_bytes(index)?))
+    }
+
+    /// Derive the address at `index` as EVM address bytes.
+    ///
+    /// Refuses a key registered for any other family. The bytes are the same
+    /// shape whatever the family, which is exactly why this refuses rather
+    /// than converts: an `Address` flows on into the chain monitor and the
+    /// watched-address table, both of which mean *an EVM address on an EVM
+    /// chain*, and a Tron key's bytes there would have the server watching an
+    /// Ethereum address for a payment that is never coming.
+    pub fn derive_evm_address(&self, index: u32) -> EvmResult<Address> {
+        if self.family != ChainFamily::Evm {
+            return Err(EvmError::InvalidXpub(format!(
+                "this key is registered for `{}`, not an EVM chain; it cannot                  derive an EVM address",
+                self.family.namespace()
+            )));
+        }
+        self.derive_address_bytes(index)
+    }
+
+    /// Walk `0/{index}` below the account key. Family-independent: the two
+    /// families differ in the coin type already spent above this point, and
+    /// in nothing below it.
+    fn derive_address_bytes(&self, index: u32) -> EvmResult<Address> {
         // Derive external chain (0) then index
         let external = self
             .account_xpub
@@ -297,6 +383,14 @@ mod tests {
 
     // Standard test mnemonic (DO NOT USE IN PRODUCTION)
     const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    /// What a wallet exports for `TEST_MNEMONIC` at `m/44'/60'/0'` - the
+    /// string a merchant pastes to register an Ethereum receiving key.
+    const EVM_ACCOUNT_XPUB: &str = "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
+
+    /// The same seed at `m/44'/195'/0'` - Tron. Note that nothing about the
+    /// two strings says which is which.
+    const TRON_ACCOUNT_XPUB: &str = "xpub6D1AabNHCupeiLM65ZR9UStMhJ1vCpyV4XbZdyhMZBiJXALQtmn9p42VTQckoHVn8WNqS7dqnJokZHAHcHGoaQgmv8D45oNUKx6DZMNZBCd";
 
     #[test]
     fn test_wallet_from_mnemonic() {
@@ -392,15 +486,182 @@ mod tests {
         let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
         let xpub = wallet.account_xpub().unwrap();
         let xpub_str = MainnetEncoder::xpub_to_base58(&xpub).unwrap();
-        let deriver = XpubDeriver::from_xpub(&xpub_str).unwrap();
+        let deriver = XpubDeriver::from_xpub("eip155", &xpub_str).unwrap();
 
         // XpubDeriver should derive the same addresses as HdWallet
         for i in 0..5 {
             assert_eq!(
                 wallet.derive_address(i).unwrap(),
-                deriver.derive_address(i).unwrap()
+                deriver.derive_evm_address(i).unwrap()
             );
         }
+    }
+
+    /// The coin type is honoured, not merely the encoding swapped.
+    ///
+    /// This is the assertion the whole family-scoping change rests on, and the
+    /// one that a plausible-looking wrong implementation fails. Tron addresses
+    /// are base58check over the same 20 bytes Ethereum renders as hex, so it
+    /// is entirely possible to "add Tron support" by re-encoding an Ethereum
+    /// key and produce valid, checksum-correct `T…` addresses for every index.
+    /// They would be addresses at `m/44'/60'`, and the merchant's Tron wallet
+    /// looks under `m/44'/195'` - so the money arrives somewhere only a seed
+    /// re-import at a non-standard path can reach.
+    ///
+    /// So: from one seed, the Tron address must not be the Tron encoding of
+    /// the Ethereum address. It must be a different key entirely.
+    #[test]
+    fn a_tron_address_is_not_the_evm_address_in_another_alphabet() {
+        use crate::family::ChainFamily;
+
+        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
+
+        for index in 0..3u32 {
+            let evm_bytes = wallet.derive_address_for(ChainFamily::Evm, index).unwrap();
+            let tron_bytes = wallet.derive_address_for(ChainFamily::Tron, index).unwrap();
+
+            assert_ne!(
+                evm_bytes, tron_bytes,
+                "index {index}: m/44'/60'/0'/0/{index} and m/44'/195'/0'/0/{index}                  produced the same key - the coin type is being ignored"
+            );
+
+            // And stated the way the bug would actually appear: the Tron
+            // address is not the EVM address wearing base58.
+            assert_ne!(
+                ChainFamily::Tron.encode_address(tron_bytes),
+                ChainFamily::Tron.encode_address(evm_bytes),
+                "index {index}: the Tron address is just the EVM key re-encoded"
+            );
+        }
+    }
+
+    /// Both families' addresses for one seed, against an independent
+    /// derivation of the standard BIP-39 test mnemonic.
+    ///
+    /// Published values, not values this code produced: an implementation that
+    /// is self-consistently wrong about the coin type passes every relative
+    /// assertion in this file, and only a fixed external vector catches it.
+    /// The Ethereum value is the one this module has always asserted; the Tron
+    /// values are at `m/44'/195'/0'/0/{0,1,2}`.
+    #[test]
+    fn one_seed_derives_the_published_addresses_for_each_family() {
+        use crate::family::ChainFamily;
+
+        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
+
+        let evm: Vec<String> = (0..3)
+            .map(|i| {
+                ChainFamily::Evm
+                    .encode_address(wallet.derive_address_for(ChainFamily::Evm, i).unwrap())
+            })
+            .collect();
+        assert_eq!(
+            evm[0].to_lowercase(),
+            "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+        );
+
+        let tron: Vec<String> = (0..3)
+            .map(|i| {
+                ChainFamily::Tron
+                    .encode_address(wallet.derive_address_for(ChainFamily::Tron, i).unwrap())
+            })
+            .collect();
+        assert_eq!(
+            tron,
+            vec![
+                "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH".to_string(),
+                "TSeJkUh4Qv67VNFwY8LaAxERygNdy6NQZK".to_string(),
+                "TYJPRrdB5APNeRs4R7fYZSwW3TcrTKw2gx".to_string(),
+            ]
+        );
+    }
+
+    /// The two families' account xpubs are indistinguishable by inspection.
+    ///
+    /// The premise of the whole design. If a server could tell them apart it
+    /// would not need to ask, and every merchant-facing warning here would be
+    /// unnecessary ceremony. It cannot: same version bytes, same alphabet,
+    /// same length, both accepted by the only check a merchant's paste is
+    /// subjected to.
+    ///
+    /// These are the strings a merchant actually pastes - what a wallet
+    /// exports for the standard BIP-39 test mnemonic at `m/44'/60'/0'` and
+    /// `m/44'/195'/0'` - rather than what this crate's encoder emits, which is
+    /// a `zpub` and so would hide the very similarity being asserted.
+    #[test]
+    fn an_ethereum_xpub_and_a_tron_xpub_cannot_be_told_apart() {
+        assert_ne!(
+            EVM_ACCOUNT_XPUB, TRON_ACCOUNT_XPUB,
+            "different keys, or the coin type did nothing"
+        );
+        assert_eq!(EVM_ACCOUNT_XPUB.len(), TRON_ACCOUNT_XPUB.len());
+        assert!(EVM_ACCOUNT_XPUB.starts_with("xpub") && TRON_ACCOUNT_XPUB.starts_with("xpub"));
+        assert!(
+            validate_xpub(EVM_ACCOUNT_XPUB) && validate_xpub(TRON_ACCOUNT_XPUB),
+            "both pass the only check a merchant's paste is subjected to"
+        );
+    }
+
+    /// Registering a key by the string a merchant pastes produces the
+    /// published addresses for its family - and, for the same seed, the two
+    /// families produce different ones.
+    ///
+    /// This is the entry point that matters: `POST /wallets` hands an xpub
+    /// string and a namespace to exactly this pair of calls. The Ethereum
+    /// value is the one this module has asserted since it was written; the
+    /// Tron values come from an independent derivation at `m/44'/195'/0'/0/i`.
+    #[test]
+    fn a_registered_xpub_derives_its_own_family_published_addresses() {
+        let evm = XpubDeriver::from_xpub("eip155", EVM_ACCOUNT_XPUB).unwrap();
+        assert_eq!(
+            evm.derive_address(0).unwrap().to_lowercase(),
+            "0x9858effd232b4033e47d90003d41ec34ecaeda94"
+        );
+
+        let tron = XpubDeriver::from_xpub("tron", TRON_ACCOUNT_XPUB).unwrap();
+        let first_three: Vec<String> = (0..3).map(|i| tron.derive_address(i).unwrap()).collect();
+        assert_eq!(
+            first_three,
+            vec![
+                "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH".to_string(),
+                "TSeJkUh4Qv67VNFwY8LaAxERygNdy6NQZK".to_string(),
+                "TYJPRrdB5APNeRs4R7fYZSwW3TcrTKw2gx".to_string(),
+            ]
+        );
+
+        // The Ethereum key run through Tron's encoding is a valid `T…`
+        // address, and it is not any of those. That is the failure mode: it
+        // looks right, it passes every checksum, and the merchant's Tron
+        // wallet never shows it.
+        let misfiled = XpubDeriver::from_xpub("tron", EVM_ACCOUNT_XPUB).unwrap();
+        let wrong = misfiled.derive_address(0).unwrap();
+        assert!(wrong.starts_with('T'));
+        assert!(!first_three.contains(&wrong));
+    }
+
+    /// A Tron key refuses to be used where EVM address bytes are expected.
+    ///
+    /// `derive_evm_address` feeds the chain monitor and the watched-address
+    /// table, which mean an address on an EVM chain. Bytes from a Tron key put
+    /// there would have the server watching an Ethereum address nobody will
+    /// ever pay.
+    #[test]
+    fn a_tron_key_cannot_be_used_as_an_evm_key() {
+        use crate::family::ChainFamily;
+
+        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
+        let xpub =
+            MainnetEncoder::xpub_to_base58(&wallet.account_xpub_for(ChainFamily::Tron).unwrap())
+                .unwrap();
+
+        let deriver = XpubDeriver::from_xpub("tron", &xpub).unwrap();
+        assert!(deriver.derive_evm_address(0).is_err());
+        assert!(deriver.derive_address(0).unwrap().starts_with('T'));
+        assert_eq!(deriver.derivation_path(0), "m/44'/195'/0'/0/0");
+
+        // And a namespace with no derivation at all is refused outright,
+        // rather than quietly treated as Ethereum.
+        assert!(XpubDeriver::from_xpub("solana", &xpub).is_err());
     }
 
     #[test]

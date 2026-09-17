@@ -21,7 +21,7 @@ fn migrations_dir() -> std::path::PathBuf {
 }
 
 /// Read one migration file by stem.
-fn migration_sql(stem: &str) -> String {
+pub(super) fn migration_sql(stem: &str) -> String {
     std::fs::read_to_string(migrations_dir().join(format!("{stem}.sql")))
         .unwrap_or_else(|e| panic!("read migration {stem}: {e}"))
 }
@@ -38,7 +38,17 @@ fn split_url(url: &str) -> (String, String) {
 ///
 /// Returns `None` when `DATABASE_URL` is unset, matching the other integration
 /// tests, so the suite stays runnable without a database.
-async fn pre_migration_db(suffix: &str) -> Option<(PgPool, String, String)> {
+pub(super) async fn pre_migration_db(suffix: &str) -> Option<(PgPool, String, String)> {
+    pre_migration_db_for(MIGRATION, suffix).await
+}
+
+/// The same, stopping before an arbitrary migration - so a later migration can
+/// be exercised against the state a deployed database is actually in when it
+/// runs, rather than against today's schema.
+pub(super) async fn pre_migration_db_for(
+    migration: &str,
+    suffix: &str,
+) -> Option<(PgPool, String, String)> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let (server_url, base) = split_url(&url);
     let name = format!("{base}_wallets_{suffix}");
@@ -72,7 +82,7 @@ async fn pre_migration_db(suffix: &str) -> Option<(PgPool, String, String)> {
         .collect();
     stems.sort();
 
-    for stem in stems.iter().take_while(|s| s.as_str() != MIGRATION) {
+    for stem in stems.iter().take_while(|s| s.as_str() != migration) {
         pool.execute(migration_sql(stem).as_str())
             .await
             .unwrap_or_else(|e| panic!("apply {stem}: {e}"));
@@ -81,7 +91,7 @@ async fn pre_migration_db(suffix: &str) -> Option<(PgPool, String, String)> {
     Some((pool, name, server_url))
 }
 
-async fn drop_db(pool: PgPool, name: &str, server_url: &str) {
+pub(super) async fn drop_db(pool: PgPool, name: &str, server_url: &str) {
     pool.close().await;
     let admin = PgPool::connect(server_url).await.expect("connect admin");
     admin
@@ -92,7 +102,7 @@ async fn drop_db(pool: PgPool, name: &str, server_url: &str) {
 }
 
 /// Seed a user and a store, old-shape.
-async fn seed_store(pool: &PgPool, label: &str) -> (Uuid, Uuid) {
+pub(super) async fn seed_store(pool: &PgPool, label: &str) -> (Uuid, Uuid) {
     let user_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, kdf_params, encrypted_symmetric_key, \
