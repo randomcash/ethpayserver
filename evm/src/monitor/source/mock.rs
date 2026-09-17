@@ -34,6 +34,15 @@ struct Inner {
     /// that a stalled monitor actually reconnected, not just that it kept
     /// running.
     subscribe_count: AtomicU64,
+    /// One counter per RPC method, so a test can assert how an operation
+    /// *scales* rather than only that it produced the right answer.
+    ///
+    /// Call volume here is not a performance nicety. Native payment detection
+    /// polls one balance per watched address per block - O(N) in open invoices
+    /// where ERC20 detection is O(1) - and that shape, calls-per-block against
+    /// addresses-watched, is invisible to every test that checks only whether
+    /// a payment was found.
+    calls: Mutex<HashMap<&'static str, u64>>,
     /// Last status a `subscribe_blocks` attempt produced. Like the real
     /// `RpcBlockSource`, this only changes as a side effect of an actual
     /// subscribe attempt - not the instant `reachable` flips - so a test
@@ -96,6 +105,7 @@ impl MockBlockSource {
                 logs: RwLock::new(HashMap::new()),
                 block_tx: Mutex::new(block_tx),
                 subscribe_count: AtomicU64::new(0),
+                calls: Mutex::new(HashMap::new()),
                 status: Mutex::new(SourceStatus::Connected),
                 reachable: AtomicBool::new(true),
                 hung: AtomicBool::new(false),
@@ -111,6 +121,54 @@ impl MockBlockSource {
     /// (through any clone, since they share state).
     pub fn subscribe_count(&self) -> u64 {
         self.inner.subscribe_count.load(Ordering::SeqCst)
+    }
+
+    /// How many times `method` has been called on this source.
+    #[must_use]
+    pub fn call_count(&self, method: &str) -> u64 {
+        self.inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(method)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Every method called so far, with counts. Handy in a failure message:
+    /// "12 calls" is not actionable, "get_balance 12, get_logs 1" is.
+    #[must_use]
+    pub fn call_counts(&self) -> Vec<(&'static str, u64)> {
+        let mut counts: Vec<(&'static str, u64)> = self
+            .inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        counts.sort_unstable();
+        counts
+    }
+
+    /// Forget every recorded call. Lets one test measure several scenarios
+    /// without a fresh source and fresh wiring for each.
+    pub fn reset_call_counts(&self) {
+        self.inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    fn record_call(&self, method: &'static str) {
+        *self
+            .inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(method)
+            .or_insert(0) += 1;
     }
 
     /// Make `find_native_transfers_to` fail with `message` until cleared with
@@ -278,6 +336,7 @@ impl BlockSource for MockBlockSource {
     }
 
     async fn get_logs(&self, filter: &LogFilter) -> EvmResult<Vec<alloy::rpc::types::Log>> {
+        self.record_call("get_logs");
         let logs = self.inner.logs.read().await;
         let mut result = Vec::new();
 
@@ -307,6 +366,7 @@ impl BlockSource for MockBlockSource {
     }
 
     async fn get_balance(&self, address: Address, _block: Option<u64>) -> EvmResult<U256> {
+        self.record_call("get_balance");
         loop {
             if !self.inner.hung.load(Ordering::SeqCst) {
                 break;
@@ -325,10 +385,12 @@ impl BlockSource for MockBlockSource {
     }
 
     async fn get_block_number(&self) -> EvmResult<u64> {
+        self.record_call("get_block_number");
         Ok(self.inner.current_block.load(Ordering::SeqCst))
     }
 
     async fn get_block(&self, _number: u64) -> EvmResult<Option<Block>> {
+        self.record_call("get_block");
         Ok(None)
     }
 
@@ -351,6 +413,7 @@ impl BlockSource for MockBlockSource {
         block_number: u64,
         addresses: &[Address],
     ) -> EvmResult<Vec<NativeTransfer>> {
+        self.record_call("find_native_transfers_to");
         if let Some(message) = self
             .inner
             .find_native_transfers_error
