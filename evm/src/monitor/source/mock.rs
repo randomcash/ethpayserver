@@ -161,6 +161,25 @@ impl MockBlockSource {
             .clear();
     }
 
+    /// Block while [`Self::hang_rpc`] is in effect.
+    ///
+    /// Shared by every call `process_block` makes, so a test wedging the loop
+    /// does not have to know which RPC the loop happens to be sitting in.
+    async fn await_if_hung(&self) {
+        loop {
+            if !self.inner.hung.load(Ordering::SeqCst) {
+                break;
+            }
+            // Register interest before re-checking, so a `release_hang` that
+            // lands between the load above and this point isn't missed.
+            let notified = self.inner.hang_notify.notified();
+            if !self.inner.hung.load(Ordering::SeqCst) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
     fn record_call(&self, method: &'static str) {
         *self
             .inner
@@ -259,16 +278,22 @@ impl MockBlockSource {
         self.inner.current_block.store(number, Ordering::SeqCst);
     }
 
-    /// Make every `get_balance` call block forever, simulating an RPC call
-    /// made from inside the monitor's own event loop that never returns -
+    /// Make the RPC calls `process_block` issues block forever, simulating a
+    /// call made from inside the monitor's own event loop that never returns -
     /// wedging the loop itself, rather than just leaving its subscription
     /// silent the way [`Self::kill_connection`] does.
-    pub fn hang_get_balance(&self) {
+    ///
+    /// Covers both `get_balance` and `find_native_transfers_to`, because which
+    /// one the loop is sitting in is an implementation detail of detection and
+    /// not what a test wedging the loop is trying to say. Gating only
+    /// `get_balance` meant these tests quietly stopped wedging anything when
+    /// native detection moved to reading the block instead of polling.
+    pub fn hang_rpc(&self) {
         self.inner.hung.store(true, Ordering::SeqCst);
     }
 
-    /// Release every `get_balance` call currently blocked (and let future
-    /// ones return normally).
+    /// Release every call currently blocked by [`Self::hang_rpc`] (and let
+    /// future ones return normally).
     pub fn release_hang(&self) {
         self.inner.hung.store(false, Ordering::SeqCst);
         self.inner.hang_notify.notify_waiters();
@@ -367,18 +392,7 @@ impl BlockSource for MockBlockSource {
 
     async fn get_balance(&self, address: Address, _block: Option<u64>) -> EvmResult<U256> {
         self.record_call("get_balance");
-        loop {
-            if !self.inner.hung.load(Ordering::SeqCst) {
-                break;
-            }
-            // Register interest before re-checking, so a `release_hang` that
-            // lands between the load above and this point isn't missed.
-            let notified = self.inner.hang_notify.notified();
-            if !self.inner.hung.load(Ordering::SeqCst) {
-                break;
-            }
-            notified.await;
-        }
+        self.await_if_hung().await;
 
         let balances = self.inner.balances.read().await;
         Ok(balances.get(&address).copied().unwrap_or(U256::ZERO))
@@ -414,6 +428,7 @@ impl BlockSource for MockBlockSource {
         addresses: &[Address],
     ) -> EvmResult<Vec<NativeTransfer>> {
         self.record_call("find_native_transfers_to");
+        self.await_if_hung().await;
         if let Some(message) = self
             .inner
             .find_native_transfers_error

@@ -83,6 +83,4 @@ pub struct WatchedAddress {
     pub token_contract: Option<Address>,
     /// When watching started.
     pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Previous known balance (for native).
-    pub last_known_balance: U256,
 }

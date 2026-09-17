@@ -64,7 +64,6 @@ async fn test_native_payment_detection_and_confirmation() {
             expected_amount: Some(payment_amount),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -180,7 +179,6 @@ async fn test_erc20_payment_detection() {
             expected_amount: Some(payment_amount),
             token_contract: Some(token_contract),
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -265,7 +263,6 @@ async fn test_underpayment_two_transactions() {
             expected_amount: Some(half_amount * U256::from(2)),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -551,7 +548,6 @@ async fn test_reorg_reports_a_relocated_transaction_as_survived() {
             expected_amount: Some(payment_amount),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -629,7 +625,6 @@ async fn test_reorg_reports_a_relocated_erc20_transfer_as_survived() {
             expected_amount: Some(payment_amount),
             token_contract: Some(token_contract),
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -720,7 +715,6 @@ async fn test_reorg_wider_than_scan_cap_still_finds_a_relocated_transaction() {
             expected_amount: Some(payment_amount),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -789,7 +783,6 @@ async fn test_reorg_revalidation_failure_reports_nothing_and_retries() {
             expected_amount: Some(payment_amount),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
