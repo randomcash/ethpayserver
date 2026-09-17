@@ -846,3 +846,138 @@ async fn test_reorg_revalidation_failure_reports_nothing_and_retries() {
     monitor.stop().await.unwrap();
     let _ = monitor_handle.await;
 }
+
+/// Subscribe, start the monitor, and wait for it to report itself up.
+///
+/// Every test here needs this and none of them are testing it; folding it away
+/// keeps what a test actually asserts visible rather than buried under four
+/// lines of identical setup.
+async fn start_and_wait(
+    monitor: &Arc<ChainMonitor<MockBlockSource>>,
+) -> (
+    tokio::sync::broadcast::Receiver<MonitorEvent>,
+    tokio::task::JoinHandle<evm::EvmResult<()>>,
+) {
+    let mut event_rx = monitor.subscribe();
+    let running = Arc::clone(monitor);
+    let handle = tokio::spawn(async move { running.start().await });
+
+    let started = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+    assert!(
+        matches!(started, Ok(Ok(MonitorEvent::MonitorStarted { .. }))),
+        "monitor did not start: {started:?}"
+    );
+
+    (event_rx, handle)
+}
+
+/// Two payments to one address, the second smaller than the first, are both
+/// detected.
+///
+/// This pins a failure mode shut rather than guarding live code. Detection
+/// used to work on balance *increases* against a stored `last_known_balance`,
+/// which made "smaller than something seen earlier" a meaningful and
+/// dangerous category: a merchant sweeping a payment address dropped its
+/// balance, and if the stored value stayed at the pre-sweep high-water mark,
+/// a later genuine payment below that mark never read as an increase. The
+/// customer paid and nothing credited it, silently.
+///
+/// Detection now reads the block's transfers, so amounts are not compared
+/// against remembered state at all and the sweep here is invisible to the
+/// monitor. The test is kept because it is cheap and because it is the
+/// assertion that goes red if detection is ever rebuilt on remembered
+/// balances - every other test in this file sends a single payment, or
+/// payments that only grow.
+#[tokio::test]
+async fn a_payment_after_a_sweep_is_still_detected() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let invoice_id = uuid::Uuid::new_v4();
+
+    // The second payment is deliberately *smaller* than the first. If
+    // `last_known_balance` is left at the pre-sweep figure, this cannot look
+    // like an increase, which is the whole point of the test.
+    let first_payment = U256::from(50_000_000_000_000_000u64); // 0.05 ETH
+    let second_payment = U256::from(10_000_000_000_000_000u64); // 0.01 ETH
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id,
+            expected_amount: Some(first_payment),
+            token_contract: None,
+            created_at: Utc::now(),
+        })
+        .await;
+
+    let (mut event_rx, monitor_handle) = start_and_wait(&monitor).await;
+
+    // 1. The customer pays.
+    let first_tx = B256::random();
+    test_source
+        .set_balance(payment_address, first_payment)
+        .await;
+    test_source
+        .add_native_transfer(
+            100,
+            make_native_transfer(sender, payment_address, first_payment, first_tx),
+        )
+        .await;
+    test_source.push_block(make_block(100));
+
+    let detected = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("timeout waiting for the first payment")
+        .expect("channel error");
+    match detected {
+        MonitorEvent::PaymentDetected(p) => assert_eq!(p.amount, first_payment),
+        other => panic!("expected the first PaymentDetected, got {other:?}"),
+    }
+
+    // 2. The merchant sweeps the address. No transfer *to* it, so nothing
+    //    should be detected for this block.
+    test_source.push_block(make_block(101));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 3. A second, smaller payment arrives.
+    let second_tx = B256::random();
+    test_source
+        .add_native_transfer(
+            102,
+            make_native_transfer(sender, payment_address, second_payment, second_tx),
+        )
+        .await;
+    test_source.push_block(make_block(102));
+
+    let mut saw_second = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), event_rx.recv()).await {
+            Ok(Ok(MonitorEvent::PaymentDetected(p))) if p.tx_hash == second_tx => {
+                assert_eq!(p.amount, second_payment);
+                assert_eq!(p.payment_address, payment_address);
+                saw_second = true;
+                break;
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+
+    monitor_handle.abort();
+    assert!(
+        saw_second,
+        "the second payment was never detected. A payment smaller than one seen \
+         earlier must still be credited; if this fails, detection has been rebuilt on \
+         remembered balances and a swept address silently stops crediting."
+    );
+}
