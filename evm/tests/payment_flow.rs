@@ -849,9 +849,11 @@ async fn test_reorg_revalidation_failure_reports_nothing_and_retries() {
 
 /// Subscribe, start the monitor, and wait for it to report itself up.
 ///
-/// Every test here needs this and none of them are testing it; folding it away
-/// keeps what a test actually asserts visible rather than buried under four
-/// lines of identical setup.
+/// No test here is testing this, so folding it away keeps what a test actually
+/// asserts visible rather than buried under four lines of identical setup. The
+/// eleven older tests in this file still each carry their own copy; worth
+/// collapsing onto this when one of them is next touched, rather than churning
+/// them all in a change about payment detection.
 async fn start_and_wait(
     monitor: &Arc<ChainMonitor<MockBlockSource>>,
 ) -> (
@@ -979,5 +981,90 @@ async fn a_payment_after_a_sweep_is_still_detected() {
         "the second payment was never detected. A payment smaller than one seen \
          earlier must still be credited; if this fails, detection has been rebuilt on \
          remembered balances and a swept address silently stops crediting."
+    );
+}
+
+/// A block the monitor could not read is reported, not treated as empty.
+///
+/// Native detection reads the block once and matches its transfers, so that
+/// single call is all that stands between a payment and never being credited.
+/// When it fails — the HTTP endpoint has not imported a block the
+/// subscription already announced, which happens whenever the two are not the
+/// same node — the monitor must say so.
+///
+/// The failure this pins shut is silence. `find_native_transfers_to`
+/// returning `Ok(vec![])` for a block it could not fetch is indistinguishable
+/// from a block containing no payments, so the loop would advance past it with
+/// no error anywhere.
+///
+/// Note what this does **not** claim: the payment is not recovered. Nothing
+/// re-reads a block the monitor has moved past — gaps are consulted only for
+/// reorg detection and no catch-up exists — so the payment in that block is
+/// lost either way. What changes is that it is lost *loudly*, with a
+/// `MonitorError` naming the block, instead of looking like an ordinary empty
+/// block forever. Backfilling a missed block is a separate gap and is tracked
+/// on its own.
+#[tokio::test]
+async fn a_block_that_could_not_be_read_is_reported_rather_than_treated_as_empty() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let amount = U256::from(50_000_000_000_000_000u64);
+    let tx_hash = B256::random();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: Some(amount),
+            token_contract: None,
+            created_at: Utc::now(),
+        })
+        .await;
+
+    let (mut event_rx, handle) = start_and_wait(&monitor).await;
+
+    // The payment is in block 100, but reading that block fails.
+    test_source
+        .add_native_transfer(
+            100,
+            make_native_transfer(sender, payment_address, amount, tx_hash),
+        )
+        .await;
+    test_source.set_find_native_transfers_error(Some("block not imported yet"));
+    test_source.push_block(make_block(100));
+
+    let mut reported = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(400), event_rx.recv()).await {
+            Ok(Ok(MonitorEvent::MonitorError { error, .. })) => {
+                assert!(
+                    error.contains("block not imported yet"),
+                    "the reported error should name what actually failed, got {error:?}"
+                );
+                reported = true;
+                break;
+            }
+            Ok(Ok(MonitorEvent::PaymentDetected(_))) => {
+                panic!("a payment cannot be detected from a block that could not be read")
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+
+    handle.abort();
+    assert!(
+        reported,
+        "a block read that failed was silently treated as a block with no payments. \
+         Nothing re-reads it, so the payment inside it is gone with no trace."
     );
 }

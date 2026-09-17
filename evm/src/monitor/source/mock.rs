@@ -37,11 +37,11 @@ struct Inner {
     /// One counter per RPC method, so a test can assert how an operation
     /// *scales* rather than only that it produced the right answer.
     ///
-    /// Call volume here is not a performance nicety. Native payment detection
-    /// polls one balance per watched address per block - O(N) in open invoices
-    /// where ERC20 detection is O(1) - and that shape, calls-per-block against
-    /// addresses-watched, is invisible to every test that checks only whether
-    /// a payment was found.
+    /// Call volume is not a performance nicety here. Both detection paths are
+    /// O(1) per block - one log filter, one block read - and that shape is
+    /// invisible to every test that checks only whether a payment was found,
+    /// which is how native detection stayed O(N) in open invoices for as long
+    /// as it did.
     calls: Mutex<HashMap<&'static str, u64>>,
     /// Last status a `subscribe_blocks` attempt produced. Like the real
     /// `RpcBlockSource`, this only changes as a side effect of an actual
@@ -53,10 +53,15 @@ struct Inner {
     /// `status` so a test can simulate the endpoint going down and coming
     /// back independently of when the monitor notices.
     reachable: AtomicBool,
-    /// Whether `get_balance` should block forever instead of returning.
-    /// Simulates an RPC call made *from inside* block processing that never
-    /// completes - as distinct from `kill_connection`, which kills the block
-    /// stream but leaves ordinary request/response calls answering.
+    /// Whether the calls block processing makes should block forever instead
+    /// of returning. Simulates an RPC call made *from inside* block processing
+    /// that never completes - as distinct from `kill_connection`, which kills
+    /// the block stream but leaves ordinary request/response calls answering.
+    ///
+    /// Covers every call `process_block` issues rather than one of them, so a
+    /// test wedging the loop does not silently stop wedging anything when
+    /// detection changes which RPC it uses. That is exactly what happened when
+    /// it gated `get_balance` alone.
     hung: AtomicBool,
     hang_notify: Notify,
     /// Hash of every block pushed so far, keyed by number. Backs
@@ -283,11 +288,14 @@ impl MockBlockSource {
     /// wedging the loop itself, rather than just leaving its subscription
     /// silent the way [`Self::kill_connection`] does.
     ///
-    /// Covers both `get_balance` and `find_native_transfers_to`, because which
+    /// Covers every call `process_block` issues - the block read, the log
+    /// query, the balance read and the reorg continuity check - because which
     /// one the loop is sitting in is an implementation detail of detection and
     /// not what a test wedging the loop is trying to say. Gating only
     /// `get_balance` meant these tests quietly stopped wedging anything when
-    /// native detection moved to reading the block instead of polling.
+    /// native detection moved to reading the block instead of polling; gating
+    /// only the two calls native detection happens to make now would leave the
+    /// same trap for an ERC20-only or reorg-path test.
     pub fn hang_rpc(&self) {
         self.inner.hung.store(true, Ordering::SeqCst);
     }
@@ -362,6 +370,7 @@ impl BlockSource for MockBlockSource {
 
     async fn get_logs(&self, filter: &LogFilter) -> EvmResult<Vec<alloy::rpc::types::Log>> {
         self.record_call("get_logs");
+        self.await_if_hung().await;
         let logs = self.inner.logs.read().await;
         let mut result = Vec::new();
 
@@ -409,6 +418,7 @@ impl BlockSource for MockBlockSource {
     }
 
     async fn get_block_hash(&self, number: u64) -> EvmResult<Option<B256>> {
+        self.await_if_hung().await;
         if let Some(message) = self.inner.get_block_hash_error.read().unwrap().clone() {
             return Err(EvmError::Rpc(message));
         }

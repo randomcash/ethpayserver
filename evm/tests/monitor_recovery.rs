@@ -350,7 +350,7 @@ async fn event_loop_hang_is_detected_from_outside_it() {
     test_source.hang_rpc();
     let subscribes_before = test_source.subscribe_count();
 
-    // Drive the loop into `process_block`, where it wedges on `get_balance`.
+    // Drive the loop into `process_block`, where it wedges on the block read.
     test_source.push_block(make_block(1));
 
     // Long enough to clear `loop_hang_timeout_secs` several times over, and

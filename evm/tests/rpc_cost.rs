@@ -96,17 +96,33 @@ async fn calls_for_one_block(n: usize, token: Option<Address>) -> BlockCalls {
     probe.push_block(make_block(100));
 
     // A block with no payment emits no event, so this waits on the observable
-    // side effect instead: the calls the block produced. Polled rather than
-    // slept on, so the test is as fast as the monitor is.
-    let expected = if token.is_some() {
-        "get_logs"
-    } else {
-        "find_native_transfers_to"
-    };
+    // side effect instead: the calls the block produced.
+    //
+    // Waits for the counts to stop changing rather than for the first call to
+    // land. `record_call` fires on *entry*, so a snapshot taken the moment the
+    // first call is seen is read while `process_block` may still be running -
+    // and a regression that adds calls *after* the first one would only be
+    // caught by whatever slack the poll interval happened to leave. For a test
+    // whose whole job is stopping the old shape creeping back, that is the
+    // wrong thing to depend on.
+    let mut stable_for = 0;
+    let mut previous = (0, 0, 0);
     for _ in 0..200 {
         tokio::time::sleep(Duration::from_millis(10)).await;
-        if probe.call_count(expected) >= 1 {
-            break;
+        let now = (
+            probe.call_count("find_native_transfers_to"),
+            probe.call_count("get_balance"),
+            probe.call_count("get_logs"),
+        );
+        if now == previous && now != (0, 0, 0) {
+            stable_for += 1;
+            // Three consecutive identical reads, i.e. ~30ms with nothing new.
+            if stable_for >= 3 {
+                break;
+            }
+        } else {
+            stable_for = 0;
+            previous = now;
         }
     }
 

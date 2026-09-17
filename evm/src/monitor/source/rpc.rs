@@ -474,8 +474,27 @@ impl BlockSource for RpcBlockSource {
         })
         .await?;
 
+        // A block the monitor was just notified about must exist. Absent means
+        // this HTTP endpoint has not imported it yet - a different node from
+        // the one the subscription came from, or a load-balanced pool where
+        // the two are not the same machine.
+        //
+        // Returning `Ok(vec![])` for that is indistinguishable from "this
+        // block contained no payments", and since this is the only native
+        // detection path, the caller would advance `last_block` past a block
+        // it never actually read. Nothing revisits it: gaps are only used for
+        // reorg detection and nothing backfills. A payment in that block would
+        // be silently never credited.
+        //
+        // So it fails closed, the same way the reorg gap check and
+        // `find_survived_tx_hashes` do: leave `last_block` untouched and let
+        // the next block re-drive it, which costs one retry and cannot lose a
+        // payment.
         let Some(block) = block else {
-            return Ok(Vec::new());
+            return Err(EvmError::Rpc(format!(
+                "block {block_number} was announced but this endpoint has not imported \
+                 it yet; refusing to treat it as empty"
+            )));
         };
 
         // Filter transactions that send ETH to watched addresses
