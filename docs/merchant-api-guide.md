@@ -265,8 +265,10 @@ purpose — this returns `400 Bad Request` and nothing is stored. There is no
 way to register a spending key through this or any other endpoint; that is
 what makes the non-custodial guarantee true rather than aspirational.
 
-The first wallet you add becomes the primary. `PATCH /wallets/{wallet_id}` with
-`{"is_primary": true}` moves it later.
+The first wallet you add *for a family* becomes that family's primary, so a
+merchant with one key per chain never has to think about it. `PATCH
+/wallets/{wallet_id}` with `{"is_primary": true}` moves it later, and moves
+only its own family's primary.
 
 Adding an xpub you already hold returns the wallet you already have rather than
 a second one. A key has exactly one derivation counter: a second counter on the
