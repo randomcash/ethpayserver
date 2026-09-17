@@ -22,13 +22,12 @@ ALTER TABLE store_wallets
     ADD CONSTRAINT store_wallets_wallet_id_fkey
         FOREIGN KEY (wallet_id) REFERENCES wallets(id) ON DELETE RESTRICT;
 ALTER TABLE store_wallets DROP CONSTRAINT store_wallets_pkey;
--- A store may hold several overrides now; keep the oldest per store, since the
--- pre-namespace schema can only express one and the eip155 one is the only one
--- the guard above allows to exist.
-DELETE FROM store_wallets sw
-USING store_wallets keep
-WHERE keep.store_id = sw.store_id
-  AND keep.created_at < sw.created_at;
+-- The pre-namespace schema can express one override per store. The guard above
+-- has already established that every wallet is `eip155`, and an override's
+-- namespace equals its wallet's by foreign key, so no store can hold two - and
+-- re-adding the primary key will say so loudly if that reasoning is ever
+-- wrong. Deleting the surplus rows to make it fit would be this migration
+-- quietly choosing where a store's money goes.
 ALTER TABLE store_wallets ADD PRIMARY KEY (store_id);
 ALTER TABLE store_wallets DROP COLUMN namespace;
 
