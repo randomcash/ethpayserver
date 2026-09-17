@@ -124,6 +124,15 @@ impl<A> PluginHostApi<A> {
         }
     }
 
+    /// The one store this host issues, and reads back, its own invoices on.
+    ///
+    /// Shared with `payment_observer.rs` so the reconciliation read is bound
+    /// to exactly the store `enforce_own_store` bounds the write to. Two
+    /// different notions of "our store" between the two would be a hole.
+    pub(super) fn own_store_id(&self) -> StoreId {
+        self.own_store_id
+    }
+
     /// Shared with sibling capability modules under `services::plugins` (see
     /// `merchant_directory.rs`) that read through the same data service this
     /// one writes through, rather than a second connection of their own.
