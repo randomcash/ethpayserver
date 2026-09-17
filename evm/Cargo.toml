@@ -47,6 +47,13 @@ coins-bip32 = "0.13"
 coins-bip39 = "0.13"
 k256 = "0.13"
 
+# Tron address encoding: base58check over a 0x41-prefixed payload, with a
+# double-SHA256 checksum. Both crates are already in the tree transitively
+# (coins-bip32 and k256 respectively); named here because this crate uses them
+# directly and a transitive dependency is not a promise.
+bs58 = "0.5"
+sha2 = "0.10"
+
 # Async runtime
 tokio = { version = "1.42", features = ["sync", "time"] }
 tokio-stream = "0.1"

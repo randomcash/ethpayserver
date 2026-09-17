@@ -24,15 +24,24 @@ use data_service::{
     self, StorePaymentMethod, StorePaymentMethodReader, WalletReader, WalletWriter,
 };
 use evm::{XpubDeriver, validate_xpub};
+use types::NAMESPACE_EIP155;
 
 use super::super::extractors::AuthenticatedUser;
 use super::{ApiErr, mask_xpub, repository_error, require_store_settings_permission};
 use crate::state::PgAppState;
 pub use api_types::{
-    CreateWalletRequest, DerivedAddressEntry, RotateWalletRequest, RotateWalletResponse,
-    RotationEntry, SetStoreWalletRequest, StoreWalletResponse, UpdateWalletRequest,
-    WalletAddressesResponse, WalletResponse, WalletXpubResponse,
+    CreateWalletRequest, CreateWalletResponse, DerivedAddressEntry, RotateWalletRequest,
+    RotateWalletResponse, RotationEntry, SetStoreWalletRequest, StoreWalletResponse,
+    UpdateWalletRequest, WalletAddressesResponse, WalletResponse, WalletXpubResponse,
 };
+
+/// How many addresses a newly registered wallet hands back for checking.
+///
+/// Three, because the merchant is comparing them by eye against a list in
+/// another application and one is not a pattern - a single match could be
+/// coincidence in a way three consecutive ones cannot. More than a handful and
+/// nobody reads them.
+const VERIFICATION_ADDRESS_COUNT: u32 = 3;
 
 /// Query parameters for listing wallet addresses.
 #[derive(Debug, Deserialize, IntoParams)]
@@ -41,6 +50,55 @@ pub struct WalletAddressesQuery {
     pub limit: Option<u32>,
     /// Starting index (default 0).
     pub offset: Option<u32>,
+}
+
+/// Which chain family an endpoint about a store's wallet is asking about.
+///
+/// A store may hold one override per family, so "the store's wallet" is not a
+/// question with a single answer any more. Defaults to `eip155`, which is what
+/// every caller written before families meant.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct StoreWalletQuery {
+    /// CAIP-2 namespace: `eip155`, `tron`, ... . Defaults to `eip155`.
+    pub namespace: Option<String>,
+}
+
+impl StoreWalletQuery {
+    fn namespace(&self) -> &str {
+        self.namespace.as_deref().unwrap_or(NAMESPACE_EIP155)
+    }
+}
+
+/// Derive the first `count` addresses of a wallet, rendered for its family.
+///
+/// Used both to answer `GET /wallets/{id}/addresses` and to hand a merchant
+/// something to check a freshly registered key against. The derivation path
+/// carries the coin type, which is the only part of it that differs between
+/// families and the only part worth a merchant's attention.
+pub(super) fn derive_entries(
+    wallet: &data_service::Wallet,
+    offset: u32,
+    count: u32,
+) -> Result<Vec<DerivedAddressEntry>, StatusCode> {
+    // The namespace comes from the wallet row, never from the request: it is
+    // what the key was registered as, and deriving under anything else
+    // produces addresses the merchant's own wallet does not watch.
+    let deriver = XpubDeriver::from_xpub(&wallet.namespace, &wallet.xpub)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut addresses = Vec::with_capacity(count as usize);
+    for i in offset..offset.saturating_add(count) {
+        addresses.push(DerivedAddressEntry {
+            address: deriver
+                .derive_address(i)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            index: i,
+            derivation_path: deriver.derivation_path(i),
+            used: (i as i64) < wallet.derivation_index as i64,
+        });
+    }
+
+    Ok(addresses)
 }
 
 /// Load a wallet and confirm it belongs to the caller.
@@ -90,11 +148,24 @@ where
     Ok(Json(wallets.into_iter().map(Into::into).collect()))
 }
 
-/// Add a wallet to the account.
+/// Add a wallet to the account, for one chain family.
 ///
-/// Adding an xpub the account already holds returns the existing wallet rather
-/// than a duplicate: two rows on one key would be two derivation counters on
-/// it, and that is exactly the collision the account-level model removes.
+/// Adding an xpub the account already holds *in the same family* returns the
+/// existing wallet rather than a duplicate: two rows on one key would be two
+/// derivation counters on it, and that is exactly the collision the
+/// account-level model removes. The same bytes registered for a different
+/// family is a different wallet - see `WalletWriter::create_wallet`.
+///
+/// The response carries the first few addresses the key derives, and that is
+/// the point of this endpoint rather than a nicety. An account-level xpub has
+/// its BIP-44 coin type baked in and its parent unreachable, so nothing here
+/// can check that the key the merchant pasted is a key for the family they
+/// picked: `m/44'/60'/0'` and `m/44'/195'/0'` are the same bytes in the same
+/// alphabet with the same version prefix. A mismatch is accepted, derives
+/// perfectly valid addresses, and is discovered only when a customer has paid
+/// and the merchant's wallet shows nothing. Comparing three addresses against
+/// their own wallet, before any invoice quotes one, is the only check that
+/// exists.
 #[utoipa::path(
     post,
     path = "/wallets",
@@ -102,8 +173,10 @@ where
     security(("bearer_auth" = [])),
     request_body = CreateWalletRequest,
     responses(
-        (status = 201, description = "Wallet added", body = WalletResponse),
-        (status = 400, description = "Invalid xpub"),
+        (status = 201, description = "Wallet added, with addresses to verify it",
+         body = CreateWalletResponse),
+        (status = 400, description = "Invalid xpub, or a chain family this server \
+                                      cannot derive for"),
         (status = 401, description = "Unauthorized"),
         (status = 409, description = "Another account already holds this xpub"),
     )
@@ -112,7 +185,7 @@ pub async fn create_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Json(req): Json<CreateWalletRequest>,
-) -> Result<(StatusCode, Json<WalletResponse>), ApiErr>
+) -> Result<(StatusCode, Json<CreateWalletResponse>), ApiErr>
 where
     A: SessionService + 'static,
 {
@@ -120,16 +193,45 @@ where
         return Err(StatusCode::BAD_REQUEST.into());
     }
 
+    // Refuse a family this build cannot derive for, before the key is stored.
+    // Accepting `solana` here would write a row nothing can ever derive from,
+    // and the merchant would see a wallet listed on their account that no
+    // payment method can use and no error explains.
+    if evm::family_for_namespace(&req.namespace).is_err() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unsupported_namespace: this server cannot derive addresses for \
+                 `{}` keys",
+                req.namespace
+            ),
+        )
+            .into());
+    }
+
     let wallet = WalletWriter::create_wallet(
         &*state.data_service,
         user.id.0,
+        &req.namespace,
         &req.xpub,
         req.name.as_deref(),
     )
     .await
     .map_err(repository_error)?;
 
-    Ok((StatusCode::CREATED, Json(wallet.into())))
+    // Derived from index 0 rather than from the wallet's current position:
+    // these are for checking the key, not for use, and index 0 is the one the
+    // merchant's own wallet shows first. Re-registering an existing wallet
+    // therefore returns the same three addresses it did the first time.
+    let verification_addresses = derive_entries(&wallet, 0, VERIFICATION_ADDRESS_COUNT)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateWalletResponse {
+            wallet: wallet.into(),
+            verification_addresses,
+        }),
+    ))
 }
 
 /// Get one of the account's wallets.
@@ -269,6 +371,7 @@ where
     Ok(Json(WalletXpubResponse {
         id: wallet.id,
         user_id: wallet.user_id,
+        namespace: wallet.namespace,
         xpub: wallet.xpub,
         derivation_index: wallet.derivation_index,
         name: wallet.name,
@@ -278,7 +381,10 @@ where
 
 /// List derived addresses for a wallet.
 ///
-/// Addresses below the wallet's current index have been handed out.
+/// Addresses below the wallet's current index have been handed out. Rendered
+/// in the wallet's own family encoding, with the coin type in each derivation
+/// path - the path used to be hardcoded as `m/44'/60'/0'/0/{i}`, which is a
+/// claim about the key rather than a fact read from it.
 #[utoipa::path(
     get,
     path = "/wallets/{wallet_id}/addresses",
@@ -309,48 +415,38 @@ where
     let limit = query.limit.unwrap_or(20).min(100);
     let offset = query.offset.unwrap_or(0);
 
-    let deriver =
-        XpubDeriver::from_xpub(&wallet.xpub).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut addresses = Vec::with_capacity(limit as usize);
-    for i in offset..offset.saturating_add(limit) {
-        let address = deriver
-            .derive_address(i)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        addresses.push(DerivedAddressEntry {
-            address: address.to_string(),
-            index: i,
-            derivation_path: format!("m/44'/60'/0'/0/{i}"),
-            used: (i as i64) < wallet.derivation_index as i64,
-        });
-    }
-
     Ok(Json(WalletAddressesResponse {
         wallet_id: wallet.id,
         derivation_index: wallet.derivation_index,
-        addresses,
+        addresses: derive_entries(&wallet, offset, limit)?,
     }))
 }
 
-/// Get the wallet a store derives from.
+/// Get the wallet a store derives from, for one chain family.
+///
+/// Per family, because that is what resolution is. A store with an Ethereum
+/// key and no Tron one has an answer for `eip155` and none for `tron`, and
+/// collapsing the two would report a key that Tron payments will never be
+/// collected on.
 #[utoipa::path(
     get,
     path = "/stores/{store_id}/wallet",
     tag = "stores",
     security(("bearer_auth" = [])),
-    params(("store_id" = Uuid, Path, description = "Store ID")),
+    params(("store_id" = Uuid, Path, description = "Store ID"), StoreWalletQuery),
     responses(
         (status = 200, description = "Resolved wallet", body = StoreWalletResponse),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
-        (status = 404, description = "Store has no wallet and the account has no primary"),
+        (status = 404, description = "No wallet for this family: the store has no \
+                                      override for it and the account no primary"),
     )
 )]
 pub async fn get_store_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
+    Query(query): Query<StoreWalletQuery>,
 ) -> Result<Json<StoreWalletResponse>, StatusCode>
 where
     A: SessionService + 'static,
@@ -369,15 +465,18 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let wallet = WalletReader::resolve_store_wallet(&*state.data_service, store_id)
+    let namespace = query.namespace();
+
+    let wallet = WalletReader::resolve_store_wallet(&*state.data_service, store_id, namespace)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let is_override = WalletReader::get_store_wallet_override(&*state.data_service, store_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .is_some();
+    let is_override =
+        WalletReader::get_store_wallet_override(&*state.data_service, store_id, namespace)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_some();
 
     Ok(Json(StoreWalletResponse {
         store_id,
@@ -448,7 +547,8 @@ where
     }))
 }
 
-/// Drop a store's override so it follows the account primary again.
+/// Drop a store's override for one chain family, so it follows that family's
+/// account primary again.
 ///
 /// This no longer deletes a wallet - it only stops pinning one. The xpub, its
 /// counter and the addresses derived from it are untouched, which is the point:
@@ -462,9 +562,9 @@ where
     path = "/stores/{store_id}/wallet",
     tag = "stores",
     security(("bearer_auth" = [])),
-    params(("store_id" = Uuid, Path, description = "Store ID")),
+    params(("store_id" = Uuid, Path, description = "Store ID"), StoreWalletQuery),
     responses(
-        (status = 204, description = "Override cleared"),
+        (status = 204, description = "Override cleared for this family"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
     )
@@ -473,13 +573,17 @@ pub async fn delete_store_wallet<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
+    Query(query): Query<StoreWalletQuery>,
 ) -> Result<StatusCode, StatusCode>
 where
     A: SessionService + 'static,
 {
     require_store_settings_permission(&state, &user, store_id).await?;
 
-    WalletWriter::clear_store_wallet(&*state.data_service, store_id)
+    // Scoped to one family, mirroring `PUT`. Clearing every override would
+    // move where a store's Ethereum payments go in response to a request about
+    // Tron.
+    WalletWriter::clear_store_wallet(&*state.data_service, store_id, query.namespace())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -490,10 +594,13 @@ where
 // Wallet XPub Rotation
 // =============================================================================
 
-/// Rotate the xpub a store's payment methods derive from.
+/// Rotate the xpub a store's payment methods derive from, on one chain family.
 ///
-/// Points every payment method for this store at the account wallet holding
-/// the new xpub, creating it if the account does not already have it. Old
+/// Points every payment method for this store *on that family* at the account
+/// wallet holding the new xpub, creating it if the account does not already
+/// have it. Methods on other families are untouched: a key belongs to one
+/// family, and repointing a Tron method at a new Ethereum key would derive its
+/// addresses at coin type 60 on a chain whose wallets look under 195. Old
 /// addresses remain watched until their parent invoices resolve, and a
 /// rotation record is kept per payment method.
 ///
@@ -540,6 +647,21 @@ where
         return Err(StatusCode::BAD_REQUEST.into());
     }
 
+    // And the family it is being rotated into. A namespace this build cannot
+    // derive for would store a key nothing can use, in response to a request
+    // made because the previous key was compromised.
+    if evm::family_for_namespace(&req.namespace).is_err() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unsupported_namespace: this server cannot derive addresses for \
+                 `{}` keys",
+                req.namespace
+            ),
+        )
+            .into());
+    }
+
     // Verify store exists
     let _ = state
         .data_service
@@ -563,11 +685,12 @@ where
     // said nothing about where it stopped.
     let rotations = state
         .data_service
-        .rotate_store_xpub(store_id, &req.xpub, req.reason.as_deref())
+        .rotate_store_xpub(store_id, &req.namespace, &req.xpub, req.reason.as_deref())
         .await
         .map_err(repository_error)?;
 
-    // Nothing moved means every method was already deriving from this key.
+    // Nothing moved means every method on this family was already deriving
+    // from this key - or the store has no methods on it at all.
     if rotations.is_empty() {
         return Err(StatusCode::BAD_REQUEST.into());
     }

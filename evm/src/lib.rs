@@ -32,6 +32,7 @@
 pub mod api;
 
 pub mod error;
+pub mod family;
 pub mod metrics;
 pub mod monitor;
 pub mod network;
@@ -52,6 +53,10 @@ pub mod wallet;
 // Re-export commonly used items
 pub use alloy::providers::RootProvider;
 pub use error::{EvmError, EvmResult};
+pub use family::{
+    ChainFamily, ETH_COIN_TYPE, NAMESPACE_EIP155, NAMESPACE_TRON, TRON_COIN_TYPE,
+    family_for_namespace,
+};
 pub use network::{
     ALL_CHAINS, ChainConfig, EvmNetwork, get_any_chain_config, get_chain_config,
     get_chain_config_by_id,

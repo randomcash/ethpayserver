@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::PgDataService;
 use super::conversions::chain_id_from_row;
-use super::wallet::STORE_WALLET_RESOLUTION;
+use super::wallet::{METHOD_NAMESPACE, store_wallet_resolution};
 use crate::{RepositoryError, RepositoryResult, sqlx_to_repo_error};
 use types::{DerivationAllocation, StorePaymentMethod};
 use types::{StorePaymentMethodReader, StorePaymentMethodWriter};
@@ -22,18 +22,41 @@ const METHOD_COLUMNS: &str = "pm.id, pm.store_id, pm.chain_id, pm.token_address,
      pm.asset_symbol, pm.decimals, w.id AS wallet_id, w.xpub, w.derivation_index, \
      pm.enabled, pm.created_at";
 
+/// The wallet a payment method aliased `pm` derives from: its pin, else its
+/// store's override for the method's family, else the account primary for that
+/// family.
+///
+/// Every step is scoped to `pm.chain_namespace`. The pin is scoped by the
+/// schema - a composite foreign key refuses a `wallet_id` from another family
+/// outright - and the two fallbacks by the filter inside
+/// [`store_wallet_resolution`]. What this must never do is answer a `tron:`
+/// method with an `eip155` wallet: that key was exported at coin type 60 and
+/// the `T...` address derived from it is one the merchant's wallet does not
+/// watch.
+fn method_wallet() -> String {
+    format!(
+        "COALESCE(pm.wallet_id, {})",
+        store_wallet_resolution(METHOD_NAMESPACE)
+    )
+}
+
 /// `FROM` clause resolving a payment method to the wallet it derives from.
 ///
 /// LEFT JOIN, not JOIN: a method whose chain runs out - no pin, no store
-/// override, no account primary - must still be listed. It exists and simply
-/// cannot be paid yet, which is a state the settings UI has to be able to show.
-/// An inner join would silently hide it, and a merchant would be left looking
-/// for a payment method they can see they created.
+/// override, no account primary for its family - must still be listed. It
+/// exists and simply cannot be paid yet, which is a state the settings UI has
+/// to be able to show. An inner join would silently hide it, and a merchant
+/// would be left looking for a payment method they can see they created.
+///
+/// The `w.namespace` equality is belt and braces over the foreign key: if a
+/// wallet from the wrong family ever did reach `pm.wallet_id`, this reports
+/// the method as having no key rather than deriving from it.
 fn method_from() -> String {
     format!(
         "FROM store_payment_methods pm \
          JOIN stores s ON s.id = pm.store_id \
-         LEFT JOIN wallets w ON w.id = COALESCE(pm.wallet_id, {STORE_WALLET_RESOLUTION})"
+         LEFT JOIN wallets w ON w.id = {} AND w.namespace = {METHOD_NAMESPACE}",
+        method_wallet()
     )
 }
 
@@ -175,19 +198,30 @@ impl StorePaymentMethodWriter for PgDataService {
         // store's resolution afterwards rather than freezing today's answer -
         // which is the point: rotate the store's wallet and every unpinned
         // method moves with it.
+        // A key supplied here is a key for THIS method's chain family: the
+        // merchant is pasting it against a chain they picked. Filing it under
+        // anything else - an account default, say - is the wrong-coin-type bug
+        // reached through the payment-method form.
+        let namespace = chain_id.namespace();
+
         let wallet_id = match xpub {
-            Some(xpub) => Some(self.wallet_for_store_xpub(store_id, xpub).await?),
+            Some(xpub) => Some(
+                self.wallet_for_store_xpub(store_id, namespace, xpub)
+                    .await?,
+            ),
             None => {
                 // Refuse now rather than at the first invoice. An unpinned
                 // method on a store that resolves to nothing looks fine in the
-                // list and fails only when a customer is waiting to pay.
-                if !self.store_resolves_to_a_wallet(store_id).await? {
-                    return Err(RepositoryError::Conflict(
-                        "This store has no receiving key to derive addresses from. \
-                         Add one on the Wallets page, or supply an xpub with this \
-                         payment method."
-                            .to_string(),
-                    ));
+                // list and fails only when a customer is waiting to pay. Asked
+                // per family: an account with an Ethereum key and no Tron one
+                // resolves for one chain and not the other, and the answer
+                // that matters is the one for the chain being enabled.
+                if !self.store_resolves_to_a_wallet(store_id, namespace).await? {
+                    return Err(RepositoryError::Conflict(format!(
+                        "This store has no receiving key for {namespace} chains to derive \
+                         addresses from. Add one on the Wallets page, or supply an xpub \
+                         with this payment method."
+                    )));
                 }
                 None
             }
@@ -252,8 +286,14 @@ impl StorePaymentMethodWriter for PgDataService {
             .await?
             .ok_or_else(|| RepositoryError::NotFound("payment method not found".into()))?;
 
+        // The family comes from the method's own chain, which the update
+        // cannot change - `UpdatePaymentMethodRequest` carries no chain id -
+        // so a key pasted here is unambiguously a key for that chain.
         let wallet_id = match xpub {
-            Some(x) => Some(self.wallet_for_store_xpub(existing.store_id, x).await?),
+            Some(x) => Some(
+                self.wallet_for_store_xpub(existing.store_id, existing.chain_id.namespace(), x)
+                    .await?,
+            ),
             None => None,
         };
 
@@ -316,9 +356,12 @@ impl StorePaymentMethodWriter for PgDataService {
             FROM store_payment_methods pm
             JOIN stores s ON s.id = pm.store_id
             WHERE pm.id = $1
-              AND w.id = COALESCE(pm.wallet_id, {STORE_WALLET_RESOLUTION})
-            RETURNING w.id AS wallet_id, w.xpub, w.derivation_index - 1 AS current_index
-            "#
+              AND w.id = {}
+              AND w.namespace = {METHOD_NAMESPACE}
+            RETURNING w.id AS wallet_id, w.namespace, w.xpub,
+                      w.derivation_index - 1 AS current_index
+            "#,
+            method_wallet()
         ))
         .bind(id)
         .fetch_optional(&self.pool)
@@ -328,14 +371,18 @@ impl StorePaymentMethodWriter for PgDataService {
         match row {
             Some(r) => Ok(DerivationAllocation {
                 wallet_id: r.get("wallet_id"),
+                namespace: r.get("namespace"),
                 xpub: r.get("xpub"),
                 index: r.get("current_index"),
             }),
-            // Either the method is gone, or resolution found nothing: no pin,
-            // no store override, no account primary. Both mean there is no key
-            // to derive from, and inventing one is not an option.
+            // Either the method is gone, or resolution found nothing for this
+            // method's chain family: no pin, no store override, no account
+            // primary in that namespace. All of them mean there is no key to
+            // derive from, and inventing one is not an option - a wallet from
+            // another family would derive a valid address at the wrong coin
+            // type, which is worse than refusing because it looks like success.
             None => Err(RepositoryError::NotFound(
-                "payment method has no wallet to derive from".into(),
+                "payment method has no wallet in its chain family to derive from".into(),
             )),
         }
     }

@@ -197,7 +197,12 @@ ETHPayServer derives unique payment addresses from an extended public key
 (BIP-32 xpub). This means the server never holds private keys.
 
 Wallets belong to the account, not to a store. Every store uses the account's
-primary wallet unless it is pinned to a different one.
+primary wallet for a chain family unless it is pinned to a different one.
+
+A wallet belongs to one **chain family**, named by its CAIP-2 namespace -
+`eip155` for Ethereum and every EVM chain, `tron` for Tron. `namespace`
+defaults to `eip155`, so a request that does not mention it means what it
+always meant.
 
 ```bash
 curl -X POST https://your-instance.example.com/wallets \
@@ -205,7 +210,8 @@ curl -X POST https://your-instance.example.com/wallets \
   -H "Content-Type: application/json" \
   -d '{
     "xpub": "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt",
-    "name": "Main Wallet"
+    "name": "Main Wallet",
+    "namespace": "eip155"
   }'
 ```
 
@@ -215,13 +221,43 @@ Response (`201 Created`):
 {
   "id": "b2c3d4e5-f6a7-8901-bcde-f23456789012",
   "user_id": "11111111-2222-3333-4444-555555555555",
+  "namespace": "eip155",
   "xpub_masked": "xpub6CU...3fDVmz",
   "derivation_index": 0,
   "name": "Main Wallet",
   "is_primary": true,
-  "created_at": "2026-04-01T12:01:00Z"
+  "created_at": "2026-04-01T12:01:00Z",
+  "verification_addresses": [
+    {
+      "address": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+      "index": 0,
+      "derivation_path": "m/44'/60'/0'/0/0",
+      "used": false
+    },
+    { "...": "two more" }
+  ]
 }
 ```
+
+### Check `verification_addresses` before you take a payment
+
+**This is the only check there is, and nothing else can do it for you.**
+
+An account-level xpub has its BIP-44 coin type baked into it and its parent is
+unreachable, so nothing in the key says which chain family it was exported for.
+`m/44'/60'/0'` (Ethereum) and `m/44'/195'/0'` (Tron) are byte-indistinguishable:
+same base58 alphabet, same version bytes, same length, both valid.
+
+If you register a key under the wrong `namespace`, everything appears to work.
+The key validates. Addresses derive. They are checksum-correct, and money sent
+to them arrives. Your own wallet will simply never show it, because it looks
+under the other coin type - and recovering those funds means re-importing your
+seed at a non-standard path.
+
+So compare the three addresses in `verification_addresses` against the first
+three receiving addresses your own wallet shows, **before** any invoice quotes
+one. If they do not match, the key is registered for the wrong family: delete
+the wallet and add it again with the right `namespace`.
 
 If `xpub` fails the extended-key version-byte check — including every
 `xprv`, which is a spending key and uses a different version byte on
@@ -245,22 +281,31 @@ curl -X PUT https://your-instance.example.com/stores/{store_id}/wallet \
   -d '{"wallet_id": "b2c3d4e5-f6a7-8901-bcde-f23456789012"}'
 ```
 
-`DELETE /stores/{store_id}/wallet` removes that pin so the store follows the
-primary again. It does not delete the wallet, and no derivation counter is
-reset.
+The pin applies to the named wallet's chain family and to nothing else. A store
+can hold one pin per family, so pinning a Tron wallet says nothing about where
+that store's Ethereum payments go.
 
-Both calls change where money actually goes: the store's payment methods are
-released from whatever key they were configured with and follow the store from
-then on, so the next invoice is paid to an address derived from the wallet you
-named. Addresses already issued keep working - in-flight invoices still resolve
-on them.
+`DELETE /stores/{store_id}/wallet?namespace=eip155` removes the pin for one
+family so the store follows that family's primary again. It does not delete the
+wallet, and no derivation counter is reset. `GET /stores/{store_id}/wallet`
+takes the same `namespace` parameter; both default to `eip155`.
+
+Both calls change where money actually goes: the store's payment methods **on
+that family** are released from whatever key they were configured with and
+follow the store from then on, so the next invoice is paid to an address derived
+from the wallet you named. Addresses already issued keep working - in-flight
+invoices still resolve on them.
 
 An xpub can belong to only one account. Registering one another merchant has
 already added returns `409 Conflict`, because two accounts deriving from one
-key would hand the same addresses to both their customers.
+key would hand the same addresses to both their customers. Registering your own
+key again under a *different* namespace is a different wallet, with its own
+counter - the two derive on different chains, so their addresses cannot collide.
 
-The xpub must be at the BIP-44 account level (`m/44'/60'/0'`). Payment
-addresses are derived at `m/44'/60'/0'/0/{index}`.
+The xpub must be at the BIP-44 account level, at its family's coin type:
+`m/44'/60'/0'` for `eip155`, `m/44'/195'/0'` for `tron`. Payment addresses are
+derived at `<account path>/0/{index}`, and `GET /wallets/{id}/addresses` reports
+the full path beside each address.
 
 ---
 
