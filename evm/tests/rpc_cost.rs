@@ -111,27 +111,26 @@ async fn calls_for_one_block(n: usize, token: Option<Address>) -> (u64, u64) {
     counts
 }
 
-/// Native detection makes **two** `eth_getBalance` calls per watched address,
-/// per block.
+/// Native detection makes **one** `eth_getBalance` per watched address, per
+/// block.
 ///
-/// Two, not one, and the second is redundant:
+/// It used to make two. `check_native_payments` read each address's balance at
+/// `block.number` to see whether it went up, and `update_watched_balances`
+/// then read the same address at the same block again to store it as
+/// `last_known_balance` — a value the first read already had in hand. Every
+/// address was paying for two identical requests where one would do.
 ///
-/// * `check_native_payments` reads each address's balance at `block.number`
-///   to see whether it went up.
-/// * `update_watched_balances` then reads *the same address at the same
-///   block* again, to store it as `last_known_balance` — a value the first
-///   read already had in hand.
+/// Still O(N) in watched addresses, which is the larger problem and not this
+/// test's subject: ERC20 below shows O(1) per block is reachable, and getting
+/// native there means reading the block once and matching locally rather than
+/// polling per address.
 ///
-/// So half of these requests fetch a value the other half already has. That is
-/// separable from the larger reshaping (read the block once, match locally)
-/// and worth taking on its own.
-///
-/// Pinned at exactly `2 * n` deliberately, so the call shape cannot drift in
-/// either direction without someone noticing: if it grows, something
-/// regressed; if it shrinks, the fix landed and this test should be rewritten
-/// to pin the new shape rather than deleted.
+/// Pinned at exactly `n` rather than a bound, so the call shape cannot drift
+/// in either direction unnoticed — if it grows, something regressed; if it
+/// shrinks, the reshaping landed and this test should be rewritten to pin the
+/// new shape rather than deleted.
 #[tokio::test]
-async fn native_detection_costs_two_calls_per_watched_address_per_block() {
+async fn native_detection_costs_one_call_per_watched_address_per_block() {
     let mut measured = Vec::new();
     for n in [1usize, 2, 4, 8] {
         let (balance_calls, _) = calls_for_one_block(n, None).await;
@@ -140,22 +139,20 @@ async fn native_detection_costs_two_calls_per_watched_address_per_block() {
 
     for (n, calls) in &measured {
         assert_eq!(
-            *calls,
-            2 * *n as u64,
-            "one block with {n} watched native addresses costs {} get_balance calls \
-             (one to detect, one to re-read what was just detected). Measured across \
-             sizes: {measured:?}",
-            2 * n
+            *calls, *n as u64,
+            "one block with {n} watched native addresses should cost {n} get_balance \
+             calls — one per address, none repeated. Measured across sizes: {measured:?}"
         );
     }
 
-    // States the shape rather than only the coefficient: if this ever becomes
-    // independent of `n`, the rework landed.
+    // States the shape rather than only the coefficient: while detection polls
+    // per address this grows with `n`, and when it stops growing the reshaping
+    // has landed and this test needs rewriting.
     let (first_n, first_calls) = measured[0];
     let (last_n, last_calls) = measured[measured.len() - 1];
     assert!(
         last_calls > first_calls,
-        "native detection is expected to scale with watched addresses today \
+        "native detection still scales with watched addresses today \
          ({first_n} -> {first_calls}, {last_n} -> {last_calls}); if it no longer does, \
          rewrite this test to pin the new shape"
     );

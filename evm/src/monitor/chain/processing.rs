@@ -87,6 +87,9 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
 
         // Get watched addresses (read lock)
         let has_native_watches;
+        // Balances observed while scanning, carried out of the read lock so
+        // they can be stored under the write lock without being fetched twice.
+        let mut observed: HashMap<Address, U256> = HashMap::new();
         {
             let watched = self.watched.read().await;
             if watched.is_empty() {
@@ -99,7 +102,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
 
             // Check for native transfers (balance changes)
             if self.config.monitor_native {
-                self.check_native_payments(&watched, block).await?;
+                observed = self.check_native_payments(&watched, block).await?;
             }
 
             // Check for ERC20 transfers
@@ -110,7 +113,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
 
         // Update last known balances for native watches (requires write lock)
         if has_native_watches && self.config.monitor_native {
-            self.update_watched_balances(block.number).await?;
+            self.update_watched_balances(&observed).await;
         }
 
         *self.last_block.write().await = Some(block.number);
@@ -128,9 +131,14 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         &self,
         watched: &HashMap<WatchKey, WatchedAddress>,
         block: &BlockNotification,
-    ) -> EvmResult<()> {
+    ) -> EvmResult<HashMap<Address, U256>> {
         // Collect native watched addresses and check for balance increases
         let mut addresses_with_increase: Vec<(Address, uuid::Uuid, U256)> = Vec::new();
+        // Every balance read here, not only the ones that grew. The caller
+        // stores these instead of fetching them again, and a balance that went
+        // *down* is exactly the case that must not be dropped - see
+        // `update_watched_balances`.
+        let mut observed: HashMap<Address, U256> = HashMap::new();
 
         for ((address, token), watch) in watched.iter() {
             // Skip if watching for token (not native)
@@ -142,6 +150,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 .source
                 .get_balance(*address, Some(block.number))
                 .await?;
+            observed.insert(*address, current_balance);
 
             if current_balance > watch.last_known_balance {
                 let increase = current_balance - watch.last_known_balance;
@@ -151,7 +160,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
 
         // If no balance increases, nothing to do
         if addresses_with_increase.is_empty() {
-            return Ok(());
+            return Ok(observed);
         }
 
         // Fetch transactions for this block to find the actual transfers
@@ -218,14 +227,32 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             let _ = self.event_tx.send(MonitorEvent::PaymentDetected(event));
         }
 
-        Ok(())
+        Ok(observed)
     }
 
-    /// Update last known balances for all watched native addresses.
+    /// Store the balances `check_native_payments` already observed.
     ///
-    /// Called after payment checks to ensure we track the latest balance
-    /// for detecting future payments.
-    async fn update_watched_balances(&self, block_number: u64) -> EvmResult<()> {
+    /// Takes them as an argument rather than fetching them. This used to call
+    /// `get_balance` for every watched native address a second time, at the
+    /// same block, for values `check_native_payments` had just read and
+    /// discarded - two identical requests per address per block where one
+    /// would do. See `evm/tests/rpc_cost.rs`, which pins the call count.
+    ///
+    /// Writes back **every** observed balance, including ones that went down.
+    /// Detection works on increases against `last_known_balance`, so that
+    /// value has to follow the balance down as well as up: a merchant sweeping
+    /// a payment address takes it to zero, and if this stayed at the pre-sweep
+    /// figure, a later genuine payment smaller than it would never read as an
+    /// increase. Covered by `a_payment_after_a_sweep_is_still_detected`.
+    ///
+    /// The watched set is re-read under the write lock, so an address added or
+    /// removed since the observation is handled: `observed` is consulted by
+    /// address, and an entry with no observation is left alone. Leaving it
+    /// alone is the right answer rather than an omission - a newly watched
+    /// address keeps the balance it was registered with, so a payment that
+    /// arrived in this same block is still an increase next block, where
+    /// stamping it with the current balance would have swallowed it.
+    async fn update_watched_balances(&self, observed: &HashMap<Address, U256>) {
         let mut watched = self.watched.write().await;
 
         for ((_, token), watch) in watched.iter_mut() {
@@ -233,14 +260,10 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 continue; // Skip ERC20
             }
 
-            let balance = self
-                .source
-                .get_balance(watch.address, Some(block_number))
-                .await?;
-            watch.last_known_balance = balance;
+            if let Some(balance) = observed.get(&watch.address) {
+                watch.last_known_balance = *balance;
+            }
         }
-
-        Ok(())
     }
 
     /// Check for ERC20 token payments.
