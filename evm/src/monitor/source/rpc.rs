@@ -497,33 +497,7 @@ impl BlockSource for RpcBlockSource {
             )));
         };
 
-        // Filter transactions that send ETH to watched addresses
-        let mut transfers = Vec::new();
-
-        for (tx_index, tx) in block.transactions.txns().enumerate() {
-            // Skip if no recipient (contract creation)
-            let Some(to) = tx.to() else {
-                continue;
-            };
-
-            // Skip if not sending to a watched address
-            if !watched.contains(&to) {
-                continue;
-            }
-
-            // Skip if no value transferred
-            if tx.value().is_zero() {
-                continue;
-            }
-
-            transfers.push(NativeTransfer {
-                tx_hash: tx.tx_hash(),
-                from: tx.from(),
-                to,
-                value: tx.value(),
-                tx_index: tx_index as u64,
-            });
-        }
+        let transfers = extract_native_transfers(&block, &watched)?;
 
         debug!(
             chain_id = self.config.chain_id,
@@ -547,9 +521,182 @@ impl std::fmt::Debug for RpcBlockSource {
     }
 }
 
+/// Pull the transfers to `watched` out of a block the node returned.
+///
+/// Split out of [`RpcBlockSource::find_native_transfers_to`] so the matching
+/// can be tested without a provider - this is the only thing standing between
+/// a native payment and never being credited, and it was previously reachable
+/// only over a live RPC connection.
+///
+/// Refuses a block whose transaction list is hashes rather than full objects.
+/// Alloy's `txns()` documents that it "will be empty if the block is an uncle
+/// or if the transaction list contains only hashes", so a node that ignored
+/// `fullTransactions: true` - or a proxy or cache that answered with the wrong
+/// shape - would produce zero transfers and look exactly like a block with no
+/// payments in it. The caller would then advance past a block it never read.
+/// We asked for full objects; anything else is an error, not an empty result.
+fn extract_native_transfers(
+    block: &Block,
+    watched: &HashSet<Address>,
+) -> EvmResult<Vec<NativeTransfer>> {
+    if !block.transactions.is_full() && !block.transactions.is_uncle() {
+        return Err(EvmError::Rpc(
+            "block came back with transaction hashes instead of full transactions; \
+             refusing to read it as having no payments"
+                .to_string(),
+        ));
+    }
+
+    let mut transfers = Vec::new();
+
+    for (tx_index, tx) in block.transactions.txns().enumerate() {
+        // Skip if no recipient (contract creation)
+        let Some(to) = tx.to() else {
+            continue;
+        };
+
+        // Skip if not sending to a watched address
+        if !watched.contains(&to) {
+            continue;
+        }
+
+        // Skip if no value transferred
+        if tx.value().is_zero() {
+            continue;
+        }
+
+        transfers.push(NativeTransfer {
+            tx_hash: tx.tx_hash(),
+            from: tx.from(),
+            to,
+            value: tx.value(),
+            tx_index: tx_index as u64,
+        });
+    }
+
+    Ok(transfers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use alloy::consensus::{Signed, TxEip1559, TxEnvelope};
+    use alloy::primitives::{B256, Signature, TxKind};
+    use alloy::rpc::types::{BlockTransactions, Transaction};
+
+    fn tx_to(to: Address, value: U256, from: Address) -> Transaction {
+        let inner = TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 1,
+            to: TxKind::Call(to),
+            value,
+            ..Default::default()
+        };
+        let signed = Signed::new_unchecked(inner, Signature::test_signature(), B256::ZERO);
+        Transaction {
+            inner: alloy::consensus::transaction::Recovered::new_unchecked(
+                TxEnvelope::Eip1559(signed),
+                from,
+            ),
+            block_hash: None,
+            block_number: None,
+            transaction_index: None,
+            effective_gas_price: None,
+        }
+    }
+
+    fn block_with(transactions: BlockTransactions<Transaction>) -> Block {
+        Block {
+            transactions,
+            ..Default::default()
+        }
+    }
+
+    /// A block whose transaction list is hashes rather than full objects is
+    /// refused, not read as a block with no payments in it.
+    ///
+    /// Alloy's `txns()` yields nothing for a hashes-only list, so without this
+    /// a node that ignored `fullTransactions: true` - or a proxy answering
+    /// with the wrong shape - would produce zero transfers, and the monitor
+    /// would advance past a block it never actually read. Every payment in it
+    /// would be lost with no error anywhere.
+    #[test]
+    fn a_block_of_hashes_is_refused_rather_than_read_as_empty() {
+        let watched: HashSet<Address> = [Address::repeat_byte(0xAA)].into_iter().collect();
+        let block = block_with(BlockTransactions::Hashes(vec![B256::repeat_byte(1)]));
+
+        let err = extract_native_transfers(&block, &watched)
+            .expect_err("a hashes-only block must not read as zero transfers");
+
+        assert!(
+            err.to_string().contains("hashes"),
+            "the error should say what was wrong with the block, got {err}"
+        );
+    }
+
+    /// The ordinary case: full transactions to a watched address are matched.
+    #[test]
+    fn transfers_to_watched_addresses_are_found_with_sender_and_amount() {
+        let watched_addr = Address::repeat_byte(0xAA);
+        let other = Address::repeat_byte(0xBB);
+        let sender = Address::repeat_byte(0xCC);
+        let watched: HashSet<Address> = [watched_addr].into_iter().collect();
+
+        let block = block_with(BlockTransactions::Full(vec![
+            tx_to(other, U256::from(5u64), sender),
+            tx_to(watched_addr, U256::from(7u64), sender),
+        ]));
+
+        let transfers = extract_native_transfers(&block, &watched).unwrap();
+
+        assert_eq!(transfers.len(), 1, "only the watched address should match");
+        assert_eq!(transfers[0].to, watched_addr);
+        assert_eq!(transfers[0].from, sender);
+        assert_eq!(transfers[0].value, U256::from(7u64));
+        assert_eq!(
+            transfers[0].tx_index, 1,
+            "tx_index must be the position in the block, since two transfers in one \
+             block are told apart by it"
+        );
+    }
+
+    /// A zero-value transaction to a watched address is not a payment.
+    /// Contract calls routinely carry no value, and crediting an invoice for
+    /// one would mark it paid for nothing.
+    #[test]
+    fn a_zero_value_transaction_is_not_a_payment() {
+        let watched_addr = Address::repeat_byte(0xAA);
+        let watched: HashSet<Address> = [watched_addr].into_iter().collect();
+        let block = block_with(BlockTransactions::Full(vec![tx_to(
+            watched_addr,
+            U256::ZERO,
+            Address::repeat_byte(0xCC),
+        )]));
+
+        assert!(
+            extract_native_transfers(&block, &watched)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// An empty block is genuinely empty, and must not be confused with the
+    /// hashes case above.
+    #[test]
+    fn a_genuinely_empty_block_yields_no_transfers_without_erroring() {
+        let watched: HashSet<Address> = [Address::repeat_byte(0xAA)].into_iter().collect();
+        let block = block_with(BlockTransactions::Full(vec![]));
+
+        assert!(
+            extract_native_transfers(&block, &watched)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn config_debug_does_not_leak_the_api_key() {
