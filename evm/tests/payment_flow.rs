@@ -64,7 +64,6 @@ async fn test_native_payment_detection_and_confirmation() {
             expected_amount: Some(payment_amount),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -180,7 +179,6 @@ async fn test_erc20_payment_detection() {
             expected_amount: Some(payment_amount),
             token_contract: Some(token_contract),
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -265,7 +263,6 @@ async fn test_underpayment_two_transactions() {
             expected_amount: Some(half_amount * U256::from(2)),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -551,7 +548,6 @@ async fn test_reorg_reports_a_relocated_transaction_as_survived() {
             expected_amount: Some(payment_amount),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -629,7 +625,6 @@ async fn test_reorg_reports_a_relocated_erc20_transfer_as_survived() {
             expected_amount: Some(payment_amount),
             token_contract: Some(token_contract),
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -720,7 +715,6 @@ async fn test_reorg_wider_than_scan_cap_still_finds_a_relocated_transaction() {
             expected_amount: Some(payment_amount),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -789,7 +783,6 @@ async fn test_reorg_revalidation_failure_reports_nothing_and_retries() {
             expected_amount: Some(payment_amount),
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -852,4 +845,226 @@ async fn test_reorg_revalidation_failure_reports_nothing_and_retries() {
 
     monitor.stop().await.unwrap();
     let _ = monitor_handle.await;
+}
+
+/// Subscribe, start the monitor, and wait for it to report itself up.
+///
+/// No test here is testing this, so folding it away keeps what a test actually
+/// asserts visible rather than buried under four lines of identical setup. The
+/// eleven older tests in this file still each carry their own copy; worth
+/// collapsing onto this when one of them is next touched, rather than churning
+/// them all in a change about payment detection.
+async fn start_and_wait(
+    monitor: &Arc<ChainMonitor<MockBlockSource>>,
+) -> (
+    tokio::sync::broadcast::Receiver<MonitorEvent>,
+    tokio::task::JoinHandle<evm::EvmResult<()>>,
+) {
+    let mut event_rx = monitor.subscribe();
+    let running = Arc::clone(monitor);
+    let handle = tokio::spawn(async move { running.start().await });
+
+    let started = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+    assert!(
+        matches!(started, Ok(Ok(MonitorEvent::MonitorStarted { .. }))),
+        "monitor did not start: {started:?}"
+    );
+
+    (event_rx, handle)
+}
+
+/// Two payments to one address, the second smaller than the first, are both
+/// detected.
+///
+/// This pins a failure mode shut rather than guarding live code. Detection
+/// used to work on balance *increases* against a stored `last_known_balance`,
+/// which made "smaller than something seen earlier" a meaningful and
+/// dangerous category: a merchant sweeping a payment address dropped its
+/// balance, and if the stored value stayed at the pre-sweep high-water mark,
+/// a later genuine payment below that mark never read as an increase. The
+/// customer paid and nothing credited it, silently.
+///
+/// Detection now reads the block's transfers, so amounts are not compared
+/// against remembered state at all and the sweep here is invisible to the
+/// monitor. The test is kept because it is cheap and because it is the
+/// assertion that goes red if detection is ever rebuilt on remembered
+/// balances - every other test in this file sends a single payment, or
+/// payments that only grow.
+#[tokio::test]
+async fn a_payment_after_a_sweep_is_still_detected() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let invoice_id = uuid::Uuid::new_v4();
+
+    // The second payment is deliberately *smaller* than the first. If
+    // `last_known_balance` is left at the pre-sweep figure, this cannot look
+    // like an increase, which is the whole point of the test.
+    let first_payment = U256::from(50_000_000_000_000_000u64); // 0.05 ETH
+    let second_payment = U256::from(10_000_000_000_000_000u64); // 0.01 ETH
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id,
+            expected_amount: Some(first_payment),
+            token_contract: None,
+            created_at: Utc::now(),
+        })
+        .await;
+
+    let (mut event_rx, monitor_handle) = start_and_wait(&monitor).await;
+
+    // 1. The customer pays.
+    let first_tx = B256::random();
+    test_source
+        .set_balance(payment_address, first_payment)
+        .await;
+    test_source
+        .add_native_transfer(
+            100,
+            make_native_transfer(sender, payment_address, first_payment, first_tx),
+        )
+        .await;
+    test_source.push_block(make_block(100));
+
+    let detected = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("timeout waiting for the first payment")
+        .expect("channel error");
+    match detected {
+        MonitorEvent::PaymentDetected(p) => assert_eq!(p.amount, first_payment),
+        other => panic!("expected the first PaymentDetected, got {other:?}"),
+    }
+
+    // 2. The merchant sweeps the address. No transfer *to* it, so nothing
+    //    should be detected for this block.
+    test_source.push_block(make_block(101));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 3. A second, smaller payment arrives.
+    let second_tx = B256::random();
+    test_source
+        .add_native_transfer(
+            102,
+            make_native_transfer(sender, payment_address, second_payment, second_tx),
+        )
+        .await;
+    test_source.push_block(make_block(102));
+
+    let mut saw_second = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), event_rx.recv()).await {
+            Ok(Ok(MonitorEvent::PaymentDetected(p))) if p.tx_hash == second_tx => {
+                assert_eq!(p.amount, second_payment);
+                assert_eq!(p.payment_address, payment_address);
+                saw_second = true;
+                break;
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+
+    monitor_handle.abort();
+    assert!(
+        saw_second,
+        "the second payment was never detected. A payment smaller than one seen \
+         earlier must still be credited; if this fails, detection has been rebuilt on \
+         remembered balances and a swept address silently stops crediting."
+    );
+}
+
+/// A block the monitor could not read is reported, not treated as empty.
+///
+/// Native detection reads the block once and matches its transfers, so that
+/// single call is all that stands between a payment and never being credited.
+/// When it fails — the HTTP endpoint has not imported a block the
+/// subscription already announced, which happens whenever the two are not the
+/// same node — the monitor must say so.
+///
+/// The failure this pins shut is silence. `find_native_transfers_to`
+/// returning `Ok(vec![])` for a block it could not fetch is indistinguishable
+/// from a block containing no payments, so the loop would advance past it with
+/// no error anywhere.
+///
+/// Note what this does **not** claim: the payment is not recovered. Nothing
+/// re-reads a block the monitor has moved past — gaps are consulted only for
+/// reorg detection and no catch-up exists — so the payment in that block is
+/// lost either way. What changes is that it is lost *loudly*, with a
+/// `MonitorError` naming the block, instead of looking like an ordinary empty
+/// block forever. Backfilling a missed block is a separate gap and is tracked
+/// on its own.
+#[tokio::test]
+async fn a_block_that_could_not_be_read_is_reported_rather_than_treated_as_empty() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let amount = U256::from(50_000_000_000_000_000u64);
+    let tx_hash = B256::random();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: Some(amount),
+            token_contract: None,
+            created_at: Utc::now(),
+        })
+        .await;
+
+    let (mut event_rx, handle) = start_and_wait(&monitor).await;
+
+    // The payment is in block 100, but reading that block fails.
+    test_source
+        .add_native_transfer(
+            100,
+            make_native_transfer(sender, payment_address, amount, tx_hash),
+        )
+        .await;
+    test_source.set_find_native_transfers_error(Some("block not imported yet"));
+    test_source.push_block(make_block(100));
+
+    let mut reported = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(400), event_rx.recv()).await {
+            Ok(Ok(MonitorEvent::MonitorError { error, .. })) => {
+                assert!(
+                    error.contains("block not imported yet"),
+                    "the reported error should name what actually failed, got {error:?}"
+                );
+                reported = true;
+                break;
+            }
+            Ok(Ok(MonitorEvent::PaymentDetected(_))) => {
+                panic!("a payment cannot be detected from a block that could not be read")
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+
+    handle.abort();
+    assert!(
+        reported,
+        "a block read that failed was silently treated as a block with no payments. \
+         Nothing re-reads it, so the payment inside it is gone with no trace."
+    );
 }

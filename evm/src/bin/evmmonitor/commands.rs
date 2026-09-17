@@ -65,7 +65,6 @@ pub(crate) async fn restore_watched_addresses(
                         expected_amount: None,
                         token_contract,
                         created_at: Utc::now(),
-                        last_known_balance: alloy::primitives::U256::ZERO,
                     };
                     monitor.watch(watched).await;
                     restored_count += 1;
@@ -125,7 +124,6 @@ pub(crate) async fn handle_commands(
                         expected_amount: cmd.expected_amount,
                         token_contract: cmd.token_contract,
                         created_at: Utc::now(),
-                        last_known_balance: alloy::primitives::U256::ZERO,
                     };
 
                     monitor.watch(watched).await;

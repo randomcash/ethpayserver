@@ -86,7 +86,6 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         }
 
         // Get watched addresses (read lock)
-        let has_native_watches;
         {
             let watched = self.watched.read().await;
             if watched.is_empty() {
@@ -95,9 +94,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 return Ok(());
             }
 
-            has_native_watches = watched.keys().any(|(_, token)| token.is_none());
-
-            // Check for native transfers (balance changes)
+            // Check for native transfers
             if self.config.monitor_native {
                 self.check_native_payments(&watched, block).await?;
             }
@@ -108,11 +105,6 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             }
         } // Release read lock
 
-        // Update last known balances for native watches (requires write lock)
-        if has_native_watches && self.config.monitor_native {
-            self.update_watched_balances(block.number).await?;
-        }
-
         *self.last_block.write().await = Some(block.number);
         *self.last_block_hash.write().await = Some(block.hash);
 
@@ -121,51 +113,50 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
 
     /// Check for native currency payments.
     ///
-    /// Uses a two-phase approach:
-    /// 1. Poll balances to detect increases (lightweight)
-    /// 2. Only when balance increases, fetch block transactions to get tx details
+    /// Reads the block once and matches its transfers against the watched
+    /// set, which is one RPC call per block however many addresses are
+    /// watched - the same shape `check_erc20_payments` gets from putting every
+    /// address into a single log filter.
+    ///
+    /// It used to poll `eth_getBalance` for each watched address on every
+    /// block to find which balances had grown, and only then read the block to
+    /// find the transfers behind them. That was one call per address per
+    /// block: linear in open invoices, on every chain, forever. `rpc_cost.rs`
+    /// pins the shape.
+    ///
+    /// Dropping the balance poll costs no detection, which is not obvious and
+    /// was verified rather than assumed. The poll could observe that a balance
+    /// had risen, but attribution came from the block's transactions either
+    /// way - so an increase with no matching transaction in the block emitted
+    /// nothing, and then had its evidence erased when the polled balance was
+    /// stored. A balance rise the block cannot explain - an internal transfer,
+    /// where value moves from a contract rather than a top-level transaction -
+    /// was therefore already lost silently, before and after this change.
+    /// Crediting those needs attribution this path never had; it is tracked
+    /// separately and is a fix, not a regression.
     async fn check_native_payments(
         &self,
         watched: &HashMap<WatchKey, WatchedAddress>,
         block: &BlockNotification,
     ) -> EvmResult<()> {
-        // Collect native watched addresses and check for balance increases
-        let mut addresses_with_increase: Vec<(Address, uuid::Uuid, U256)> = Vec::new();
+        // Every watched native address, not only ones something changed for:
+        // the block is read once regardless, so narrowing the set first would
+        // buy nothing and cost the call that told us what to narrow it to.
+        let invoice_map: HashMap<Address, uuid::Uuid> = watched
+            .iter()
+            .filter(|((_, token), _)| token.is_none())
+            .map(|((address, _), watch)| (*address, watch.invoice_id))
+            .collect();
 
-        for ((address, token), watch) in watched.iter() {
-            // Skip if watching for token (not native)
-            if token.is_some() {
-                continue;
-            }
-
-            let current_balance = self
-                .source
-                .get_balance(*address, Some(block.number))
-                .await?;
-
-            if current_balance > watch.last_known_balance {
-                let increase = current_balance - watch.last_known_balance;
-                addresses_with_increase.push((*address, watch.invoice_id, increase));
-            }
-        }
-
-        // If no balance increases, nothing to do
-        if addresses_with_increase.is_empty() {
+        if invoice_map.is_empty() {
             return Ok(());
         }
 
-        // Fetch transactions for this block to find the actual transfers
-        let addresses: Vec<Address> = addresses_with_increase.iter().map(|(a, _, _)| *a).collect();
+        let addresses: Vec<Address> = invoice_map.keys().copied().collect();
         let transfers = self
             .source
             .find_native_transfers_to(block.number, &addresses)
             .await?;
-
-        // Create a lookup map for quick access
-        let invoice_map: HashMap<Address, uuid::Uuid> = addresses_with_increase
-            .iter()
-            .map(|(addr, invoice_id, _)| (*addr, *invoice_id))
-            .collect();
 
         // Process each transfer found
         for transfer in transfers {
@@ -216,28 +207,6 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             }
 
             let _ = self.event_tx.send(MonitorEvent::PaymentDetected(event));
-        }
-
-        Ok(())
-    }
-
-    /// Update last known balances for all watched native addresses.
-    ///
-    /// Called after payment checks to ensure we track the latest balance
-    /// for detecting future payments.
-    async fn update_watched_balances(&self, block_number: u64) -> EvmResult<()> {
-        let mut watched = self.watched.write().await;
-
-        for ((_, token), watch) in watched.iter_mut() {
-            if token.is_some() {
-                continue; // Skip ERC20
-            }
-
-            let balance = self
-                .source
-                .get_balance(watch.address, Some(block_number))
-                .await?;
-            watch.last_known_balance = balance;
         }
 
         Ok(())

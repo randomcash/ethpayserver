@@ -12,11 +12,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use evm::Address;
 use evm::monitor::{
     ChainMonitor, ChainMonitorConfig, CoordinatorConfig, MockBlockSource, MonitorCoordinator,
     MonitorEvent, SourceStatus, WatchedAddress, make_block,
 };
-use evm::{Address, U256};
 
 const TEST_CHAIN_ID: u64 = 11155111;
 
@@ -330,8 +330,8 @@ async fn event_loop_hang_is_detected_from_outside_it() {
         "expected MonitorStarted"
     );
 
-    // A watched native address makes `process_block` call `get_balance` -
-    // the RPC call this test hangs.
+    // A watched native address makes `process_block` read the block to look
+    // for transfers - the RPC call this test hangs.
     monitor
         .watch(WatchedAddress {
             address: Address::random(),
@@ -339,7 +339,6 @@ async fn event_loop_hang_is_detected_from_outside_it() {
             expected_amount: None,
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
@@ -348,10 +347,10 @@ async fn event_loop_hang_is_detected_from_outside_it() {
         "precondition: a freshly started loop must not already read as hung"
     );
 
-    test_source.hang_get_balance();
+    test_source.hang_rpc();
     let subscribes_before = test_source.subscribe_count();
 
-    // Drive the loop into `process_block`, where it wedges on `get_balance`.
+    // Drive the loop into `process_block`, where it wedges on the block read.
     test_source.push_block(make_block(1));
 
     // Long enough to clear `loop_hang_timeout_secs` several times over, and
@@ -437,11 +436,10 @@ async fn coordinator_watchdog_reacts_to_a_hung_event_loop() {
             expected_amount: None,
             token_contract: None,
             created_at: Utc::now(),
-            last_known_balance: U256::ZERO,
         })
         .await;
 
-    test_source.hang_get_balance();
+    test_source.hang_rpc();
     test_source.push_block(make_block(1));
 
     let (chain_id, stalled_for) = tokio::time::timeout(Duration::from_secs(3), hang_rx.recv())
