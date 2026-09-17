@@ -34,6 +34,7 @@ mod payout_claims;
 mod store_creation;
 mod wallet;
 mod wallet_migration;
+mod wallet_namespace_migration;
 mod watched_address;
 mod webhook_delivery;
 
