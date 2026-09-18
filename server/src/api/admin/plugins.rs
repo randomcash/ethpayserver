@@ -50,7 +50,9 @@ use payserver_plugin_api::{Manifest, PluginId};
 
 use crate::api::ApiErr;
 use crate::api::extractors::AdminAuth;
-use crate::services::plugins::{PluginArtifacts, PluginRegistry, host_version};
+use crate::services::plugins::{
+    PluginArtifacts, PluginRegistry, PluginStorage, generate_role_password, host_version,
+};
 use crate::state::PgAppState;
 
 /// The largest wasm module this endpoint accepts, before base64.
@@ -120,6 +122,20 @@ pub struct InstallPluginRequest {
     pub manifest_toml: String,
     /// The wasm module, base64 (standard alphabet, padded).
     pub wasm_base64: String,
+
+    /// The plugin's own sqlx migrations, filename to SQL text.
+    ///
+    /// Empty for a plugin that keeps no state of its own. A plugin that does
+    /// cannot get tables any other way: its schema is created here and these
+    /// are the only statements ever run against it as an owner, because the
+    /// plugin's own role is granted no `CREATE`.
+    ///
+    /// Filenames follow sqlx's convention (`20260918000000_init.sql`), and
+    /// their **bytes** are the checksum sqlx records. Re-sending a file whose
+    /// content changed after it has applied anywhere breaks that install and
+    /// every future upgrade of it - add a new file instead.
+    #[serde(default)]
+    pub migrations: std::collections::BTreeMap<String, String>,
 }
 
 /// Why a plugin is being switched off.
@@ -188,6 +204,110 @@ fn server_error(msg: impl Into<String>) -> ApiErr {
 /// see `payserver_plugin_api::PluginId`.
 fn parse_id(raw: &str) -> Result<PluginId, ApiErr> {
     PluginId::new(raw).map_err(|e| bad_request(e.to_string()))
+}
+
+/// Create the plugin's schema, run its migrations, and give it a login role.
+///
+/// Returns the role's password to be stored with the install record, or
+/// `None` when this instance has no pools - in which case the plugin is
+/// installed without database access rather than with the host's connection.
+///
+/// Migrations are materialised to a temporary directory because sqlx's
+/// `Migrator` reads a path. They are the plugin's own bytes, written and read
+/// unchanged, so the checksum sqlx records is the one the author produced.
+async fn provision_storage<A>(
+    state: &PgAppState<A>,
+    id: &PluginId,
+    migrations: &std::collections::BTreeMap<String, String>,
+) -> Result<Option<String>, ApiErr>
+where
+    A: SessionService + 'static,
+{
+    let Some(pools) = state.plugin_pools.as_ref() else {
+        return Ok(None);
+    };
+
+    let dir = tempfile::tempdir()
+        .map_err(|e| server_error(format!("could not stage the plugin's migrations: {e}")))?;
+    for (name, sql) in migrations {
+        // A filename is a path component and nothing else. Without this a
+        // migration named `../../etc/thing` would be written outside the
+        // staging directory.
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(bad_request(format!(
+                "migration filename {name:?} must be a plain filename"
+            )));
+        }
+        std::fs::write(dir.path().join(name), sql)
+            .map_err(|e| server_error(format!("could not stage migration {name}: {e}")))?;
+    }
+
+    let storage = PluginStorage::new(state.data_service.pool().clone());
+
+    // Run the migrations on a blocking thread rather than awaiting them here.
+    // sqlx's filesystem `MigrationSource` resolves through a `BoxFuture` that
+    // is not `Send`, so awaiting `install` directly makes this whole handler's
+    // future non-`Send` and axum will not accept it. `Handle::block_on` has no
+    // `Send` bound, and a blocking thread is where a directory walk plus a
+    // series of DDL statements belongs anyway.
+    let handle = tokio::runtime::Handle::current();
+    let staged = dir.path().to_path_buf();
+    let for_task = storage.clone();
+    let for_id = id.clone();
+    tokio::task::spawn_blocking(move || handle.block_on(for_task.install(&for_id, &staged)))
+        .await
+        .map_err(|e| server_error(format!("the migration task did not finish: {e}")))?
+        .map_err(|e| bad_request(format!("the plugin's migrations did not apply: {e}")))?;
+
+    let password = generate_role_password().map_err(|e| server_error(e.to_string()))?;
+    storage
+        .provision_role(id, &password)
+        .await
+        .map_err(|e| server_error(format!("could not provision the plugin's role: {e}")))?;
+
+    // Eagerly, once: the pool itself is lazy, so without this a wrong
+    // credential would not surface until the plugin's first call, long after
+    // the admin who could fix it has moved on.
+    pools
+        .register(id, &password)
+        .await
+        .map_err(|e| server_error(format!("could not register the plugin's pool: {e}")))?;
+
+    Ok(Some(password))
+}
+
+/// Close `id`'s pool and drop its login role.
+///
+/// Order matters: Postgres refuses to drop a role while a session is
+/// authenticated as it, so closing the pool second fails half-way and leaves
+/// the role behind - still granted on a schema whose plugin is gone.
+///
+/// The schema and its data are deliberately kept. An admin uninstalling a
+/// plugin to debug it should not lose its records - the billing plugin's
+/// subscriptions most of all - and a reinstall provisions a fresh role
+/// against the same tables.
+///
+/// A failure here does not fail the uninstall. The plugin is already disabled
+/// and its row gone; refusing over a leftover role would leave an admin with
+/// a plugin they cannot finish removing.
+async fn release_database_access<A>(state: &PgAppState<A>, id: &PluginId)
+where
+    A: SessionService + 'static,
+{
+    if let Some(pools) = state.plugin_pools.as_ref() {
+        pools.remove(id).await;
+    }
+    if let Err(e) = PluginStorage::new(state.data_service.pool().clone())
+        .drop_role(id)
+        .await
+    {
+        tracing::error!(
+            plugin_id = %id,
+            error = %e,
+            "uninstalled the plugin but could not drop its database role; it grants access to a \
+             schema whose plugin is gone and should be removed by hand"
+        );
+    }
 }
 
 fn artifacts<A>(state: &PgAppState<A>) -> PluginArtifacts {
@@ -334,11 +454,22 @@ where
         .write(&id, &version, &wasm)
         .map_err(|e| server_error(e.to_string()))?;
 
+    // Storage before the install record, deliberately. A plugin whose
+    // migrations failed is not installed - recording it first would leave a
+    // row pointing at a schema that does not have the tables the plugin
+    // expects, which boots fine and fails on the first call.
+    let db_role_password = provision_storage(&state, &id, &req.migrations).await?;
+
     let record = NewInstalledPlugin {
         id: id.as_str().to_string(),
         version: version.clone(),
         manifest_toml: req.manifest_toml,
         artifact_sha256: sha256,
+        // `None` when this instance has no pools. The upsert COALESCEs, so
+        // that preserves whatever credential the plugin already had rather
+        // than clearing it - an upgrade must not strip a working plugin of
+        // its database access.
+        db_role_password,
     };
     InstalledPluginWriter::upsert_installed_plugin(&*state.data_service, &record)
         .await
@@ -572,6 +703,8 @@ where
         .plugin_host
         .as_ref()
         .is_some_and(|host| host.disable(&id, "uninstalled"));
+
+    release_database_access(&state, &id).await;
 
     InstalledPluginWriter::remove_installed_plugin(&*state.data_service, id.as_str())
         .await

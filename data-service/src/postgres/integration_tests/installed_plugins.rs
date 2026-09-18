@@ -37,6 +37,7 @@ fn new_plugin(id: &str, version: &str) -> NewInstalledPlugin {
         version: version.to_string(),
         manifest_toml: format!("id = \"{id}\"\nversion = \"{version}\"\nkind = \"action\"\n"),
         artifact_sha256: "a".repeat(64),
+        db_role_password: None,
     }
 }
 
@@ -272,4 +273,72 @@ async fn toggling_an_absent_plugin_reports_that_nothing_changed() {
             .await
             .expect("enable")
     );
+}
+
+/// An upgrade that does not supply a credential must keep the one the plugin
+/// already had.
+///
+/// The alternative is silent: a re-install through a path that skipped role
+/// provisioning would null the column, and the plugin would come back with no
+/// database access and no error anywhere - working yesterday, broken today,
+/// nothing in the logs.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL"]
+async fn an_upgrade_without_a_credential_keeps_the_existing_one() {
+    let Some(service) = service().await else {
+        return;
+    };
+    let id = unique_id("keeps-credential");
+
+    let mut first = new_plugin(&id, "0.1.0");
+    first.db_role_password = Some("secret-one".to_string());
+    InstalledPluginWriter::upsert_installed_plugin(&service, &first)
+        .await
+        .unwrap();
+
+    // An upgrade that says nothing about the credential.
+    let second = new_plugin(&id, "0.2.0");
+    InstalledPluginWriter::upsert_installed_plugin(&service, &second)
+        .await
+        .unwrap();
+
+    let stored = InstalledPluginReader::get_installed_plugin(&service, &id)
+        .await
+        .unwrap()
+        .expect("still installed");
+    assert_eq!(stored.version, "0.2.0", "the upgrade did apply");
+    assert_eq!(
+        stored.db_role_password,
+        Some("secret-one".to_string()),
+        "the upgrade stripped the plugin's database credential"
+    );
+}
+
+/// And a supplied credential replaces the old one, or rotating it would be
+/// impossible.
+#[tokio::test]
+#[ignore = "requires DATABASE_URL"]
+async fn an_upgrade_with_a_credential_replaces_it() {
+    let Some(service) = service().await else {
+        return;
+    };
+    let id = unique_id("rotates-credential");
+
+    let mut first = new_plugin(&id, "0.1.0");
+    first.db_role_password = Some("old".to_string());
+    InstalledPluginWriter::upsert_installed_plugin(&service, &first)
+        .await
+        .unwrap();
+
+    let mut second = new_plugin(&id, "0.2.0");
+    second.db_role_password = Some("new".to_string());
+    InstalledPluginWriter::upsert_installed_plugin(&service, &second)
+        .await
+        .unwrap();
+
+    let stored = InstalledPluginReader::get_installed_plugin(&service, &id)
+        .await
+        .unwrap()
+        .expect("still installed");
+    assert_eq!(stored.db_role_password, Some("new".to_string()));
 }

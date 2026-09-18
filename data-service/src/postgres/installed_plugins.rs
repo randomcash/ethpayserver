@@ -21,13 +21,14 @@ fn row_to_plugin(row: &sqlx::postgres::PgRow) -> InstalledPlugin {
         artifact_sha256: row.get("artifact_sha256"),
         enabled: row.get("enabled"),
         disabled_reason: row.get("disabled_reason"),
+        db_role_password: row.get("db_role_password"),
         installed_at: row.get("installed_at"),
         updated_at: row.get("updated_at"),
     }
 }
 
 const PLUGIN_COLS: &str = "id, version, manifest_toml, artifact_sha256, enabled, \
-                           disabled_reason, installed_at, updated_at";
+                           disabled_reason, db_role_password, installed_at, updated_at";
 
 #[async_trait]
 impl InstalledPluginReader for PgDataService {
@@ -84,12 +85,18 @@ impl InstalledPluginWriter for PgDataService {
         // broken plugin unable to.
         sqlx::query(
             "INSERT INTO installed_plugins \
-                 (id, version, manifest_toml, artifact_sha256, enabled, disabled_reason) \
-             VALUES ($1, $2, $3, $4, TRUE, NULL) \
+                 (id, version, manifest_toml, artifact_sha256, enabled, disabled_reason, \
+                  db_role_password) \
+             VALUES ($1, $2, $3, $4, TRUE, NULL, $5) \
              ON CONFLICT (id) DO UPDATE SET \
                  version = EXCLUDED.version, \
                  manifest_toml = EXCLUDED.manifest_toml, \
                  artifact_sha256 = EXCLUDED.artifact_sha256, \
+                 -- An upgrade keeps the existing credential when the caller
+                 -- does not supply one, so a re-install that skipped
+                 -- provisioning cannot silently strip a working plugin of its
+                 -- database access.
+                 db_role_password = COALESCE(EXCLUDED.db_role_password, installed_plugins.db_role_password), \
                  enabled = TRUE, \
                  disabled_reason = NULL, \
                  updated_at = NOW()",
@@ -98,6 +105,7 @@ impl InstalledPluginWriter for PgDataService {
         .bind(&plugin.version)
         .bind(&plugin.manifest_toml)
         .bind(&plugin.artifact_sha256)
+        .bind(&plugin.db_role_password)
         .execute(self.pool())
         .await
         .map_err(sqlx_to_repo_error)?;

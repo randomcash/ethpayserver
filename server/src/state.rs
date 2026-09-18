@@ -155,6 +155,12 @@ pub struct AppState<D, A, E> {
     /// back later would confirm only that it was set, not that this process
     /// agreed with it.
     pub plugin_dir: std::path::PathBuf,
+
+    /// One connection pool per installed plugin, sharing one instance-wide
+    /// budget. `None` on a boot that built no pools - safe mode, or a process
+    /// that never reached the plugin stage - in which case a plugin gets no
+    /// database access rather than the host's own connection.
+    pub plugin_pools: Option<Arc<crate::services::plugins::PluginPools>>,
     /// Safe mode: this boot has every plugin disabled.
     ///
     /// Resolved once at startup from `Config::safe_mode` and copied in here,
@@ -181,6 +187,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             plugin_pages: Arc::clone(&self.plugin_pages),
             plugin_host: self.plugin_host.clone(),
             plugin_dir: self.plugin_dir.clone(),
+            plugin_pools: self.plugin_pools.clone(),
             safe_mode: self.safe_mode,
         }
     }
@@ -210,6 +217,7 @@ impl<D, A, E> AppState<D, A, E> {
             plugin_pages: Arc::new(PageHost::new()),
             plugin_host: None,
             plugin_dir: std::path::PathBuf::from("./plugins"),
+            plugin_pools: None,
             safe_mode: false,
         }
     }

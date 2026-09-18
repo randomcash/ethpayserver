@@ -28,6 +28,13 @@ pub struct InstalledPlugin {
     pub artifact_sha256: String,
     pub enabled: bool,
     pub disabled_reason: Option<String>,
+    /// The password for this plugin's own database login role.
+    ///
+    /// `None` for a plugin installed before per-plugin roles existed, or one
+    /// whose provisioning did not complete. Such a plugin gets no database
+    /// access at all rather than falling back to the host's connection -
+    /// which is the direction that cannot leak.
+    pub db_role_password: Option<String>,
     pub installed_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -39,6 +46,8 @@ pub struct NewInstalledPlugin {
     pub version: String,
     pub manifest_toml: String,
     pub artifact_sha256: String,
+    /// The password for the login role the plugin's own statements run as.
+    pub db_role_password: Option<String>,
 }
 
 /// The lifecycle events worth keeping after the fact.

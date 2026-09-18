@@ -49,9 +49,11 @@
 mod boot;
 mod dispatch;
 mod filter;
+mod host_calls;
 mod invoice_issuer;
 mod merchant_directory;
 mod payment_observer;
+mod pools;
 mod storage;
 
 pub use boot::{
@@ -66,6 +68,7 @@ pub use filter::{
     FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest,
     run_invoice_creation_filters,
 };
+pub use host_calls::SchemaStorageCalls;
 pub use invoice_issuer::{
     HostInvoiceIssuer, InvoiceCreateRequest, InvoiceIssuerError, PluginHostApi, enforce_own_store,
 };
@@ -73,7 +76,10 @@ pub use payment_observer::{
     OwnStorePayment, OwnStorePaymentObserver, OwnStorePaymentReader, PaymentObserverError,
     is_own_store, notify_own_store_payment,
 };
-pub use storage::{PluginSchema, PluginStorage, PluginStorageError};
+pub use pools::{DEFAULT_MAX_IN_FLIGHT, PluginPoolError, PluginPools};
+pub use storage::{
+    PluginSchema, PluginStorage, PluginStorageError, generate_role_password, role_name,
+};
 
 // The host itself is `payserver-plugin-host`, shared with every other
 // payserver. Nothing in it knows about EVM, chains or invoices - it compiles
