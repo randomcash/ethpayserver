@@ -73,7 +73,7 @@ pub use payment_observer::{
     OwnStorePayment, OwnStorePaymentObserver, OwnStorePaymentReader, PaymentObserverError,
     is_own_store, notify_own_store_payment,
 };
-pub use storage::{PluginSchema, PluginStorage, PluginStorageError};
+pub use storage::{PluginSchema, PluginStorage, PluginStorageError, generate_role_password};
 
 // The host itself is `payserver-plugin-host`, shared with every other
 // payserver. Nothing in it knows about EVM, chains or invoices - it compiles
