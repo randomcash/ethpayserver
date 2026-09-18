@@ -46,22 +46,14 @@
 //! host - disabling, in the database, anything that fails, so a restart
 //! does not walk straight back into the same crash.
 
-mod artifacts;
 mod boot;
 mod dispatch;
-mod error;
 mod filter;
-mod host;
 mod invoice_issuer;
 mod merchant_directory;
-pub mod page;
-mod pages;
 mod payment_observer;
-mod registry;
-mod runtime;
 mod storage;
 
-pub use artifacts::{ArtifactError, PluginArtifacts, digest};
 pub use boot::{
     DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, PluginBootReport, load_installed_plugins,
     report_boot,
@@ -70,26 +62,37 @@ pub use dispatch::{
     FILTER_INVOICE_CREATION, PAYMENT_SETTLED, PluginInvoiceCreationFilter, PluginPaymentObserver,
     invoice_creation_filters, own_store_payment_reporting, payment_observers,
 };
-pub use error::PluginLoadError;
 pub use filter::{
     FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest,
     run_invoice_creation_filters,
 };
-pub use host::{FilterOutcome, PluginHost, PluginHostError, PluginStatusSnapshot};
 pub use invoice_issuer::{
     HostInvoiceIssuer, InvoiceCreateRequest, InvoiceIssuerError, PluginHostApi, enforce_own_store,
 };
-pub use page::{PageElement, Viewer};
-pub use pages::{PageError, PageHost, PageRenderer};
 pub use payment_observer::{
     OwnStorePayment, OwnStorePaymentObserver, OwnStorePaymentReader, PaymentObserverError,
     is_own_store, notify_own_store_payment,
 };
-pub use registry::{PluginRegistry, host_version};
-pub use runtime::{
-    HOST_MODULE, PluginCallError, PluginEngine, PluginHostCalls, PluginInstance, PluginWasmError,
-};
 pub use storage::{PluginSchema, PluginStorage, PluginStorageError};
+
+// The host itself is `payserver-plugin-host`, shared with every other
+// payserver. Nothing in it knows about EVM, chains or invoices - it compiles
+// a module, instantiates it, calls an export under a deadline, contains a
+// trap, verifies an artifact's digest and renders a page descriptor - so
+// keeping a second copy here meant two implementations to fix a wasm bug in.
+// They had already drifted apart within two days of the extraction.
+//
+// Re-exported rather than made a direct dependency of every caller: the
+// modules below (boot, dispatch, filter, invoice_issuer, storage,
+// payment_observer, merchant_directory) are the payserver-shaped half and
+// stay here, because every one of them names this server's own database or
+// its own money path.
+pub use payserver_plugin_host::{
+    ArtifactError, FilterOutcome, HOST_MODULE, PageElement, PageError, PageHost, PageRenderer,
+    PluginArtifacts, PluginCallError, PluginEngine, PluginHost, PluginHostCalls, PluginHostError,
+    PluginInstance, PluginLoadError, PluginRegistry, PluginStatusSnapshot, PluginWasmError, Viewer,
+    digest, host_version, page,
+};
 
 // Capability 1: no new type here, just `data_service::MerchantDirectoryReader`
 // re-exported alongside the other two capabilities' names, and implemented on

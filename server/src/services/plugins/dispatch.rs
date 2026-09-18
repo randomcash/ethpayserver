@@ -35,8 +35,8 @@ use payserver_plugin_api::{PluginId, PluginKind};
 use serde::{Deserialize, Serialize};
 
 use super::filter::{FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest};
-use super::host::{FilterOutcome, PluginHost};
 use super::payment_observer::{OwnStorePayment, OwnStorePaymentObserver};
+use payserver_plugin_host::{FilterOutcome, PluginHost};
 
 /// The export consulted before an invoice is created.
 pub const FILTER_INVOICE_CREATION: &str = "filter_invoice_creation";
@@ -254,8 +254,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::services::plugins::registry::host_version;
     use payserver_plugin_api::Manifest;
+    use payserver_plugin_host::host_version;
     use std::time::Duration;
     use types::StoreId;
     use uuid::Uuid;
