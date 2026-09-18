@@ -30,8 +30,8 @@ use data_service::{
 };
 use payserver_plugin_api::{Manifest, PluginId};
 
-use super::artifacts::{ArtifactError, PluginArtifacts};
-use super::host::PluginHost;
+use payserver_plugin_host::PluginHost;
+use payserver_plugin_host::{ArtifactError, PluginArtifacts};
 
 /// A plugin that did not load, and what was done about it.
 #[derive(Debug, PartialEq, Eq)]
@@ -417,10 +417,41 @@ mod tests {
     use chrono::Utc;
     use types::{RepositoryError, RepositoryResult};
 
-    use super::super::host::PluginHost;
-    use super::super::registry::host_version;
-    use super::super::runtime::fixtures::echo_module;
+    use payserver_plugin_host::{PluginHost, host_version};
+
     use super::*;
+
+    /// The smallest module this host will load: the ABI exports and a `call`
+    /// that hands its argument straight back.
+    ///
+    /// Defined here rather than borrowed from `payserver-plugin-host`, whose
+    /// equivalent fixtures are `#[cfg(test)]` and so do not cross the crate
+    /// boundary. Duplicating fifteen lines of WAT that only has to *load* is
+    /// a much smaller cost than the alternative these tests exist alongside -
+    /// duplicating the host itself - and this copy asserts nothing about the
+    /// runtime's behaviour, only that boot accepts a well-formed artifact.
+    fn echo_module() -> Vec<u8> {
+        wat::parse_str(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (global $next (mut i32) (i32.const 1024))
+
+                (func (export "alloc") (param $len i32) (result i32)
+                    (local $ptr i32)
+                    (local.set $ptr (global.get $next))
+                    (global.set $next (i32.add (global.get $next) (local.get $len)))
+                    (local.get $ptr))
+
+                (func (export "call") (param $ptr i32) (param $len i32) (result i64)
+                    (i64.or
+                        (i64.shl (i64.extend_i32_u (local.get $ptr)) (i64.const 32))
+                        (i64.extend_i32_u (local.get $len))))
+            )
+            "#,
+        )
+        .unwrap()
+    }
 
     const PLUGIN_ID: &str = "cash.random.billing";
 
@@ -784,7 +815,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let artifacts = PluginArtifacts::new(dir.path());
 
-        let store = FakeStore::with_row(row("0.1.0", &super::super::artifacts::digest(b"gone")));
+        let store = FakeStore::with_row(row("0.1.0", &payserver_plugin_host::digest(b"gone")));
         let host = host();
 
         let report = load_installed_plugins(&store, Some(&host), &artifacts)
@@ -818,7 +849,7 @@ mod tests {
     #[tokio::test]
     async fn an_unmounted_artifact_volume_does_not_disable_everything_installed() {
         let artifacts = PluginArtifacts::new("/definitely/not/mounted");
-        let sha = super::super::artifacts::digest(b"whatever");
+        let sha = payserver_plugin_host::digest(b"whatever");
 
         let mut rows = Vec::new();
         for n in 0..3 {

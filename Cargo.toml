@@ -17,10 +17,11 @@ resolver = "3"
 # `scripts/commons.sh link`, which writes an uncommitted `.cargo/config.toml`
 # patch. To move the pin, `scripts/commons.sh pin <rev>`.
 [workspace.dependencies]
-api-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "589f36fff55c756b2dbff4b0d5b35f5e41f29ac6" }
-scrub = { git = "https://github.com/randomcash/payserver-commons.git", rev = "589f36fff55c756b2dbff4b0d5b35f5e41f29ac6" }
-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "589f36fff55c756b2dbff4b0d5b35f5e41f29ac6" }
-auth = { git = "https://github.com/randomcash/payserver-commons.git", rev = "589f36fff55c756b2dbff4b0d5b35f5e41f29ac6" }
-crypto = { git = "https://github.com/randomcash/payserver-commons.git", rev = "589f36fff55c756b2dbff4b0d5b35f5e41f29ac6" }
-rates = { git = "https://github.com/randomcash/payserver-commons.git", rev = "589f36fff55c756b2dbff4b0d5b35f5e41f29ac6" }
-payserver-plugin-api = { git = "https://github.com/randomcash/payserver-commons.git", rev = "589f36fff55c756b2dbff4b0d5b35f5e41f29ac6" }
+api-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "762dbefdbffa918fe57e48607d0231b7935fc676" }
+scrub = { git = "https://github.com/randomcash/payserver-commons.git", rev = "762dbefdbffa918fe57e48607d0231b7935fc676" }
+types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "762dbefdbffa918fe57e48607d0231b7935fc676" }
+auth = { git = "https://github.com/randomcash/payserver-commons.git", rev = "762dbefdbffa918fe57e48607d0231b7935fc676" }
+crypto = { git = "https://github.com/randomcash/payserver-commons.git", rev = "762dbefdbffa918fe57e48607d0231b7935fc676" }
+rates = { git = "https://github.com/randomcash/payserver-commons.git", rev = "762dbefdbffa918fe57e48607d0231b7935fc676" }
+payserver-plugin-api = { git = "https://github.com/randomcash/payserver-commons.git", rev = "762dbefdbffa918fe57e48607d0231b7935fc676" }
+payserver-plugin-host = { git = "https://github.com/randomcash/payserver-commons.git", rev = "762dbefdbffa918fe57e48607d0231b7935fc676" }
