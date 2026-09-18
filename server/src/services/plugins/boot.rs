@@ -98,11 +98,15 @@ pub const DEFAULT_CALL_DEADLINE: std::time::Duration = std::time::Duration::from
 pub struct PluginBootReport {
     /// Compiled, instantiated and registered with the host.
     ///
-    /// Not "reachable": nothing in this build dispatches to a plugin.
-    /// `run_action` and `run_filter` have no callers outside the host's own
-    /// tests, and `invoice_creation_filters` - the one wired call site - is
-    /// populated in tests and never in the live server. A plugin here has
-    /// loaded and is waiting for a dispatch path that a later slice adds.
+    /// These ids are what the boot hands to `dispatch::invoice_creation_filters`
+    /// and `dispatch::payment_observers` to build the capability
+    /// implementations the rest of the server calls, so a plugin listed here
+    /// is reachable: a filter among them is consulted before every invoice is
+    /// created, and any of them may be told that an own-store invoice settled.
+    ///
+    /// Reachable is still not the same as *called*. A filter is only offered
+    /// the hook if its manifest declares `kind = "filter"`, and own-store
+    /// payment reporting additionally needs `ETHPAY_BILLING_STORE_ID` set.
     pub loaded: Vec<PluginId>,
     /// Installed but switched off - by an admin, or by a previous boot that
     /// could not load it. Carries the recorded reason where there is one.

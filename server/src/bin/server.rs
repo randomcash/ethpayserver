@@ -30,7 +30,8 @@ use server::{
 };
 use server::{
     DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, PluginArtifacts, PluginHost, host_version,
-    load_installed_plugins, report_boot,
+    invoice_creation_filters, load_installed_plugins, own_store_payment_reporting,
+    payment_observers, report_boot,
 };
 
 #[tokio::main]
@@ -165,6 +166,74 @@ async fn main() -> Result<()> {
     let ws_broadcast = Arc::new(server::api::ws::WsBroadcast::new(256));
 
     // Start background services
+    // Bring up the plugin host and load whatever is installed.
+    //
+    // In safe mode there is no host at all - not an empty one. A boot that
+    // builds no wasmtime engine cannot run plugin code by any path, including
+    // one added later by someone who did not know to check the flag.
+    let plugin_host = if config.safe_mode {
+        None
+    } else {
+        Some(Arc::new(PluginHost::new(
+            host_version(),
+            DEFAULT_MAX_FAILURES,
+            DEFAULT_CALL_DEADLINE,
+        )))
+    };
+    let plugin_artifacts = PluginArtifacts::new(&config.plugin_dir);
+    // A failure to *read* the install list is different from a plugin failing
+    // to load: the database is not answering, which the rest of the boot is
+    // about to discover anyway. Log and continue with no plugins rather than
+    // refuse to start - a server that will not come up is the one state an
+    // admin cannot fix a plugin problem from.
+    let loaded =
+        match load_installed_plugins(&*data_service, plugin_host.as_deref(), &plugin_artifacts)
+            .await
+        {
+            Ok(report) => {
+                report_boot(&report);
+                report.loaded
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "could not read the installed-plugin list; starting with no plugins loaded"
+                );
+                Vec::new()
+            }
+        };
+
+    // Turn the loaded plugins into the capability implementations the rest of
+    // the server calls. Without this, a plugin compiles, instantiates and
+    // registers - and nothing ever dispatches to it.
+    let (plugin_filters, plugin_payment_observers): (
+        Vec<Arc<dyn server::services::plugins::InvoiceCreationFilter>>,
+        Vec<Arc<dyn server::services::plugins::OwnStorePaymentObserver>>,
+    ) = match plugin_host.as_ref() {
+        Some(host) => (
+            invoice_creation_filters(host, &loaded),
+            payment_observers(host, &loaded),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+
+    // Capability 4 needs both a store to watch and something to tell. Either
+    // one missing means no dispatch at all: an instance with a billing store
+    // but no plugin has nobody to notify, and observers without a configured
+    // store must never be handed a guess at which store is ours.
+    let own_store_payments =
+        own_store_payment_reporting(config.billing_store_id, plugin_payment_observers);
+    match own_store_payments.as_ref() {
+        Some((store_id, observers)) => tracing::info!(
+            %store_id,
+            observers = observers.len() as u64,
+            "own-store payments will be reported to plugins"
+        ),
+        None => tracing::info!(
+            "no own-store payment reporting: ETHPAY_BILLING_STORE_ID unset or no plugin loaded"
+        ),
+    }
+
     // 1. Webhook delivery service - sends webhook notifications
     //    Created first because cleanup service needs it for expiration webhooks
     let webhook_config = WebhookConfig::from_env();
@@ -203,6 +272,10 @@ async fn main() -> Result<()> {
         Some(Arc::clone(&ws_broadcast)),
         Arc::clone(&email_sender),
     );
+    let event_consumer = match own_store_payments {
+        Some((store_id, observers)) => event_consumer.with_own_store_payments(store_id, observers),
+        None => event_consumer,
+    };
     tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
 
@@ -254,35 +327,12 @@ async fn main() -> Result<()> {
     state.webauthn = Some(webauthn_health);
     state.safe_mode = config.safe_mode;
 
-    // Bring up the plugin host and load whatever is installed.
-    //
-    // In safe mode there is no host at all - not an empty one. A boot that
-    // builds no wasmtime engine cannot run plugin code by any path, including
-    // one added later by someone who did not know to check the flag.
-    let plugin_host = if config.safe_mode {
-        None
-    } else {
-        Some(Arc::new(PluginHost::new(
-            host_version(),
-            DEFAULT_MAX_FAILURES,
-            DEFAULT_CALL_DEADLINE,
-        )))
-    };
-    let plugin_artifacts = PluginArtifacts::new(&config.plugin_dir);
-    // A failure to *read* the install list is different from a plugin failing
-    // to load: the database is not answering, which the rest of the boot is
-    // about to discover anyway. Log and continue with no plugins rather than
-    // refuse to start - a server that will not come up is the one state an
-    // admin cannot fix a plugin problem from.
-    match load_installed_plugins(&*data_service, plugin_host.as_deref(), &plugin_artifacts).await {
-        Ok(report) => report_boot(&report),
-        Err(e) => tracing::error!(
-            error = %e,
-            "could not read the installed-plugin list; starting with no plugins loaded"
-        ),
-    }
-    state.plugin_host = plugin_host;
+    state.plugin_host = plugin_host.clone();
     state.plugin_dir = config.plugin_dir.clone();
+    // The one wired filter call site. Empty until a filter plugin is
+    // installed, which is every deployment today; before this line it was
+    // empty even then.
+    state.invoice_creation_filters = plugin_filters;
 
     // Create rate limiters
     let rate_limit_config = RateLimitConfig::from_env();

@@ -19,7 +19,8 @@ pub use plugins::{
     PageError, PageHost, PageRenderer, PluginArtifacts, PluginBootReport, PluginCallError,
     PluginEngine, PluginHost, PluginHostError, PluginInstance, PluginLoadError, PluginRegistry,
     PluginSchema, PluginStatusSnapshot, PluginStorage, PluginStorageError, PluginWasmError, Viewer,
-    host_version, load_installed_plugins, report_boot,
+    host_version, invoice_creation_filters, load_installed_plugins, own_store_payment_reporting,
+    payment_observers, report_boot,
 };
 pub use watch_retry::{WatchRetryConfig, WatchRetryService};
 pub use webhook::{WebhookConfig, WebhookService, WebhookSink};

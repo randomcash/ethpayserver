@@ -48,6 +48,7 @@
 
 mod artifacts;
 mod boot;
+mod dispatch;
 mod error;
 mod filter;
 mod host;
@@ -64,6 +65,10 @@ pub use artifacts::{ArtifactError, PluginArtifacts, digest};
 pub use boot::{
     DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, PluginBootReport, load_installed_plugins,
     report_boot,
+};
+pub use dispatch::{
+    FILTER_INVOICE_CREATION, PAYMENT_SETTLED, PluginInvoiceCreationFilter, PluginPaymentObserver,
+    invoice_creation_filters, own_store_payment_reporting, payment_observers,
 };
 pub use error::PluginLoadError;
 pub use filter::{
