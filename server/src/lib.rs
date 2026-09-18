@@ -43,14 +43,15 @@ pub mod state;
 pub use config::Config;
 pub use services::{
     ArtifactError, ChainHealthMetricsConfig, ChainHealthMetricsService, CleanupConfig,
-    CleanupError, CleanupStats, DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, EVMMonitor,
-    EVMMonitorError, EventConsumer, EventConsumerError, FilterOutcome, InvoiceCleanupService,
-    PageElement, PageError, PageHost, PageRenderer, PluginArtifacts, PluginBootReport,
-    PluginCallError, PluginEngine, PluginHost, PluginHostError, PluginInstance, PluginLoadError,
-    PluginRegistry, PluginSchema, PluginStatusSnapshot, PluginStorage, PluginStorageError,
-    PluginWasmError, RedisEVMMonitor, Viewer, WatchRetryConfig, WatchRetryService, WebhookConfig,
-    WebhookService, WebhookSink, host_version, invoice_creation_filters, load_installed_plugins,
-    own_store_payment_reporting, payment_observers, report_boot,
+    CleanupError, CleanupStats, DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, DEFAULT_MAX_IN_FLIGHT,
+    EVMMonitor, EVMMonitorError, EventConsumer, EventConsumerError, FilterOutcome,
+    InvoiceCleanupService, PageElement, PageError, PageHost, PageRenderer, PluginArtifacts,
+    PluginBootReport, PluginCallError, PluginEngine, PluginHost, PluginHostError, PluginInstance,
+    PluginLoadError, PluginPools, PluginRegistry, PluginSchema, PluginStatusSnapshot,
+    PluginStorage, PluginStorageError, PluginWasmError, RedisEVMMonitor, Viewer, WatchRetryConfig,
+    WatchRetryService, WebhookConfig, WebhookService, WebhookSink, host_version,
+    invoice_creation_filters, load_installed_plugins, own_store_payment_reporting,
+    payment_observers, report_boot,
 };
 pub use state::{AppDataService, AppDataServiceReader, AppState};
 

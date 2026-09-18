@@ -29,9 +29,9 @@ use server::{
     metrics,
 };
 use server::{
-    DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, PluginArtifacts, PluginHost, host_version,
-    invoice_creation_filters, load_installed_plugins, own_store_payment_reporting,
-    payment_observers, report_boot,
+    DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, DEFAULT_MAX_IN_FLIGHT, PluginArtifacts,
+    PluginHost, PluginPools, host_version, invoice_creation_filters, load_installed_plugins,
+    own_store_payment_reporting, payment_observers, report_boot,
 };
 
 #[tokio::main]
@@ -186,22 +186,35 @@ async fn main() -> Result<()> {
     // about to discover anyway. Log and continue with no plugins rather than
     // refuse to start - a server that will not come up is the one state an
     // admin cannot fix a plugin problem from.
-    let loaded =
-        match load_installed_plugins(&*data_service, plugin_host.as_deref(), &plugin_artifacts)
-            .await
-        {
-            Ok(report) => {
-                report_boot(&report);
-                report.loaded
-            }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "could not read the installed-plugin list; starting with no plugins loaded"
-                );
-                Vec::new()
-            }
-        };
+    // One pool per plugin, all sharing one budget. Built before the loader so
+    // a plugin with a credential gets database access as it registers, rather
+    // than on a later pass that would leave the first call after boot without
+    // it.
+    let plugin_pools = Arc::new(PluginPools::new(
+        config.database_url.expose_secret().to_string(),
+        DEFAULT_MAX_IN_FLIGHT,
+    ));
+
+    let loaded = match load_installed_plugins(
+        &*data_service,
+        plugin_host.as_deref(),
+        &plugin_artifacts,
+        Some(&plugin_pools),
+    )
+    .await
+    {
+        Ok(report) => {
+            report_boot(&report);
+            report.loaded
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "could not read the installed-plugin list; starting with no plugins loaded"
+            );
+            Vec::new()
+        }
+    };
 
     // Turn the loaded plugins into the capability implementations the rest of
     // the server calls. Without this, a plugin compiles, instantiates and
@@ -329,6 +342,8 @@ async fn main() -> Result<()> {
 
     state.plugin_host = plugin_host.clone();
     state.plugin_dir = config.plugin_dir.clone();
+    // So install and uninstall reach the same pools the boot loader registered.
+    state.plugin_pools = Some(Arc::clone(&plugin_pools));
     // The one wired filter call site. Empty until a filter plugin is
     // installed, which is every deployment today; before this line it was
     // empty even then.

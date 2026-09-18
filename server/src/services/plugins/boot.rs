@@ -141,6 +141,7 @@ pub async fn load_installed_plugins<D>(
     data: &D,
     host: Option<&PluginHost>,
     artifacts: &PluginArtifacts,
+    pools: Option<&std::sync::Arc<super::PluginPools>>,
 ) -> Result<PluginBootReport, types::RepositoryError>
 where
     D: InstalledPluginReader + InstalledPluginWriter + ?Sized,
@@ -174,7 +175,7 @@ where
             continue;
         }
 
-        match register_or_disable(data, host, artifacts, &id, &row).await {
+        match register_or_disable(data, host, artifacts, &id, &row, pools).await {
             Ok(()) => report.loaded.push(id),
             Err(failure) => report.failed.push(failure),
         }
@@ -198,10 +199,13 @@ async fn register_or_disable<D>(
     artifacts: &PluginArtifacts,
     id: &PluginId,
     row: &InstalledPlugin,
+    pools: Option<&std::sync::Arc<super::PluginPools>>,
 ) -> Result<(), PluginLoadFailure>
 where
     D: InstalledPluginWriter + ?Sized,
 {
+    let calls = database_calls_for(id, row, pools).await;
+
     let Err((kind, reason)) = load_one(
         host,
         artifacts,
@@ -209,6 +213,7 @@ where
         &row.version,
         &row.manifest_toml,
         &row.artifact_sha256,
+        calls,
     ) else {
         tracing::info!(plugin_id = %id, version = %row.version, "plugin loaded");
         return Ok(());
@@ -252,6 +257,7 @@ fn load_one(
     version: &str,
     manifest_toml: &str,
     expected_sha256: &str,
+    calls: Option<std::sync::Arc<dyn payserver_plugin_host::PluginHostCalls>>,
 ) -> Result<(), (FailureKind, String)> {
     let manifest: Manifest = manifest_toml.parse().map_err(|e| {
         (
@@ -287,8 +293,45 @@ fn load_one(
         .read_verified(id, version, expected_sha256)
         .map_err(|e| (classify(&e), e.to_string()))?;
 
-    host.register(manifest, &wasm)
+    host.register_with_calls(manifest, &wasm, calls)
         .map_err(|e| (FailureKind::Plugin, format!("host refused it: {e}")))
+}
+
+/// The host calls this plugin gets, if it has a credential and this boot has
+/// pools.
+///
+/// Both halves are required and neither is assumed:
+///
+/// - A plugin installed before per-plugin roles existed has no password, and
+///   gets no database rather than the host's connection. There is no safe
+///   fallback: the host connects as a superuser, so absent means absent.
+/// - Registering a pool opens no connection (see [`PluginPools::register`]),
+///   so the only way it fails is a `DATABASE_URL` this process could not
+///   parse - which the rest of the boot has already survived. It is logged
+///   and treated as no database, so one plugin's bad credential does not stop
+///   the others loading.
+async fn database_calls_for(
+    id: &PluginId,
+    row: &InstalledPlugin,
+    pools: Option<&std::sync::Arc<super::PluginPools>>,
+) -> Option<std::sync::Arc<dyn payserver_plugin_host::PluginHostCalls>> {
+    let (pools, password) = (pools?, row.db_role_password.as_deref()?);
+
+    match pools.register(id, password).await {
+        Ok(()) => Some(std::sync::Arc::new(super::SchemaStorageCalls::new(
+            id.clone(),
+            std::sync::Arc::clone(pools),
+        ))
+            as std::sync::Arc<dyn payserver_plugin_host::PluginHostCalls>),
+        Err(e) => {
+            tracing::error!(
+                plugin_id = %id,
+                error = %e,
+                "could not give this plugin database access; it will load without it"
+            );
+            None
+        }
+    }
 }
 
 /// Which failures are the plugin's and which are the machine's.
@@ -584,6 +627,7 @@ mod tests {
             artifact_sha256: sha.to_string(),
             enabled: true,
             disabled_reason: None,
+            db_role_password: None,
             installed_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -610,7 +654,7 @@ mod tests {
         let store = FakeStore::with_row(row("0.1.0", &sha));
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
             .await
             .unwrap();
 
@@ -643,7 +687,7 @@ mod tests {
         let store = FakeStore::with_row(row("0.1.0", &installed_sha));
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
             .await
             .unwrap();
 
@@ -693,7 +737,7 @@ mod tests {
         let store = FakeStore::with_row(disabled);
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
             .await
             .unwrap();
 
@@ -721,7 +765,7 @@ mod tests {
 
         let store = FakeStore::with_row(row("0.1.0", &sha));
 
-        let report = load_installed_plugins(&store, None, &artifacts)
+        let report = load_installed_plugins(&store, None, &artifacts, None)
             .await
             .unwrap();
 
@@ -756,7 +800,7 @@ mod tests {
         let store = FakeStore::with_row(mismatched);
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
             .await
             .unwrap();
 
@@ -785,7 +829,7 @@ mod tests {
         let store = FakeStore::with_row(mismatched);
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
             .await
             .unwrap();
 
@@ -818,7 +862,7 @@ mod tests {
         let store = FakeStore::with_row(row("0.1.0", &payserver_plugin_host::digest(b"gone")));
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
             .await
             .expect("a missing artifact is not a boot failure");
 
@@ -864,7 +908,7 @@ mod tests {
         };
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
             .await
             .unwrap();
 
@@ -890,7 +934,7 @@ mod tests {
         let store = FakeStore::with_row(row("0.1.0", &sha));
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts)
+        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
             .await
             .unwrap();
 
