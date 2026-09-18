@@ -10,12 +10,45 @@ name: Scheduled E2E (testnet)
 # Runs on hosted runners on purpose. The deploy host is also the self-hosted
 # runner, so a job there cannot report on a box that is down —
 # the healthchecks.io dead-man's-switch below covers the "no run at all" case.
+#
+# ---------------------------------------------------------------------------
+# SCHEDULE DISABLED: testnet is not on the public internet any more.
+#
+# testnet.random.cash now resolves to a tailnet address and is served by Caddy
+# on the deploy box; there is no public route to it. A GitHub-hosted runner
+# cannot reach it, so every scheduled run would fail, file a
+# testnet-is-failing issue daily, and ping healthchecks /fail every morning —
+# which is precisely the desensitising this file warns about further down.
+#
+# Moving the jobs to `[self-hosted, debianbase]` is NOT the fix, twice over:
+# it forfeits the property the header is about (a job on the box cannot report
+# that the box is down), and that runner was deliberately left with no
+# workflow referencing it because a fork PR executing on the deploy host is an
+# exposure nobody wanted.
+#
+# The fix is to let the hosted runner join the tailnet for the duration of the
+# run - `tailscale/github-action` with an ephemeral OAuth client - which keeps
+# the runner independent of the box AND reaches a private testnet. That needs
+# a credential this workflow does not have yet:
+#
+#   TS_OAUTH_CLIENT_ID / TS_OAUTH_SECRET  (tag: tag:ci, ephemeral)
+#
+# Until those secrets exist the schedule stays off. Two things follow, and
+# both need a human:
+#   1. The healthchecks.io check for this workflow will now see silence, which
+#      is exactly what it is built to alert on. Pause it there, or it pages
+#      every day for a workflow that was switched off on purpose.
+#   2. `workflow_dispatch` is kept, but a manual run from a hosted runner
+#      cannot reach testnet either. It is useful only once the tailnet step
+#      above exists.
+# ---------------------------------------------------------------------------
 
 on:
-  schedule:
-    # 06:00 UTC daily — an hour before the Monday audit, so a red testnet is
-    # already on the desk when the weekly retro starts.
-    - cron: "0 6 * * *"
+  # schedule:
+  #   # 06:00 UTC daily — an hour before the Monday audit, so a red testnet is
+  #   # already on the desk when the weekly retro starts.
+  #   # Re-enable together with the tailnet join step described above.
+  #   - cron: "0 6 * * *"
   workflow_dispatch:
 
 permissions:
