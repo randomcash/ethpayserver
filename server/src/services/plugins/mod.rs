@@ -52,6 +52,7 @@ mod filter;
 mod invoice_issuer;
 mod merchant_directory;
 mod payment_observer;
+mod pools;
 mod storage;
 
 pub use boot::{
@@ -73,7 +74,10 @@ pub use payment_observer::{
     OwnStorePayment, OwnStorePaymentObserver, OwnStorePaymentReader, PaymentObserverError,
     is_own_store, notify_own_store_payment,
 };
-pub use storage::{PluginSchema, PluginStorage, PluginStorageError, generate_role_password};
+pub use pools::{DEFAULT_MAX_IN_FLIGHT, PluginPoolError, PluginPools};
+pub use storage::{
+    PluginSchema, PluginStorage, PluginStorageError, generate_role_password, role_name,
+};
 
 // The host itself is `payserver-plugin-host`, shared with every other
 // payserver. Nothing in it knows about EVM, chains or invoices - it compiles

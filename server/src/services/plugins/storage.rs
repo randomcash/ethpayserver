@@ -101,12 +101,28 @@ pub enum PluginStorageError {
 
 /// The Postgres schema name for `id`: `plugin_<id>`. The prefix keeps it out
 /// of the way of `public` and of any core schema that might exist later.
-fn schema_name(id: &PluginId) -> Result<String, PluginStorageError> {
-    let name = format!("plugin_{}", id.as_str());
+/// The login role a plugin's own statements run as.
+///
+/// The same identifier as its schema, deliberately: `provision_role` grants
+/// against the schema of this name, and `pools` authenticates as the role of
+/// this name. Deriving both from one function is what stops a connection
+/// authenticating as a role whose grants point at a different schema.
+///
+/// Takes the id as `&str` rather than `&PluginId` so a caller holding only
+/// the stored string does not have to re-parse it.
+///
+/// # Errors
+/// If the resulting name exceeds Postgres's identifier limit.
+pub fn role_name(plugin_id: &str) -> Result<String, PluginStorageError> {
+    let name = format!("plugin_{plugin_id}");
     if name.len() > MAX_IDENTIFIER_LEN {
         return Err(PluginStorageError::SchemaNameTooLong(name));
     }
     Ok(name)
+}
+
+fn schema_name(id: &PluginId) -> Result<String, PluginStorageError> {
+    role_name(id.as_str())
 }
 
 /// Double-quote a Postgres identifier, escaping embedded quotes.
