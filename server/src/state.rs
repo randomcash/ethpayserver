@@ -105,6 +105,20 @@ pub struct AppState<D, A, E> {
     /// to enforce a lapsed subscription. Empty when no such plugin is
     /// installed, in which case invoice creation is never filtered at all.
     pub invoice_creation_filters: Vec<Arc<dyn InvoiceCreationFilter>>,
+
+    /// The store this instance bills its own subscriptions through, and the
+    /// one store `invoice_creation_filters` is never consulted for.
+    ///
+    /// Without this exemption a billing plugin can deadlock the thing that
+    /// pays it: the plugin refuses invoice creation for a lapsed merchant,
+    /// the invoice that would renew a subscription is itself created on this
+    /// store, and a plugin bug - or simply a plugin that fails closed while
+    /// it is down - refuses the renewal that would have fixed it. The only
+    /// way out of that state is editing the database by hand.
+    ///
+    /// `None` on any instance that sells nothing to itself, which exempts
+    /// nothing.
+    pub billing_store_id: Option<types::StoreId>,
     /// Sender used to verify a pending email-address change.
     ///
     /// Unlike `webhook_sink` this is never `None`: `create_email_sender`
@@ -162,6 +176,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             webhook_sink: self.webhook_sink.clone(),
             webauthn: self.webauthn.clone(),
             invoice_creation_filters: self.invoice_creation_filters.clone(),
+            billing_store_id: self.billing_store_id,
             email_sender: Arc::clone(&self.email_sender),
             plugin_pages: Arc::clone(&self.plugin_pages),
             plugin_host: self.plugin_host.clone(),
@@ -190,6 +205,7 @@ impl<D, A, E> AppState<D, A, E> {
             webhook_sink: None,
             webauthn: None,
             invoice_creation_filters: Vec::new(),
+            billing_store_id: None,
             email_sender,
             plugin_pages: Arc::new(PageHost::new()),
             plugin_host: None,

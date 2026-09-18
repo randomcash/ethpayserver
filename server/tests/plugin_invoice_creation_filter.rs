@@ -133,6 +133,14 @@ fn app_state(
     data_service: Arc<PgDataService>,
     filters: Vec<Arc<dyn InvoiceCreationFilter>>,
 ) -> PgAppState<UnusedSessionService> {
+    app_state_billing(data_service, filters, None)
+}
+
+fn app_state_billing(
+    data_service: Arc<PgDataService>,
+    filters: Vec<Arc<dyn InvoiceCreationFilter>>,
+    billing_store_id: Option<types::StoreId>,
+) -> PgAppState<UnusedSessionService> {
     let mut state = PgAppState::new(
         data_service,
         Arc::new(UnusedSessionService),
@@ -141,6 +149,7 @@ fn app_state(
         Arc::new(server::services::email::NoopEmailSender),
     );
     state.invoice_creation_filters = filters;
+    state.billing_store_id = billing_store_id;
     state
 }
 
@@ -245,4 +254,87 @@ async fn no_filters_reaches_past_the_filter_stage() {
     };
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "no_payment_methods");
+}
+
+/// The deadlock the billing-store exemption exists to prevent.
+///
+/// A billing plugin refuses invoice creation for a merchant in arrears. The
+/// invoice that *renews* a subscription is itself created on the instance's
+/// own store - so without the exemption, a plugin that refuses (a bug, or
+/// simply being down while its manifest fails closed) refuses the renewal
+/// that would have cleared the refusal, and the only way out is editing the
+/// database by hand.
+///
+/// Uses the same `AlwaysDeny` filter as the test above, which proves the
+/// difference is the exemption and not the filter.
+#[tokio::test]
+#[ignore]
+async fn our_own_billing_store_is_never_filtered() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state_billing(
+        Arc::new(pg),
+        vec![Arc::new(AlwaysDeny)],
+        Some(types::StoreId(store.id.0)),
+    );
+
+    let result = create_invoice(
+        AuthenticatedUser(user_info(owner)),
+        State(state),
+        Json(invoice_request(store.id.0)),
+    )
+    .await;
+
+    if let Err((status, Json(body))) = &result {
+        assert_ne!(
+            body["error"].as_str(),
+            Some("invoice_creation_blocked"),
+            "the billing store was filtered; a plugin can now deadlock its own renewals (status {status})"
+        );
+    }
+}
+
+/// The exemption must be exactly one store wide. A second store on the same
+/// instance is still filtered, or the exemption has become a way to bypass
+/// billing entirely.
+#[tokio::test]
+#[ignore]
+async fn the_exemption_covers_only_the_billing_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let billing = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    let merchant = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&billing, UserId(owner))
+        .await
+        .expect("seed billing store");
+    pg.create_store_owned_by(&merchant, UserId(owner))
+        .await
+        .expect("seed merchant store");
+
+    let state = app_state_billing(
+        Arc::new(pg),
+        vec![Arc::new(AlwaysDeny)],
+        Some(types::StoreId(billing.id.0)),
+    );
+
+    let result = create_invoice(
+        AuthenticatedUser(user_info(owner)),
+        State(state),
+        Json(invoice_request(merchant.id.0)),
+    )
+    .await;
+
+    let Err((_, Json(body))) = result else {
+        panic!("a merchant store must still be filtered when a billing store is configured");
+    };
+    assert_eq!(body["error"].as_str(), Some("invoice_creation_blocked"));
 }

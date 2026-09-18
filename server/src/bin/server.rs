@@ -333,6 +333,8 @@ async fn main() -> Result<()> {
     // installed, which is every deployment today; before this line it was
     // empty even then.
     state.invoice_creation_filters = plugin_filters;
+    // Never filtered: see `AppState::billing_store_id`.
+    state.billing_store_id = config.billing_store_id;
 
     // Create rate limiters
     let rate_limit_config = RateLimitConfig::from_env();
