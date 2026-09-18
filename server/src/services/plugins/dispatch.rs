@@ -57,6 +57,9 @@ const UNAVAILABLE: &str = "Invoice creation is temporarily unavailable. Please t
 #[derive(Debug, Serialize)]
 struct WireFilterRequest {
     store_id: String,
+    /// The merchant who owns the store. Billing is per merchant, so this is
+    /// the key a subscription is actually looked up by.
+    account_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +114,7 @@ impl InvoiceCreationFilter for PluginInvoiceCreationFilter {
     ) -> FilterVerdict {
         let wire = WireFilterRequest {
             store_id: request.store_id.0.to_string(),
+            account_id: request.account_id.0.to_string(),
         };
 
         let outcome: FilterOutcome<WireFilterVerdict> = self
@@ -339,6 +343,7 @@ mod tests {
     fn a_store() -> InvoiceCreationFilterRequest {
         InvoiceCreationFilterRequest {
             store_id: StoreId(Uuid::new_v4()),
+            account_id: auth::UserId(Uuid::new_v4()),
         }
     }
 
