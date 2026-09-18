@@ -6,14 +6,23 @@
 //! [`payserver_plugin_api::Manifest`], decide whether this host will register
 //! it, before any plugin code runs.
 //!
-//! `merchant_directory`, `filter` and `invoice_issuer` are the three host
-//! capabilities: read who the merchants are
+//! `merchant_directory`, `filter`, `invoice_issuer` and `payment_observer`
+//! are the four host capabilities: read who the merchants are
 //! ([`data_service::MerchantDirectoryReader`], defined in the `data-service`
 //! crate rather than here since it is a database read, not a host-state
 //! decision, but implemented on [`PluginHostApi`] here so it is reachable the
-//! same way the other two capabilities are), a filter that can refuse invoice
-//! creation, and creating an invoice on the instance's own store. None of the
-//! three depends on wasmtime; each is written and tested against directly.
+//! same way the other capabilities are), a filter that can refuse invoice
+//! creation, creating an invoice on the instance's own store, and being told
+//! after the fact that one of those invoices was paid. None of the four
+//! depends on wasmtime; each is written and tested against directly.
+//!
+//! The asymmetry between `filter` and `payment_observer` is deliberate and
+//! load-bearing. A filter may refuse a not-yet-created invoice, because that
+//! is a billing decision the merchant can resolve by paying. An observer may
+//! refuse nothing, because withholding credit for a payment already sent takes
+//! a customer's money over a dispute they are not party to. Neither can drift
+//! into the other's shape: one returns a verdict and is never told about a
+//! payment, the other is told about payments and returns `()`.
 //!
 //! `storage` is the storage slice: a schema per plugin, created on install,
 //! and a migration runner that runs the plugin's own migrations against it
@@ -39,6 +48,7 @@
 
 mod artifacts;
 mod boot;
+mod dispatch;
 mod error;
 mod filter;
 mod host;
@@ -46,6 +56,7 @@ mod invoice_issuer;
 mod merchant_directory;
 pub mod page;
 mod pages;
+mod payment_observer;
 mod registry;
 mod runtime;
 mod storage;
@@ -54,6 +65,10 @@ pub use artifacts::{ArtifactError, PluginArtifacts, digest};
 pub use boot::{
     DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, PluginBootReport, load_installed_plugins,
     report_boot,
+};
+pub use dispatch::{
+    FILTER_INVOICE_CREATION, PAYMENT_SETTLED, PluginInvoiceCreationFilter, PluginPaymentObserver,
+    invoice_creation_filters, own_store_payment_reporting, payment_observers,
 };
 pub use error::PluginLoadError;
 pub use filter::{
@@ -66,6 +81,10 @@ pub use invoice_issuer::{
 };
 pub use page::{PageElement, Viewer};
 pub use pages::{PageError, PageHost, PageRenderer};
+pub use payment_observer::{
+    OwnStorePayment, OwnStorePaymentObserver, OwnStorePaymentReader, PaymentObserverError,
+    is_own_store, notify_own_store_payment,
+};
 pub use registry::{PluginRegistry, host_version};
 pub use runtime::{PluginCallError, PluginEngine, PluginInstance, PluginWasmError};
 pub use storage::{PluginSchema, PluginStorage, PluginStorageError};

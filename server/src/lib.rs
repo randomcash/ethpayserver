@@ -49,7 +49,8 @@ pub use services::{
     PluginCallError, PluginEngine, PluginHost, PluginHostError, PluginInstance, PluginLoadError,
     PluginRegistry, PluginSchema, PluginStatusSnapshot, PluginStorage, PluginStorageError,
     PluginWasmError, RedisEVMMonitor, Viewer, WatchRetryConfig, WatchRetryService, WebhookConfig,
-    WebhookService, WebhookSink, host_version, load_installed_plugins, report_boot,
+    WebhookService, WebhookSink, host_version, invoice_creation_filters, load_installed_plugins,
+    own_store_payment_reporting, payment_observers, report_boot,
 };
 pub use state::{AppDataService, AppDataServiceReader, AppState};
 

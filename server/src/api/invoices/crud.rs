@@ -75,13 +75,25 @@ where
     // A plugin (host capability 2) may refuse invoice creation - e.g. to
     // enforce a lapsed subscription. The merchant keeps every other
     // capability; only this endpoint is ever filtered.
-    if let FilterVerdict::Deny { reason } = run_invoice_creation_filters(
-        &state.invoice_creation_filters,
-        InvoiceCreationFilterRequest {
-            store_id: StoreId(req.store_id),
-        },
-    )
-    .await
+    //
+    // Our own billing store is exempt, and that exemption is load-bearing
+    // rather than a convenience. The invoice that renews a subscription is
+    // created on this store, by the same plugin that decides whether
+    // subscriptions are in good standing. Without the exemption a plugin
+    // that refuses - because of a bug, or simply because it is down and
+    // fails closed - refuses the renewal that would have cleared the
+    // refusal, and nothing short of editing the database gets out of it.
+    let is_our_own_billing_store = state
+        .billing_store_id
+        .is_some_and(|own| own.0 == req.store_id);
+    if !is_our_own_billing_store
+        && let FilterVerdict::Deny { reason } = run_invoice_creation_filters(
+            &state.invoice_creation_filters,
+            InvoiceCreationFilterRequest {
+                store_id: StoreId(req.store_id),
+            },
+        )
+        .await
     {
         return Err(invoice_error(
             StatusCode::FORBIDDEN,

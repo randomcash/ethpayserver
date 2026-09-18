@@ -169,6 +169,47 @@ pub fn create_test_consumer(
     )
 }
 
+/// A capability-4 observer that records instead of calling a plugin.
+///
+/// The production path runs a wasm call; before this existed nothing could
+/// see whether `handle_payment_confirmed` dispatched at all - which is the
+/// failure mode the module's own unit tests cannot catch, since they call the
+/// dispatcher directly rather than reaching it through the handler.
+#[derive(Default)]
+pub struct RecordingPaymentObserver {
+    settled: std::sync::Mutex<Vec<crate::services::plugins::OwnStorePayment>>,
+}
+
+impl RecordingPaymentObserver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn settled(&self) -> Vec<crate::services::plugins::OwnStorePayment> {
+        self.settled.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl crate::services::plugins::OwnStorePaymentObserver for RecordingPaymentObserver {
+    async fn payment_settled(&self, payment: &crate::services::plugins::OwnStorePayment) {
+        self.settled.lock().unwrap().push(payment.clone());
+    }
+}
+
+/// A consumer that reports settled invoices on `own_store` to `observer`.
+pub fn create_test_consumer_with_observer(
+    ds: Arc<InMemoryDataService>,
+    bridge: Arc<evm::monitor::bridge::MemoryBridge>,
+    own_store: StoreId,
+    observer: Arc<RecordingPaymentObserver>,
+) -> super::super::EventConsumer<InMemoryDataService, MockEVMMonitor> {
+    create_test_consumer(ds, bridge).with_own_store_payments(
+        own_store,
+        vec![observer as Arc<dyn crate::services::plugins::OwnStorePaymentObserver>],
+    )
+}
+
 /// A webhook queue that records instead of delivering.
 ///
 /// The production sink needs Redis, so before this existed no test could see

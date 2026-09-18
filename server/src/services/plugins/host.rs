@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
-use payserver_plugin_api::{FailureMode, Manifest, PluginId, Version};
+use payserver_plugin_api::{FailureMode, Manifest, PluginId, PluginKind, Version};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -443,6 +443,24 @@ impl PluginHost {
                 FilterOutcome::could_not_run(failure_mode, reason)
             }
         }
+    }
+
+    /// What `id`'s manifest declared it is, or `None` if nothing is
+    /// registered under that id.
+    ///
+    /// Exists so a dispatch site can route only to plugins that claim the
+    /// shape it is about to call. Asking an action plugin to answer a filter
+    /// export would fail, and a failure on a filter resolves to the manifest's
+    /// `FailureMode` - which defaults to *closed*. A single non-filter plugin
+    /// registered as a filter would therefore refuse every invoice on the
+    /// instance, for as long as it stayed installed.
+    #[must_use]
+    pub fn kind(&self, id: &PluginId) -> Option<PluginKind> {
+        self.registry
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .map(|manifest| manifest.kind)
     }
 
     fn failure_mode_for(&self, id: &PluginId) -> FailureMode {

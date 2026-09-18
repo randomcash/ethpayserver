@@ -15,6 +15,7 @@ use crate::api::ws::StatusUpdate;
 use crate::metrics;
 use crate::services::email::ReceiptData;
 use crate::services::evm_monitor::EVMMonitor;
+use crate::services::plugins::notify_own_store_payment;
 use crate::services::webhook::WebhookDataService;
 use crate::services::webhook::WebhookEventType;
 
@@ -154,6 +155,15 @@ impl<
                     // Send customer receipt email (best-effort, never blocks payment flow)
                     self.send_customer_receipt(&invoice, payment, event.chain_id)
                         .await;
+
+                    // Tell any plugin that this instance's own store settled
+                    // an invoice - how a subscription learns it was paid.
+                    // Deliberately last, after every write and every
+                    // merchant-visible transition: it observes committed work
+                    // and can neither refuse nor alter it. Filtered to our own
+                    // store inside, never a merchant's.
+                    self.notify_own_store_settled(&invoice_id, event.confirmed_at)
+                        .await;
                 }
             }
             InvoiceStatus::Expired => {
@@ -192,6 +202,11 @@ impl<
                         )
                         .await;
                     }
+
+                    // A late payment is still money received - a subscription
+                    // paid after its invoice expired has been paid.
+                    self.notify_own_store_settled(&invoice_id, event.confirmed_at)
+                        .await;
                 }
             }
             _ => {
@@ -205,6 +220,47 @@ impl<
         }
 
         Ok(())
+    }
+
+    /// Re-read the invoice in its settled state and report it to capability-4
+    /// observers, if it belongs to this instance's own store.
+    ///
+    /// Re-reads rather than reusing the pre-transition copy: the status and
+    /// `amount_received` an observer is told must be the ones that were
+    /// committed, not the ones that were true before the update. A failed
+    /// re-read is logged and dropped - this is an observation, and losing one
+    /// must never fail a payment. That is exactly why a consumer of this
+    /// capability has to reconcile through `OwnStorePaymentReader` rather than
+    /// trust these dispatches.
+    async fn notify_own_store_settled(
+        &self,
+        invoice_id: &InvoiceId,
+        settled_at: chrono::DateTime<Utc>,
+    ) {
+        if self.payment_observers.is_empty() {
+            return;
+        }
+
+        match InvoiceReader::get(&*self.data_service, invoice_id).await {
+            Ok(Some(settled)) => {
+                notify_own_store_payment(
+                    &self.payment_observers,
+                    self.own_store_id,
+                    &settled,
+                    settled_at,
+                )
+                .await;
+            }
+            Ok(None) => tracing::warn!(
+                %invoice_id,
+                "invoice vanished between its settled transition and the plugin notification"
+            ),
+            Err(e) => tracing::warn!(
+                %invoice_id,
+                error = %e,
+                "could not re-read a settled invoice to notify plugins; reconciliation will catch it"
+            ),
+        }
     }
 
     /// Send a payment receipt email to the customer (best-effort).

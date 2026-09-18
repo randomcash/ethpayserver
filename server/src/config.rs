@@ -44,6 +44,9 @@
 //! - `ETHPAY_DISABLE_PLUGINS` - Safe mode: boot with every plugin disabled
 //!   (default: false). Same effect as the `--disable-plugins` CLI flag.
 //! - `ETHPAY_PLUGIN_DIR` - Where installed plugins' wasm lives
+//! - `ETHPAY_BILLING_STORE_ID` - The store this instance bills its own
+//!   subscriptions through. Unset on any instance that sells nothing to
+//!   itself; a plugin is told about payments on this store and no other.
 //!   (default: ./plugins)
 
 use secrecy::{ExposeSecret, SecretString};
@@ -88,6 +91,14 @@ pub struct Config {
     /// volume survives a redeploy. A missing directory is not an error -
     /// it is what a server with no plugins installed looks like.
     pub plugin_dir: PathBuf,
+
+    /// The store this instance issues, and settles, its own invoices on.
+    ///
+    /// `None` on an instance that sells nothing to itself, which is every
+    /// deployment without a billing plugin. It must stay `None` rather than
+    /// defaulting to anything: a wrong value here would hand a plugin a
+    /// merchant's payments, and there is no value that is safely wrong.
+    pub billing_store_id: Option<types::StoreId>,
 }
 
 /// Valid log levels.
@@ -140,6 +151,7 @@ impl Config {
             enable_swagger,
             safe_mode,
             plugin_dir,
+            billing_store_id: billing_store_id_from(|key| env::var(key).ok()),
         };
 
         config.validate()?;
@@ -248,6 +260,36 @@ where
         .map_or_else(|| PathBuf::from(DEFAULT_PLUGIN_DIR), PathBuf::from)
 }
 
+/// The store this instance bills its own subscriptions through, from
+/// `ETHPAY_BILLING_STORE_ID`.
+///
+/// Absent, blank and unparseable all yield `None`, and all three are logged as
+/// nothing rather than guessed at. This id decides which payments a plugin is
+/// told about, so the failure mode for a typo has to be "the billing plugin
+/// hears nothing" - noticed quickly and harmlessly - rather than "the billing
+/// plugin hears about some merchant's store", which is a disclosure nobody
+/// would spot.
+pub fn billing_store_id_from<F>(lookup: F) -> Option<types::StoreId>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let raw = lookup("ETHPAY_BILLING_STORE_ID")?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match uuid::Uuid::parse_str(trimmed) {
+        Ok(id) => Some(types::StoreId(id)),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "ETHPAY_BILLING_STORE_ID is not a UUID; this instance will report no own-store payments"
+            );
+            None
+        }
+    }
+}
+
 /// Relative on purpose: a development run and a test need no privileged
 /// directory to exist. A container image sets `ETHPAY_PLUGIN_DIR` explicitly
 /// to a volume that survives a redeploy.
@@ -288,6 +330,7 @@ mod tests {
             enable_swagger: false,
             safe_mode: false,
             plugin_dir: PathBuf::from(DEFAULT_PLUGIN_DIR),
+            billing_store_id: None,
         };
         let rendered = format!("{config:?}");
         assert!(

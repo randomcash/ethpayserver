@@ -30,6 +30,7 @@ use types::{
 use super::email::EmailSender;
 use super::evm_monitor::EVMMonitor;
 use super::invoice_cleanup::{CleanupDataService, InvoiceCleanupService};
+use super::plugins::OwnStorePaymentObserver;
 use super::webhook::{WebhookDataService, WebhookSink};
 use crate::api::ws::WsBroadcast;
 
@@ -84,6 +85,14 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     webhook_service: Option<Arc<dyn WebhookSink>>,
     ws_broadcast: Option<Arc<WsBroadcast>>,
     email_sender: Arc<dyn EmailSender>,
+    /// Capability 4 observers, and the one store they may hear about.
+    ///
+    /// Both default to "nothing": an instance that does not sell
+    /// subscriptions to itself has no own store and no observers, and
+    /// `own_store_id: None` reports nothing even if an observer is somehow
+    /// registered. See `plugins::payment_observer`.
+    payment_observers: Vec<Arc<dyn OwnStorePaymentObserver>>,
+    own_store_id: Option<types::StoreId>,
 }
 
 impl<
@@ -108,7 +117,27 @@ impl<
             webhook_service,
             ws_broadcast,
             email_sender,
+            payment_observers: Vec::new(),
+            own_store_id: None,
         }
+    }
+
+    /// Report settled invoices on `own_store_id` to `observers`.
+    ///
+    /// Separate from `new` rather than two more positional arguments: every
+    /// existing caller wants neither, and a call site that silently passed
+    /// the wrong store here would leak merchants' payments to a plugin. An
+    /// instance that never calls this reports nothing, which is the state
+    /// every deployment is in until a billing plugin is configured.
+    #[must_use]
+    pub fn with_own_store_payments(
+        mut self,
+        own_store_id: types::StoreId,
+        observers: Vec<Arc<dyn OwnStorePaymentObserver>>,
+    ) -> Self {
+        self.own_store_id = Some(own_store_id);
+        self.payment_observers = observers;
+        self
     }
 
     /// Run the event consumer as a background task.
