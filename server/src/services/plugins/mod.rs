@@ -86,7 +86,9 @@ pub use payment_observer::{
     is_own_store, notify_own_store_payment,
 };
 pub use registry::{PluginRegistry, host_version};
-pub use runtime::{PluginCallError, PluginEngine, PluginInstance, PluginWasmError};
+pub use runtime::{
+    HOST_MODULE, PluginCallError, PluginEngine, PluginHostCalls, PluginInstance, PluginWasmError,
+};
 pub use storage::{PluginSchema, PluginStorage, PluginStorageError};
 
 // Capability 1: no new type here, just `data_service::MerchantDirectoryReader`
