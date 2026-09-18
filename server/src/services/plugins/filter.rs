@@ -19,13 +19,27 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use auth::UserId;
 use types::StoreId;
 
 /// The one thing a filter is ever asked about: may an invoice be created on
 /// `store_id`?
+///
+/// `account_id` is the merchant who owns that store, and it is here because
+/// billing is per merchant rather than per store: the locked pricing model
+/// charges a merchant once for a monthly volume, and a merchant running three
+/// stores must not be billed three times or have their volume split into
+/// three brackets that each look small.
+///
+/// Note what is still absent, which is the property this type exists to hold:
+/// there is no field naming a payment, a confirmation or a credit. Adding the
+/// owner of the store already named here does not open the money path;
+/// widening this to a generic `filter(hook, payload)` would, which is what
+/// the test below refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvoiceCreationFilterRequest {
     pub store_id: StoreId,
+    pub account_id: UserId,
 }
 
 /// A filter's answer. `Deny`'s `reason` is shown to the merchant verbatim, so
@@ -104,6 +118,7 @@ mod tests {
             &filters,
             InvoiceCreationFilterRequest {
                 store_id: StoreId::new(),
+                account_id: UserId::new(),
             },
         )
         .await;
@@ -120,6 +135,7 @@ mod tests {
             &[],
             InvoiceCreationFilterRequest {
                 store_id: StoreId::new(),
+                account_id: UserId::new(),
             },
         )
         .await;
@@ -134,6 +150,7 @@ mod tests {
             &filters,
             InvoiceCreationFilterRequest {
                 store_id: StoreId::new(),
+                account_id: UserId::new(),
             },
         )
         .await;
@@ -154,7 +171,15 @@ mod tests {
     fn the_request_a_filter_receives_names_only_a_store() {
         let request = InvoiceCreationFilterRequest {
             store_id: StoreId::new(),
+            account_id: UserId::new(),
         };
-        let InvoiceCreationFilterRequest { store_id: _ } = request;
+        // Destructured exhaustively on purpose: adding a field here is a
+        // deliberate act that has to be made in this test too, which is the
+        // moment to ask whether the new field names anything on the money
+        // path.
+        let InvoiceCreationFilterRequest {
+            store_id: _,
+            account_id: _,
+        } = request;
     }
 }

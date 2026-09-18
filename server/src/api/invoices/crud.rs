@@ -86,11 +86,40 @@ where
     let is_our_own_billing_store = state
         .billing_store_id
         .is_some_and(|own| own.0 == req.store_id);
-    if !is_our_own_billing_store
+
+    // Resolved only when something is actually going to be asked. Billing is
+    // per merchant rather than per store - a merchant running three stores
+    // pays once, and their volume is one figure rather than three small ones
+    // - so a filter needs the owner, not just the store. That costs a read,
+    // and this is the invoice-creation path, so no plugin installed means no
+    // read: the common case, and every deployment today.
+    let account_id = if is_our_own_billing_store || state.invoice_creation_filters.is_empty() {
+        None
+    } else {
+        match auth::StoreRepository::get_store(&*state.data_service, StoreId(req.store_id)).await {
+            Ok(Some(store)) => Some(store.owner_id),
+            // The permission check above already passed, so the store exists
+            // and is readable; reaching here means the database answered
+            // differently between two calls. Refuse rather than ask the
+            // filter about a merchant we could not identify - a billing
+            // decision made against the wrong account is worse than a
+            // refusal the caller can retry.
+            Ok(None) | Err(_) => {
+                return Err(invoice_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Could not identify the account that owns this store",
+                ));
+            }
+        }
+    };
+
+    if let Some(account_id) = account_id
         && let FilterVerdict::Deny { reason } = run_invoice_creation_filters(
             &state.invoice_creation_filters,
             InvoiceCreationFilterRequest {
                 store_id: StoreId(req.store_id),
+                account_id,
             },
         )
         .await

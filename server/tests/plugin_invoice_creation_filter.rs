@@ -338,3 +338,59 @@ async fn the_exemption_covers_only_the_billing_store() {
     };
     assert_eq!(body["error"].as_str(), Some("invoice_creation_blocked"));
 }
+
+/// The account a filter is told about must be the store's **owner**, not the
+/// caller and not a placeholder.
+///
+/// Billing is per merchant: a wrong account here bills or refuses the wrong
+/// merchant, and every other test in this file passes whatever value is in
+/// that field. This is the only one that reads it.
+#[tokio::test]
+#[ignore]
+async fn the_filter_is_told_which_account_owns_the_store() {
+    use std::sync::Mutex;
+
+    struct Recording(Arc<Mutex<Vec<InvoiceCreationFilterRequest>>>);
+
+    #[async_trait]
+    impl InvoiceCreationFilter for Recording {
+        async fn filter_invoice_creation(
+            &self,
+            request: InvoiceCreationFilterRequest,
+        ) -> FilterVerdict {
+            self.0.lock().unwrap().push(request);
+            FilterVerdict::Allow
+        }
+    }
+
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store");
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let state = app_state(Arc::new(pg), vec![Arc::new(Recording(seen.clone()))]);
+
+    let _ = create_invoice(
+        AuthenticatedUser(user_info(owner)),
+        State(state),
+        Json(invoice_request(store.id.0)),
+    )
+    .await;
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "the filter was never consulted");
+    assert_eq!(
+        seen[0].store_id.0, store.id.0,
+        "the filter was told about the wrong store"
+    );
+    assert_eq!(
+        seen[0].account_id,
+        UserId(owner),
+        "the filter was told about the wrong account; billing would act on the wrong merchant"
+    );
+}
