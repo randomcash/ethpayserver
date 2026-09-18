@@ -59,6 +59,20 @@ pub const HOST_MODULE: &str = "ethpayserver";
 /// Every method is scoped to the calling plugin by the implementation, not by
 /// an argument. A plugin naming the schema it wants to read is the same hole
 /// `enforce_own_store` closes on the invoice side.
+///
+/// # An implementation must bound its own time
+///
+/// The call deadline does **not** cover this. A plugin's deadline is enforced
+/// by wasmtime's epoch interruption, which traps *wasm execution* — and a
+/// host function is not wasm execution. Once control is inside an
+/// implementation of this trait, the epoch can advance as far as it likes and
+/// nothing interrupts it; the plugin is simply not running to be trapped.
+///
+/// So an implementation that talks to a database and hangs holds its
+/// `spawn_blocking` thread indefinitely, past any deadline the host thinks it
+/// set, and the plugin looks stuck for a reason that is not the plugin's. Any
+/// implementation that can block must impose its own timeout and return an
+/// error when it elapses.
 pub trait PluginHostCalls: Send + Sync {
     /// Read from the plugin's own storage. `request` and the answer are the
     /// plugin's own JSON; this layer does not interpret either.
@@ -364,6 +378,15 @@ fn host_linker(engine: &Engine) -> Result<Linker<PluginCtx>, PluginWasmError> {
                 // a short buffer: a plugin that under-allocates gets a clear
                 // number back instead of an opaque failure. It never writes
                 // past what the plugin asked for.
+                //
+                // One shot. The answer is taken out of the context above
+                // whether or not all of it fits, so a plugin that
+                // under-allocates loses the remainder and cannot take again.
+                // That is the safer direction - a partial answer left behind
+                // would be handed to whatever asked next, which is a wrong
+                // answer rather than a missing one - and it costs nothing,
+                // since `storage_query` already told the plugin the exact
+                // length to allocate.
                 let n = pending.len().min(len);
                 let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
                     return -1;
