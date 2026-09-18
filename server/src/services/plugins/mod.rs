@@ -49,6 +49,7 @@
 mod boot;
 mod dispatch;
 mod filter;
+mod host_calls;
 mod invoice_issuer;
 mod merchant_directory;
 mod payment_observer;
@@ -67,6 +68,7 @@ pub use filter::{
     FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest,
     run_invoice_creation_filters,
 };
+pub use host_calls::SchemaStorageCalls;
 pub use invoice_issuer::{
     HostInvoiceIssuer, InvoiceCreateRequest, InvoiceIssuerError, PluginHostApi, enforce_own_store,
 };
