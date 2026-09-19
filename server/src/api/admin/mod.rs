@@ -19,11 +19,14 @@ use utoipa::ToSchema;
 
 use auth::{
     Role, ServerSettings, ServerSettingsRepository, SessionService, UserId, UserRepository,
+    repository::StoreRepository,
 };
+use data_service::AccountDeletionReader;
 
 pub mod plugins;
 
 use super::extractors::AdminAuth;
+use super::stores::store_response;
 use crate::state::PgAppState;
 pub use api_types::{
     AdminUserInfo, ServerSettingsResponse, UpdateRoleRequest, UpdateServerSettingsRequest,
@@ -266,6 +269,137 @@ where
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to unlock user"))?;
 
     Ok(StatusCode::OK)
+}
+
+/// List the stores a user owns.
+///
+/// `GET /stores` only ever answers for the caller, so an admin deciding
+/// whether an account is safe to remove has no way to see what it owns.
+/// This is that lookup, scoped to an arbitrary user id rather than the
+/// session.
+#[utoipa::path(
+    get,
+    path = "/admin/users/{id}/stores",
+    tag = "admin",
+    security(("bearer_auth" = [])),
+    params(("id" = String, Path, description = "User ID")),
+    responses(
+        (status = 200, description = "Stores owned by this user", body = Vec<api_types::StoreResponse>),
+        (status = 400, description = "Invalid user ID"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
+    )
+)]
+pub async fn list_user_stores<A>(
+    AdminAuth(_admin): AdminAuth,
+    Path(user_id): Path<String>,
+    State(state): State<PgAppState<A>>,
+) -> Result<Json<Vec<api_types::StoreResponse>>, (StatusCode, &'static str)>
+where
+    A: SessionService + 'static,
+{
+    let uid = uuid::Uuid::parse_str(&user_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID"))?;
+    let uid = UserId(uid);
+
+    let stores = StoreRepository::get_stores_for_user(&*state.data_service, uid)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+
+    Ok(Json(stores.into_iter().map(store_response).collect()))
+}
+
+/// Delete a user account.
+///
+/// The same safeguard as self-service `DELETE /users/me`
+/// (`data_service::AccountDeletionReader`): refused while the account's
+/// stores hold any payment, payout or refund, so an admin cannot destroy a
+/// merchant's financial history any more easily than the merchant could.
+///
+/// Also refuses outright on a `ServerAdmin` target, rather than counting how
+/// many remain (contrast `update_user_role`'s last-admin guard) - deleting an
+/// admin is a heavier action than demoting one, and an operator who means it
+/// can still demote first. This is also what stands between an automated
+/// cleanup script and the one account a deployment cannot lose: whatever
+/// swept a batch of abandoned signups must not be able to reach the account
+/// that holds a production signing key just because it matched the same
+/// query.
+#[utoipa::path(
+    delete,
+    path = "/admin/users/{id}",
+    tag = "admin",
+    security(("bearer_auth" = [])),
+    params(("id" = String, Path, description = "User ID")),
+    responses(
+        (status = 204, description = "Account deleted"),
+        (status = 400, description = "Invalid user ID, or target is a server admin"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
+        (status = 404, description = "User not found"),
+        (status = 409, description = "Account holds financial records and cannot be deleted"),
+    )
+)]
+pub async fn delete_user_account<A>(
+    AdminAuth(admin): AdminAuth,
+    Path(user_id): Path<String>,
+    State(state): State<PgAppState<A>>,
+) -> Result<StatusCode, (StatusCode, String)>
+where
+    A: SessionService + 'static,
+{
+    let uid = uuid::Uuid::parse_str(&user_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+    let uid = UserId(uid);
+
+    let ds = &*state.data_service;
+
+    let user = ds
+        .get_user(uid)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    if user.role == Role::ServerAdmin {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cannot delete a server admin. Demote the account first.".to_string(),
+        ));
+    }
+
+    let blockers = AccountDeletionReader::account_deletion_blockers(ds, uid)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not check the account.".to_string(),
+            )
+        })?;
+
+    if blockers.any() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "This account's stores hold {}. Deleting it would destroy that \
+                 history, so it is refused.",
+                blockers.describe()
+            ),
+        ));
+    }
+
+    UserRepository::delete_user(ds, uid).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not delete the account.".to_string(),
+        )
+    })?;
+
+    tracing::info!(actor = %admin.id, user_id = %uid, "account deleted by admin");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Get server settings (returns defaults if not yet configured).

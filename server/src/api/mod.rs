@@ -157,6 +157,8 @@ impl From<(StatusCode, String)> for ApiErr {
         users::set_primary_wallet_credential,
         // Admin
         admin::list_users,
+        admin::list_user_stores,
+        admin::delete_user_account,
         admin::update_user_role,
         admin::lock_user,
         admin::unlock_user,
@@ -470,6 +472,8 @@ where
     // Admin endpoints (ServerAdmin only)
     let admin_routes = Router::new()
         .route("/users", get(admin::list_users::<A>))
+        .route("/users/{id}", delete(admin::delete_user_account::<A>))
+        .route("/users/{id}/stores", get(admin::list_user_stores::<A>))
         .route(
             "/users/{id}/role",
             axum::routing::patch(admin::update_user_role::<A>),
