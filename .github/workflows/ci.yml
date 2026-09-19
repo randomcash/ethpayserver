@@ -692,22 +692,22 @@ jobs:
     needs: [docker]
     if: github.ref == 'refs/heads/testnet'
     # Nothing here uses GITHUB_TOKEN - the dispatch authenticates with
-    # DEPLOY_PAT, which is a different credential. Handing this job the
+    # RCS_DISPATCH_PAT, which is a different credential. Handing this job the
     # repository's default token scope while it holds a cross-repo PAT is
     # scope it has no use for.
     permissions: {}
     steps:
       - name: Trigger central-infrastructure deploy
         env:
-          DEPLOY_PAT: ${{ secrets.DEPLOY_PAT }}
+          RCS_DISPATCH_PAT: ${{ secrets.RCS_DISPATCH_PAT }}
         run: |
           set -e
-          [ -n "$DEPLOY_PAT" ] || { echo "::error::DEPLOY_PAT is not set; images were pushed but nothing will deploy"; exit 1; }
+          [ -n "$RCS_DISPATCH_PAT" ] || { echo "::error::RCS_DISPATCH_PAT is not set; images were pushed but nothing will deploy"; exit 1; }
           SHA_TAG="${{ needs.docker.outputs.sha_tag }}"
           [ -n "$SHA_TAG" ] || { echo "::error::docker job produced no sha tag"; exit 1; }
           curl -sS --fail-with-body -X POST \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $DEPLOY_PAT" \
+            -H "Authorization: Bearer $RCS_DISPATCH_PAT" \
             https://api.github.com/repos/randomcash/central-infrastructure/dispatches \
             -d "{\"event_type\":\"deploy-testnet\",\"client_payload\":{\"sha_tag\":\"$SHA_TAG\"}}"
           echo "dispatched deploy-testnet $SHA_TAG" >> "$GITHUB_STEP_SUMMARY"
@@ -751,15 +751,15 @@ jobs:
       - name: Trigger central-infrastructure deploy
         if: steps.resolve.outputs.deploy == 'true'
         env:
-          DEPLOY_PAT: ${{ secrets.DEPLOY_PAT }}
+          RCS_DISPATCH_PAT: ${{ secrets.RCS_DISPATCH_PAT }}
         run: |
           set -e
           # Same guards the testnet dispatch already carries: a missing token or
           # a silent HTTP failure must not read as a successful deploy.
-          [ -n "$DEPLOY_PAT" ] || { echo "::error::DEPLOY_PAT is not set; images were pushed but nothing will deploy"; exit 1; }
+          [ -n "$RCS_DISPATCH_PAT" ] || { echo "::error::RCS_DISPATCH_PAT is not set; images were pushed but nothing will deploy"; exit 1; }
           curl -sS --fail-with-body -X POST \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $DEPLOY_PAT" \
+            -H "Authorization: Bearer $RCS_DISPATCH_PAT" \
             https://api.github.com/repos/randomcash/central-infrastructure/dispatches \
             -d '{"event_type": "deploy", "client_payload": {"service": "ethpayserver", "environment": "${{ steps.resolve.outputs.environment }}", "sha": "${{ github.sha }}", "tag": "${{ steps.resolve.outputs.tag }}"}}'
           echo "dispatched mainnet deploy ${{ steps.resolve.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
