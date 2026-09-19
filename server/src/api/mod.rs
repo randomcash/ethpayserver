@@ -151,6 +151,7 @@ impl From<(StatusCode, String)> for ApiErr {
         users::create_api_key,
         users::revoke_api_key,
         users::update_api_key,
+        users::update_api_key_permissions,
         users::rotate_api_key,
         users::list_wallet_credentials,
         users::create_wallet_reauth_challenge,
@@ -220,6 +221,7 @@ impl From<(StatusCode, String)> for ApiErr {
         users::CreateApiKeyPayload,
         users::CreateApiKeyResponsePayload,
         users::UpdateApiKeyPayload,
+        users::UpdateApiKeyPermissionsPayload,
         users::RotateApiKeyResponsePayload,
         users::WalletCredentialResponse,
         users::WalletReauthChallengeResponse,
@@ -452,6 +454,10 @@ where
         .route(
             "/api-keys/{id}",
             axum::routing::patch(users::update_api_key::<A>),
+        )
+        .route(
+            "/api-keys/{id}/permissions",
+            axum::routing::patch(users::update_api_key_permissions::<A>),
         )
         .route(
             "/api-keys/{id}/rotate",

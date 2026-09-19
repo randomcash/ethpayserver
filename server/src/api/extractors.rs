@@ -8,7 +8,7 @@ use axum::{
     http::{StatusCode, header::AUTHORIZATION, request::Parts},
 };
 
-use auth::{Permission, Role, SessionId, SessionService, UserId, UserInfo};
+use auth::{Permission, Policies, Role, SessionId, SessionService, UserId, UserInfo};
 use chrono::{DateTime, Utc};
 
 use super::api_key_deprecation::DeprecationSlot;
@@ -229,7 +229,25 @@ where
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to resolve user"))?
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "User not found"))?;
-    let user = UserInfo::from(&user);
+    let mut user = UserInfo::from(&user);
+
+    // Narrow the in-memory role to what this specific key is actually scoped
+    // to do. `Role` has exactly two levels, and every ServerAdmin gate in
+    // this codebase (there are over a dozen, from plugin install to user
+    // role management) is a bare `role == Role::ServerAdmin` comparison, not
+    // a per-`Permission` one - so "scoped below ServerAdmin" can only mean
+    // "this request runs as a regular User", and setting that once here
+    // makes all of those checks respect the key's scope for free, without
+    // threading a wider permission type through every call site. A key
+    // authenticates as its owner's full role only when its stored
+    // `permissions` is null (never narrowed - every key that predates this
+    // column, and any key an admin has not deliberately scoped) or
+    // explicitly includes `unrestricted`.
+    if user.role == Role::ServerAdmin
+        && !key_retains_unrestricted_access(key_info.permissions.as_deref())
+    {
+        user.role = Role::User;
+    }
 
     // Fire-and-forget: update last_used_at
     let ds = state.data_service.clone();
@@ -359,6 +377,19 @@ pub(super) fn is_reauth_stale(session_created_at: DateTime<Utc>, now: DateTime<U
     now - session_created_at > REAUTH_FRESHNESS
 }
 
+/// Whether a key's stored permission scope still grants everything its
+/// owner's role would. `None` (unscoped - every key from before per-key
+/// scoping existed, and any key nobody has narrowed) and an explicit
+/// `unrestricted` entry both count; any other stored set does not, even if
+/// it lists individual server permissions, because nothing in this server
+/// gates on those individually today - see `validate_api_key`.
+pub(super) fn key_retains_unrestricted_access(permissions: Option<&[String]>) -> bool {
+    match permissions {
+        None => true,
+        Some(set) => set.iter().any(|p| p == Policies::UNRESTRICTED),
+    }
+}
+
 /// Pure predicate: is a deprecated key past its grace window at `now`?
 ///
 /// Extracted so the grace-expiry rule can be unit-tested without booting a
@@ -444,5 +475,33 @@ mod tests {
         let grace = 30 * 24 * 3600;
         assert!(!is_grace_expired(at(0), at(24 * 20), grace));
         assert!(is_grace_expired(at(0), at(24 * 31), grace));
+    }
+
+    #[test]
+    fn a_key_never_scoped_keeps_unrestricted_access() {
+        // NULL permissions: every key before this column existed, and any
+        // key nobody has deliberately narrowed since.
+        assert!(key_retains_unrestricted_access(None));
+    }
+
+    #[test]
+    fn a_key_explicitly_marked_unrestricted_keeps_full_access() {
+        let perms = vec![Policies::UNRESTRICTED.to_string()];
+        assert!(key_retains_unrestricted_access(Some(&perms)));
+    }
+
+    #[test]
+    fn a_key_scoped_to_specific_permissions_loses_admin_access() {
+        // Selecting individual server permissions is not the same as
+        // `unrestricted` - nothing in this server gates on them
+        // individually, so a key like this authenticates as a plain User.
+        let perms = vec![Policies::SERVER_MANAGE_TOKENS.to_string()];
+        assert!(!key_retains_unrestricted_access(Some(&perms)));
+    }
+
+    #[test]
+    fn a_key_scoped_to_an_empty_set_loses_admin_access() {
+        // The default for a newly created key: nothing was selected.
+        assert!(!key_retains_unrestricted_access(Some(&[])));
     }
 }
