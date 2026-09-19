@@ -193,6 +193,41 @@ returns it, its payment method, webhook and invoices all remain, and a second
 sweep reports it as already archived rather than deleting it again. Removing the
 rows themselves needs database access.
 
+## Leftover registrations (`scripts/sweep-e2e-accounts.mjs`)
+
+`tests/scout.spec.ts` registers a fresh passkey account per run; most never
+get past registration, so what is left is an account with no email, no wallet
+and usually no store. Its own `afterAll` now removes the account it just
+created, the same way `synthetic-payment.spec.ts`'s `afterEach` removes the
+store it created — set `E2E_API_TOKEN` to a `server_admin` token in whatever
+job runs `scout.spec.ts` and cleanup happens there, next to creation, with no
+separate schedule to keep in sync. Without that variable set (e.g. running
+scout locally) it leaves the account in place rather than failing the run.
+
+`scripts/sweep-e2e-accounts.mjs` is the backfill for residue that predates
+that hook - every account this repo's E2E runs created before this shipped -
+and the backstop for a run whose cleanup step itself failed. It removes any
+account with no email and no wallet that also has no store, or whose only
+stores are ones the sweep above would also clear.
+
+```bash
+E2E_API_URL=https://testnet.random.cash E2E_REMOTE=true E2E_API_TOKEN=ak_... \
+  node scripts/sweep-e2e-accounts.mjs          # lists only
+E2E_API_URL=... E2E_REMOTE=true E2E_API_TOKEN=ak_... \
+  node scripts/sweep-e2e-accounts.mjs --execute
+```
+
+The token must belong to a `server_admin` — it calls `GET /admin/users`,
+`GET /admin/users/{id}/stores` and `DELETE /admin/users/{id}`
+(`server/src/api/admin/mod.rs`). That last one goes through the same cascade
+as self-service `DELETE /users/me`: it refuses on its own if the account ever
+took a payment, payout or refund, and it refuses outright on a `server_admin`
+target, so this script cannot reach the account `synthetic-payment.spec.ts`
+pays into even if the query above ever matched it by accident. It does not,
+today — that account also owns `testnet-subscriptions`, a store this sweep
+does not recognize — but the script hardcodes an exclusion for it anyway,
+because a query that happens to be safe today is not a guarantee.
+
 ## Synthetic payment (`tests/synthetic-payment.spec.ts`)
 
 The only test that exercises the money path for real: it creates invoices over
