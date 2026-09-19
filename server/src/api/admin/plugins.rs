@@ -113,6 +113,51 @@ pub struct AdminPluginListResponse {
     pub safe_mode: bool,
 }
 
+/// Refuse an install whose slug another plugin already owns.
+///
+/// Uniqueness cannot live on the slug type: that validates one slug and knows
+/// nothing about any other. Only the host knows what else is installed, so
+/// this is the one place it can be enforced - and it has to be, because two
+/// plugins sharing a slug means one silently owns the URL and the other's
+/// pages become unreachable.
+async fn refuse_a_taken_slug<A>(
+    state: &PgAppState<A>,
+    manifest: &Manifest,
+    id: &PluginId,
+) -> Result<(), ApiErr>
+where
+    A: SessionService + 'static,
+{
+    let Some(slug) = &manifest.slug else {
+        return Ok(());
+    };
+
+    let installed = InstalledPluginReader::list_installed_plugins(&*state.data_service)
+        .await
+        .map_err(|e| server_error(format!("could not read installed plugins: {e}")))?;
+
+    for row in &installed {
+        // An upgrade of this same plugin keeps its own slug.
+        if row.id == id.as_str() {
+            continue;
+        }
+        // A stored manifest that no longer parses cannot be compared, and is
+        // not a reason to refuse an unrelated install: it is already broken
+        // and reported as such at boot.
+        let Ok(other) = row.manifest_toml.parse::<Manifest>() else {
+            continue;
+        };
+        if other.slug.as_ref() == Some(slug) {
+            return Err(bad_request(format!(
+                "slug {slug:?} is already used by plugin {}; a slug is a URL and two \
+                 plugins cannot share one",
+                row.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Install a plugin, or upgrade one already installed.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct InstallPluginRequest {
@@ -443,6 +488,8 @@ where
 
     let id = manifest.id.clone();
     let version = manifest.version.to_string();
+
+    refuse_a_taken_slug(&state, &manifest, &id).await?;
 
     let existing = InstalledPluginReader::get_installed_plugin(&*state.data_service, id.as_str())
         .await
