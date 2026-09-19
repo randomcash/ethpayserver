@@ -504,4 +504,14 @@ mod tests {
         // The default for a newly created key: nothing was selected.
         assert!(!key_retains_unrestricted_access(Some(&[])));
     }
+
+    #[test]
+    fn unrestricted_sentinel_matches_the_permission_enums_own_policy_string() {
+        // This module checks the raw `Policies::UNRESTRICTED` string;
+        // users.rs's validate_requested_permissions checks
+        // `Permission::Unrestricted.as_policy()` instead. Pin them equal so
+        // a future edit to either can't silently desync a key that was
+        // written as "unrestricted" from the one check that retains it.
+        assert_eq!(Permission::Unrestricted.as_policy(), Policies::UNRESTRICTED);
+    }
 }
