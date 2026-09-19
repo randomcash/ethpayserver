@@ -299,6 +299,12 @@ where
         invoice_expiry_minutes: settings.invoice_expiry_minutes,
         rate_limit_rpm: settings.rate_limit_rpm,
         enabled_chain_ids: settings.enabled_chain_ids,
+        billing_store_id: settings.billing_store_id,
+        // What this process resolved at boot, compared with what is stored.
+        // They differ after a change nobody has restarted into, and an admin
+        // needs to be able to tell - otherwise the page shows a store the
+        // server is not actually billing on.
+        billing_store_id_active: state.billing_store_id == settings.billing_store_id,
     }))
 }
 
@@ -316,18 +322,45 @@ where
     )
 )]
 pub async fn update_settings<A>(
-    AdminAuth(_admin): AdminAuth,
+    AdminAuth(admin): AdminAuth,
     State(state): State<PgAppState<A>>,
     Json(body): Json<UpdateServerSettingsRequest>,
 ) -> Result<StatusCode, StatusCode>
 where
     A: SessionService + 'static,
 {
+    let current = state
+        .data_service
+        .get_server_settings()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .unwrap_or_default();
+
+    // Absent leaves it alone; `Some(None)` clears it. A plain `Option` could
+    // not tell those apart, and every client that saves the other four
+    // settings without knowing about this field would switch billing off.
+    let billing_store_id = match body.billing_store_id {
+        Some(next) => next,
+        None => current.billing_store_id,
+    };
+
+    if let Some(store_id) = billing_store_id
+        && billing_store_id != current.billing_store_id
+    {
+        validate_billing_store(&state, store_id).await?;
+        tracing::info!(
+            actor = %admin.id,
+            store_id = %store_id,
+            "billing store changed; it takes effect on the next restart"
+        );
+    }
+
     let settings = ServerSettings {
         default_confirmations: body.default_confirmations,
         invoice_expiry_minutes: body.invoice_expiry_minutes,
         rate_limit_rpm: body.rate_limit_rpm,
         enabled_chain_ids: body.enabled_chain_ids,
+        billing_store_id,
     };
 
     state
@@ -337,6 +370,59 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::OK)
+}
+
+/// Refuse a billing store that could not actually be billed on.
+///
+/// Checked here rather than at boot because here there is a human to tell.
+/// Every one of these failures is silent otherwise: the setting saves, the
+/// server restarts, and the first sign of trouble is a merchant clicking Pay
+/// and getting nothing - by which point nobody connects it to a settings
+/// change made days earlier.
+///
+/// Not a foreign key, for the reason the migration gives: a settings row must
+/// not be what stops a store being deleted.
+async fn validate_billing_store<A>(
+    state: &PgAppState<A>,
+    store_id: types::StoreId,
+) -> Result<(), StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let methods = data_service::StorePaymentMethodReader::get_enabled_payment_methods(
+        &*state.data_service,
+        store_id.0,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Err(reason) = billable(&methods) {
+        tracing::warn!(%store_id, reason, "refused a billing store that cannot be invoiced on");
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    Ok(())
+}
+
+/// Whether an invoice could actually be issued and paid on these methods.
+///
+/// Its own function so the rule is testable without a database. Both
+/// failures produce the same refusal but not the same log line - an operator
+/// who enabled no method and one whose wallet does not resolve have
+/// different things to go and fix.
+fn billable(methods: &[data_service::StorePaymentMethod]) -> Result<(), &'static str> {
+    if methods.is_empty() {
+        return Err("the store has no enabled payment method");
+    }
+    // `get_enabled_payment_methods` resolves each method's wallet through the
+    // pin -> store override -> account primary walk, so this reads the
+    // *resolved* answer and not the raw column. A store where nothing
+    // resolves can quote no address, so an invoice issued on it could never
+    // be paid.
+    if methods.iter().all(|m| m.wallet_id.is_none()) {
+        return Err("no enabled payment method resolves to a wallet");
+    }
+    Ok(())
 }
 
 /// Whether this boot has every plugin disabled.
@@ -397,6 +483,8 @@ mod tests {
             invoice_expiry_minutes: 60,
             rate_limit_rpm: 100,
             enabled_chain_ids: vec![ChainId::evm(1), ChainId::evm(137)],
+            billing_store_id: None,
+            billing_store_id_active: true,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["default_confirmations"], 3);
@@ -411,5 +499,47 @@ mod tests {
         let resp = SafeModeResponse { safe_mode: true };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["safe_mode"], true);
+    }
+
+    fn method(wallet: Option<uuid::Uuid>) -> data_service::StorePaymentMethod {
+        data_service::StorePaymentMethod {
+            id: uuid::Uuid::new_v4(),
+            store_id: uuid::Uuid::new_v4(),
+            chain_id: ChainId::evm(11155111),
+            token_address: None,
+            asset_symbol: "USDC".to_string(),
+            decimals: 6,
+            wallet_id: wallet,
+            xpub: wallet.map(|_| "xpub".to_string()),
+            derivation_index: wallet.map(|_| 0),
+            enabled: true,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// A billing store is checked when it is set, because that is the only
+    /// moment a human is present. Every one of these failures is otherwise
+    /// silent until a merchant clicks Pay and gets nothing, days later.
+    #[test]
+    fn a_store_that_cannot_be_invoiced_on_is_refused() {
+        assert_eq!(
+            billable(&[]),
+            Err("the store has no enabled payment method"),
+            "a store with nothing enabled can quote no asset"
+        );
+
+        assert_eq!(
+            billable(&[method(None)]),
+            Err("no enabled payment method resolves to a wallet"),
+            "a method with no resolved wallet can quote no address, so its \
+             invoice could never be paid"
+        );
+
+        assert!(billable(&[method(Some(uuid::Uuid::new_v4()))]).is_ok());
+
+        // One resolving method is enough - the invoice can be paid on that
+        // one, and refusing the whole store because a second is unconfigured
+        // would block a working setup.
+        assert!(billable(&[method(None), method(Some(uuid::Uuid::new_v4()))]).is_ok());
     }
 }

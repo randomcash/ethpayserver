@@ -12,7 +12,8 @@ impl ServerSettingsRepository for PgDataService {
     async fn get_server_settings(&self) -> Result<Option<ServerSettings>> {
         let row = sqlx::query(
             r#"
-            SELECT default_confirmations, invoice_expiry_minutes, rate_limit_rpm, enabled_chain_ids
+            SELECT default_confirmations, invoice_expiry_minutes, rate_limit_rpm,
+                   enabled_chain_ids, billing_store_id
             FROM server_settings WHERE id = 1
             "#,
         )
@@ -48,19 +49,23 @@ impl ServerSettingsRepository for PgDataService {
                     }
                 })
                 .collect(),
+            billing_store_id: r
+                .get::<Option<uuid::Uuid>, _>("billing_store_id")
+                .map(types::StoreId),
         }))
     }
 
     async fn upsert_server_settings(&self, settings: &ServerSettings) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO server_settings (id, default_confirmations, invoice_expiry_minutes, rate_limit_rpm, enabled_chain_ids, updated_at)
-            VALUES (1, $1, $2, $3, $4, NOW())
+            INSERT INTO server_settings (id, default_confirmations, invoice_expiry_minutes, rate_limit_rpm, enabled_chain_ids, billing_store_id, updated_at)
+            VALUES (1, $1, $2, $3, $4, $5, NOW())
             ON CONFLICT (id) DO UPDATE SET
                 default_confirmations = EXCLUDED.default_confirmations,
                 invoice_expiry_minutes = EXCLUDED.invoice_expiry_minutes,
                 rate_limit_rpm = EXCLUDED.rate_limit_rpm,
                 enabled_chain_ids = EXCLUDED.enabled_chain_ids,
+                billing_store_id = EXCLUDED.billing_store_id,
                 updated_at = NOW()
             "#,
         )
@@ -77,6 +82,7 @@ impl ServerSettingsRepository for PgDataService {
                 .map(|c| c.to_string())
                 .collect::<Vec<_>>(),
         )
+        .bind(settings.billing_store_id.map(|s| s.0))
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;

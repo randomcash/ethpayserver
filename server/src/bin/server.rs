@@ -195,6 +195,40 @@ async fn main() -> Result<()> {
         DEFAULT_MAX_IN_FLIGHT,
     ));
 
+    // The billing store: the stored setting wins, the environment is the
+    // fallback.
+    //
+    // That precedence and not the reverse. An admin who sets this in the UI
+    // must see it take effect - if an environment variable silently overrode
+    // it, the settings page would show one store while the server billed on
+    // another, and nothing would say so. The environment stays supported
+    // because instances configured before this setting existed are still
+    // configured that way, and because a fresh database has no settings row
+    // to read.
+    let billing_store_id =
+        match auth::ServerSettingsRepository::get_server_settings(&*data_service).await {
+            Ok(settings) => settings.and_then(|s| s.billing_store_id).or_else(|| {
+                if config.billing_store_id.is_some() {
+                    tracing::info!(
+                        "billing store taken from ETHPAY_BILLING_STORE_ID; setting it in \
+                     the admin settings takes precedence from then on"
+                    );
+                }
+                config.billing_store_id
+            }),
+            // Not fatal. Falling back to the environment is the behaviour this
+            // server had before the setting existed, and refusing to start over
+            // an unreadable settings row would take the whole instance down for a
+            // feature most instances do not use.
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "could not read server settings; falling back to ETHPAY_BILLING_STORE_ID"
+                );
+                config.billing_store_id
+            }
+        };
+
     // Published further down, once there is an `AppState` to build an issuer
     // around. Handed to the loader now because this is where a plugin is
     // given its host calls, and a plugin that got none here would have no
@@ -242,7 +276,7 @@ async fn main() -> Result<()> {
     // but no plugin has nobody to notify, and observers without a configured
     // store must never be handed a guess at which store is ours.
     let own_store_payments =
-        own_store_payment_reporting(config.billing_store_id, plugin_payment_observers);
+        own_store_payment_reporting(billing_store_id, plugin_payment_observers);
     match own_store_payments.as_ref() {
         Some((store_id, observers)) => tracing::info!(
             %store_id,
@@ -356,14 +390,14 @@ async fn main() -> Result<()> {
     // empty even then.
     state.invoice_creation_filters = plugin_filters;
     // Never filtered: see `AppState::billing_store_id`.
-    state.billing_store_id = config.billing_store_id;
+    state.billing_store_id = billing_store_id;
 
     // Capability 3, published. An instance with no configured billing store
     // publishes nothing, and its plugins are told invoicing is unavailable -
     // which is the truth: there is no store this host would issue on, and
     // guessing at one is how a plugin ends up invoicing a merchant's
     // customers.
-    match config.billing_store_id {
+    match billing_store_id {
         Some(store_id) => {
             let issuer: Arc<dyn server::services::plugins::HostInvoiceIssuer> = Arc::new(
                 server::services::plugins::PluginHostApi::new(state.clone(), store_id),
