@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use payserver_plugin_api::PluginId;
 use payserver_plugin_api::page::{PageElement, Viewer};
 use payserver_plugin_host::{PageRenderError, PageRenderer, PageRequest, PluginHost};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The export asked to draw a page.
 pub const RENDER_PAGE: &str = "render_page";
@@ -52,6 +52,27 @@ struct WirePageRequest<'a> {
     /// bill.
     #[serde(skip_serializing_if = "Option::is_none")]
     account_id: Option<&'a str>,
+}
+
+/// What a plugin answers a page request with.
+///
+/// A failure travels **in the answer**, not in the return value. The ABI packs
+/// `(ptr << 32) | len` into the i64 an export returns and has no
+/// negative-means-error convention there - that belongs to the host-call
+/// direction. A plugin that returned -1 to mean "I failed" had it read as
+/// `ptr = len = 0xFFFFFFFF`, which the runtime reports as a malformed answer
+/// and counts against the failure budget: three page loads disabled the
+/// plugin outright. A plugin that cannot draw one page must not be able to
+/// switch itself off by saying so.
+///
+/// Untagged, and the order matters: `{"error": ...}` is tried first, so a
+/// page can never be mistaken for a failure, and `null` and a real element
+/// both fall through to `Page`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WirePageAnswer {
+    Failed { error: String },
+    Page(Option<PageElement>),
 }
 
 /// Renders one plugin's pages by calling its `render_page` export.
@@ -79,20 +100,33 @@ impl PageRenderer for WasmPageRenderer {
             account_id: request.account_id.as_deref(),
         };
 
-        self.host
-            .run_query::<_, Option<PageElement>>(&self.plugin, RENDER_PAGE, &wire)
+        let answer = self
+            .host
+            .run_query::<_, WirePageAnswer>(&self.plugin, RENDER_PAGE, &wire)
             .await
-            .map_err(|reason| {
-                // Logged with the plugin id because the message the caller
-                // gets is deliberately about the page, not about wasm.
-                tracing::warn!(
-                    plugin_id = %self.plugin,
-                    path = %request.path,
-                    reason = %reason,
-                    "a plugin could not render one of its pages"
-                );
-                PageRenderError::new(reason)
-            })
+            .map_err(|reason| self.refused(&request.path, reason))?;
+
+        match answer {
+            WirePageAnswer::Page(page) => Ok(page),
+            WirePageAnswer::Failed { error } => Err(self.refused(&request.path, error)),
+        }
+    }
+}
+
+impl WasmPageRenderer {
+    /// One place to log a refusal, so the two ways a page can fail - the call
+    /// not completing, and the plugin saying it could not - read the same in
+    /// the log and to the caller.
+    fn refused(&self, path: &str, reason: String) -> PageRenderError {
+        // Logged with the plugin id because the message the caller gets is
+        // deliberately about the page, not about wasm.
+        tracing::warn!(
+            plugin_id = %self.plugin,
+            path,
+            reason = %reason,
+            "a plugin could not render one of its pages"
+        );
+        PageRenderError::new(reason)
     }
 }
 
@@ -136,8 +170,35 @@ mod tests {
     /// path reports a broken plugin instead of a missing page.
     #[test]
     fn a_null_answer_is_a_missing_page_not_a_parse_failure() {
-        let parsed: Option<PageElement> = serde_json::from_str("null").unwrap();
-        assert!(parsed.is_none());
+        let parsed: WirePageAnswer = serde_json::from_str("null").unwrap();
+        assert!(matches!(parsed, WirePageAnswer::Page(None)));
+    }
+
+    /// The path that shipped untested and cost a live outage. A plugin
+    /// reports a failure in its answer; returning a negative from the export
+    /// instead had the runtime read it as `ptr = len = 0xFFFFFFFF`, call the
+    /// answer malformed, and disable the plugin after three page loads.
+    #[test]
+    fn a_plugin_can_report_a_failure_without_looking_broken() {
+        let parsed: WirePageAnswer =
+            serde_json::from_str(r#"{"error":"the database refused the query"}"#).unwrap();
+        let WirePageAnswer::Failed { error } = parsed else {
+            panic!("an error answer must not parse as a page");
+        };
+        assert_eq!(error, "the database refused the query");
+    }
+
+    /// The untagged order has to keep a page out of the failure arm. A page
+    /// that parsed as a failure would take the plugin down for rendering
+    /// correctly.
+    #[test]
+    fn a_real_page_never_parses_as_a_failure() {
+        let parsed: WirePageAnswer =
+            serde_json::from_str(r#"{"type":"section","title":"Your subscription"}"#).unwrap();
+        assert!(
+            matches!(parsed, WirePageAnswer::Page(Some(PageElement::Section(_)))),
+            "a section must parse as a page"
+        );
     }
 
     /// An answer this client does not recognise must still render. The
@@ -145,8 +206,11 @@ mod tests {
     /// otherwise produce a page that fails to parse here and 500s.
     #[test]
     fn an_unrecognised_element_parses_as_unknown_rather_than_failing() {
-        let parsed: Option<PageElement> =
+        let parsed: WirePageAnswer =
             serde_json::from_str(r#"{"type":"hologram","glow":true}"#).unwrap();
-        assert_eq!(parsed, Some(PageElement::Unknown));
+        assert!(matches!(
+            parsed,
+            WirePageAnswer::Page(Some(PageElement::Unknown))
+        ));
     }
 }
