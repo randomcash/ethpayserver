@@ -12,8 +12,8 @@ use sha3::Digest;
 use uuid::Uuid;
 
 use auth::{
-    ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService, WalletCredential,
-    WalletCredentialId, WalletRepository,
+    ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Permission, Role, SessionService,
+    WalletCredential, WalletCredentialId, WalletRepository,
 };
 use data_service::ApiKeyFullInfo;
 
@@ -21,18 +21,199 @@ use super::api_key_hash::hash_api_key;
 use super::extractors::{AuthenticatedUser, FreshlyAuthenticatedUser};
 use crate::services::EmailChangeVerificationData;
 use crate::state::PgAppState;
-pub use api_types::{
-    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
-    RotateApiKeyResponsePayload, UpdateApiKeyPayload,
-};
+pub use api_types::UpdateApiKeyPayload;
 
-/// Build from an `ApiKey` plus the ancillary rate-limit / deprecation fields
-/// not present on the auth-crate struct. Used by endpoints that already
-/// have an `ApiKey` in hand (e.g. update_api_key after a mutation).
+/// API key info for list/get responses.
+///
+/// Hand-mirrors `api_types::ApiKeyInfoResponse` with one added field
+/// (`permissions`) rather than extending that pinned struct: `api-types`
+/// lives in payserver-commons, and landing a field there is the three-step
+/// dance (merge, bump the pinned rev, `cargo update`) this repo's
+/// `CLAUDE.md` describes - a cross-repo change this ticket cannot complete
+/// on its own. Same reasoning as `WalletCredentialResponse` below. The wire
+/// shape only grows a field, so a client still built against the pinned
+/// type keeps working unchanged.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct ApiKeyInfoResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub key_prefix: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Per-key rate limit in requests per minute. Null = server default.
+    pub rate_limit_rpm: Option<i32>,
+    /// Set when the key is deprecated via rotation. Key remains valid during
+    /// the grace window; null means not deprecated.
+    pub deprecated_at: Option<DateTime<Utc>>,
+    /// When the grace window ends for a deprecated key. Null for
+    /// non-deprecated keys.
+    pub deprecation_expires_at: Option<DateTime<Utc>>,
+    /// Permission policy strings this key is scoped to. `None` means it
+    /// inherits its owner's role in full - either because it predates this
+    /// column, or because nobody has narrowed it since.
+    pub permissions: Option<Vec<String>>,
+}
+
+/// Response for listing API keys.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct ApiKeyListResponse {
+    pub keys: Vec<ApiKeyInfoResponse>,
+}
+
+/// Request to create a new API key. See `ApiKeyInfoResponse` for why this is
+/// hand-mirrored rather than extending the pinned `api_types` struct.
+#[derive(Debug, Clone, serde::Deserialize, utoipa::ToSchema)]
+pub struct CreateApiKeyPayload {
+    /// Human-readable name for the key.
+    pub name: String,
+    /// Optional expiration time.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// The key's scope, chosen at creation. Only two shapes are accepted
+    /// today: `[]` (scoped to the owner's non-admin baseline) or
+    /// `["unrestricted"]` (see `auth::Policies::UNRESTRICTED`, inherits the
+    /// owner's role in full). Defaults to `[]` when omitted: a new key
+    /// starts able to do nothing beyond authenticating and must be
+    /// deliberately widened, rather than silently inheriting everything its
+    /// owner can do. `unrestricted` is only accepted when the caller's own
+    /// current role grants it - a key can never exceed its owner, including
+    /// at the moment it is minted. See `validate_requested_permissions` for
+    /// why the vocabulary stops at these two shapes rather than the full
+    /// list of named policies: nothing in this server enforces those
+    /// individually yet, so offering a menu implying otherwise would be
+    /// worse than not offering it.
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+/// Response after creating an API key (includes plaintext key).
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct CreateApiKeyResponsePayload {
+    pub id: Uuid,
+    pub name: String,
+    pub key_prefix: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    /// The plaintext API key. Store this securely — it cannot be retrieved again.
+    pub key: String,
+    pub permissions: Vec<String>,
+}
+
+/// Response after rotating an API key.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct RotateApiKeyResponsePayload {
+    /// The new API key's ID.
+    pub id: Uuid,
+    pub name: String,
+    pub key_prefix: String,
+    pub created_at: DateTime<Utc>,
+    /// The new plaintext API key. Store this securely.
+    pub key: String,
+    /// When the old key was deprecated (grace window starts here).
+    pub old_key_deprecated_at: DateTime<Utc>,
+    /// When the old key's grace window ends and it stops authenticating.
+    /// Clients should show this directly instead of hardcoding "48 hours".
+    pub old_key_grace_expires_at: DateTime<Utc>,
+    /// Permission scope carried over from the key being rotated.
+    pub permissions: Option<Vec<String>>,
+}
+
+/// Body for `PATCH /users/api-keys/{id}/permissions`.
+#[derive(Debug, Clone, serde::Deserialize, utoipa::ToSchema)]
+pub struct UpdateApiKeyPermissionsPayload {
+    /// `None`/`null` clears the key back to "inherit the owner's role in
+    /// full". `Some` sets an explicit scope - see `CreateApiKeyPayload`'s
+    /// `permissions` field for the two shapes accepted and why.
+    pub permissions: Option<Vec<String>>,
+}
+
+/// Is `requested` one of the two scopes this server can actually enforce?
+///
+/// Every admin gate in this codebase (there are over a dozen, from plugin
+/// install to user role management) is a bare `role == Role::ServerAdmin`
+/// comparison, not a check against an individual `Permission` - see
+/// `validate_api_key`'s downgrade and `key_retains_unrestricted_access` in
+/// `extractors.rs`. So a stored set naming specific server or user policies
+/// (e.g. just `ethpay.server.canmanagetokens`) would be silently
+/// indistinguishable from an empty one: neither grants anything past a plain
+/// `User`'s fixed permissions. Offering a menu of individually-named actions
+/// that all collapse to the same outcome is worse than not offering it, so
+/// this only accepts what the server can actually tell apart: nothing beyond
+/// the owner's non-admin baseline (`[]`), or the owner's full role
+/// (`["unrestricted"]`). Widening this to real per-action scoping needs
+/// per-endpoint enforcement this codebase does not have yet, not a change
+/// here.
+///
+/// `owner_role` is always the role belonging to the account the key
+/// authenticates as, never the caller's - the write-time half of "a key can
+/// never exceed its owner". Read-time enforcement (`validate_api_key`, and
+/// every `role == Role::ServerAdmin` check downstream of it) covers a key
+/// whose owner's role later changes, but without this an admin editing
+/// someone else's key could grant it `unrestricted` on the strength of the
+/// *admin's* role, which that key's own owner could never grant themselves -
+/// precisely the "promoting the owner must not widen keys already issued"
+/// failure this feature exists to close, from the other direction.
+fn validate_requested_permissions(owner_role: Role, requested: &[String]) -> Result<(), StatusCode> {
+    match requested {
+        [] => Ok(()),
+        [single] if single == Permission::Unrestricted.as_policy() => {
+            if owner_role == Role::ServerAdmin {
+                Ok(())
+            } else {
+                Err(StatusCode::BAD_REQUEST)
+            }
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+#[cfg(test)]
+mod permission_scope_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_scope_is_always_accepted() {
+        assert!(validate_requested_permissions(Role::User, &[]).is_ok());
+        assert!(validate_requested_permissions(Role::ServerAdmin, &[]).is_ok());
+    }
+
+    #[test]
+    fn unrestricted_is_accepted_only_for_a_server_admin_owner() {
+        let unrestricted = vec![Permission::Unrestricted.as_policy().to_string()];
+        assert!(validate_requested_permissions(Role::ServerAdmin, &unrestricted).is_ok());
+        assert!(validate_requested_permissions(Role::User, &unrestricted).is_err());
+    }
+
+    #[test]
+    fn a_named_individual_permission_is_rejected_even_for_an_admin_owner() {
+        // Nothing in this server enforces named permissions individually -
+        // accepting one here would promise scoping the rest of the codebase
+        // cannot deliver.
+        let named = vec![Permission::ServerManageTokens.as_policy().to_string()];
+        assert!(validate_requested_permissions(Role::ServerAdmin, &named).is_err());
+    }
+
+    #[test]
+    fn unrestricted_mixed_with_anything_else_is_rejected() {
+        let mixed = vec![
+            Permission::Unrestricted.as_policy().to_string(),
+            Permission::ServerViewUsers.as_policy().to_string(),
+        ];
+        assert!(validate_requested_permissions(Role::ServerAdmin, &mixed).is_err());
+    }
+}
+
+/// Build from an `ApiKey` plus the ancillary rate-limit / deprecation /
+/// permission fields not present on the auth-crate struct. Used by
+/// endpoints that already have an `ApiKey` in hand (e.g. update_api_key
+/// after a mutation).
 pub(crate) fn api_key_info_with_rate_limit(
     key: &ApiKey,
     rate_limit_rpm: Option<i32>,
     deprecated_at: Option<DateTime<Utc>>,
+    permissions: Option<Vec<String>>,
 ) -> ApiKeyInfoResponse {
     let info = ApiKeyInfo::from(key);
     ApiKeyInfoResponse {
@@ -46,15 +227,15 @@ pub(crate) fn api_key_info_with_rate_limit(
         rate_limit_rpm,
         deprecated_at,
         deprecation_expires_at: deprecated_at.map(deprecation_expires_at),
+        permissions,
     }
 }
 
 /// Build the wire shape from the `auth` domain type.
 ///
-/// A free function rather than a `From` impl: `ApiKeyFullInfo` belongs to `auth` and
-/// `ApiKeyInfoResponse` to `api-types`, so neither is local here. `api-types` does not
-/// depend on `auth` deliberately - it is compiled into the browser bundle and
-/// `auth` is a server-side crate.
+/// A free function rather than a `From` impl: `ApiKeyFullInfo` belongs to
+/// `data_service` and `ApiKeyInfoResponse` is local to this module (see its
+/// doc comment), so neither owns the other.
 pub(crate) fn api_key_info_response(info: ApiKeyFullInfo) -> ApiKeyInfoResponse {
     ApiKeyInfoResponse {
         id: info.id,
@@ -67,6 +248,7 @@ pub(crate) fn api_key_info_response(info: ApiKeyFullInfo) -> ApiKeyInfoResponse 
         rate_limit_rpm: info.rate_limit_rpm,
         deprecated_at: info.deprecated_at,
         deprecation_expires_at: info.deprecated_at.map(deprecation_expires_at),
+        permissions: info.permissions,
     }
 }
 
@@ -132,11 +314,13 @@ where
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    validate_requested_permissions(user.role, &payload.permissions)?;
+
     let (raw_key, api_key) = build_api_key(&name, user.id, payload.expires_at);
 
     state
         .data_service
-        .create_api_key(&api_key)
+        .create_api_key_with_permissions(&api_key, Some(&payload.permissions))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -150,6 +334,7 @@ where
             created_at: api_key.created_at,
             expires_at: api_key.expires_at,
             key: raw_key,
+            permissions: payload.permissions,
         }),
     ))
 }
@@ -254,21 +439,128 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Preserve any existing deprecation state in the response rather than
-    // always returning None — prevents a stale-UI bug where the client
-    // thinks the key was un-deprecated after a rate-limit update.
-    let deprecated_at = state
+    // Preserve any existing deprecation/permission state in the response
+    // rather than always returning None — prevents a stale-UI bug where the
+    // client thinks the key was un-deprecated, or reset to full access,
+    // after a rate-limit update.
+    let auth_info = state
         .data_service
         .get_api_key_auth_info_by_id(id)
         .await
         .ok()
-        .flatten()
-        .and_then(|info| info.deprecated_at);
+        .flatten();
+    let deprecated_at = auth_info.as_ref().and_then(|info| info.deprecated_at);
+    let permissions = auth_info.and_then(|info| info.permissions);
 
     Ok(Json(api_key_info_with_rate_limit(
         &key,
         payload.rate_limit_rpm,
         deprecated_at,
+        permissions,
+    )))
+}
+
+/// Narrow (or, for a still-fully-privileged caller, widen back to
+/// "inherit") an existing API key's permission scope.
+///
+/// A separate endpoint from `update_api_key` rather than folded into it:
+/// that endpoint always overwrites every field in its body, and a caller
+/// that only wants to change the rate limit must not be able to
+/// accidentally reset a deliberately narrowed key back to full access just
+/// by omitting a field it does not know exists.
+///
+/// Clearing to "inherit" (`permissions: null`) is refused unless the caller
+/// is unrestricted for *this* request - not merely `role == ServerAdmin` on
+/// the account, but actually holding that role right now. A key that has
+/// itself been scoped away from `unrestricted` authenticates as a plain
+/// `User` (see `validate_api_key`), so it cannot use this endpoint to hand
+/// itself back the access it was narrowed away from, even against its own
+/// row.
+#[utoipa::path(
+    patch,
+    path = "/users/api-keys/{id}/permissions",
+    tag = "users",
+    security(("bearer_auth" = [])),
+    params(
+        ("id" = Uuid, Path, description = "API key ID to update"),
+    ),
+    request_body = UpdateApiKeyPermissionsPayload,
+    responses(
+        (status = 200, description = "Permission scope updated", body = ApiKeyInfoResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "API key not found"),
+    )
+)]
+pub async fn update_api_key_permissions<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateApiKeyPermissionsPayload>,
+) -> Result<Json<ApiKeyInfoResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let key = state
+        .data_service
+        .get_api_key(ApiKeyId(id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if key.user_id != user.id && user.role != Role::ServerAdmin {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // The role to validate a widened grant against is the key's own owner's,
+    // not the caller's - an admin editing someone else's key must not be
+    // able to launder a grant through their own broader role. Only fetched
+    // when the caller isn't the owner: the common case (a user managing
+    // their own key) already has this in hand.
+    let owner_role = if key.user_id == user.id {
+        user.role
+    } else {
+        auth::UserRepository::get_user(&*state.data_service, key.user_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?
+            .role
+    };
+
+    let permissions = match &payload.permissions {
+        Some(requested) => {
+            validate_requested_permissions(owner_role, requested)?;
+            Some(requested.clone())
+        }
+        None => {
+            if user.role != Role::ServerAdmin {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            None
+        }
+    };
+
+    state
+        .data_service
+        .update_api_key_permissions(ApiKeyId(id), permissions.as_deref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let auth_info = state
+        .data_service
+        .get_api_key_auth_info_by_id(id)
+        .await
+        .ok()
+        .flatten();
+    let (rate_limit_rpm, deprecated_at) = auth_info
+        .map(|info| (info.rate_limit_rpm, info.deprecated_at))
+        .unwrap_or_default();
+
+    Ok(Json(api_key_info_with_rate_limit(
+        &key,
+        rate_limit_rpm,
+        deprecated_at,
+        permissions,
     )))
 }
 
@@ -333,13 +625,16 @@ where
     // Without a transaction a partial failure (new key created, deprecation
     // fails) would leave TWO active keys on the account — the explicit
     // enemy of rotation.
+    //
+    // The new key carries over the old key's permission scope: rotation
+    // swaps the secret, it does not widen what the key can do.
     let new_name = format!("{} (rotated)", key.name);
     let (raw_key, new_api_key) = build_api_key(&new_name, user.id, key.expires_at);
     let now = Utc::now();
 
     state
         .data_service
-        .rotate_api_key_atomic(&new_api_key, id, now)
+        .rotate_api_key_atomic(&new_api_key, auth_info.permissions.as_deref(), id, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -353,6 +648,7 @@ where
             key: raw_key,
             old_key_deprecated_at: now,
             old_key_grace_expires_at: deprecation_expires_at(now),
+            permissions: auth_info.permissions,
         }),
     ))
 }
