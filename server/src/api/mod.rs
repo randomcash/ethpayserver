@@ -163,6 +163,7 @@ impl From<(StatusCode, String)> for ApiErr {
         admin::get_settings,
         admin::update_settings,
         admin::get_safe_mode,
+        plugins::list_plugin_pages,
         admin::plugins::list_plugins,
         admin::plugins::install_plugin,
         admin::plugins::enable_plugin,
@@ -229,6 +230,9 @@ impl From<(StatusCode, String)> for ApiErr {
         admin::ServerSettingsResponse,
         admin::UpdateServerSettingsRequest,
         admin::SafeModeResponse,
+        plugins::PluginPagesResponse,
+        plugins::PluginPagesInfo,
+        plugins::PluginPageInfo,
         admin::plugins::AdminPluginInfo,
         admin::plugins::AdminPluginListResponse,
         admin::plugins::InstallPluginRequest,
@@ -414,6 +418,9 @@ where
     // Plugin static pages. Same route for merchant and admin views - the
     // handler resolves the viewer from the authenticated identity.
     let plugin_routes = Router::new()
+        // What the client puts in its navigation. Declared in each plugin's
+        // manifest, so building a menu runs no plugin code.
+        .route("/", get(plugins::list_plugin_pages::<A>))
         .route("/{id}/pages/{*path}", get(plugins::get_page::<A>))
         .with_state(state.clone());
 

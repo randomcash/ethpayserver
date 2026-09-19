@@ -1,11 +1,16 @@
-//! What a plugin's `storage_query` import actually does.
+//! What a plugin's host imports actually do.
 //!
 //! The wasm side of this is in `payserver-plugin-host`: a plugin calls
-//! `storage_query`, gets a length back, and copies the answer out with
-//! `host_take`. This is the other end - the part that runs SQL on a
-//! connection Postgres authenticated as *that plugin's* role.
+//! `storage_query` or `invoice_create`, gets a length back, and copies the
+//! answer out with `host_take`. This is the other end.
 //!
-//! # The contract
+//! Two capabilities, and they are not alike. Storage runs SQL on a
+//! connection Postgres authenticated as *that plugin's* role, and the
+//! database is what confines it. Invoicing has no such backstop - it writes
+//! to the money path - so its confinement is that the plugin cannot name a
+//! store. See [`PluginCalls::invoice_create`].
+//!
+//! # The storage contract
 //!
 //! Request:
 //!
@@ -104,10 +109,67 @@ struct StatementResult {
     rows: Vec<BTreeMap<String, Option<String>>>,
 }
 
-/// One plugin's database access, over its own pool.
-pub struct SchemaStorageCalls {
+/// The issuer a plugin's `invoice_create` reaches, published once the server
+/// has one.
+///
+/// This exists to break a genuine cycle rather than to be clever about
+/// initialisation order. An issuer is built around `AppState`; `AppState` is
+/// built with the capability implementations that come out of plugin
+/// loading; plugin loading is where a plugin is handed its host calls. One
+/// of the three has to be late, and this is the one where late is harmless:
+/// nothing can call a plugin until the router is serving, and the cell is
+/// filled before it does.
+///
+/// A `OnceLock` rather than a `Mutex` because the write happens once during
+/// boot and every read after it is on the money path. It also means the
+/// capability cannot be swapped out from under a running plugin - whoever
+/// could do that could redirect where invoices are issued.
+///
+/// Unpublished reads as "this host does not issue invoices", which is the
+/// same answer an instance with no billing store gives, and the right one:
+/// in both cases there is no store this host would be willing to issue on.
+#[derive(Clone, Default)]
+pub struct DeferredIssuer(Arc<std::sync::OnceLock<Arc<dyn super::HostInvoiceIssuer>>>);
+
+impl DeferredIssuer {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publish the issuer. Returns whether this call is the one that set it;
+    /// a second call changes nothing and says so rather than silently
+    /// winning or silently losing.
+    pub fn publish(&self, issuer: Arc<dyn super::HostInvoiceIssuer>) -> bool {
+        self.0.set(issuer).is_ok()
+    }
+
+    fn get(&self) -> Option<&Arc<dyn super::HostInvoiceIssuer>> {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Debug for DeferredIssuer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DeferredIssuer")
+            .field(&self.get().is_some())
+            .finish()
+    }
+}
+
+/// One plugin's host imports: its database, and whether it may invoice.
+pub struct PluginCalls {
     plugin: PluginId,
     pools: Arc<PluginPools>,
+    /// Who issues an invoice when this plugin asks for one, if anything
+    /// does.
+    ///
+    /// Unpublished is the ordinary case and not a degraded one: issuing
+    /// requires an own store to issue on, and an instance that has not been
+    /// told which store is its own has no honest answer to give. Absent
+    /// means the plugin is told invoicing is unavailable, rather than the
+    /// host guessing at a store.
+    issuer: DeferredIssuer,
     /// The runtime to drive the async database work on.
     ///
     /// [`PluginHostCalls`] is sync because the runtime calls plugins from
@@ -118,7 +180,7 @@ pub struct SchemaStorageCalls {
     handle: tokio::runtime::Handle,
 }
 
-impl SchemaStorageCalls {
+impl PluginCalls {
     /// # Panics
     /// If constructed outside a tokio runtime.
     #[must_use]
@@ -126,6 +188,7 @@ impl SchemaStorageCalls {
         Self {
             plugin,
             pools,
+            issuer: DeferredIssuer::default(),
             handle: tokio::runtime::Handle::current(),
         }
     }
@@ -234,7 +297,99 @@ fn decode_row(
     Ok(out)
 }
 
-impl PluginHostCalls for SchemaStorageCalls {
+/// What a plugin sends to ask for an invoice.
+///
+/// Note what is not here: a store. Not an optional one, not one that gets
+/// checked - the field does not exist, so a plugin cannot express the
+/// request that would have to be refused. `enforce_own_store` still guards
+/// the host-side API for ordinary callers; on this path the property holds
+/// because there is nothing to enforce it against.
+///
+/// Every value is a string, for the same reason it is on the storage side:
+/// an amount is `NUMERIC(38,18)` and a JSON number is a double.
+#[derive(Debug, Deserialize)]
+struct InvoiceRequest {
+    /// Must match one of the store's own enabled payment methods. There is
+    /// no conversion path here - the instance prices its own subscription in
+    /// something it already accepts.
+    asset_symbol: String,
+    amount: String,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    customer_email: Option<String>,
+}
+
+/// What the plugin gets back: enough to record the invoice against a
+/// subscription and to send the merchant to it.
+#[derive(Debug, Serialize)]
+struct InvoiceIssued {
+    invoice_id: String,
+    currency: String,
+    amount: String,
+    status: String,
+    expires_at: String,
+    /// Where a merchant pays it. A path rather than a URL: the host does not
+    /// reliably know its own external origin, and a plugin that rendered a
+    /// wrong absolute URL would send a paying merchant somewhere that is not
+    /// this instance.
+    checkout_path: String,
+}
+
+impl PluginCalls {
+    /// Point this plugin's `invoice_create` at an issuer, which may not have
+    /// been published yet.
+    #[must_use]
+    pub fn with_issuer(mut self, issuer: DeferredIssuer) -> Self {
+        self.issuer = issuer;
+        self
+    }
+
+    fn issue(&self, request: InvoiceRequest) -> Result<InvoiceIssued, String> {
+        let Some(issuer) = self.issuer.get().cloned() else {
+            return Err(
+                "this host does not issue invoices; no own store is configured for it".to_string(),
+            );
+        };
+
+        // The store is the host's, taken from the issuer that was built
+        // around it. `own_store_id()` is the same value `enforce_own_store`
+        // would compare against, so the check it performs is trivially
+        // satisfied rather than skipped.
+        let store_id = issuer.own_store_id();
+
+        let invoice = self
+            .handle
+            .block_on(issuer.invoice_create(super::InvoiceCreateRequest {
+                store_id,
+                asset_symbol: request.asset_symbol,
+                amount: request.amount,
+                metadata: request.metadata,
+                customer_email: request.customer_email,
+            }))
+            .map_err(|e| e.to_string())?;
+
+        Ok(InvoiceIssued {
+            checkout_path: format!("/checkout/{}", invoice.id.0),
+            invoice_id: invoice.id.0.to_string(),
+            currency: invoice.currency,
+            amount: invoice.amount,
+            status: format!("{:?}", invoice.status).to_lowercase(),
+            expires_at: invoice.expires_at.to_rfc3339(),
+        })
+    }
+}
+
+impl PluginHostCalls for PluginCalls {
+    fn invoice_create(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        let parsed: InvoiceRequest = serde_json::from_slice(request)
+            .map_err(|e| format!("could not read the invoice request: {e}"))?;
+
+        let issued = self.issue(parsed)?;
+        serde_json::to_vec(&issued)
+            .map_err(|e| format!("could not serialise the invoice answer: {e}"))
+    }
+
     fn storage_query(&self, request: &[u8]) -> Result<Vec<u8>, String> {
         let parsed: StorageRequest = serde_json::from_slice(request)
             .map_err(|e| format!("could not read the storage request: {e}"))?;
@@ -327,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_statement_list_is_refused() {
         let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
-        let calls = SchemaStorageCalls::new(PluginId::new("cash.random.t").unwrap(), pools);
+        let calls = PluginCalls::new(PluginId::new("cash.random.t").unwrap(), pools);
         let err = calls
             .run(request(r#"{"statements":[]}"#))
             .await
@@ -338,7 +493,7 @@ mod tests {
     #[tokio::test]
     async fn too_many_statements_are_refused_before_any_run() {
         let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
-        let calls = SchemaStorageCalls::new(PluginId::new("cash.random.t").unwrap(), pools);
+        let calls = PluginCalls::new(PluginId::new("cash.random.t").unwrap(), pools);
         let many: Vec<String> = (0..MAX_STATEMENTS + 1)
             .map(|_| r#"{"sql":"SELECT 1"}"#.to_string())
             .collect();
@@ -357,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn a_plugin_without_a_pool_gets_no_database() {
         let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
-        let calls = SchemaStorageCalls::new(PluginId::new("cash.random.nopool").unwrap(), pools);
+        let calls = PluginCalls::new(PluginId::new("cash.random.nopool").unwrap(), pools);
         let err = calls
             .run(request(r#"{"statements":[{"sql":"SELECT 1"}]}"#))
             .await
@@ -369,9 +524,8 @@ mod tests {
     fn a_malformed_request_is_an_error_not_a_panic() {
         let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let calls = rt.block_on(async {
-            SchemaStorageCalls::new(PluginId::new("cash.random.t").unwrap(), pools)
-        });
+        let calls =
+            rt.block_on(async { PluginCalls::new(PluginId::new("cash.random.t").unwrap(), pools) });
         let err = calls.storage_query(b"not json at all").unwrap_err();
         assert!(err.contains("could not read the storage request"), "{err}");
     }
@@ -381,7 +535,7 @@ mod tests {
     async fn live(
         name: &str,
     ) -> Option<(
-        SchemaStorageCalls,
+        PluginCalls,
         String,
         crate::services::plugins::PluginStorage,
         PluginId,
@@ -418,7 +572,7 @@ mod tests {
         pools.register(&plugin, &password).await.unwrap();
 
         Some((
-            SchemaStorageCalls::new(plugin.clone(), pools),
+            PluginCalls::new(plugin.clone(), pools),
             schema,
             storage,
             plugin,

@@ -46,7 +46,7 @@ use auth::SessionService;
 use chrono::{DateTime, Utc};
 use types::{InvoiceData, InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, StoreId};
 
-use super::PluginHostApi;
+use super::{HostInvoiceIssuer, PluginHostApi};
 
 /// A settled invoice on the instance's own store.
 ///

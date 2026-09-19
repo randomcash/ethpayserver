@@ -195,11 +195,18 @@ async fn main() -> Result<()> {
         DEFAULT_MAX_IN_FLIGHT,
     ));
 
+    // Published further down, once there is an `AppState` to build an issuer
+    // around. Handed to the loader now because this is where a plugin is
+    // given its host calls, and a plugin that got none here would have no
+    // way to be granted them later.
+    let plugin_issuer = server::services::plugins::DeferredIssuer::new();
+
     let loaded = match load_installed_plugins(
         &*data_service,
         plugin_host.as_deref(),
         &plugin_artifacts,
         Some(&plugin_pools),
+        &plugin_issuer,
     )
     .await
     {
@@ -350,6 +357,50 @@ async fn main() -> Result<()> {
     state.invoice_creation_filters = plugin_filters;
     // Never filtered: see `AppState::billing_store_id`.
     state.billing_store_id = config.billing_store_id;
+
+    // Capability 3, published. An instance with no configured billing store
+    // publishes nothing, and its plugins are told invoicing is unavailable -
+    // which is the truth: there is no store this host would issue on, and
+    // guessing at one is how a plugin ends up invoicing a merchant's
+    // customers.
+    match config.billing_store_id {
+        Some(store_id) => {
+            let issuer: Arc<dyn server::services::plugins::HostInvoiceIssuer> = Arc::new(
+                server::services::plugins::PluginHostApi::new(state.clone(), store_id),
+            );
+            if plugin_issuer.publish(issuer) {
+                tracing::info!(%store_id, "plugins may issue invoices on this instance's own store");
+            }
+        }
+        None => tracing::info!(
+            "plugins cannot issue invoices: ETHPAY_BILLING_STORE_ID is unset, so this \
+             instance has no store of its own to bill on"
+        ),
+    }
+
+    // Capability 5. `PageHost` is built empty by `AppState::new` and has
+    // never had a production renderer registered in it, so every plugin page
+    // request 404'd - correct for a host with nothing to draw, and
+    // indistinguishable from a feature that was never wired up.
+    if let Some(host) = plugin_host.as_ref() {
+        let mut pages = server::services::plugins::PageHost::new();
+        for id in &loaded {
+            pages.register(
+                id.clone(),
+                Arc::new(server::services::plugins::WasmPageRenderer::new(
+                    Arc::clone(host),
+                    id.clone(),
+                )),
+            );
+        }
+        if !loaded.is_empty() {
+            tracing::info!(
+                plugins = loaded.len() as u64,
+                "plugin pages are served from /plugins/{{id}}/pages/{{path}}"
+            );
+        }
+        state.plugin_pages = Arc::new(pages);
+    }
 
     // Create rate limiters
     let rate_limit_config = RateLimitConfig::from_env();
