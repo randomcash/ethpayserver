@@ -64,7 +64,7 @@ use payserver_plugin_api::PluginId;
 
 use super::ApiErr;
 use super::extractors::AuthenticatedUser;
-use crate::services::plugins::{PageElement, PageError, PluginRegistry, Viewer};
+use crate::services::plugins::{PageElement, PageError, PageRequest, PluginRegistry, Viewer};
 use crate::state::PgAppState;
 
 /// Builds the `/plugins` mount.
@@ -139,6 +139,119 @@ impl From<PageError> for ApiErr {
     }
 }
 
+/// Which declared pages a caller is offered.
+///
+/// Its own function so the rule can be tested without a database behind it.
+/// Navigation only: see [`list_plugin_pages`] for why this is not what stops
+/// a merchant reading an operator's page.
+fn visible_pages(
+    declared: Vec<payserver_plugin_api::PageDeclaration>,
+    is_admin: bool,
+) -> Vec<PluginPageInfo> {
+    declared
+        .into_iter()
+        .filter(|page| is_admin || !page.admin_only)
+        .map(|page| PluginPageInfo {
+            path: page.path,
+            label: page.label,
+        })
+        .collect()
+}
+
+/// One plugin's pages, as the client should list them.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct PluginPagesInfo {
+    pub id: String,
+    pub pages: Vec<PluginPageInfo>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct PluginPageInfo {
+    /// Append to `/plugins/{id}/pages/` to fetch it.
+    pub path: String,
+    pub label: String,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct PluginPagesResponse {
+    pub plugins: Vec<PluginPagesInfo>,
+}
+
+/// What a client should put in its navigation.
+///
+/// Declared in each plugin's manifest, not discovered by calling it: a menu
+/// must be built before any page is asked for, and a host that ran wasm to
+/// find out what to draw a sidebar from would be running plugin code on
+/// every page load of the app.
+///
+/// Only plugins this process actually has loaded are listed. An installed
+/// but unloaded plugin's page would 404 on arrival, and offering a merchant
+/// a menu entry that cannot open is worse than not offering it.
+///
+/// `admin_only` entries are filtered out here for a merchant. That is
+/// navigation, not access control - the plugin still decides what to return
+/// for the viewer it is handed, and the viewer still comes from the session.
+/// Filtering here only avoids showing someone a door they would be handed
+/// their own page through anyway.
+#[utoipa::path(
+    get,
+    path = "/plugins",
+    responses((status = 200, body = PluginPagesResponse)),
+    tag = "plugins"
+)]
+pub async fn list_plugin_pages<A>(
+    State(state): State<PgAppState<A>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<PluginPagesResponse>, ApiErr>
+where
+    A: SessionService + 'static,
+{
+    use data_service::InstalledPluginReader;
+    use payserver_plugin_api::Manifest;
+
+    let installed = InstalledPluginReader::list_installed_plugins(&*state.data_service)
+        .await
+        .map_err(|e| {
+            ApiErr::from((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not read installed plugins: {e}"),
+            ))
+        })?;
+
+    let is_admin = matches!(user.role, Role::ServerAdmin);
+
+    let plugins = installed
+        .into_iter()
+        .filter(|row| row.enabled)
+        .filter_map(|row| {
+            let id = PluginId::new(row.id.clone()).ok()?;
+            // Loaded, not merely installed: a page from a plugin this
+            // process never instantiated has nothing to render it.
+            let loaded = state
+                .plugin_host
+                .as_ref()
+                .and_then(|h| h.status(&id))
+                .is_some_and(|s| s.enabled);
+            if !loaded {
+                return None;
+            }
+
+            let manifest: Manifest = row.manifest_toml.parse().ok()?;
+            let pages = visible_pages(manifest.pages, is_admin);
+
+            // A plugin with no pages a caller may see is not listed at all,
+            // rather than listed empty - a client should not have to know
+            // that an empty list means "draw nothing".
+            if pages.is_empty() {
+                return None;
+            }
+            Some(PluginPagesInfo { id: row.id, pages })
+        })
+        .collect();
+
+    Ok(Json(PluginPagesResponse { plugins }))
+}
+
 pub async fn get_page<A>(
     State(state): State<PgAppState<A>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -149,9 +262,19 @@ where
 {
     let plugin_id = PluginId::new(plugin_id)
         .map_err(|e| ApiErr::from((StatusCode::NOT_FOUND, e.to_string())))?;
-    let viewer = viewer_for(user.role);
 
-    let page = state.plugin_pages.render(&plugin_id, &path, viewer).await?;
+    // Both halves of "who is asking" are resolved here, from the session the
+    // host authenticated, and neither is anything the request claimed. A
+    // plugin that could name its own viewer could ask to be treated as an
+    // admin, and one that could name an account could read another
+    // merchant's page.
+    let request = PageRequest {
+        path,
+        viewer: viewer_for(user.role),
+        account_id: Some(user.id.0.to_string()),
+    };
+
+    let page = state.plugin_pages.render(&plugin_id, &request).await?;
     Ok(Json(page))
 }
 
@@ -476,14 +599,19 @@ mod tests {
         impl PageRenderer for Billing {
             async fn render_page(
                 &self,
-                path: &str,
-                viewer: Viewer,
+                request: &PageRequest,
             ) -> Result<Option<PageElement>, PageRenderError> {
-                if path != "subscriptions" {
+                if request.path != "subscriptions" {
                     return Ok(None);
                 }
+                // Echoes both halves of the identity back, so the test can
+                // assert the host resolved them rather than the plugin.
                 Ok(Some(PageElement::Badge(Badge {
-                    text: format!("{viewer:?}"),
+                    text: format!(
+                        "{:?}/{}",
+                        request.viewer,
+                        request.account_id.as_deref().unwrap_or("none")
+                    ),
                     tone: Tone::Info,
                 })))
             }
@@ -526,8 +654,10 @@ mod tests {
             panic!("expected the badge the renderer returned");
         };
         assert_eq!(
-            badge.text, "Merchant",
-            "the viewer must come from the authenticated session, not from the request"
+            badge.text,
+            format!("Merchant/{}", uuid::Uuid::from_u128(1)),
+            "both the viewer and the account must come from the authenticated \
+             session, not from anything the request claimed"
         );
 
         // A path the plugin does not serve is still a 404, so the test above
@@ -564,6 +694,38 @@ mod tests {
     #[test]
     fn server_admin_is_the_admin_viewer() {
         assert_eq!(viewer_for(Role::ServerAdmin), Viewer::Admin);
+    }
+
+    /// Navigation is filtered by role, and the order a plugin declared is
+    /// the order a menu is built in.
+    #[test]
+    fn admin_only_pages_are_offered_only_to_an_admin() {
+        use payserver_plugin_api::PageDeclaration;
+
+        let declared = vec![
+            PageDeclaration {
+                path: "subscription".to_string(),
+                label: "Subscription".to_string(),
+                admin_only: false,
+            },
+            PageDeclaration {
+                path: "subscriptions".to_string(),
+                label: "Subscriptions".to_string(),
+                admin_only: true,
+            },
+        ];
+
+        let merchant = visible_pages(declared.clone(), false);
+        assert_eq!(merchant.len(), 1);
+        assert_eq!(merchant[0].path, "subscription");
+
+        let admin = visible_pages(declared, true);
+        assert_eq!(admin.len(), 2);
+        assert_eq!(
+            admin.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+            vec!["subscription", "subscriptions"],
+            "the plugin's declared order is what a menu is built from"
+        );
     }
 
     #[test]

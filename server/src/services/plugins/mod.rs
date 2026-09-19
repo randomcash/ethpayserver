@@ -97,9 +97,9 @@ pub use storage::{
 // its own money path.
 pub use payserver_plugin_host::{
     ArtifactError, FilterOutcome, HOST_MODULE, PageElement, PageError, PageHost, PageRenderer,
-    PluginArtifacts, PluginCallError, PluginEngine, PluginHost, PluginHostCalls, PluginHostError,
-    PluginInstance, PluginLoadError, PluginRegistry, PluginStatusSnapshot, PluginWasmError, Viewer,
-    digest, host_version, page,
+    PageRequest, PluginArtifacts, PluginCallError, PluginEngine, PluginHost, PluginHostCalls,
+    PluginHostError, PluginInstance, PluginLoadError, PluginRegistry, PluginStatusSnapshot,
+    PluginWasmError, Viewer, digest, host_version, page,
 };
 
 // Capability 1: no new type here, just `data_service::MerchantDirectoryReader`

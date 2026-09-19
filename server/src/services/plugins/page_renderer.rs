@@ -36,7 +36,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use payserver_plugin_api::PluginId;
 use payserver_plugin_api::page::{PageElement, Viewer};
-use payserver_plugin_host::{PageRenderError, PageRenderer, PluginHost};
+use payserver_plugin_host::{PageRenderError, PageRenderer, PageRequest, PluginHost};
 use serde::Serialize;
 
 /// The export asked to draw a page.
@@ -46,6 +46,12 @@ pub const RENDER_PAGE: &str = "render_page";
 struct WirePageRequest<'a> {
     path: &'a str,
     viewer: Viewer,
+    /// Who is asking, as the host resolved them. A plugin needs this to
+    /// show a merchant their own anything, and must never be able to supply
+    /// it - one that could name an account could read another merchant's
+    /// bill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<&'a str>,
 }
 
 /// Renders one plugin's pages by calling its `render_page` export.
@@ -65,20 +71,23 @@ impl WasmPageRenderer {
 impl PageRenderer for WasmPageRenderer {
     async fn render_page(
         &self,
-        path: &str,
-        viewer: Viewer,
+        request: &PageRequest,
     ) -> Result<Option<PageElement>, PageRenderError> {
-        let request = WirePageRequest { path, viewer };
+        let wire = WirePageRequest {
+            path: &request.path,
+            viewer: request.viewer,
+            account_id: request.account_id.as_deref(),
+        };
 
         self.host
-            .run_query::<_, Option<PageElement>>(&self.plugin, RENDER_PAGE, &request)
+            .run_query::<_, Option<PageElement>>(&self.plugin, RENDER_PAGE, &wire)
             .await
             .map_err(|reason| {
                 // Logged with the plugin id because the message the caller
                 // gets is deliberately about the page, not about wasm.
                 tracing::warn!(
                     plugin_id = %self.plugin,
-                    path,
+                    path = %request.path,
                     reason = %reason,
                     "a plugin could not render one of its pages"
                 );
@@ -101,16 +110,25 @@ mod tests {
         let json = serde_json::to_string(&WirePageRequest {
             path: "subscriptions",
             viewer: Viewer::Merchant,
+            account_id: Some("acct-7"),
         })
         .unwrap();
-        assert_eq!(json, r#"{"path":"subscriptions","viewer":"merchant"}"#);
+        assert_eq!(
+            json,
+            r#"{"path":"subscriptions","viewer":"merchant","account_id":"acct-7"}"#
+        );
 
         let admin = serde_json::to_string(&WirePageRequest {
             path: "subscriptions",
             viewer: Viewer::Admin,
+            account_id: None,
         })
         .unwrap();
         assert!(admin.contains(r#""viewer":"admin""#), "{admin}");
+        assert!(
+            !admin.contains("account_id"),
+            "an absent identity must be absent, not null: {admin}"
+        );
     }
 
     /// `null` is how a plugin says "not one of my pages", and it has to
