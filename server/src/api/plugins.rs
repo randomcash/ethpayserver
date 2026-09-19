@@ -11,12 +11,28 @@
 //! by [`router()`], not left to whoever calls it, so the reservation is
 //! structural rather than a convention a future call site could forget.
 //!
+//! Two segments are reserved under a plugin's prefix, and the split is not
+//! cosmetic:
+//!
+//! - `/plugins/{id}/pages/{path}` serves the [`PageElement`] tree a plugin
+//!   returns from its `render_page` export. It is mounted by
+//!   [`super::router`], not here, and [`get_page`] is its handler.
+//! - `/plugins/{id}/routes/...` is the plugin's own declared router, nested
+//!   by [`router()`] below.
+//!
+//! Without that second segment they would overlap, and overlap here fails
+//! silently in the worse direction: axum prefers a static nest to a dynamic
+//! route, so a plugin that declared any router at all would shadow the
+//! host's page endpoint for its own id, and a merchant would get that
+//! plugin's 404 where their billing page should be. Giving each a segment of
+//! its own means neither can reach the other, whichever gets mounted first.
+//!
 //! Nothing in this build can ask a loaded plugin for its own router: the
 //! wasmtime runtime instantiates and calls plugins, but no entry point
-//! produces a router.
-//! `declared_routes` is therefore supplied by the caller — today always
-//! empty in the live server — as the seam a future slice fills in once a
-//! plugin can actually produce one.
+//! produces a router. `declared_routes` is therefore supplied by the caller
+//! — today always empty in the live server — as the seam a future slice
+//! fills in once a plugin can actually produce one. Pages do not go through
+//! it and never did.
 //!
 //! Auth is a [`middleware::from_fn_with_state`] layer wrapped around each
 //! plugin's *entire* nest, not a per-handler extractor a plugin's own code
@@ -75,8 +91,9 @@ where
             state.clone(),
             require_host_auth,
         ));
-        mounted = mounted.nest(&format!("/{id}"), gated);
+        mounted = mounted.nest(&format!("/{id}/routes"), gated);
     }
+
     Router::new().nest("/plugins", mounted)
 }
 
@@ -105,7 +122,20 @@ fn viewer_for(role: Role) -> Viewer {
 
 impl From<PageError> for ApiErr {
     fn from(err: PageError) -> Self {
-        (StatusCode::NOT_FOUND, err.to_string()).into()
+        match err {
+            // A plugin that trapped, timed out or is disabled is not a page
+            // that does not exist. 404 for a billing page that is merely
+            // broken is a far more convincing lie than 502, and it sends
+            // whoever is debugging it looking for a routing mistake.
+            PageError::Unavailable(_) => (
+                StatusCode::BAD_GATEWAY,
+                "the plugin could not render this page".to_string(),
+            )
+                .into(),
+            PageError::PluginNotFound | PageError::PageNotFound => {
+                (StatusCode::NOT_FOUND, err.to_string()).into()
+            }
+        }
     }
 }
 
@@ -121,7 +151,7 @@ where
         .map_err(|e| ApiErr::from((StatusCode::NOT_FOUND, e.to_string())))?;
     let viewer = viewer_for(user.role);
 
-    let page = state.plugin_pages.render(&plugin_id, &path, viewer)?;
+    let page = state.plugin_pages.render(&plugin_id, &path, viewer).await?;
     Ok(Json(page))
 }
 
@@ -244,7 +274,7 @@ mod tests {
         let app = router(test_state(), &registry, declared_routes);
 
         let request = HttpRequest::builder()
-            .uri("/plugins/cash.random.billing/anything")
+            .uri("/plugins/cash.random.billing/routes/anything")
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
@@ -266,7 +296,7 @@ mod tests {
         let app = router(test_state(), &registry, declared_routes);
 
         let request = HttpRequest::builder()
-            .uri("/plugins/cash.random.billing/anything")
+            .uri("/plugins/cash.random.billing/routes/anything")
             .header("authorization", bearer_for_valid_session())
             .body(Body::empty())
             .unwrap();
@@ -310,7 +340,7 @@ mod tests {
         let app = router(test_state(), &registry, declared_routes);
 
         let request = HttpRequest::builder()
-            .uri("/plugins/cash.random.billing/")
+            .uri("/plugins/cash.random.billing/routes/")
             .header("authorization", bearer_for_valid_session())
             .body(Body::empty())
             .unwrap();
@@ -353,7 +383,7 @@ mod tests {
         let plugin_response = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/plugins/cash.random.billing/api/invoices")
+                    .uri("/plugins/cash.random.billing/routes/api/invoices")
                     .header("authorization", bearer_for_valid_session())
                     .body(Body::empty())
                     .unwrap(),
@@ -391,7 +421,7 @@ mod tests {
         let response = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/plugins/cash.random.billing/whoami")
+                    .uri("/plugins/cash.random.billing/routes/whoami")
                     .header("authorization", bearer_for_valid_session())
                     .body(Body::empty())
                     .unwrap(),
@@ -425,6 +455,110 @@ mod tests {
             "merging an unprefixed plugin router onto the core router should panic on the exact \
              path collision that the /plugins/{{id}} prefix exists to prevent"
         );
+    }
+
+    /// The page endpoint, through the router a request actually reaches.
+    ///
+    /// The route has been mounted for a while and always answered 404,
+    /// because `PageHost` was built empty and nothing ever registered a
+    /// renderer in it. That is indistinguishable from a feature that was
+    /// never wired up, and it was one: a unit test of `PageHost` passes
+    /// either way. This asks over HTTP, with a renderer registered, so it
+    /// fails if either half goes missing.
+    #[tokio::test]
+    async fn a_registered_renderer_is_reachable_over_http() {
+        use payserver_plugin_api::page::{Badge, Tone};
+        use payserver_plugin_host::{PageHost, PageRenderError, PageRenderer};
+
+        struct Billing;
+
+        #[async_trait]
+        impl PageRenderer for Billing {
+            async fn render_page(
+                &self,
+                path: &str,
+                viewer: Viewer,
+            ) -> Result<Option<PageElement>, PageRenderError> {
+                if path != "subscriptions" {
+                    return Ok(None);
+                }
+                Ok(Some(PageElement::Badge(Badge {
+                    text: format!("{viewer:?}"),
+                    tone: Tone::Info,
+                })))
+            }
+        }
+
+        let mut pages = PageHost::new();
+        pages.register(
+            PluginId::new("cash.random.billing").unwrap(),
+            Arc::new(Billing),
+        );
+
+        let mut state = test_state();
+        state.plugin_pages = Arc::new(pages);
+
+        let app = Router::new()
+            .route(
+                "/plugins/{id}/pages/{*path}",
+                axum::routing::get(get_page::<FakeSessions>),
+            )
+            .with_state(state);
+
+        let request = HttpRequest::builder()
+            .uri("/plugins/cash.random.billing/pages/subscriptions")
+            .header("Authorization", bearer_for_valid_session())
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a registered renderer must be reachable through the mounted route"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let element: PageElement = serde_json::from_slice(&body).unwrap();
+        let PageElement::Badge(badge) = element else {
+            panic!("expected the badge the renderer returned");
+        };
+        assert_eq!(
+            badge.text, "Merchant",
+            "the viewer must come from the authenticated session, not from the request"
+        );
+
+        // A path the plugin does not serve is still a 404, so the test above
+        // is not passing because everything answers 200.
+        let missing = HttpRequest::builder()
+            .uri("/plugins/cash.random.billing/pages/not-a-page")
+            .header("Authorization", bearer_for_valid_session())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(missing).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// A plugin that could not answer is a 502, not a 404. Answering "no
+    /// such page" for a billing page that merely trapped sends whoever is
+    /// debugging it looking for a routing mistake that is not there.
+    #[test]
+    fn a_broken_plugin_is_a_bad_gateway_not_a_missing_page() {
+        use axum::response::IntoResponse;
+        use payserver_plugin_host::PageRenderError;
+
+        let unavailable: ApiErr = PageError::Unavailable(PageRenderError::new("wasm trap")).into();
+        let missing: ApiErr = PageError::PageNotFound.into();
+
+        assert_eq!(
+            unavailable.into_response().status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(missing.into_response().status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

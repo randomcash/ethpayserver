@@ -52,6 +52,7 @@ mod filter;
 mod host_calls;
 mod invoice_issuer;
 mod merchant_directory;
+mod page_renderer;
 mod payment_observer;
 mod pools;
 mod storage;
@@ -68,10 +69,11 @@ pub use filter::{
     FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest,
     run_invoice_creation_filters,
 };
-pub use host_calls::SchemaStorageCalls;
+pub use host_calls::{DeferredIssuer, PluginCalls};
 pub use invoice_issuer::{
     HostInvoiceIssuer, InvoiceCreateRequest, InvoiceIssuerError, PluginHostApi, enforce_own_store,
 };
+pub use page_renderer::{RENDER_PAGE, WasmPageRenderer};
 pub use payment_observer::{
     OwnStorePayment, OwnStorePaymentObserver, OwnStorePaymentReader, PaymentObserverError,
     is_own_store, notify_own_store_payment,

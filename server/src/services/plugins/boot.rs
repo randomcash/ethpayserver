@@ -142,6 +142,7 @@ pub async fn load_installed_plugins<D>(
     host: Option<&PluginHost>,
     artifacts: &PluginArtifacts,
     pools: Option<&std::sync::Arc<super::PluginPools>>,
+    issuer: &super::DeferredIssuer,
 ) -> Result<PluginBootReport, types::RepositoryError>
 where
     D: InstalledPluginReader + InstalledPluginWriter + ?Sized,
@@ -175,7 +176,7 @@ where
             continue;
         }
 
-        match register_or_disable(data, host, artifacts, &id, &row, pools).await {
+        match register_or_disable(data, host, artifacts, &id, &row, pools, issuer).await {
             Ok(()) => report.loaded.push(id),
             Err(failure) => report.failed.push(failure),
         }
@@ -200,11 +201,12 @@ async fn register_or_disable<D>(
     id: &PluginId,
     row: &InstalledPlugin,
     pools: Option<&std::sync::Arc<super::PluginPools>>,
+    issuer: &super::DeferredIssuer,
 ) -> Result<(), PluginLoadFailure>
 where
     D: InstalledPluginWriter + ?Sized,
 {
-    let calls = database_calls_for(id, row, pools).await;
+    let calls = host_calls_for(id, row, pools, issuer).await;
 
     let Err((kind, reason)) = load_one(
         host,
@@ -297,10 +299,10 @@ fn load_one(
         .map_err(|e| (FailureKind::Plugin, format!("host refused it: {e}")))
 }
 
-/// The host calls this plugin gets, if it has a credential and this boot has
-/// pools.
+/// The host calls this plugin gets: its database, if it has a credential and
+/// this boot has pools, and the invoice issuer, whenever one is published.
 ///
-/// Both halves are required and neither is assumed:
+/// The database half is required and not assumed:
 ///
 /// - A plugin installed before per-plugin roles existed has no password, and
 ///   gets no database rather than the host's connection. There is no safe
@@ -310,18 +312,24 @@ fn load_one(
 ///   parse - which the rest of the boot has already survived. It is logged
 ///   and treated as no database, so one plugin's bad credential does not stop
 ///   the others loading.
-async fn database_calls_for(
+///
+/// A plugin with no database gets no host calls at all, invoicing included.
+/// That is deliberate rather than incidental: a plugin that cannot record
+/// what it issued must not be able to issue. Billing that charges a merchant
+/// and loses the fact would be worse than billing that does not run.
+async fn host_calls_for(
     id: &PluginId,
     row: &InstalledPlugin,
     pools: Option<&std::sync::Arc<super::PluginPools>>,
+    issuer: &super::DeferredIssuer,
 ) -> Option<std::sync::Arc<dyn payserver_plugin_host::PluginHostCalls>> {
     let (pools, password) = (pools?, row.db_role_password.as_deref()?);
 
     match pools.register(id, password).await {
-        Ok(()) => Some(std::sync::Arc::new(super::SchemaStorageCalls::new(
-            id.clone(),
-            std::sync::Arc::clone(pools),
-        ))
+        Ok(()) => Some(std::sync::Arc::new(
+            super::PluginCalls::new(id.clone(), std::sync::Arc::clone(pools))
+                .with_issuer(issuer.clone()),
+        )
             as std::sync::Arc<dyn payserver_plugin_host::PluginHostCalls>),
         Err(e) => {
             tracing::error!(
@@ -654,9 +662,15 @@ mod tests {
         let store = FakeStore::with_row(row("0.1.0", &sha));
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
-            .await
-            .unwrap();
+        let report = load_installed_plugins(
+            &store,
+            Some(&host),
+            &artifacts,
+            None,
+            &crate::services::plugins::DeferredIssuer::default(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(report.loaded, vec![id.clone()]);
         assert!(report.failed.is_empty(), "failed: {:?}", report.failed);
@@ -687,9 +701,15 @@ mod tests {
         let store = FakeStore::with_row(row("0.1.0", &installed_sha));
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
-            .await
-            .unwrap();
+        let report = load_installed_plugins(
+            &store,
+            Some(&host),
+            &artifacts,
+            None,
+            &crate::services::plugins::DeferredIssuer::default(),
+        )
+        .await
+        .unwrap();
 
         assert!(
             report.loaded.is_empty(),
@@ -737,9 +757,15 @@ mod tests {
         let store = FakeStore::with_row(disabled);
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
-            .await
-            .unwrap();
+        let report = load_installed_plugins(
+            &store,
+            Some(&host),
+            &artifacts,
+            None,
+            &crate::services::plugins::DeferredIssuer::default(),
+        )
+        .await
+        .unwrap();
 
         assert!(report.loaded.is_empty());
         assert_eq!(
@@ -765,9 +791,15 @@ mod tests {
 
         let store = FakeStore::with_row(row("0.1.0", &sha));
 
-        let report = load_installed_plugins(&store, None, &artifacts, None)
-            .await
-            .unwrap();
+        let report = load_installed_plugins(
+            &store,
+            None,
+            &artifacts,
+            None,
+            &crate::services::plugins::DeferredIssuer::default(),
+        )
+        .await
+        .unwrap();
 
         assert!(report.safe_mode);
         assert!(report.loaded.is_empty());
@@ -800,9 +832,15 @@ mod tests {
         let store = FakeStore::with_row(mismatched);
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
-            .await
-            .unwrap();
+        let report = load_installed_plugins(
+            &store,
+            Some(&host),
+            &artifacts,
+            None,
+            &crate::services::plugins::DeferredIssuer::default(),
+        )
+        .await
+        .unwrap();
 
         assert!(report.loaded.is_empty());
         assert!(
@@ -829,9 +867,15 @@ mod tests {
         let store = FakeStore::with_row(mismatched);
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
-            .await
-            .unwrap();
+        let report = load_installed_plugins(
+            &store,
+            Some(&host),
+            &artifacts,
+            None,
+            &crate::services::plugins::DeferredIssuer::default(),
+        )
+        .await
+        .unwrap();
 
         assert!(report.loaded.is_empty());
         assert!(
@@ -862,9 +906,15 @@ mod tests {
         let store = FakeStore::with_row(row("0.1.0", &payserver_plugin_host::digest(b"gone")));
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
-            .await
-            .expect("a missing artifact is not a boot failure");
+        let report = load_installed_plugins(
+            &store,
+            Some(&host),
+            &artifacts,
+            None,
+            &crate::services::plugins::DeferredIssuer::default(),
+        )
+        .await
+        .expect("a missing artifact is not a boot failure");
 
         assert_eq!(report.failed.len(), 1);
         assert!(
@@ -908,9 +958,15 @@ mod tests {
         };
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
-            .await
-            .unwrap();
+        let report = load_installed_plugins(
+            &store,
+            Some(&host),
+            &artifacts,
+            None,
+            &crate::services::plugins::DeferredIssuer::default(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(report.failed.len(), 3);
         assert!(report.failed.iter().all(|f| !f.disabled));
@@ -934,9 +990,15 @@ mod tests {
         let store = FakeStore::with_row(row("0.1.0", &sha));
         let host = host();
 
-        let report = load_installed_plugins(&store, Some(&host), &artifacts, None)
-            .await
-            .unwrap();
+        let report = load_installed_plugins(
+            &store,
+            Some(&host),
+            &artifacts,
+            None,
+            &crate::services::plugins::DeferredIssuer::default(),
+        )
+        .await
+        .unwrap();
 
         assert!(report.failed[0].disabled);
         assert!(!store.row(PLUGIN_ID).enabled);

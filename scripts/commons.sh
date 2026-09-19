@@ -18,10 +18,22 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/Cargo.toml"
 config="$repo_root/.cargo/config.toml"
 url="https://github.com/randomcash/payserver-commons.git"
-crates=(api-types types auth crypto rates scrub payserver-plugin-api)
-
+# Every commons crate this workspace pins, read from the manifest rather than
+# listed here.
+#
+# It used to be a literal list, and it went stale: `payserver-plugin-host` was
+# added to the workspace and not to the list, so `link` wrote a patch that did
+# not mention it. A crate missing from the patch does not fail - it silently
+# keeps building against the pinned revision while this script reports
+# "linked", which is the worst of both, because you are told you are testing
+# your local changes and you are not. Reading the manifest removes the class.
 die() { echo "error: $*" >&2; exit 1; }
 current_rev() { grep -m1 -oP 'rev = "\K[0-9a-f]{40}' "$manifest" || true; }
+
+mapfile -t crates < <(
+  grep -oP '^\K[a-z0-9_-]+(?= *= *\{ *git *= *"'"$url"'")' "$manifest" | sort -u
+)
+[ "${#crates[@]}" -gt 0 ] || die "no commons crates found in $manifest"
 
 case "${1:-status}" in
   link)

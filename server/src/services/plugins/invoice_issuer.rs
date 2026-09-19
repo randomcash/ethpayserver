@@ -98,6 +98,16 @@ pub fn enforce_own_store(
 /// Create an invoice, on the instance's own store only.
 #[async_trait]
 pub trait HostInvoiceIssuer: Send + Sync {
+    /// The one store this issuer will issue on.
+    ///
+    /// On the trait rather than only on the concrete type because the wasm
+    /// host call needs it: a plugin's request carries no store, so the host
+    /// has to supply one, and the only correct one is the issuer's own. A
+    /// caller that had to be *told* the store could be told the wrong one,
+    /// which is precisely the hole `enforce_own_store` exists to close -
+    /// so it is read from the thing that will enforce it.
+    fn own_store_id(&self) -> StoreId;
+
     async fn invoice_create(
         &self,
         request: InvoiceCreateRequest,
@@ -124,15 +134,6 @@ impl<A> PluginHostApi<A> {
         }
     }
 
-    /// The one store this host issues, and reads back, its own invoices on.
-    ///
-    /// Shared with `payment_observer.rs` so the reconciliation read is bound
-    /// to exactly the store `enforce_own_store` bounds the write to. Two
-    /// different notions of "our store" between the two would be a hole.
-    pub(super) fn own_store_id(&self) -> StoreId {
-        self.own_store_id
-    }
-
     /// Shared with sibling capability modules under `services::plugins` (see
     /// `merchant_directory.rs`) that read through the same data service this
     /// one writes through, rather than a second connection of their own.
@@ -143,6 +144,13 @@ impl<A> PluginHostApi<A> {
 
 #[async_trait]
 impl<A: SessionService + 'static> HostInvoiceIssuer for PluginHostApi<A> {
+    /// Shared with `payment_observer.rs` so the reconciliation read is bound
+    /// to exactly the store `enforce_own_store` bounds the write to. Two
+    /// different notions of "our store" between the two would be a hole.
+    fn own_store_id(&self) -> StoreId {
+        self.own_store_id
+    }
+
     async fn invoice_create(
         &self,
         request: InvoiceCreateRequest,

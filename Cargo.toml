@@ -17,11 +17,11 @@ resolver = "3"
 # `scripts/commons.sh link`, which writes an uncommitted `.cargo/config.toml`
 # patch. To move the pin, `scripts/commons.sh pin <rev>`.
 [workspace.dependencies]
-api-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "b0e7e98734d4579cf2393d029a933102a614fd10" }
-scrub = { git = "https://github.com/randomcash/payserver-commons.git", rev = "b0e7e98734d4579cf2393d029a933102a614fd10" }
-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "b0e7e98734d4579cf2393d029a933102a614fd10" }
-auth = { git = "https://github.com/randomcash/payserver-commons.git", rev = "b0e7e98734d4579cf2393d029a933102a614fd10" }
-crypto = { git = "https://github.com/randomcash/payserver-commons.git", rev = "b0e7e98734d4579cf2393d029a933102a614fd10" }
-rates = { git = "https://github.com/randomcash/payserver-commons.git", rev = "b0e7e98734d4579cf2393d029a933102a614fd10" }
-payserver-plugin-api = { git = "https://github.com/randomcash/payserver-commons.git", rev = "b0e7e98734d4579cf2393d029a933102a614fd10" }
-payserver-plugin-host = { git = "https://github.com/randomcash/payserver-commons.git", rev = "b0e7e98734d4579cf2393d029a933102a614fd10" }
+api-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "0d962d96d62c7d3a6726aea3d2339705877a2438" }
+scrub = { git = "https://github.com/randomcash/payserver-commons.git", rev = "0d962d96d62c7d3a6726aea3d2339705877a2438" }
+types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "0d962d96d62c7d3a6726aea3d2339705877a2438" }
+auth = { git = "https://github.com/randomcash/payserver-commons.git", rev = "0d962d96d62c7d3a6726aea3d2339705877a2438" }
+crypto = { git = "https://github.com/randomcash/payserver-commons.git", rev = "0d962d96d62c7d3a6726aea3d2339705877a2438" }
+rates = { git = "https://github.com/randomcash/payserver-commons.git", rev = "0d962d96d62c7d3a6726aea3d2339705877a2438" }
+payserver-plugin-api = { git = "https://github.com/randomcash/payserver-commons.git", rev = "0d962d96d62c7d3a6726aea3d2339705877a2438" }
+payserver-plugin-host = { git = "https://github.com/randomcash/payserver-commons.git", rev = "0d962d96d62c7d3a6726aea3d2339705877a2438" }
