@@ -4,13 +4,23 @@
  *
  * Run with:  E2E_REMOTE=true npx playwright test tests/scout.spec.ts
  */
+import { appendFileSync } from 'node:fs';
+
 import { test as base, expect, type Page, type ConsoleMessage } from '@playwright/test';
 import { setupVirtualAuthenticator, isClientPanic } from '../fixtures/auth';
+import { api } from '../fixtures/api';
 
 let scoutPage: Page;
 const issues: string[] = [];
 const consoleErrors: string[] = [];
 let authenticated = false;
+/**
+ * The account `register with passkey` created, captured from the recovery
+ * screen before it is dismissed - same source as `RecoveryCredentials.accountId`
+ * in fixtures/auth.ts. Module scope because `afterAll` needs it after the test
+ * that set it has already gone out of scope.
+ */
+let createdUserId: string | null = null;
 
 function issue(label: string, detail: string) {
   issues.push(`[${label}] ${detail}`);
@@ -44,11 +54,49 @@ test.beforeAll(async ({ browser }) => {
   });
 });
 
+/**
+ * Remove the account `register with passkey` just created.
+ *
+ * Without this, every run leaves a passkey-only account behind forever: there
+ * is no session to reach `DELETE /users/me` with once this hook's own browser
+ * context closes, and nobody holds the passkey to sign back in later. Cleanup
+ * lives here, next to the registration that creates the account, rather than
+ * in a separate script nobody is forced to run - a teardown living somewhere
+ * else is exactly how this residue accumulated the first time.
+ *
+ * `E2E_API_TOKEN` (a `server_admin` bearer token) is optional: scout also runs
+ * locally and against `E2E_REMOTE=false` without one, where leaving a throwaway
+ * local account behind costs nothing. Skipped silently in that case, not
+ * treated as a failure.
+ */
+async function cleanupCreatedAccount() {
+  if (!createdUserId) return;
+  const token = process.env.E2E_API_TOKEN;
+  if (!token) {
+    console.log(`account ${createdUserId} left in place - set E2E_API_TOKEN to sweep it here`);
+    return;
+  }
+  try {
+    await api(`/admin/users/${createdUserId}`, { method: 'DELETE', token });
+    console.log(`cleaned up account ${createdUserId}`);
+  } catch (err) {
+    const msg =
+      `Failed to clean up scout account ${createdUserId}: ${err}. It is still on the ` +
+      `server and will stay there - delete it with \`node scripts/sweep-e2e-accounts.mjs --execute\`.`;
+    console.log(`::error title=Scout account leaked::${msg}`);
+    if (process.env.GITHUB_STEP_SUMMARY) {
+      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ❌ Account leaked\n\n${msg}\n`);
+    }
+    issue('CLEANUP', msg);
+  }
+}
+
 test.afterAll(async () => {
   if (consoleErrors.length > 0) {
     console.log('\n=== JS CONSOLE ERRORS ===');
     for (const e of consoleErrors) console.log(`  ${e}`);
   }
+  await cleanupCreatedAccount();
   if (issues.length > 0) {
     console.log('\n=== ISSUES FOUND ===');
     for (const i of issues) console.log(`  ${i}`);
@@ -283,6 +331,18 @@ test.describe('Auth & Authenticated', () => {
     ]);
 
     if (await savedButton.isVisible().catch(() => false)) {
+      // Capture before dismissing: this screen is shown exactly once, and a
+      // passkey-only account has no email or wallet to identify it by
+      // afterwards. Same selector as `RecoveryCredentials.accountId` in
+      // fixtures/auth.ts.
+      createdUserId =
+        (
+          await scoutPage
+            .locator('.ps-recovery-account-id-value')
+            .textContent({ timeout: 2_000 })
+            .catch(() => null)
+        )?.trim() || null;
+
       await savedButton.click();
       await scoutPage.locator('.ps-checkbox').check();
       await scoutPage.locator('.ps-button-primary', { hasText: /complete setup/i }).click();

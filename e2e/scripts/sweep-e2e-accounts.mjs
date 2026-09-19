@@ -8,10 +8,15 @@
  * that: no email, no wallet, no store. Each one is small, but there is no
  * job that ever removes them, so they only ever accumulate.
  *
- * This targets exactly that residue: accounts that own no store at all, or
- * whose every store is one of the `synthetic-payment.spec.ts` runs this
- * sweep's sibling (`sweep-e2e-stores.mjs`) already knows how to name and
- * clear. Deletion goes through `DELETE /admin/users/{id}`
+ * This targets exactly that residue: accounts with no email and no wallet
+ * address - the two things that would let a real owner reach one - that also
+ * own no store at all, or whose every store is one of the
+ * `synthetic-payment.spec.ts` runs this sweep's sibling
+ * (`sweep-e2e-stores.mjs`) already knows how to name and clear. The email/
+ * wallet check matters on its own: a merchant who signed up with real
+ * contact details but has not created a first store yet would otherwise look
+ * identical to this residue on the store check alone. Deletion goes through
+ * `DELETE /admin/users/{id}`
  * (`server/src/api/admin/mod.rs`), the same cascade a merchant gets from
  * `DELETE /users/me` - it refuses on its own if the account ever took a
  * payment, payout or refund, so this script cannot use it to destroy
@@ -96,10 +101,23 @@ const users = await allUsers();
 const candidates = [];
 const skippedProtected = [];
 const skippedOwnsOther = [];
+const skippedIdentified = [];
 
 for (const user of users) {
   if (PROTECTED_USER_IDS.has(user.id) || user.role === 'server_admin') {
     skippedProtected.push(user);
+    continue;
+  }
+
+  // The residue this sweep exists for is the abandoned-mid-registration case:
+  // no email, no wallet, nothing that would let its owner recover it any way
+  // other than the passkey Playwright's virtual authenticator holds. An
+  // account with either is reachable by a real person, so it is out of scope
+  // here even if it also happens to own no store yet - a merchant who just
+  // signed up and has not created a first store looks exactly like that on
+  // the store check alone.
+  if (user.email || user.primary_wallet_address) {
+    skippedIdentified.push(user);
     continue;
   }
 
@@ -144,8 +162,9 @@ if (execute) {
 }
 
 console.log(
-  `\n${users.length} user(s) visible, ${candidates.length} matching (no stores, or only ` +
-    `${SYNTHETIC_STORE_NAME}), ${skippedProtected.length} skipped as admin/protected, ` +
+  `\n${users.length} user(s) visible, ${candidates.length} matching (no email, no wallet, ` +
+    `and no stores or only ${SYNTHETIC_STORE_NAME}), ${skippedProtected.length} skipped as ` +
+    `admin/protected, ${skippedIdentified.length} skipped for having an email or a wallet, ` +
     `${skippedOwnsOther.length} skipped for owning a non-synthetic store.`,
 );
 if (!execute && candidates.length > 0) console.log('\nRe-run with --execute to delete.');
