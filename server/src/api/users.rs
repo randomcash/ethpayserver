@@ -70,13 +70,19 @@ pub struct CreateApiKeyPayload {
     pub name: String,
     /// Optional expiration time.
     pub expires_at: Option<DateTime<Utc>>,
-    /// Permission policy strings (see `auth::Policies`) this key should be
-    /// scoped to, chosen at creation. Defaults to empty when omitted: a new
-    /// key starts able to do nothing beyond authenticating and must be
+    /// The key's scope, chosen at creation. Only two shapes are accepted
+    /// today: `[]` (scoped to the owner's non-admin baseline) or
+    /// `["unrestricted"]` (see `auth::Policies::UNRESTRICTED`, inherits the
+    /// owner's role in full). Defaults to `[]` when omitted: a new key
+    /// starts able to do nothing beyond authenticating and must be
     /// deliberately widened, rather than silently inheriting everything its
-    /// owner can do. Every entry must be a permission the caller's own
-    /// current role grants - a key can never exceed its owner, including at
-    /// the moment it is minted.
+    /// owner can do. `unrestricted` is only accepted when the caller's own
+    /// current role grants it - a key can never exceed its owner, including
+    /// at the moment it is minted. See `validate_requested_permissions` for
+    /// why the vocabulary stops at these two shapes rather than the full
+    /// list of named policies: nothing in this server enforces those
+    /// individually yet, so offering a menu implying otherwise would be
+    /// worse than not offering it.
     #[serde(default)]
     pub permissions: Vec<String>,
 }
@@ -118,30 +124,84 @@ pub struct RotateApiKeyResponsePayload {
 #[derive(Debug, Clone, serde::Deserialize, utoipa::ToSchema)]
 pub struct UpdateApiKeyPermissionsPayload {
     /// `None`/`null` clears the key back to "inherit the owner's role in
-    /// full". `Some` sets an explicit scope - every entry must be a
-    /// permission the caller's own current role grants.
+    /// full". `Some` sets an explicit scope - see `CreateApiKeyPayload`'s
+    /// `permissions` field for the two shapes accepted and why.
     pub permissions: Option<Vec<String>>,
 }
 
-/// Is every requested policy string one the caller's own current role
-/// grants? The write-time half of "a key can never exceed its owner":
-/// read-time enforcement (`validate_api_key`, and every `role ==
-/// Role::ServerAdmin` check downstream of it) covers a key whose owner's
-/// role later changes, but without this a caller could bank a policy their
-/// role does not hold today, which would then sit dormant until a
-/// promotion silently activated it - precisely the "promoting the owner
-/// must not widen keys already issued" failure this feature exists to
-/// close.
-fn validate_requested_permissions(role: Role, requested: &[String]) -> Result<(), StatusCode> {
-    let grantable: std::collections::HashSet<&'static str> = role
-        .permissions()
-        .iter()
-        .map(Permission::as_policy)
-        .collect();
-    if requested.iter().all(|p| grantable.contains(p.as_str())) {
-        Ok(())
-    } else {
-        Err(StatusCode::BAD_REQUEST)
+/// Is `requested` one of the two scopes this server can actually enforce?
+///
+/// Every admin gate in this codebase (there are over a dozen, from plugin
+/// install to user role management) is a bare `role == Role::ServerAdmin`
+/// comparison, not a check against an individual `Permission` - see
+/// `validate_api_key`'s downgrade and `key_retains_unrestricted_access` in
+/// `extractors.rs`. So a stored set naming specific server or user policies
+/// (e.g. just `ethpay.server.canmanagetokens`) would be silently
+/// indistinguishable from an empty one: neither grants anything past a plain
+/// `User`'s fixed permissions. Offering a menu of individually-named actions
+/// that all collapse to the same outcome is worse than not offering it, so
+/// this only accepts what the server can actually tell apart: nothing beyond
+/// the owner's non-admin baseline (`[]`), or the owner's full role
+/// (`["unrestricted"]`). Widening this to real per-action scoping needs
+/// per-endpoint enforcement this codebase does not have yet, not a change
+/// here.
+///
+/// `owner_role` is always the role belonging to the account the key
+/// authenticates as, never the caller's - the write-time half of "a key can
+/// never exceed its owner". Read-time enforcement (`validate_api_key`, and
+/// every `role == Role::ServerAdmin` check downstream of it) covers a key
+/// whose owner's role later changes, but without this an admin editing
+/// someone else's key could grant it `unrestricted` on the strength of the
+/// *admin's* role, which that key's own owner could never grant themselves -
+/// precisely the "promoting the owner must not widen keys already issued"
+/// failure this feature exists to close, from the other direction.
+fn validate_requested_permissions(owner_role: Role, requested: &[String]) -> Result<(), StatusCode> {
+    match requested {
+        [] => Ok(()),
+        [single] if single == Permission::Unrestricted.as_policy() => {
+            if owner_role == Role::ServerAdmin {
+                Ok(())
+            } else {
+                Err(StatusCode::BAD_REQUEST)
+            }
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+#[cfg(test)]
+mod permission_scope_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_scope_is_always_accepted() {
+        assert!(validate_requested_permissions(Role::User, &[]).is_ok());
+        assert!(validate_requested_permissions(Role::ServerAdmin, &[]).is_ok());
+    }
+
+    #[test]
+    fn unrestricted_is_accepted_only_for_a_server_admin_owner() {
+        let unrestricted = vec![Permission::Unrestricted.as_policy().to_string()];
+        assert!(validate_requested_permissions(Role::ServerAdmin, &unrestricted).is_ok());
+        assert!(validate_requested_permissions(Role::User, &unrestricted).is_err());
+    }
+
+    #[test]
+    fn a_named_individual_permission_is_rejected_even_for_an_admin_owner() {
+        // Nothing in this server enforces named permissions individually -
+        // accepting one here would promise scoping the rest of the codebase
+        // cannot deliver.
+        let named = vec![Permission::ServerManageTokens.as_policy().to_string()];
+        assert!(validate_requested_permissions(Role::ServerAdmin, &named).is_err());
+    }
+
+    #[test]
+    fn unrestricted_mixed_with_anything_else_is_rejected() {
+        let mixed = vec![
+            Permission::Unrestricted.as_policy().to_string(),
+            Permission::ServerViewUsers.as_policy().to_string(),
+        ];
+        assert!(validate_requested_permissions(Role::ServerAdmin, &mixed).is_err());
     }
 }
 
@@ -452,9 +512,24 @@ where
         return Err(StatusCode::NOT_FOUND);
     }
 
+    // The role to validate a widened grant against is the key's own owner's,
+    // not the caller's - an admin editing someone else's key must not be
+    // able to launder a grant through their own broader role. Only fetched
+    // when the caller isn't the owner: the common case (a user managing
+    // their own key) already has this in hand.
+    let owner_role = if key.user_id == user.id {
+        user.role
+    } else {
+        auth::UserRepository::get_user(&*state.data_service, key.user_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?
+            .role
+    };
+
     let permissions = match &payload.permissions {
         Some(requested) => {
-            validate_requested_permissions(user.role, requested)?;
+            validate_requested_permissions(owner_role, requested)?;
             Some(requested.clone())
         }
         None => {
