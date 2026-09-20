@@ -31,6 +31,7 @@ mod invoice_creation;
 mod merchant_directory;
 mod payment;
 mod payout_claims;
+mod server_settings;
 mod store_creation;
 mod wallet;
 mod wallet_migration;
