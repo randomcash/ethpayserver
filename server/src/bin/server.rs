@@ -326,7 +326,9 @@ async fn main() -> Result<()> {
         Some(Arc::clone(&ws_broadcast)),
         Arc::clone(&email_sender),
     );
-    let event_consumer = match own_store_payments {
+    // Cloned rather than moved: the same observers are also handed to the
+    // reconciliation loop below, which is the pull path under this push one.
+    let event_consumer = match own_store_payments.clone() {
         Some((store_id, observers)) => event_consumer.with_own_store_payments(store_id, observers),
         None => event_consumer,
     };
@@ -399,11 +401,34 @@ async fn main() -> Result<()> {
     // customers.
     match billing_store_id {
         Some(store_id) => {
-            let issuer: Arc<dyn server::services::plugins::HostInvoiceIssuer> = Arc::new(
-                server::services::plugins::PluginHostApi::new(state.clone(), store_id),
-            );
+            let api = Arc::new(server::services::plugins::PluginHostApi::new(
+                state.clone(),
+                store_id,
+            ));
+            let issuer: Arc<dyn server::services::plugins::HostInvoiceIssuer> = api.clone();
             if plugin_issuer.publish(issuer) {
                 tracing::info!(%store_id, "plugins may issue invoices on this instance's own store");
+            }
+
+            // The pull half of own-store payment reporting. Push is the fast
+            // path and never the source of truth: a dispatch is lost whenever
+            // the plugin could not take it - disabled after repeated failure,
+            // trapped, past its deadline, or not loaded because this process
+            // was restarting when the payment confirmed. Every one of those
+            // is a merchant who paid and was not credited, and none of them
+            // is visible, because the payment itself succeeded.
+            if let Some((_, observers)) = own_store_payments.as_ref() {
+                let reader: Arc<dyn server::services::plugins::OwnStorePaymentReader> = api;
+                tokio::spawn(server::services::plugins::reconcile::run(
+                    reader,
+                    observers.clone(),
+                    server::services::plugins::reconcile::DEFAULT_INTERVAL,
+                ));
+                tracing::info!(
+                    interval_secs =
+                        server::services::plugins::reconcile::DEFAULT_INTERVAL.as_secs(),
+                    "reconciling own-store payments on a loop; a lost dispatch is caught here"
+                );
             }
         }
         None => tracing::info!(
