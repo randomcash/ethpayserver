@@ -30,6 +30,11 @@ on:
         required: false
         default: "1000"
         type: string
+      tokens:
+        description: "ERC-20 addresses to sweep first, space separated (Sepolia USDC is 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238)"
+        required: false
+        default: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+        type: string
       confirm:
         description: "Type `execute` to broadcast. Anything else is a dry run."
         required: false
@@ -62,10 +67,12 @@ jobs:
         env:
           DESTINATION: ${{ inputs.destination }}
           SCAN: ${{ inputs.scan }}
+          TOKENS: ${{ inputs.tokens }}
           CONFIRM: ${{ inputs.confirm }}
         run: |
           echo "destination: $DESTINATION"
           echo "scan:        $SCAN"
+          echo "tokens:      ${TOKENS:-<none>}"
           if [ "$CONFIRM" = "execute" ]; then
             echo "mode:        EXECUTE - this broadcasts"
           else
@@ -79,6 +86,7 @@ jobs:
           E2E_SEPOLIA_RPC_URL: ${{ secrets.E2E_SEPOLIA_RPC_URL }}
           DESTINATION: ${{ inputs.destination }}
           SCAN: ${{ inputs.scan }}
+          TOKENS: ${{ inputs.tokens }}
           CONFIRM: ${{ inputs.confirm }}
         run: |
           set -euo pipefail
@@ -99,6 +107,17 @@ jobs:
             FLAG="--execute"
           fi
 
+          # One `--token` per address. Unquoted on purpose: the field is a
+          # space-separated list and word splitting is what turns it into
+          # separate arguments. Each one is checksum-checked by the script.
+          TOKEN_FLAGS=""
+          for t in ${TOKENS:-}; do
+            TOKEN_FLAGS="$TOKEN_FLAGS --token $t"
+          done
+
+          # Tokens move before ether, inside the script, and that ordering is
+          # load-bearing: the ether pass leaves every address unable to pay
+          # the gas an ERC-20 transfer costs.
           node scripts/sweep-test-wallet.mjs \
             --to "$DESTINATION" \
-            --scan "$SCAN" $FLAG
+            --scan "$SCAN" $TOKEN_FLAGS $FLAG
