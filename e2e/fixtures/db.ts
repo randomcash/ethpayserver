@@ -82,6 +82,13 @@ export async function createUserWithApiKey(
   // that does not start with it fails for a reason that reads as "wrong
   // credential" rather than "wrong prefix".
   const apiKey = `ak_e2e_${crypto.randomBytes(18).toString('hex')}`;
+  // SHA-256, and it has to be: `auth::api::api_keys` hashes the key exactly
+  // this way, so anything else here produces a credential `validate_api_key`
+  // can never match. Not a password hash and not meant to be - the value is
+  // 144 bits of randomness this process just generated, so there is no
+  // guessing to slow down and nothing for a work factor to buy. Code scanning
+  // flags it on the identifier's name; the alert is dismissed as a false
+  // positive with that reason.
   const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
 
   const client = new Client({ connectionString: DATABASE_URL });
