@@ -102,9 +102,11 @@ that are not in CI's path. Several people have lost an hour to this.
   so a failure there gates merges same as any other test. The `-j 1` is not
   cosmetic: these tests share one real Postgres instance, so run them locally
   with the same flag rather than nextest's default concurrency, or you can get
-  spurious cross-test failures CI never sees. They only run for `data-service`;
-  other crates' `#[ignore]`'d tests are not in that command and still need to
-  be run locally. The gate above does not touch any of them either way, so run
+  spurious cross-test failures CI never sees. The command now covers
+  `data-service` **and** `server`, so a `server/tests/*.rs` integration test
+  does gate merges - this paragraph used to say otherwise, which is worth
+  knowing if you wrote one and assumed it never ran. Other crates' `#[ignore]`'d
+  tests are still not in it and need running locally. The gate above does not touch any of them either way, so run
   the `data-service` ones locally too when you touch that layer — CI will
   catch a failure regardless, but locally you see it sooner.
 

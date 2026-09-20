@@ -355,11 +355,18 @@ where
         );
     }
 
+    // Absent leaves the stored list alone. A stored `enabled_chain_ids` is
+    // authoritative - every chain not in it is refused - and the GET above
+    // answers with compiled-in mainnet defaults when no row exists, so a
+    // client round-tripping what it was handed would write a list nobody
+    // chose. On a testnet deployment that list has no Sepolia in it.
+    let enabled_chain_ids = body.enabled_chain_ids.unwrap_or(current.enabled_chain_ids);
+
     let settings = ServerSettings {
         default_confirmations: body.default_confirmations,
         invoice_expiry_minutes: body.invoice_expiry_minutes,
         rate_limit_rpm: body.rate_limit_rpm,
-        enabled_chain_ids: body.enabled_chain_ids,
+        enabled_chain_ids,
         billing_store_id,
     };
 
