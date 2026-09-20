@@ -31,6 +31,25 @@ async fn service() -> Option<PgDataService> {
     Some(PgDataService::new(pool))
 }
 
+/// Put the settings table back to having no row.
+///
+/// Not tidiness - these tests share one database with every other
+/// integration test, and a settings row changes behaviour elsewhere. With no
+/// row, `chain_has_no_adapter` falls back to the compiled-in chain configs
+/// and accepts Sepolia; with one, it accepts only what `enabled_chain_ids`
+/// lists. Leaving a row behind therefore breaks
+/// `a_sepolia_payment_method_is_still_created_by_the_handler` in a different
+/// crate, which is exactly what it did before this existed.
+///
+/// Run at the start as well as the end: a previous run that panicked
+/// mid-test leaves its row behind, and the next run should not inherit it.
+async fn without_a_settings_row(service: &PgDataService) {
+    sqlx::query("DELETE FROM server_settings WHERE id = 1")
+        .execute(service.pool())
+        .await
+        .expect("clearing the settings row");
+}
+
 fn settings_with(chains: Vec<types::ChainId>, store: Option<StoreId>) -> ServerSettings {
     ServerSettings {
         default_confirmations: 5,
@@ -50,6 +69,7 @@ async fn a_written_settings_row_can_be_read_back() {
     let Some(service) = service().await else {
         return;
     };
+    without_a_settings_row(&service).await;
 
     let chains = vec![types::ChainId::evm(1), types::ChainId::evm(11155111)];
     let store = StoreId(Uuid::new_v4());
@@ -72,6 +92,8 @@ async fn a_written_settings_row_can_be_read_back() {
         "the chain ids must survive the caip2[] column intact"
     );
     assert_eq!(read.billing_store_id, Some(store));
+
+    without_a_settings_row(&service).await;
 }
 
 /// Clearing the billing store is how an instance stops selling to itself, and
@@ -82,6 +104,7 @@ async fn the_billing_store_can_be_set_and_cleared() {
     let Some(service) = service().await else {
         return;
     };
+    without_a_settings_row(&service).await;
 
     let store = StoreId(Uuid::new_v4());
     service
@@ -112,6 +135,8 @@ async fn the_billing_store_can_be_set_and_cleared() {
         None,
         "clearing must actually clear, not leave the previous store in place"
     );
+
+    without_a_settings_row(&service).await;
 }
 
 /// An empty list is a real answer - a server that enables no chains from
@@ -122,6 +147,7 @@ async fn no_enabled_chains_round_trips_as_an_empty_list() {
     let Some(service) = service().await else {
         return;
     };
+    without_a_settings_row(&service).await;
 
     service
         .upsert_server_settings(&settings_with(Vec::new(), None))
@@ -130,4 +156,6 @@ async fn no_enabled_chains_round_trips_as_an_empty_list() {
 
     let read = service.get_server_settings().await.unwrap().unwrap();
     assert!(read.enabled_chain_ids.is_empty());
+
+    without_a_settings_row(&service).await;
 }
