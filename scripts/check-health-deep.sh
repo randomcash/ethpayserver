@@ -82,8 +82,9 @@ print(','.join(bad) if bad else '')
 " 2>/dev/null || echo "unknown")
 
 STALL_BAD=""
+STALL_ERRORED=""
 if [[ -n "$HEALTH_STATE_FILE" ]]; then
-  STALL_BAD=$(HEALTH_BODY="$BODY" python3 - "$HEALTH_STATE_FILE" "$STALL_THRESHOLD" <<'PYEOF' 2>/dev/null || echo "unknown"
+  if ! STALL_BAD=$(HEALTH_BODY="$BODY" python3 - "$HEALTH_STATE_FILE" "$STALL_THRESHOLD" <<'PYEOF' 2>/dev/null
 import json, os, sys
 
 body = json.loads(os.environ["HEALTH_BODY"])
@@ -118,7 +119,9 @@ with open(state_path, "w") as f:
 
 print(",".join(stalled))
 PYEOF
-)
+  ); then
+    STALL_ERRORED=1
+  fi
 fi
 
 FAILED=()
@@ -126,7 +129,8 @@ FAILED=()
 [[ "$REDIS_STATUS" == "ok" ]] || FAILED+=("redis=$REDIS_STATUS")
 [[ "$MONITOR_FRESH" == "True" ]] || FAILED+=("monitor.data_fresh=$MONITOR_FRESH")
 [[ -z "$RPC_BAD" ]] || FAILED+=("unhealthy chains: $RPC_BAD")
-[[ -z "$STALL_BAD" || "$STALL_BAD" == "unknown" ]] || FAILED+=("stalled last_block: $STALL_BAD")
+[[ -z "$STALL_ERRORED" ]] || FAILED+=("stall-check errored")
+[[ -z "$STALL_BAD" ]] || FAILED+=("stalled last_block: $STALL_BAD")
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
   log "FAIL: ${FAILED[*]}"
