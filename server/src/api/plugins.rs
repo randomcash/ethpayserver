@@ -214,6 +214,12 @@ pub struct PluginPageInfo {
 /// `payserver-plugin-api` does not depend on `utoipa`, and a fixed,
 /// API-facing vocabulary is a better reason to add that dependency there
 /// than this one field.
+///
+/// The consumer is `payserver-client`, a separate repository: its
+/// `PluginLinks` (`src/app/layout.rs`) maps each variant here to a component
+/// in `src/app/icons.rs`. That mapping cannot live in this diff - it is a
+/// different crate in a different repo - so it ships as its own commit and
+/// PR there, opened alongside this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginPageIcon {
@@ -861,6 +867,28 @@ mod tests {
 
         let pages = visible_pages(declared, false);
         assert_eq!(pages[0].icon, PluginPageIcon::Card);
+    }
+
+    /// A manifest predating this field, or one written against a newer icon
+    /// vocabulary than this build knows, both land on [`PageIcon::Plug`]
+    /// before `visible_pages` ever sees them (that defaulting and fallback
+    /// is `payserver-plugin-api`'s own, and is tested there). What this repo
+    /// owns is the mapping onto [`PluginPageIcon`], so this only needs to
+    /// confirm the default variant survives that mapping unchanged.
+    #[test]
+    fn a_page_with_the_default_icon_maps_to_the_generic_one() {
+        use payserver_plugin_api::{PageDeclaration, PageIcon, PagePlacement};
+
+        let declared = vec![PageDeclaration {
+            path: "subscription".to_string(),
+            label: "Subscription".to_string(),
+            placement: PagePlacement::Nav,
+            icon: PageIcon::default(),
+            admin_only: false,
+        }];
+
+        let pages = visible_pages(declared, false);
+        assert_eq!(pages[0].icon, PluginPageIcon::Plug);
     }
 
     #[test]
