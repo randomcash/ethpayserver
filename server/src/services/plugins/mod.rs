@@ -55,6 +55,7 @@ mod merchant_directory;
 mod page_renderer;
 mod payment_observer;
 mod pools;
+pub mod reconcile;
 mod storage;
 
 pub use boot::{
