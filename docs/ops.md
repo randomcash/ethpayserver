@@ -94,6 +94,16 @@ Sentry's alerting rather than sitting unread in the Actions tab. The scheduled
 e2e workflow's dead-man's-switch moved onto the same vendor, checking in to
 `SENTRY_CRON_E2E_URL`.
 
+`rpcs.*.status` alone misses a chain whose indexer has wedged while the RPC
+connection itself stays up — `status: ok` with `last_block` frozen. Each job
+restores `.health-state/<env>.json` from an `actions/cache` entry keyed on the
+environment (an ordinary GitHub Actions run has no other persistence between
+schedule ticks), passes it to `check-health-deep.sh` as `HEALTH_STATE_FILE`,
+and saves it back afterwards regardless of pass/fail. The script tracks how
+many consecutive checks a chain's `last_block` has repeated and fails once
+that exceeds `STALL_THRESHOLD` (default 3 — i.e. ~15-20 minutes flat at the
+5-minute cadence).
+
 Five minutes is GitHub Actions' practical floor, not the 30-60s this ticket
 asked for — schedule intervals shorter than that are not reliable, and GitHub
 can delay a scheduled run further under load. The two Sentry Cron Monitor

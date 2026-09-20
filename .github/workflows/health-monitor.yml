@@ -17,6 +17,11 @@ name: Health monitor (deep)
 # uptime check cannot do. Configure a real Sentry Uptime Check against the
 # same URL for the faster cadence; keep this running regardless, since it is
 # the thing actually reading the body.
+#
+# A chain can report rpcs.*.status "ok" while its indexer has stopped
+# advancing — status alone misses that. The actions/cache steps below persist
+# each chain's last_block across runs so check-health-deep.sh can catch a
+# block count that has gone flat, not just a chain that has gone unhealthy.
 
 on:
   schedule:
@@ -33,11 +38,29 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      # Each run is a fresh runner, so last_block from the previous check has
+      # to come from somewhere else. This cache entry is that "somewhere
+      # else" — restored before the check, saved back after regardless of
+      # outcome, keyed per-run so the save is never a no-op cache hit.
+      - name: Restore health state
+        uses: actions/cache/restore@v4
+        with:
+          path: .health-state
+          key: health-state-testnet-${{ github.run_id }}
+          restore-keys: |
+            health-state-testnet-
       - name: Check /api/health/deep
         env:
           HEALTH_URL: https://testnet.random.cash/api/health/deep
           SENTRY_CRON_URL: ${{ secrets.SENTRY_CRON_HEALTH_TESTNET_URL }}
+          HEALTH_STATE_FILE: .health-state/testnet.json
         run: scripts/check-health-deep.sh
+      - name: Save health state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .health-state
+          key: health-state-testnet-${{ github.run_id }}
 
   mainnet:
     name: Deep health (mainnet)
@@ -45,8 +68,22 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - name: Restore health state
+        uses: actions/cache/restore@v4
+        with:
+          path: .health-state
+          key: health-state-mainnet-${{ github.run_id }}
+          restore-keys: |
+            health-state-mainnet-
       - name: Check /api/health/deep
         env:
           HEALTH_URL: https://pay.random.cash/api/health/deep
           SENTRY_CRON_URL: ${{ secrets.SENTRY_CRON_HEALTH_MAINNET_URL }}
+          HEALTH_STATE_FILE: .health-state/mainnet.json
         run: scripts/check-health-deep.sh
+      - name: Save health state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .health-state
+          key: health-state-mainnet-${{ github.run_id }}
