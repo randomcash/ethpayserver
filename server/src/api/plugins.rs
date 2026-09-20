@@ -220,6 +220,12 @@ pub struct PluginPageInfo {
 /// in `src/app/icons.rs`. That mapping cannot live in this diff - it is a
 /// different crate in a different repo - so it ships as its own commit and
 /// PR there, opened alongside this one.
+///
+/// `payserver-billing`'s own manifest still needs `icon = "card"` added now
+/// that this vocabulary exists, so its sidebar entry stops using the
+/// fallback too. That repo is private and isn't checked out anywhere this
+/// change can reach it from, so it is not done here - tracked as a follow-up
+/// against that repo instead of silently left undone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginPageIcon {
