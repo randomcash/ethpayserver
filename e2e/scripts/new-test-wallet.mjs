@@ -23,7 +23,11 @@
  * spent, only gas is, so the wallet is a closed loop that needs topping up
  * for fees rather than for volume.
  *
- *   node scripts/new-test-wallet.mjs
+ *   node scripts/new-test-wallet.mjs [--words 12|24]
+ *
+ * 12 words by default, which is what the previous wallet used. 128 bits is
+ * not a meaningful risk here and it is the length every wallet and password
+ * manager expects; `--words 24` is there if you would rather.
  *
  * Prints and stores nothing. Piping it to a file is how the phrase ends up
  * somewhere it should not be; put it in a password manager by hand.
@@ -32,9 +36,18 @@ import { english, generateMnemonic, mnemonicToAccount } from 'viem/accounts';
 
 const SPENDER_ACCOUNT_INDEX = 9; // must match synthetic-payment.spec.ts
 
-// 24 words. The old wallet was 12, which is 128 bits and fine; this costs
-// nothing to strengthen and the phrase is typed once, into a secret field.
-const mnemonic = generateMnemonic(english, 256);
+const wordsIdx = process.argv.indexOf('--words');
+const words = wordsIdx >= 0 ? Number(process.argv[wordsIdx + 1]) : 12;
+if (words !== 12 && words !== 24) {
+  console.error(`--words ${process.argv[wordsIdx + 1]} is not 12 or 24.`);
+  process.exit(1);
+}
+
+// 128 bits at 12 words, 256 at 24. Both are far past brute force; the honest
+// difference for a Sepolia wallet is that one is easier to write down
+// correctly, and writing it down correctly is the failure this script exists
+// to prevent.
+const mnemonic = generateMnemonic(english, words === 24 ? 256 : 128);
 
 const spender = mnemonicToAccount(mnemonic, { accountIndex: SPENDER_ACCOUNT_INDEX });
 const merchant = mnemonicToAccount(mnemonic, { accountIndex: 0 });
@@ -45,7 +58,7 @@ console.log(`
   It is not saved here, it is not in your shell history, and the last one
   was lost exactly this way.
 
-  E2E_TEST_MNEMONIC
+  E2E_TEST_MNEMONIC   (${words} words)
   ${mnemonic}
 
   Fund this address with Sepolia ETH — it pays for every synthetic payment:
