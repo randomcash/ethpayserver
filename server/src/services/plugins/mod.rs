@@ -52,6 +52,7 @@ mod filter;
 mod host_calls;
 mod invoice_issuer;
 mod merchant_directory;
+mod merchant_volume;
 mod page_renderer;
 mod payment_observer;
 mod pools;
@@ -70,9 +71,12 @@ pub use filter::{
     FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest,
     run_invoice_creation_filters,
 };
-pub use host_calls::{DeferredIssuer, PluginCalls};
+pub use host_calls::{DeferredCapabilities, DeferredIssuer, DeferredVolume, PluginCalls};
 pub use invoice_issuer::{
     HostInvoiceIssuer, InvoiceCreateRequest, InvoiceIssuerError, PluginHostApi, enforce_own_store,
+};
+pub use merchant_volume::{
+    MAX_WINDOW_DAYS, MerchantVolume, MerchantVolumeReader, PluginMerchantVolume,
 };
 pub use page_renderer::{RENDER_PAGE, WasmPageRenderer};
 pub use payment_observer::{
