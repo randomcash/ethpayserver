@@ -17,6 +17,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use ::types::ChainId;
 use auth::{
     Role, ServerSettings, ServerSettingsRepository, SessionService, UserId, UserRepository,
 };
@@ -268,7 +269,12 @@ where
     Ok(StatusCode::OK)
 }
 
-/// Get server settings (returns defaults if not yet configured).
+/// Get server settings.
+///
+/// When no row has ever been written, this reports the numeric defaults
+/// alongside the chain ids the server is actually gating on right now - not
+/// `ServerSettings::default()`'s hardcoded mainnet list, which this process
+/// may not be enforcing at all. See `unconfigured_chain_ids`.
 #[utoipa::path(
     get,
     path = "/admin/settings",
@@ -287,18 +293,30 @@ pub async fn get_settings<A>(
 where
     A: SessionService + 'static,
 {
-    let settings = state
+    let row = state
         .data_service
         .get_server_settings()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .unwrap_or_default();
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // No row means `chain_has_no_adapter` is not using `enabled_chain_ids` at
+    // all - it falls back to `unconfigured_chain_ids()` instead (see there).
+    // Reporting `ServerSettings::default()`'s hardcoded mainnet list here was
+    // the bug: it showed chains the server was not actually gating on, and
+    // saving anything else on the page wrote that list verbatim, which does
+    // not contain Sepolia. Reporting the same set the server is actually
+    // using makes an unrelated save a no-op instead of a change.
+    let enabled_chain_ids = match &row {
+        Some(settings) => settings.enabled_chain_ids.clone(),
+        None => unconfigured_chain_ids(),
+    };
+    let settings = row.unwrap_or_default();
 
     Ok(Json(ServerSettingsResponse {
         default_confirmations: settings.default_confirmations,
         invoice_expiry_minutes: settings.invoice_expiry_minutes,
         rate_limit_rpm: settings.rate_limit_rpm,
-        enabled_chain_ids: settings.enabled_chain_ids,
+        enabled_chain_ids,
         billing_store_id: settings.billing_store_id,
         // What this process resolved at boot, compared with what is stored.
         // They differ after a change nobody has restarted into, and an admin
@@ -306,6 +324,19 @@ where
         // server is not actually billing on.
         billing_store_id_active: state.billing_store_id == settings.billing_store_id,
     }))
+}
+
+/// The chains a build accepts for a brand-new payment method when no
+/// `server_settings` row exists yet, mirroring `chain_has_no_adapter`'s
+/// `None` + `New` branch exactly - see that function's doc for why this is
+/// `evm::testnet` and not the full registry. Its own function so `get_settings`
+/// can report the same set it is actually gated by, rather than a value that
+/// looks current but isn't.
+fn unconfigured_chain_ids() -> Vec<ChainId> {
+    evm::testnet::ALL_TESTNETS
+        .iter()
+        .map(|config| ChainId::evm(config.chain_id))
+        .collect()
 }
 
 /// Update server settings (upsert).
@@ -498,6 +529,53 @@ mod tests {
         assert_eq!(
             json["enabled_chain_ids"],
             serde_json::json!(["eip155:1", "eip155:137"])
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_instance_reports_sepolia_and_not_the_mainnet_default() {
+        let chain_ids = unconfigured_chain_ids();
+        assert!(chain_ids.contains(&ChainId::evm(11_155_111)));
+        // The bug this guards: an unconfigured deployment must never report
+        // the mainnet default list, because a testnet instance actually
+        // gates on this set - not that one - and saving it verbatim would
+        // start refusing Sepolia.
+        assert_ne!(chain_ids, ServerSettings::default().enabled_chain_ids);
+    }
+
+    /// The reported set and the gated set must be the same set.
+    ///
+    /// Two functions that have to agree is how this repository keeps getting
+    /// caught, and "it mirrors the other one" is a claim that holds until
+    /// someone edits one of them. Today it cannot drift - `get_testnet_config`
+    /// is a linear search of `ALL_TESTNETS`, so both read the same slice - but
+    /// reimplementing it as a match would break the mirror silently, and the
+    /// symptom would be a settings page offering chains the server refuses.
+    ///
+    /// So: ask the gate itself, chain by chain, and require it to accept
+    /// exactly what this function reports.
+    #[test]
+    fn every_chain_reported_when_unconfigured_is_one_the_gate_actually_accepts() {
+        use crate::api::stores::{ChainCheckContext, chain_has_no_adapter};
+
+        for chain_id in unconfigured_chain_ids() {
+            assert!(
+                !chain_has_no_adapter(&chain_id, None, ChainCheckContext::New),
+                "{chain_id} is offered by the settings page and refused by the gate"
+            );
+        }
+
+        // And the other direction, on the one that matters: a chain the gate
+        // refuses must not be offered. Mainnet is the case with teeth, since
+        // it is what `ServerSettings::default()` used to report here.
+        let mainnet = ChainId::evm(1);
+        assert!(
+            chain_has_no_adapter(&mainnet, None, ChainCheckContext::New),
+            "an unconfigured instance does not accept mainnet for a new method"
+        );
+        assert!(
+            !unconfigured_chain_ids().contains(&mainnet),
+            "so the settings page must not offer it"
         );
     }
 
