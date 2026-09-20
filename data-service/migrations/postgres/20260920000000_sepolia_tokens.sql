@@ -10,7 +10,14 @@
 -- stored without a resolvable one is invisible to the pricing ladder - which
 -- is how the first real USDC payment on this instance came out worth nothing.
 --
--- Circle's own Sepolia deployment. Chain 11155111.
+-- Circle's own Sepolia deployment.
+--
+-- `chain_id` is the `caip2` domain, so `eip155:11155111` and not `11155111`.
+-- The older seed migrations in this directory pass a bare integer, which is
+-- what the column was when they were written - copying their shape verbatim
+-- fails the domain's check constraint, and it fails at migration time on a
+-- fresh database rather than here.
 INSERT INTO tokens (token_type, chain_id, address, symbol, name, decimals) VALUES
-    ('erc20', 11155111, '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', 'USDC', 'USD Coin', 6)
+    ('erc20', 'eip155:11155111', '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
+     'USDC', 'USD Coin', 6)
 ON CONFLICT DO NOTHING;
