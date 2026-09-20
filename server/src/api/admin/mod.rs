@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unconfigured_chain_ids_contains_sepolia_not_mainnet_default() {
+    fn an_unconfigured_instance_reports_sepolia_and_not_the_mainnet_default() {
         let chain_ids = unconfigured_chain_ids();
         assert!(chain_ids.contains(&ChainId::evm(11_155_111)));
         // The bug this guards: an unconfigured deployment must never report
@@ -541,6 +541,42 @@ mod tests {
         // gates on this set - not that one - and saving it verbatim would
         // start refusing Sepolia.
         assert_ne!(chain_ids, ServerSettings::default().enabled_chain_ids);
+    }
+
+    /// The reported set and the gated set must be the same set.
+    ///
+    /// Two functions that have to agree is how this repository keeps getting
+    /// caught, and "it mirrors the other one" is a claim that holds until
+    /// someone edits one of them. Today it cannot drift - `get_testnet_config`
+    /// is a linear search of `ALL_TESTNETS`, so both read the same slice - but
+    /// reimplementing it as a match would break the mirror silently, and the
+    /// symptom would be a settings page offering chains the server refuses.
+    ///
+    /// So: ask the gate itself, chain by chain, and require it to accept
+    /// exactly what this function reports.
+    #[test]
+    fn every_chain_reported_when_unconfigured_is_one_the_gate_actually_accepts() {
+        use crate::api::stores::{ChainCheckContext, chain_has_no_adapter};
+
+        for chain_id in unconfigured_chain_ids() {
+            assert!(
+                !chain_has_no_adapter(&chain_id, None, ChainCheckContext::New),
+                "{chain_id} is offered by the settings page and refused by the gate"
+            );
+        }
+
+        // And the other direction, on the one that matters: a chain the gate
+        // refuses must not be offered. Mainnet is the case with teeth, since
+        // it is what `ServerSettings::default()` used to report here.
+        let mainnet = ChainId::evm(1);
+        assert!(
+            chain_has_no_adapter(&mainnet, None, ChainCheckContext::New),
+            "an unconfigured instance does not accept mainnet for a new method"
+        );
+        assert!(
+            !unconfigured_chain_ids().contains(&mainnet),
+            "so the settings page must not offer it"
+        );
     }
 
     #[test]
