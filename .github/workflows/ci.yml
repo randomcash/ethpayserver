@@ -439,9 +439,31 @@ jobs:
           DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
         run: ./target/release/migrate_postgres
 
+      # Before the server starts, deliberately. The host instantiates plugins
+      # at boot, so a plugin installed through the API afterwards is recorded
+      # and not running - `POST /admin/plugins` answers `restart_required`.
+      # Seeding it here is what a restart would have left behind, and it is
+      # the only way the page tests exercise a plugin that is genuinely
+      # loaded rather than skipping.
+      #
+      # `npm ci` here rather than with the browsers below: this needs `pg`,
+      # and it needs it before the server exists.
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: npm ci
+
+      - name: Seed the fixture plugin
+        working-directory: e2e
+        env:
+          E2E_DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
+        run: node scripts/seed-plugin.mjs "$GITHUB_WORKSPACE/e2e-plugins"
+
       - name: Start server
         env:
           DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
+          # Where the seed step wrote the fixture's artifact. Absolute,
+          # because the server's working directory is not this step's.
+          ETHPAY_PLUGIN_DIR: ${{ github.workspace }}/e2e-plugins
           REDIS_URL: redis://127.0.0.1:6379
           # The limiter is per IP, and the entire suite is one IP (127.0.0.1)
           # driven by a single worker. On the defaults - auth 5/min, write
@@ -546,9 +568,9 @@ jobs:
           curl -sf http://localhost:8080/api/health/live \
             || { echo "::error::frontend proxy is not reaching the API"; docker logs e2e-frontend; exit 1; }
 
-      - name: Install Playwright
+      - name: Install Playwright browsers
         working-directory: e2e
-        run: npm ci && npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium
 
       # Steps print regardless of TTY; plain `list` only prints tests as they
       # FINISH, so a job killed at the 30-minute cap would name the last

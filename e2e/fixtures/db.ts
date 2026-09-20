@@ -60,3 +60,49 @@ export async function resetDatabase(): Promise<void> {
     await client.end();
   }
 }
+
+/**
+ * A user with an API key, created directly in the database.
+ *
+ * Registration goes through WebAuthn in a browser, which is the right way to
+ * test registration and a poor way to get a credential for a suite that is
+ * testing something else. Inserting the row skips a virtual authenticator, a
+ * page load and a ceremony, none of which this returns anything about.
+ *
+ * The three encrypted columns are `NOT NULL` and hold client-side material
+ * the server never reads back for an API-key request, so a placeholder is
+ * honest here rather than lazy - a real value would suggest this account can
+ * log in, and it cannot.
+ */
+export async function createUserWithApiKey(
+  role: 'user' | 'server_admin' = 'user',
+): Promise<{ userId: string; apiKey: string }> {
+  const crypto = await import('node:crypto');
+  // `ak_` because that is the shape `validate_api_key` looks for, and a key
+  // that does not start with it fails for a reason that reads as "wrong
+  // credential" rather than "wrong prefix".
+  const apiKey = `ak_e2e_${crypto.randomBytes(18).toString('hex')}`;
+  const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
+
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rows } = await client.query(
+      `INSERT INTO users (email, kdf_params, encrypted_symmetric_key,
+                          recovery_verification_hash, role)
+       VALUES ($1, '{}', 'e2e-placeholder', 'e2e-placeholder', $2)
+       RETURNING id`,
+      [`e2e-${crypto.randomBytes(6).toString('hex')}@example.test`, role],
+    );
+    const userId = rows[0].id as string;
+
+    await client.query(
+      `INSERT INTO api_keys (user_id, name, key_hash, key_prefix, is_active)
+       VALUES ($1, 'e2e', $2, $3, true)`,
+      [userId, keyHash, apiKey.slice(0, 12)],
+    );
+    return { userId, apiKey };
+  } finally {
+    await client.end();
+  }
+}
