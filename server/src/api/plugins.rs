@@ -175,7 +175,12 @@ fn visible_pages(
 ) -> Vec<PluginPageInfo> {
     declared
         .into_iter()
-        .filter(|page| is_admin || !page.admin_only)
+        // `admin_only` or an admin-settings placement - either is enough.
+        // A page placed in admin settings is admin-only by definition (there
+        // is nowhere else it is reachable from), so a plugin should not have
+        // to say it twice, and a merchant must not be offered it because the
+        // author said it only once.
+        .filter(|page| is_admin || !(page.admin_only || page.placement.is_admin_only()))
         .map(|page| PluginPageInfo {
             path: page.path,
             label: page.label,
@@ -744,17 +749,19 @@ mod tests {
     /// the order a menu is built in.
     #[test]
     fn admin_only_pages_are_offered_only_to_an_admin() {
-        use payserver_plugin_api::PageDeclaration;
+        use payserver_plugin_api::{PageDeclaration, PagePlacement};
 
         let declared = vec![
             PageDeclaration {
                 path: "subscription".to_string(),
                 label: "Subscription".to_string(),
+                placement: PagePlacement::Nav,
                 admin_only: false,
             },
             PageDeclaration {
                 path: "subscriptions".to_string(),
                 label: "Subscriptions".to_string(),
+                placement: PagePlacement::Nav,
                 admin_only: true,
             },
         ];
@@ -770,6 +777,29 @@ mod tests {
             vec!["subscription", "subscriptions"],
             "the plugin's declared order is what a menu is built from"
         );
+    }
+
+    /// A page placed in admin settings is admin-only by definition - there is
+    /// nowhere else it is reachable from. A plugin should not have to say so
+    /// twice, and a merchant must not be offered it because the author said
+    /// it only once.
+    #[test]
+    fn an_admin_settings_page_is_admin_only_without_saying_so_twice() {
+        use payserver_plugin_api::{PageDeclaration, PagePlacement};
+
+        let declared = vec![PageDeclaration {
+            path: "subscriptions".to_string(),
+            label: "All merchants".to_string(),
+            placement: PagePlacement::AdminSettings,
+            // Deliberately NOT set: the placement alone must be enough.
+            admin_only: false,
+        }];
+
+        assert!(
+            visible_pages(declared.clone(), false).is_empty(),
+            "a merchant must not be offered a page about other merchants"
+        );
+        assert_eq!(visible_pages(declared, true).len(), 1);
     }
 
     #[test]
