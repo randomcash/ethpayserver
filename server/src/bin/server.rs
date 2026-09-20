@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
 
     // Initialize tracing (includes Sentry layer when DSN is configured)
-    init_tracing(&config.log_level);
+    init_tracing(&config.log_level, &config.log_format);
 
     // Report whether error reporting is actually on. `tracing::info!` before
     // this point has no subscriber to write to, so this must come after
@@ -527,13 +527,23 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(log_level: &str) {
+fn init_tracing(log_level: &str, log_format: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(sentry_tracing::layer())
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // `json` is what a log shipper (Grafana Cloud's Loki agent) parses; any
+    // other value keeps the human-readable format for local/dev use.
+    if log_format == "json" {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(sentry_tracing::layer())
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(sentry_tracing::layer())
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 }
