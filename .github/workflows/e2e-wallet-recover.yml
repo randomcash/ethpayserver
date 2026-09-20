@@ -59,10 +59,18 @@ jobs:
       # before anything can move, and so a malformed one fails here rather than
       # after the mnemonic is in memory.
       - name: Echo what was asked for
+        env:
+          DESTINATION: ${{ inputs.destination }}
+          SCAN: ${{ inputs.scan }}
+          CONFIRM: ${{ inputs.confirm }}
         run: |
-          echo "destination: ${{ inputs.destination }}"
-          echo "scan:        ${{ inputs.scan }}"
-          echo "mode:        ${{ inputs.confirm == 'execute' && 'EXECUTE — this broadcasts' || 'dry run' }}"
+          echo "destination: $DESTINATION"
+          echo "scan:        $SCAN"
+          if [ "$CONFIRM" = "execute" ]; then
+            echo "mode:        EXECUTE - this broadcasts"
+          else
+            echo "mode:        dry run"
+          fi
 
       - name: Sweep
         working-directory: e2e
@@ -71,13 +79,26 @@ jobs:
           E2E_SEPOLIA_RPC_URL: ${{ secrets.E2E_SEPOLIA_RPC_URL }}
           DESTINATION: ${{ inputs.destination }}
           SCAN: ${{ inputs.scan }}
+          CONFIRM: ${{ inputs.confirm }}
         run: |
           set -euo pipefail
           [ -n "$E2E_TEST_MNEMONIC" ] || { echo "::error::E2E_TEST_MNEMONIC is not set"; exit 1; }
-          # Inputs are passed through the environment, never interpolated into
-          # the script body: `${{ }}` inside `run` is substituted before bash
-          # sees it, so a crafted input would be shell, not an argument.
+
+          # Every input reaches the script through the environment. An Actions
+          # expression in a `run` block is substituted before bash is started,
+          # so one interpolated into the command line would be shell rather
+          # than an argument.
+          #
+          # That substitution also happens inside what looks like a shell
+          # comment, which is how the first version of this file failed to
+          # parse: a comment here explaining the rule contained an empty
+          # expression, and GitHub tried to evaluate it. Refer to the syntax
+          # in prose, never by writing it.
+          FLAG=""
+          if [ "$CONFIRM" = "execute" ]; then
+            FLAG="--execute"
+          fi
+
           node scripts/sweep-test-wallet.mjs \
             --to "$DESTINATION" \
-            --scan "$SCAN" \
-            ${{ inputs.confirm == 'execute' && '--execute' || '' }}
+            --scan "$SCAN" $FLAG
