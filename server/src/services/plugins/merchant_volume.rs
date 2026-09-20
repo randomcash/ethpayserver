@@ -159,34 +159,158 @@ impl<A: SessionService + 'static> MerchantVolumeReader for PluginMerchantVolume<
         // multiplying instead of dividing produces a perfectly plausible
         // number, and no integration test that seeds one asset would catch
         // it.
-        let mut rates: std::collections::BTreeMap<String, Decimal> =
-            std::collections::BTreeMap::new();
-        for (asset, _) in per_asset.keys() {
-            if rates.contains_key(asset) || asset.eq_ignore_ascii_case(currency) {
-                continue;
-            }
-            match self.state.rate_provider.get_rate(currency, asset).await {
-                Ok(rate) => {
-                    rates.insert(asset.clone(), rate.rate);
-                }
-                Err(e) => tracing::warn!(
-                    %asset,
-                    %currency,
-                    error = %e,
-                    "no rate for an asset in this account's volume; it is omitted from the total"
-                ),
-            }
-        }
+        let assets: Vec<String> = per_asset
+            .keys()
+            .map(|(asset, _)| asset.clone())
+            .filter(|asset| !asset.eq_ignore_ascii_case(currency))
+            .collect();
+        let rates = self.rates_for(&assets, currency).await;
 
         let (total, unpriced) = total_in(&per_asset, currency, |asset| rates.get(asset).copied());
 
         Ok(MerchantVolume {
-            volume: total.normalize().to_string(),
+            volume: reportable(total).to_string(),
             currency: currency.to_string(),
             unpriced_assets: unpriced.into_iter().collect(),
         })
     }
 }
+
+impl<A: SessionService + 'static> PluginMerchantVolume<A> {
+    /// How much of each asset one unit of `currency` buys.
+    ///
+    /// Direct first, because that is the same question invoice creation asks
+    /// and the answer a merchant's invoices were quoted with. When the pair
+    /// has no direct answer - which for a plan priced in a stablecoin is
+    /// *every* asset, since the providers only quote crypto against fiat -
+    /// both sides are asked against [`BRIDGE_CURRENCY`] and divided.
+    ///
+    /// Nothing is invented. A stablecoin's peg is not assumed to be one: the
+    /// bridge asks the provider what a USD buys of it, the same way it asks
+    /// what a USD buys of ETH, and both legs come from the same provider at
+    /// the same moment.
+    ///
+    /// An asset with no answer either way is simply absent from the map, which
+    /// drops it from the total and under-counts - the direction that can only
+    /// under-bill.
+    async fn rates_for(
+        &self,
+        assets: &[String],
+        currency: &str,
+    ) -> std::collections::BTreeMap<String, Decimal> {
+        let mut rates = std::collections::BTreeMap::new();
+        // Fetched lazily and at most once: a plan priced in a fiat the
+        // provider knows never needs it.
+        let mut bridge_to_currency: Option<Option<Decimal>> = None;
+
+        for asset in assets {
+            if rates.contains_key(asset) {
+                continue;
+            }
+
+            if let Ok(direct) = self.state.rate_provider.get_rate(currency, asset).await
+                && direct.rate > Decimal::ZERO
+            {
+                rates.insert(asset.clone(), direct.rate);
+                continue;
+            }
+
+            let to_currency = match &bridge_to_currency {
+                Some(cached) => *cached,
+                None => {
+                    let fetched = self.positive_rate(BRIDGE_CURRENCY, currency).await;
+                    bridge_to_currency = Some(fetched);
+                    fetched
+                }
+            };
+            let (Some(to_currency), Some(to_asset)) = (
+                to_currency,
+                self.positive_rate(BRIDGE_CURRENCY, asset).await,
+            ) else {
+                tracing::warn!(
+                    %asset,
+                    %currency,
+                    bridge = BRIDGE_CURRENCY,
+                    "no rate for an asset in this account's volume, directly or bridged; \
+                     it is omitted from the total"
+                );
+                continue;
+            };
+
+            match bridged_rate(to_asset, to_currency) {
+                Some(rate) => {
+                    rates.insert(asset.clone(), rate);
+                }
+                None => tracing::error!(
+                    %asset,
+                    %currency,
+                    "a bridged rate did not divide; the asset is omitted from the total"
+                ),
+            }
+        }
+
+        rates
+    }
+
+    /// One rate, or `None` for anything that cannot be used as a divisor.
+    async fn positive_rate(&self, from: &str, to: &str) -> Option<Decimal> {
+        match self.state.rate_provider.get_rate(from, to).await {
+            Ok(rate) if rate.rate > Decimal::ZERO => Some(rate.rate),
+            Ok(rate) => {
+                tracing::error!(%from, %to, rate = %rate.rate, "a non-positive rate cannot quote");
+                None
+            }
+            Err(e) => {
+                tracing::debug!(%from, %to, error = %e, "no rate for this pair");
+                None
+            }
+        }
+    }
+}
+
+/// The figure as it should be reported, to two places.
+///
+/// A bridged rate is a quotient and rarely divides evenly, so a total arrives
+/// with a tail: one ETH against a depegged quote currency comes out as
+/// `2624.9999999999999999999998688`. That is the right number and the wrong
+/// thing to put on a page, and it is the wrong thing to hand a plugin, which
+/// renders whatever it is given.
+///
+/// **Truncated, not rounded.** Against a cap in the thousands the difference
+/// is half a penny either way and changes no bracket - but rounding up can
+/// only ever move a merchant closer to a refusal, and truncating can only ever
+/// move them away from one. Everything else in this module fails in that
+/// direction and this is not the place to start failing in the other.
+fn reportable(total: Decimal) -> Decimal {
+    total.trunc_with_scale(2).normalize()
+}
+
+/// Turn two bridge legs into the direct rate the arithmetic wants.
+///
+/// `to_asset` is "1 bridge buys this much asset", `to_currency` is "1 bridge
+/// buys this much of the quote currency". What [`total_in`] needs is "1 quote
+/// currency buys this much asset", which is their quotient.
+///
+/// Worth checking against a real case rather than trusting the algebra: 1 USD
+/// buys 0.0004 ETH and 1 USD buys 1 USDC, so 1 USDC buys 0.0004 ETH - and one
+/// ETH of volume is 2500 USDC, which is what `total_in` then divides its way
+/// to.
+fn bridged_rate(to_asset: Decimal, to_currency: Decimal) -> Option<Decimal> {
+    if to_currency <= Decimal::ZERO {
+        return None;
+    }
+    to_asset.checked_div(to_currency)
+}
+
+/// The unit every rate is bridged through when a pair cannot be quoted
+/// directly.
+///
+/// The providers quote **crypto against fiat** and nothing else - CoinGecko
+/// maps one side to a coin id and the other to a `vs_currency`, so a pair with
+/// fiat on neither side has no shape it can be asked in. A plan priced in a
+/// stablecoin is exactly that pair: `USDC/ETH` is refused by construction, not
+/// by a missing feed.
+const BRIDGE_CURRENCY: &str = "USD";
 
 /// Collapse the per-day, per-asset buckets the database returns into one
 /// figure per `(asset, decimals)`.
@@ -328,6 +452,75 @@ mod tests {
 
     /// The window is named by the plugin, so it is the plugin that could ask
     /// for all history on every call.
+    /// The case that made the whole capability read near-zero on a live
+    /// instance.
+    ///
+    /// The plan ladder is priced in USDC, so every lookup asked the provider
+    /// for `USDC/<asset>`. The providers quote crypto against **fiat** and
+    /// nothing else - CoinGecko maps one side to a coin id and the other to a
+    /// `vs_currency` - so a pair with fiat on neither side is refused by
+    /// construction. Every ETH payment a merchant took was dropped from their
+    /// volume, and the ladder was inert again for a new reason.
+    #[test]
+    fn a_crypto_quoted_plan_is_priced_by_bridging_through_fiat() {
+        // 1 USD buys 0.0004 ETH; 1 USD buys 1 USDC.
+        let rate = bridged_rate(dec("0.0004"), dec("1")).expect("the bridge must divide");
+        assert_eq!(rate, dec("0.0004"), "1 USDC buys 0.0004 ETH");
+
+        // And the figure that falls out of it is the one a merchant would
+        // check against their own books.
+        let (total, unpriced) = total_in(
+            &assets(&[("ETH", 18, "1000000000000000000")]),
+            "USDC",
+            |_| Some(rate),
+        );
+        assert_eq!(total, dec("2500"), "one ETH is 2500 USDC at those rates");
+        assert!(unpriced.is_empty());
+    }
+
+    /// A stablecoin's peg is not assumed. The bridge asks what a USD buys of
+    /// it, exactly as it asks what a USD buys of ETH.
+    #[test]
+    fn the_bridge_does_not_assume_a_stablecoin_is_worth_one_dollar() {
+        // A depegged quote currency: 1 USD buys 1.05 of it.
+        let rate = bridged_rate(dec("0.0004"), dec("1.05")).unwrap();
+        let (total, _) = total_in(
+            &assets(&[("ETH", 18, "1000000000000000000")]),
+            "USDC",
+            |_| Some(rate),
+        );
+        // 2624.99 and not 2625: the quotient does not divide evenly and the
+        // reported figure truncates rather than rounds, which is the
+        // direction that cannot move a merchant closer to a refusal.
+        assert_eq!(
+            reportable(total),
+            dec("2624.99"),
+            "a quote currency worth less than a dollar buys more of itself per ETH"
+        );
+    }
+
+    /// A bridged rate is a quotient and rarely divides evenly, so the total
+    /// arrives with a tail that is right and unreadable. It is truncated, not
+    /// rounded: rounding up can only move a merchant closer to a refusal.
+    #[test]
+    fn a_reported_figure_is_two_places_and_never_rounds_upward() {
+        assert_eq!(
+            reportable(dec("2624.9999999999999999999998688")),
+            dec("2624.99")
+        );
+        assert_eq!(reportable(dec("2625")), dec("2625"));
+        assert_eq!(reportable(dec("0.999")), dec("0.99"));
+        assert_eq!(reportable(Decimal::ZERO), Decimal::ZERO);
+    }
+
+    /// Dividing by a bridge leg that is zero or negative is a panic or an
+    /// infinity. Absent is the answer, which drops the asset and under-counts.
+    #[test]
+    fn a_non_positive_bridge_leg_yields_no_rate() {
+        assert_eq!(bridged_rate(dec("0.0004"), Decimal::ZERO), None);
+        assert_eq!(bridged_rate(dec("0.0004"), dec("-1")), None);
+    }
+
     #[test]
     fn the_window_is_clamped_at_both_ends() {
         assert_eq!(0u32.clamp(1, MAX_WINDOW_DAYS), 1);
