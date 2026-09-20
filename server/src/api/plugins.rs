@@ -184,6 +184,7 @@ fn visible_pages(
         .map(|page| PluginPageInfo {
             path: page.path,
             label: page.label,
+            icon: page.icon.into(),
         })
         .collect()
 }
@@ -205,6 +206,55 @@ pub struct PluginPageInfo {
     /// Append to `/plugins/{id}/pages/` to fetch it.
     pub path: String,
     pub label: String,
+    pub icon: PluginPageIcon,
+}
+
+/// The icon a plugin's page shows in navigation, mirrored from
+/// [`payserver_plugin_api::PageIcon`] for the sake of an API schema:
+/// `payserver-plugin-api` does not depend on `utoipa`, and a fixed,
+/// API-facing vocabulary is a better reason to add that dependency there
+/// than this one field.
+///
+/// The consumer is `payserver-client`, a separate repository: its
+/// `PluginLinks` (`src/app/layout.rs`) maps each variant here to a component
+/// in `src/app/icons.rs`. That mapping cannot live in this diff - it is a
+/// different crate in a different repo - so it ships as its own commit and
+/// PR there, opened alongside this one.
+///
+/// `payserver-billing`'s own manifest still needs `icon = "card"` added now
+/// that this vocabulary exists, so its sidebar entry stops using the
+/// fallback too. That repo is private and isn't checked out anywhere this
+/// change can reach it from, so it is not done here - tracked as a follow-up
+/// against that repo instead of silently left undone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginPageIcon {
+    Card,
+    Coins,
+    Chart,
+    Users,
+    Shield,
+    Bell,
+    Key,
+    Tag,
+    Plug,
+}
+
+impl From<payserver_plugin_api::PageIcon> for PluginPageIcon {
+    fn from(icon: payserver_plugin_api::PageIcon) -> Self {
+        use payserver_plugin_api::PageIcon;
+        match icon {
+            PageIcon::Card => Self::Card,
+            PageIcon::Coins => Self::Coins,
+            PageIcon::Chart => Self::Chart,
+            PageIcon::Users => Self::Users,
+            PageIcon::Shield => Self::Shield,
+            PageIcon::Bell => Self::Bell,
+            PageIcon::Key => Self::Key,
+            PageIcon::Tag => Self::Tag,
+            PageIcon::Plug => Self::Plug,
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -749,19 +799,21 @@ mod tests {
     /// the order a menu is built in.
     #[test]
     fn admin_only_pages_are_offered_only_to_an_admin() {
-        use payserver_plugin_api::{PageDeclaration, PagePlacement};
+        use payserver_plugin_api::{PageDeclaration, PageIcon, PagePlacement};
 
         let declared = vec![
             PageDeclaration {
                 path: "subscription".to_string(),
                 label: "Subscription".to_string(),
                 placement: PagePlacement::Nav,
+                icon: PageIcon::Plug,
                 admin_only: false,
             },
             PageDeclaration {
                 path: "subscriptions".to_string(),
                 label: "Subscriptions".to_string(),
                 placement: PagePlacement::Nav,
+                icon: PageIcon::Plug,
                 admin_only: true,
             },
         ];
@@ -785,12 +837,13 @@ mod tests {
     /// it only once.
     #[test]
     fn an_admin_settings_page_is_admin_only_without_saying_so_twice() {
-        use payserver_plugin_api::{PageDeclaration, PagePlacement};
+        use payserver_plugin_api::{PageDeclaration, PageIcon, PagePlacement};
 
         let declared = vec![PageDeclaration {
             path: "subscriptions".to_string(),
             label: "All merchants".to_string(),
             placement: PagePlacement::AdminSettings,
+            icon: PageIcon::Plug,
             // Deliberately NOT set: the placement alone must be enough.
             admin_only: false,
         }];
@@ -800,6 +853,48 @@ mod tests {
             "a merchant must not be offered a page about other merchants"
         );
         assert_eq!(visible_pages(declared, true).len(), 1);
+    }
+
+    /// The icon a plugin declares is what a client is told to draw, not
+    /// whatever the generic default happens to be - otherwise the field
+    /// could parse correctly in the manifest and still never reach anyone
+    /// reading the response.
+    #[test]
+    fn a_declared_icon_reaches_the_response() {
+        use payserver_plugin_api::{PageDeclaration, PageIcon, PagePlacement};
+
+        let declared = vec![PageDeclaration {
+            path: "subscription".to_string(),
+            label: "Subscription".to_string(),
+            placement: PagePlacement::Nav,
+            icon: PageIcon::Card,
+            admin_only: false,
+        }];
+
+        let pages = visible_pages(declared, false);
+        assert_eq!(pages[0].icon, PluginPageIcon::Card);
+    }
+
+    /// A manifest predating this field, or one written against a newer icon
+    /// vocabulary than this build knows, both land on [`PageIcon::Plug`]
+    /// before `visible_pages` ever sees them (that defaulting and fallback
+    /// is `payserver-plugin-api`'s own, and is tested there). What this repo
+    /// owns is the mapping onto [`PluginPageIcon`], so this only needs to
+    /// confirm the default variant survives that mapping unchanged.
+    #[test]
+    fn a_page_with_the_default_icon_maps_to_the_generic_one() {
+        use payserver_plugin_api::{PageDeclaration, PageIcon, PagePlacement};
+
+        let declared = vec![PageDeclaration {
+            path: "subscription".to_string(),
+            label: "Subscription".to_string(),
+            placement: PagePlacement::Nav,
+            icon: PageIcon::default(),
+            admin_only: false,
+        }];
+
+        let pages = visible_pages(declared, false);
+        assert_eq!(pages[0].icon, PluginPageIcon::Plug);
     }
 
     #[test]
