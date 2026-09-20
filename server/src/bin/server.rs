@@ -233,14 +233,15 @@ async fn main() -> Result<()> {
     // around. Handed to the loader now because this is where a plugin is
     // given its host calls, and a plugin that got none here would have no
     // way to be granted them later.
-    let plugin_issuer = server::services::plugins::DeferredIssuer::new();
+    let plugin_capabilities = server::services::plugins::DeferredCapabilities::default();
+    let plugin_issuer = plugin_capabilities.issuer.clone();
 
     let loaded = match load_installed_plugins(
         &*data_service,
         plugin_host.as_deref(),
         &plugin_artifacts,
         Some(&plugin_pools),
-        &plugin_issuer,
+        &plugin_capabilities,
     )
     .await
     {
@@ -435,6 +436,16 @@ async fn main() -> Result<()> {
             "plugins cannot issue invoices: ETHPAY_BILLING_STORE_ID is unset, so this \
              instance has no store of its own to bill on"
         ),
+    }
+
+    // Capability 6, published unconditionally. Unlike capability 3 it needs
+    // no own store: an instance that sells nothing still has merchants with
+    // volume, and a plugin asking what one settled deserves the real answer
+    // rather than silence that reads as zero.
+    if plugin_capabilities.volume.publish(Arc::new(
+        server::services::plugins::PluginMerchantVolume::new(state.clone()),
+    )) {
+        tracing::info!("plugins may read what an account settled over a window");
     }
 
     // Capability 5. `PageHost` is built empty by `AppState::new` and has
