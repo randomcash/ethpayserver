@@ -14,7 +14,7 @@
 //! # Delivery is at-least-once
 //!
 //! A queued job is retried on any non-2xx response or transport error, on a
-//! Stripe-like backoff (1m, 5m, 30m, 2h, 12h, 24h — see [`WebhookJob`]), and
+//! an escalating backoff (1m, 5m, 30m, 2h, 12h, 24h — see [`WebhookJob`]), and
 //! the queue is a Redis sorted set from which a worker reads and then removes
 //! the job. A subscriber that returns 2xx after a network failure, or a
 //! handler that re-runs after this server restarts mid-transition, will
