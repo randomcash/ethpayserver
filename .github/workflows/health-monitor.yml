@@ -1,0 +1,52 @@
+name: Health monitor (deep)
+
+# /api/health/deep can answer 200 while the money path is dead: evmmonitor
+# stalls, monitor.data_fresh goes false, and every HTTP-status-only check
+# stays green while invoices go unpaid. Nothing polled that field between
+# deploys — health-gate.sh only runs when something deploys, and the daily
+# e2e run is the only thing that touches testnet the rest of the time.
+#
+# This runs on GitHub-hosted runners on purpose, same reasoning as
+# e2e-scheduled.yml: the deploy host cannot be trusted to report on itself
+# being down.
+#
+# Every 5 minutes is the shortest interval GitHub Actions schedules
+# meaningfully — not the 30-60s a real uptime checker gives you. This is the
+# fallback documented in docs/ops.md: it exists to assert on the response
+# body (monitor.data_fresh, per-chain rpc status), which a status-code-only
+# uptime check cannot do. Configure a real Sentry Uptime Check against the
+# same URL for the faster cadence; keep this running regardless, since it is
+# the thing actually reading the body.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  testnet:
+    name: Deep health (testnet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check /api/health/deep
+        env:
+          HEALTH_URL: https://testnet.random.cash/api/health/deep
+          SENTRY_CRON_URL: ${{ secrets.SENTRY_CRON_HEALTH_TESTNET_URL }}
+        run: scripts/check-health-deep.sh
+
+  mainnet:
+    name: Deep health (mainnet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check /api/health/deep
+        env:
+          HEALTH_URL: https://pay.random.cash/api/health/deep
+          SENTRY_CRON_URL: ${{ secrets.SENTRY_CRON_HEALTH_MAINNET_URL }}
+        run: scripts/check-health-deep.sh

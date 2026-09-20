@@ -70,6 +70,45 @@ These require a `Bearer` token with server admin privileges:
 - `GET /health/chains` — detailed per-chain health from evmmonitor (same data as `/health/deep` RPCs section, but includes watched address counts)
 - `GET /metrics` — Prometheus exposition format for scraping
 
+## Watching `/health/deep` between deploys
+
+A 200 from `/health/live` or `/health/ready` does not mean payments are being
+detected — the process can be up while `monitor.data_fresh` is false or an RPC
+has gone quiet, and a check that only reads the status code stays green
+through that. Two things exist so far that touch `/health/deep`, and both are
+deploy-triggered, not continuous:
+
+- `scripts/health-gate.sh`, run by `deploy-verify-testnet` in `ci.yml` on every
+  push to `testnet`, and manually against mainnet per
+  `docs/deployment/mainnet-gate.md`. Gates a rollout; does nothing once the
+  rollout has succeeded.
+- `scripts/smoke-prod.sh`, run manually per the same checklist.
+
+Between deploys, coverage is `.github/workflows/health-monitor.yml`: it runs
+`scripts/check-health-deep.sh` against both `testnet.random.cash` and
+`pay.random.cash` every 5 minutes on a GitHub-hosted runner, asserts
+`postgres`, `redis`, `monitor.data_fresh` and every `rpcs.*.status`, and — if
+`SENTRY_CRON_HEALTH_TESTNET_URL` / `SENTRY_CRON_HEALTH_MAINNET_URL` are set —
+checks in to a Sentry Cron Monitor so a missed or failing check pages through
+Sentry's alerting rather than sitting unread in the Actions tab. The scheduled
+e2e workflow's dead-man's-switch moved onto the same vendor, checking in to
+`SENTRY_CRON_E2E_URL`.
+
+Five minutes is GitHub Actions' practical floor, not the 30-60s this ticket
+asked for — schedule intervals shorter than that are not reliable, and GitHub
+can delay a scheduled run further under load. The two Sentry Cron Monitor
+URLs above have to be created by hand in Sentry (Crons → new monitor → "check
+in via HTTP") and the resulting URLs stored as repo secrets; that account
+setup is outside what a commit here can do.
+
+For the faster cadence, also add a Sentry **Uptime Check** (not a Cron
+Monitor) against `/api/health/deep`, run from Sentry's own checkers at 30-60s.
+As of this writing it was not confirmed whether Sentry's uptime check can
+assert on the response body rather than just the status code — if it can,
+point its alert at the same field failures; if it can't, the workflow above is
+the fallback that actually reads the body, and is why it stays regardless of
+what the uptime check can do.
+
 ## Editing a migration that has already run
 
 `sqlx` checksums the **whole migration file** — SHA-384 of its bytes — and
