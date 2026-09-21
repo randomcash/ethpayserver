@@ -11,15 +11,16 @@ mod webhook_dispatch;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use auth::StoreRepository;
 use bigdecimal::{BigDecimal, RoundingMode, Zero};
 use data_service::{
-    PaymentOptionReader, PaymentTxIndexReader, PaymentTxIndexWriter, ReorgCandidateReader,
-    ReorgWriter,
+    ChainCursor, ChainCursorReader, ChainCursorWriter, PaymentOptionReader, PaymentTxIndexReader,
+    PaymentTxIndexWriter, ReorgCandidateReader, ReorgWriter,
 };
-use evm::monitor::bridge::EventBridge;
+use evm::monitor::bridge::{EventBridge, EventCursor, EventEnvelope};
 use evm::monitor::events::MonitorEvent;
 use tokio_stream::StreamExt;
 use types::{
@@ -33,6 +34,13 @@ use super::invoice_cleanup::{CleanupDataService, InvoiceCleanupService};
 use super::plugins::OwnStorePaymentObserver;
 use super::webhook::{WebhookDataService, WebhookSink};
 use crate::api::ws::WsBroadcast;
+
+/// Identifies this server's event source when persisting resume cursors.
+///
+/// A plain constant because there is exactly one adapter kind today
+/// (evmmonitor); the column exists so a second adapter would not collide
+/// with it, not because this server picks between several.
+const ADAPTER_ID: &str = "evmmonitor";
 
 /// Trait for data service requirements in EventConsumer.
 pub trait EventConsumerDataService:
@@ -50,6 +58,8 @@ pub trait EventConsumerDataService:
     + CleanupDataService
     + ReorgCandidateReader
     + ReorgWriter
+    + ChainCursorReader
+    + ChainCursorWriter
     + Send
     + Sync
 {
@@ -70,6 +80,8 @@ impl<T> EventConsumerDataService for T where
         + CleanupDataService
         + ReorgCandidateReader
         + ReorgWriter
+        + ChainCursorReader
+        + ChainCursorWriter
         + Send
         + Sync
 {
@@ -147,7 +159,26 @@ impl<
     pub async fn run(self) {
         tracing::info!("Starting event consumer");
 
-        let mut event_stream = match self.bridge.subscribe().await {
+        let mut cursors =
+            match ChainCursorReader::chain_cursors(&*self.data_service, ADAPTER_ID).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to load chain cursors; starting with none");
+                    HashMap::new()
+                }
+            };
+
+        let bridge_epoch = match self.bridge.current_epoch().await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to read the event outbox's epoch");
+                return;
+            }
+        };
+
+        let resume_from = self.reconcile_cursors(&mut cursors, bridge_epoch).await;
+
+        let mut event_stream = match self.bridge.subscribe_from(resume_from).await {
             Ok(stream) => stream,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to subscribe to events");
@@ -155,13 +186,127 @@ impl<
             }
         };
 
-        while let Some(event) = event_stream.next().await {
-            if let Err(e) = self.handle_event(event).await {
-                tracing::error!(error = %e, "Failed to handle event");
-            }
+        while let Some(envelope) = event_stream.next().await {
+            self.apply_envelope(envelope, &mut cursors).await;
         }
 
         tracing::warn!("Event stream ended, consumer shutting down");
+    }
+
+    /// Reconcile this server's stored cursors against the outbox's current
+    /// epoch, returning where to resume.
+    ///
+    /// A cursor whose epoch still matches is trustworthy: `seq` names a
+    /// position in the outbox that still exists, so resuming from the
+    /// lowest `seq` across all watched chains - the low-water mark - is
+    /// enough, since a chain further ahead simply re-sees (and
+    /// idempotently re-skips, in [`Self::apply_envelope`]) entries it has
+    /// already applied.
+    ///
+    /// A mismatch means the outbox lost its own continuity (this being one
+    /// shared outbox, that happens to every chain in it at once, not one at
+    /// a time) - `seq` numbers from before the reset name a lineage that no
+    /// longer exists. There is no rescan-from-height fallback to fall back
+    /// to, so this does the next best thing: log loudly (this is the "page
+    /// someone" moment, not a silent one), re-arm `watch_retry` for every
+    /// chain that had a cursor, and resume from whatever the new outbox
+    /// currently retains from its oldest entry. Anything paid entirely
+    /// inside the gap is not recovered by this - only a payment still
+    /// pending when the gap closes is.
+    async fn reconcile_cursors(
+        &self,
+        cursors: &mut HashMap<u64, ChainCursor>,
+        bridge_epoch: i64,
+    ) -> Option<EventCursor> {
+        if cursors.is_empty() {
+            // Never resumed before: nothing stored to lose, so whatever the
+            // outbox currently retains from its start is a strict gain.
+            return None;
+        }
+
+        let stored_epoch = cursors.values().next().map(|c| c.epoch);
+        if stored_epoch == Some(bridge_epoch) {
+            // `unwrap_or_default` rather than `expect`: `cursors` was
+            // checked non-empty above, so `0` here is unreachable, not a
+            // real fallback.
+            let min_seq = cursors.values().map(|c| c.seq).min().unwrap_or_default();
+            return Some(EventCursor {
+                epoch: bridge_epoch,
+                seq: min_seq,
+                block_height: 0,
+            });
+        }
+
+        tracing::error!(
+            ?stored_epoch,
+            bridge_epoch,
+            "event outbox epoch changed since this server last resumed; the gap since its last \
+             commit cannot be replayed. Re-arming watch_retry for every watch on the affected \
+             chains and resuming from the outbox's oldest retained event."
+        );
+
+        let chain_ids: Vec<u64> = cursors.keys().copied().collect();
+        for chain_id in chain_ids {
+            if let Err(e) = self
+                .data_service
+                .reset_chain_watch_notifications(chain_id)
+                .await
+            {
+                tracing::error!(
+                    chain_id,
+                    error = %e,
+                    "failed to re-arm watch_retry after an event outbox epoch change"
+                );
+            }
+        }
+        cursors.clear();
+        None
+    }
+
+    /// Apply one envelope and, only once it has been applied, durably
+    /// commit having done so.
+    ///
+    /// Ordering matters: a crash between "applied" and "committed" is fine,
+    /// since delivery is at-least-once and the apply is idempotent, but
+    /// committing first and then crashing before applying would silently
+    /// lose the event - the exact failure this whole mechanism exists to
+    /// close.
+    async fn apply_envelope(
+        &self,
+        envelope: EventEnvelope,
+        cursors: &mut HashMap<u64, ChainCursor>,
+    ) {
+        let chain_id = envelope.chain_id;
+
+        if let Some(applied) = cursors.get(&chain_id)
+            && envelope.cursor.epoch == applied.epoch
+            && envelope.cursor.seq <= applied.seq
+        {
+            // Already applied. Reachable because resume uses one shared
+            // low-water mark across chains: a chain further ahead than the
+            // slowest one sees its own already-applied entries again.
+            return;
+        }
+
+        if let Err(e) = self.handle_event(envelope.event).await {
+            tracing::error!(error = %e, "Failed to handle event");
+            return;
+        }
+
+        let cursor = ChainCursor {
+            epoch: envelope.cursor.epoch,
+            seq: envelope.cursor.seq,
+            block_height: envelope.cursor.block_height,
+        };
+        if let Err(e) = self
+            .data_service
+            .commit_chain_cursor(ADAPTER_ID, chain_id, cursor)
+            .await
+        {
+            tracing::error!(chain_id, error = %e, "failed to commit chain cursor");
+            return;
+        }
+        cursors.insert(chain_id, cursor);
     }
 
     /// Handle a single monitor event.

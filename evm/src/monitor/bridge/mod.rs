@@ -22,14 +22,39 @@ pub use memory::MemoryBridge;
 use super::events::{MonitorCommand, MonitorEvent};
 use crate::error::EvmResult;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use tokio_stream::Stream;
 
-/// Stream of monitor events (monitor -> API server).
-pub type EventStream = Pin<Box<dyn Stream<Item = MonitorEvent> + Send>>;
-
 /// Stream of monitor commands (API server -> monitor).
 pub type CommandStream = Pin<Box<dyn Stream<Item = MonitorCommand> + Send>>;
+
+/// Stream of durable event envelopes (monitor -> API server).
+pub type DurableEventStream = Pin<Box<dyn Stream<Item = EventEnvelope> + Send>>;
+
+/// A position in an adapter's durable event outbox.
+///
+/// `epoch` names which lineage `seq` belongs to. A lineage ends whenever the
+/// adapter can no longer vouch for the continuity of its own outbox - first
+/// ever start, or its durable store lost retention - because starting a new
+/// lineage while keeping the old `seq` numbering would make a fresh history
+/// indistinguishable from a replay of the old one. `block_height` is the
+/// chain height as of this position; it is carried for diagnostics and any
+/// future rescan, but nothing here reads it back to decide where to resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventCursor {
+    pub epoch: i64,
+    pub seq: i64,
+    pub block_height: i64,
+}
+
+/// A [`MonitorEvent`] tagged with the outbox position it was published at.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    pub chain_id: u64,
+    pub cursor: EventCursor,
+    pub event: MonitorEvent,
+}
 
 /// Event bridge for bidirectional communication between monitors and API servers.
 ///
@@ -46,15 +71,29 @@ pub trait EventBridge: Send + Sync {
     // Events (Monitor -> API Server)
     // =========================================================================
 
-    /// Publish an event to the bridge.
+    /// Publish an event to the durable outbox.
     ///
-    /// Called by the monitor when a payment is detected, confirmed, etc.
+    /// Called by the monitor when a payment is detected, confirmed, etc. The
+    /// bridge assigns the event's outbox position; the caller does not
+    /// control `seq` or `epoch`.
     async fn publish(&self, event: &MonitorEvent) -> EvmResult<()>;
 
-    /// Subscribe to events from the bridge.
+    /// Resume the durable event outbox strictly after `from`.
     ///
-    /// Called by API servers to receive events from all monitors.
-    async fn subscribe(&self) -> EvmResult<EventStream>;
+    /// `None` means the caller has no prior cursor and accepts whatever the
+    /// outbox currently retains from its oldest entry - correct for a
+    /// consumer that has genuinely never run before, never for one that
+    /// lost its cursor. A caller with a stored cursor whose `epoch` does not
+    /// match [`EventBridge::current_epoch`] must not call this with that
+    /// cursor: the outbox lineage it names may no longer exist.
+    async fn subscribe_from(&self, from: Option<EventCursor>) -> EvmResult<DurableEventStream>;
+
+    /// The outbox's current epoch.
+    ///
+    /// A caller reconciling a stored cursor calls this first: a mismatch
+    /// against the cursor's `epoch` means that cursor's `seq` numbering may
+    /// belong to a lineage this outbox no longer has.
+    async fn current_epoch(&self) -> EvmResult<i64>;
 
     // =========================================================================
     // Commands (API Server -> Monitor)

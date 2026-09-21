@@ -36,14 +36,15 @@
 //! use evm::monitor::bridge::{BridgeConfig, EventBridge};
 //!
 //! let bridge = BridgeConfig::redis("redis://localhost:6379").build().await?;
-//! let mut events = bridge.subscribe().await?;
+//! let mut events = bridge.subscribe_from(None).await?;
 //!
-//! while let Some(event) = events.next().await {
-//!     match event {
+//! while let Some(envelope) = events.next().await {
+//!     match envelope.event {
 //!         MonitorEvent::PaymentDetected(p) => { /* update invoice */ }
 //!         MonitorEvent::PaymentConfirmed(p) => { /* mark complete */ }
 //!         _ => {}
 //!     }
+//!     // persist envelope.cursor as the applied position before reading the next one
 //! }
 //!
 //! // API server sends commands to monitor:
@@ -74,8 +75,8 @@ pub use source::{BlockNotification, BlockSource, ChainHealth, LogFilter, SourceS
 #[cfg(feature = "redis")]
 pub use bridge::RedisBridge;
 pub use bridge::{
-    BridgeConfig, COMMANDS_CHANNEL, CommandStream, EVENTS_CHANNEL, EventBridge, EventStream,
-    MemoryBridge,
+    BridgeConfig, COMMANDS_CHANNEL, CommandStream, DurableEventStream, EVENTS_CHANNEL, EventBridge,
+    EventCursor, EventEnvelope, MemoryBridge,
 };
 
 pub use chain::{ChainMonitor, ChainMonitorConfig, WatchedAddress};

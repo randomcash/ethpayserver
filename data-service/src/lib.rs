@@ -19,6 +19,7 @@
 
 pub mod account_deletion;
 pub mod analytics;
+pub mod chain_cursor;
 pub mod email_change;
 pub mod installed_plugins;
 pub mod invoice_creation;
@@ -31,6 +32,7 @@ pub mod webhook_delivery;
 
 pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
 pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
+pub use chain_cursor::{ChainCursor, ChainCursorReader, ChainCursorWriter};
 pub use email_change::{EmailChangeRequest, EmailChangeWriter};
 pub use installed_plugins::{
     InstalledPlugin, InstalledPluginReader, InstalledPluginWriter, NewInstalledPlugin,

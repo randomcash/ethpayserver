@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+mod durable_resume;
 mod helpers;
 mod own_store_payments;
 mod payment_confirmed;

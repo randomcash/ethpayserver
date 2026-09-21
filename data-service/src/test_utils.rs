@@ -18,6 +18,7 @@ use types::{
 use uuid::Uuid;
 
 use crate::analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
+use crate::chain_cursor::{ChainCursor, ChainCursorReader, ChainCursorWriter};
 use crate::{UpsertDeliveryParams, WebhookDeliveryWriter};
 
 /// In-memory implementation of all repository traits for testing.
@@ -38,6 +39,7 @@ pub struct InMemoryDataService {
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
+    chain_cursors: RwLock<HashMap<(String, u64), ChainCursor>>,
 }
 
 impl InMemoryDataService {
@@ -470,6 +472,40 @@ impl crate::reorg::ReorgWriter for InMemoryDataService {
             payment.confirmed_at = None;
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ChainCursorReader for InMemoryDataService {
+    async fn chain_cursors(&self, adapter_id: &str) -> RepositoryResult<HashMap<u64, ChainCursor>> {
+        let cursors = self.chain_cursors.read().unwrap();
+        Ok(cursors
+            .iter()
+            .filter(|((adapter, _), _)| adapter == adapter_id)
+            .map(|((_, chain_id), cursor)| (*chain_id, *cursor))
+            .collect())
+    }
+}
+
+#[async_trait]
+impl ChainCursorWriter for InMemoryDataService {
+    async fn commit_chain_cursor(
+        &self,
+        adapter_id: &str,
+        chain_id: u64,
+        cursor: ChainCursor,
+    ) -> RepositoryResult<()> {
+        self.chain_cursors
+            .write()
+            .unwrap()
+            .insert((adapter_id.to_string(), chain_id), cursor);
+        Ok(())
+    }
+
+    async fn reset_chain_watch_notifications(&self, _chain_id: u64) -> RepositoryResult<u64> {
+        // `WatchedAddressWriter::mark_notified` is already a no-op above:
+        // this test double does not model `monitor_notified` at all.
+        Ok(0)
     }
 }
 
