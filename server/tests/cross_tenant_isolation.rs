@@ -323,7 +323,7 @@ async fn list_invoices_with_another_tenants_store_id_is_refused() {
 
     let result = server::api::invoices::list_invoices(
         AuthenticatedUser(user_info(a.user_id)),
-        State(state),
+        State(state.clone()),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: Some(b.store.id.0),
             status: None,
@@ -339,6 +339,29 @@ async fn list_invoices_with_another_tenants_store_id_is_refused() {
         status_of(result),
         StatusCode::FORBIDDEN,
         "A must not be able to list B's store by naming its id directly"
+    );
+
+    // Positive control: without this, an endpoint that refuses every explicit
+    // store_id, including the caller's own, would pass the assertion above
+    // for the wrong reason.
+    let own = server::api::invoices::list_invoices(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Query(server::api::invoices::ListInvoicesQuery {
+            store_id: Some(a.store.id.0),
+            status: None,
+            currency: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await
+    .expect("A must be able to list A's own store by naming its id directly");
+    let ids: Vec<String> = own.invoices.iter().map(|i| i.id.clone()).collect();
+    assert!(
+        ids.contains(&a.invoice.id.0),
+        "A's own invoice must be visible when A names A's own store id"
     );
 }
 
@@ -589,7 +612,7 @@ async fn list_payments_with_another_tenants_store_id_is_refused() {
 
     let result = server::api::invoices::list_payments(
         AuthenticatedUser(user_info(a.user_id)),
-        State(state),
+        State(state.clone()),
         Query(server::api::invoices::ListPaymentsQuery {
             store_id: Some(b.store.id.0),
             status: None,
@@ -604,6 +627,28 @@ async fn list_payments_with_another_tenants_store_id_is_refused() {
         status_of(result),
         StatusCode::FORBIDDEN,
         "A must not be able to list B's payments by naming its store id directly"
+    );
+
+    // Positive control: without this, an endpoint that refuses every explicit
+    // store_id, including the caller's own, would pass the assertion above
+    // for the wrong reason.
+    let own = server::api::invoices::list_payments(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Query(server::api::invoices::ListPaymentsQuery {
+            store_id: Some(a.store.id.0),
+            status: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await
+    .expect("A must be able to list A's own payments by naming its store id directly");
+    let ids: Vec<String> = own.payments.iter().map(|p| p.id.clone()).collect();
+    assert!(
+        ids.contains(&a.payment_id.to_string()),
+        "A's own payment must be visible when A names A's own store id"
     );
 }
 
@@ -840,7 +885,7 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
 
     let configure_result = server::api::stores::configure_store_wallet(
         AuthenticatedUser(user_info(a.user_id)),
-        State(state),
+        State(state.clone()),
         Path(b.store.id.0),
         axum::Json(SetStoreWalletRequest {
             wallet_id: a.wallet.id,
@@ -852,6 +897,19 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
         StatusCode::FORBIDDEN,
         "A must not be able to pin a wallet onto B's store"
     );
+
+    // Positive control: without this, `get_store_wallet` refusing every
+    // caller, including one asking about their own store, would pass the
+    // assertion above for the wrong reason.
+    let own = server::api::stores::get_store_wallet(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.store.id.0),
+        Query(server::api::stores::StoreWalletQuery { namespace: None }),
+    )
+    .await
+    .expect("A must be able to read A's own store wallet");
+    assert_eq!(own.wallet.id, a.wallet.id);
 }
 
 #[tokio::test]
@@ -1051,7 +1109,7 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
     let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
     let result = server::api::stores::get_store_wallet(
         a_via_key,
-        State(state),
+        State(state.clone()),
         Path(b.store.id.0),
         Query(server::api::stores::StoreWalletQuery { namespace: None }),
     )
@@ -1061,6 +1119,20 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
         StatusCode::FORBIDDEN,
         "an API key must not read another tenant's store wallet"
     );
+
+    // Positive control: without this, `get_store_wallet` refusing every
+    // caller, API-key included, would pass the assertion above for the
+    // wrong reason.
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own = server::api::stores::get_store_wallet(
+        a_via_key,
+        State(state),
+        Path(a.store.id.0),
+        Query(server::api::stores::StoreWalletQuery { namespace: None }),
+    )
+    .await
+    .expect("an API key must be able to read its owner's own store wallet");
+    assert_eq!(own.wallet.id, a.wallet.id);
 }
 
 // ============================================================================
