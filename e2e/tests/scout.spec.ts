@@ -42,6 +42,41 @@ test.beforeAll(async ({ browser }) => {
     consoleErrors.push(`UNCAUGHT: ${err.message}`);
     notePanic(err.message);
   });
+
+  // The console listener above only sees a problem if the client logs one -
+  // and a page that renders perfectly can still sit on top of an API that
+  // answered every call with a 500. Nothing here read the network before,
+  // which is a wider version of the exact gap that let two panics ship: a
+  // failure that leaves no console trace still needs to be a finding, not a
+  // silently-passing page.
+  scoutPage.on('response', (resp) => {
+    const url = new URL(resp.url());
+    if (!url.pathname.startsWith('/api/')) return;
+    const status = resp.status();
+    const req = resp.request();
+
+    // A 404 is the expected shape of "not found", and this file deliberately
+    // asks for it: the placeholder-id routes below have no real record to
+    // find, the same way the nonexistent-invoice checkout test already did
+    // before this listener existed. What must never happen on any page is
+    // the server actually failing (5xx), a session that stopped being
+    // honoured after it was established (401/403 while `authenticated`), or
+    // scout's own light walk tripping the rate limiter.
+    if (status >= 500) {
+      issue('NETWORK', `${req.method()} ${url.pathname} -> ${status}`);
+    } else if ((status === 401 || status === 403) && authenticated) {
+      issue('NETWORK', `${req.method()} ${url.pathname} -> ${status} while authenticated`);
+    } else if (status === 429) {
+      issue('NETWORK', `${req.method()} ${url.pathname} -> 429 (rate limited)`);
+    }
+  });
+  // Connection-level failures (aborted, refused, DNS) never reach 'response'
+  // at all, so they need their own listener rather than a status check.
+  scoutPage.on('requestfailed', (req) => {
+    const url = new URL(req.url());
+    if (!url.pathname.startsWith('/api/')) return;
+    issue('NETWORK', `${req.method()} ${url.pathname} failed: ${req.failure()?.errorText ?? 'unknown error'}`);
+  });
 });
 
 test.afterAll(async () => {
@@ -83,6 +118,57 @@ async function gotoAuthed(path: string) {
   if (await signIn.isVisible({ timeout: 2_000 }).catch(() => false)) {
     issue('SESSION', `Bounced to Sign In on ${path} — session was lost after registration`);
     test.skip(true, 'Session lost — see the SESSION issue in the summary');
+  }
+}
+
+const DESKTOP_VIEWPORT = { width: 1280, height: 720 };
+const MOBILE_VIEWPORT = { width: 375, height: 812 };
+
+// Well-formed but real to nobody. A freshly registered scout account starts
+// with no invoices, payments, stores or wallets to click into, so a
+// placeholder id is the only way to reach these routes at all - it exercises
+// the same "not found" path a dead link would, which is enough to prove the
+// route mounts, doesn't panic, and doesn't hide a 500 behind a page that
+// looks fine. `/checkout/:id` behaves the same way and is included here too,
+// even though the "checkout page for nonexistent invoice" test below already
+// visits it once - that test predates the network and mobile checks, so this
+// walk covers it under both.
+const PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000000';
+const PLACEHOLDER_ROUTES = [
+  `/evm/invoices/${PLACEHOLDER_ID}`,
+  `/evm/payments/${PLACEHOLDER_ID}`,
+  `/evm/stores/${PLACEHOLDER_ID}`,
+  `/evm/wallets/${PLACEHOLDER_ID}`,
+  `/checkout/${PLACEHOLDER_ID}`,
+  '/evm/nonexistent',
+];
+
+/**
+ * Every route currently reachable from the sidebar, read straight off the
+ * router that renders it rather than hand-typed here - including the
+ * "Account" section, which PluginLinks (payserver-client's app/layout.rs)
+ * populates from whatever plugins this particular server has loaded. A page
+ * added to either section is walked without this file changing; only the
+ * routes below that no sidebar ever links to (details for a record this
+ * account has none of, and checkout) need listing by hand.
+ */
+async function discoverSidebarRoutes(): Promise<string[]> {
+  const hrefs = await scoutPage
+    .locator('.sidebar-link')
+    .evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? ''));
+  // Filters out the footer's external "Documentation" link, which carries
+  // the same `.sidebar-link` class but isn't a route this router mounts.
+  return [...new Set(hrefs)].filter((href) => href.startsWith('/'));
+}
+
+async function walkRoutes(routes: string[]) {
+  for (const path of routes) {
+    // The only public route in the mix; everything else needs a session.
+    if (path.startsWith('/checkout/')) {
+      await goto(path);
+    } else {
+      await gotoAuthed(path);
+    }
   }
 }
 
@@ -614,6 +700,36 @@ test.describe('Auth & Authenticated', () => {
     if (!await scoutPage.locator('.modal-overlay').isVisible({ timeout: 2_000 }).catch(() => false)) {
       issue('PERF', 'Modal did not open after stress test');
     }
+  });
+
+  // Shared between the two viewport passes below so the sidebar - and
+  // whatever plugins this server declared - is only discovered once.
+  let discoveredRoutes: string[] = [];
+
+  test('route coverage: desktop', async () => {
+    test.skip(!authenticated, 'Registration failed');
+    // A real hard navigation per route, not an SPA transition, so this walk
+    // reproduces what a bookmarked link or a reload actually does. That's
+    // slower than clicking through the sidebar, hence the wider budget.
+    test.setTimeout(90_000);
+
+    await gotoAuthed('/evm');
+    discoveredRoutes = [...(await discoverSidebarRoutes()), ...PLACEHOLDER_ROUTES];
+    await walkRoutes(discoveredRoutes);
+  });
+
+  test('route coverage: mobile', async () => {
+    test.skip(!authenticated, 'Registration failed');
+    test.skip(discoveredRoutes.length === 0, 'Desktop route coverage did not run');
+    test.setTimeout(90_000);
+
+    // Every UI bug reported by hand recently was on a phone - a table
+    // overflowing its card, an unlabelled control, an amount clipped
+    // mid-number - and nothing here had ever loaded a single page at a phone
+    // width to catch that class of problem before a person did.
+    await scoutPage.setViewportSize(MOBILE_VIEWPORT);
+    await walkRoutes(discoveredRoutes);
+    await scoutPage.setViewportSize(DESKTOP_VIEWPORT);
   });
 });
 
