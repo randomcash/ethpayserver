@@ -12,9 +12,20 @@ const issues: string[] = [];
 const consoleErrors: string[] = [];
 let authenticated = false;
 
+// Every issue() call - a panic, a network failure, an overflow, anything -
+// lands in this one array, and the `summary: all issues` test at the bottom
+// of the file asserts it empty (minus AUTH/REGISTER, a known test-infra
+// limitation). There is no separate "just print" path: calling issue() is
+// what fails the run, for every caller in this file, including the network
+// and responsive checks below.
 function issue(label: string, detail: string) {
   issues.push(`[${label}] ${detail}`);
 }
+
+// Referenced by the response listener below (to scope which 404s are
+// expected) and by PLACEHOLDER_ROUTES further down. Declared this early so
+// the listener doesn't read like it's guessing at what "expected" means.
+const PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000000';
 
 const test = base.extend({});
 test.describe.configure({ mode: 'serial' });
@@ -55,18 +66,23 @@ test.beforeAll(async ({ browser }) => {
     const status = resp.status();
     const req = resp.request();
 
-    // A 404 is the expected shape of "not found", and this file deliberately
-    // asks for it: the placeholder-id routes below have no real record to
-    // find, the same way the nonexistent-invoice checkout test already did
-    // before this listener existed. A 401/403 before any session exists is
-    // the same kind of expected shape - the client probes /api/auth/me on
-    // every load, and that probe is supposed to fail pre-login. Everything
-    // else in the 4xx/5xx space is not expected anywhere in this walk: a 409
-    // or 422 from a payment or invoice endpoint is exactly the class of bug
-    // this listener exists to catch, not noise to filter past, and excluding
-    // it would leave every page but the intentionally-404ing ones unwatched -
-    // the same collect-and-print gap this file exists to close.
-    if (status === 404) return;
+    // A 404 is the expected shape of "not found", but only for the
+    // placeholder-id routes below - every one of them calls an API path that
+    // embeds PLACEHOLDER_ID literally (e.g. `/api/invoices/{id}`), the same
+    // way the nonexistent-invoice checkout test already relied on before this
+    // listener existed. Scoped to that id rather than excluding 404 for every
+    // call: an authenticated page whose own query 404s (a broken join, a
+    // dangling foreign key) is exactly the class of bug this listener exists
+    // to catch, and a blanket exclusion would drop it silently on every page
+    // in the walk, not just the six that are supposed to 404.
+    //
+    // A 401/403 before any session exists is the same kind of expected shape
+    // - the client probes /api/auth/me on every load, and that probe is
+    // supposed to fail pre-login. Everything else in the 4xx/5xx space is not
+    // expected anywhere in this walk: a 409 or 422 from a payment or invoice
+    // endpoint is exactly the class of bug this listener exists to catch, not
+    // noise to filter past.
+    if (status === 404 && url.pathname.includes(PLACEHOLDER_ID)) return;
     if ((status === 401 || status === 403) && !authenticated) return;
 
     if (status >= 500) {
@@ -148,6 +164,11 @@ const MOBILE_VIEWPORT = { width: 375, height: 812 };
  * here: they're walked by the Unauthenticated tests above, and this crawl
  * runs against a live session, where landing on either is exactly the
  * signed-out state `gotoAuthed` exists to catch, not a route to add to it.
+ *
+ * Plugin pages (`/evm/plugins/:id/:path`) are a second exception, handled by
+ * `discoverPluginRoutes` below rather than this crawl: whether a plugin's
+ * link happens to be in the DOM this scan reaches depends on rendering
+ * timing and page layout, where the server's own plugin registry does not.
  */
 const ROUTE_HREF_PATTERN = /^\/(evm(\/|$)|checkout\/)/;
 
@@ -164,6 +185,35 @@ async function discoverLinkedRoutes(): Promise<string[]> {
   ];
 }
 
+interface PluginPagesResponse {
+  plugins?: { id: string; pages?: { path: string }[] }[];
+}
+
+/**
+ * Plugin pages the DOM crawl above cannot reliably find: a freshly
+ * registered scout account has no data of its own, but plugins are
+ * installed per deployment, not per account, so `/api/plugins` - the same
+ * endpoint the client's own sidebar calls to build `PluginLinks` - lists
+ * every page a plugin declared for this session's role. Reading that list
+ * directly is what "enumerate from the router" means for a route the
+ * client's router only describes as a wildcard (`/plugins/:id/:path`): the
+ * concrete instances come from server-declared data, not from Rust source
+ * this test can read, so the data source has to be the same one the real
+ * client renders from.
+ *
+ * The billing plugin is the ticket's named example, but nothing here is
+ * billing-specific - a new plugin with a new page is covered the moment it
+ * is installed and enabled, without this file changing.
+ */
+async function discoverPluginRoutes(): Promise<string[]> {
+  const resp = await scoutPage.request.get('/api/plugins').catch(() => null);
+  if (!resp || !resp.ok()) return [];
+  const body: PluginPagesResponse | null = await resp.json().catch(() => null);
+  return (body?.plugins ?? []).flatMap((plugin) =>
+    (plugin.pages ?? []).map((page) => `/evm/plugins/${plugin.id}/${page.path}`),
+  );
+}
+
 // A route reachable only through a real record's id - invoice, payment,
 // store, wallet detail, checkout - is invisible to any DOM scan: a freshly
 // registered scout account has none of those records, so the app never
@@ -171,8 +221,8 @@ async function discoverLinkedRoutes(): Promise<string[]> {
 // DOM; it is true of the DOM itself, and no amount of scanning more of it
 // fixes that. This is the one part of route coverage that has to stay a
 // hand list, for the same reason a 404 from these same routes is expected
-// rather than collected below.
-const PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000000';
+// rather than collected above. (Plugin detail pages don't need the same
+// treatment - see discoverPluginRoutes.)
 const PLACEHOLDER_ROUTES = [
   `/evm/invoices/${PLACEHOLDER_ID}`,
   `/evm/payments/${PLACEHOLDER_ID}`,
@@ -220,10 +270,15 @@ async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise
     }
 
     if (checkOverflow) {
+      // null (not 0) on failure: this check's only job is to catch overflow,
+      // so a page that crashed mid-evaluate must not read the same as a page
+      // that measured cleanly at zero.
       const overflowPx = await scoutPage
         .evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
-        .catch(() => 0);
-      if (overflowPx > OVERFLOW_TOLERANCE_PX) {
+        .catch(() => null);
+      if (overflowPx === null) {
+        issue('RESPONSIVE', `${path} overflow check could not run`);
+      } else if (overflowPx > OVERFLOW_TOLERANCE_PX) {
         issue('RESPONSIVE', `${path} overflows horizontally by ${overflowPx}px at mobile width`);
       }
     }
@@ -780,7 +835,11 @@ test.describe('Auth & Authenticated', () => {
     test.setTimeout(90_000);
 
     await gotoAuthed('/evm');
-    discoveredRoutes = await walkRoutes([...(await discoverLinkedRoutes()), ...PLACEHOLDER_ROUTES]);
+    discoveredRoutes = await walkRoutes([
+      ...(await discoverLinkedRoutes()),
+      ...(await discoverPluginRoutes()),
+      ...PLACEHOLDER_ROUTES,
+    ]);
   });
 
   test('route coverage: mobile', async () => {
