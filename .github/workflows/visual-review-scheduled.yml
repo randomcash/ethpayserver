@@ -76,18 +76,28 @@ jobs:
             const findingsPath = 'e2e/test-results/visual/findings.json';
             const reportPath = 'e2e/test-results/visual/report.md';
 
-            if (!fs.existsSync(findingsPath)) {
-              console.log('No findings.json — review did not run (missing secret or manifest). Nothing to file.');
-              return;
+            // findings.json is always written once the review step actually
+            // ran, even when it found nothing or ran into trouble — see
+            // e2e/scripts/visual-review.mjs. A missing file means the step
+            // never got that far at all (e.g. killed by the job timeout),
+            // which is itself worth a report, not silence.
+            let findings = [];
+            let errors = [];
+            if (fs.existsSync(findingsPath)) {
+              ({ findings = [], errors = [] } = JSON.parse(fs.readFileSync(findingsPath, 'utf8')));
+            } else {
+              errors = [{ route: null, viewport: null, reason: 'findings.json missing — the review step produced no output at all' }];
             }
-            const findings = JSON.parse(fs.readFileSync(findingsPath, 'utf8'));
-            if (findings.length === 0) {
-              console.log('Visual review found nothing to report.');
+
+            if (findings.length === 0 && errors.length === 0) {
+              console.log('Visual review ran cleanly and found nothing to report.');
               return;
             }
 
             const title = 'Nightly visual review: findings';
-            const report = fs.existsSync(reportPath) ? fs.readFileSync(reportPath, 'utf8') : '(report.md missing)';
+            const report = fs.existsSync(reportPath)
+              ? fs.readFileSync(reportPath, 'utf8')
+              : ['# Nightly visual review', '', ...errors.map(e => `- ${e.reason}`)].join('\n');
             const body = [
               report,
               '',

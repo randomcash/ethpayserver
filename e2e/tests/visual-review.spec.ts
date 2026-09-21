@@ -115,13 +115,27 @@ test.describe('Authenticated routes', () => {
     try {
       await register(sharedPage);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       manifest.push({
         route: 'register',
         path: '/register',
         viewport: 'n/a',
         file: null,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
       });
+      // Registration gates every authenticated capture below — record each
+      // route as uncaptured rather than letting it vanish from the manifest.
+      // A vanished route and a clean route both read as "nothing to report";
+      // an explicit error entry is the only way to tell them apart.
+      for (const [route, urlPath] of AUTHENTICATED_ROUTES) {
+        manifest.push({
+          route,
+          path: urlPath,
+          viewport: 'n/a',
+          file: null,
+          error: `not captured — passkey registration failed: ${message}`,
+        });
+      }
       return;
     }
 

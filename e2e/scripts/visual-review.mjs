@@ -9,10 +9,15 @@
  *   ANTHROPIC_API_KEY=... node scripts/visual-review.mjs
  *
  * Reads test-results/visual/manifest.json (written by the spec), writes
- * test-results/visual/findings.json and test-results/visual/report.md.
- * Advisory only: this always exits 0. A model judging layout will produce
- * false positives, and a check that can fail on a false positive gets
- * disabled — see scripts/health-gate.sh's history for what that looks like.
+ * test-results/visual/findings.json ({ findings, errors }) and
+ * test-results/visual/report.md. Advisory only: this always exits 0. A model
+ * judging layout will produce false positives, and a check that can fail on
+ * a false positive gets disabled — see scripts/health-gate.sh's history for
+ * what that looks like.
+ *
+ * "errors" is not "findings": a route that could not be captured or
+ * reviewed goes there, so it never renders the same as a route that was
+ * looked at and found clean.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -74,10 +79,19 @@ function loadManifest() {
 // One route per call, both viewports in the same request — half the calls of
 // reviewing each screenshot alone, and the model can tell what changed
 // between mobile and desktop rather than judging each in isolation.
-function groupByRoute(manifest) {
+function groupByRoute(manifest, errors) {
   const routes = new Map();
   for (const entry of manifest) {
-    if (!entry.file) continue; // capture failed — nothing to look at
+    if (!entry.file) {
+      // Capture failed — nothing to look at, but say so instead of letting
+      // the route disappear from the report as if it had never been listed.
+      errors.push({
+        route: entry.route,
+        viewport: entry.viewport,
+        reason: entry.error ? `capture failed: ${entry.error}` : 'capture failed',
+      });
+      continue;
+    }
     if (!routes.has(entry.route)) routes.set(entry.route, { path: entry.path, shots: [] });
     routes.get(entry.route).shots.push(entry);
   }
@@ -121,16 +135,35 @@ async function reviewRoute(apiKey, route, { path: routePath, shots }) {
   return (toolUse.input?.findings ?? []).map((f) => ({ route, path: routePath, ...f }));
 }
 
-function renderReport(findings) {
-  if (findings.length === 0) {
-    return '# Nightly visual review\n\nNo issues found.\n';
+// Errors are not findings, but they must never be invisible: a route that
+// could not be captured or reviewed and a route that was reviewed and found
+// clean must not render identically, or the only signal that the pipeline
+// broke is a console line nobody watches on a nightly run.
+function renderReport(findings, errors) {
+  const lines = ['# Nightly visual review', ''];
+  if (errors.length > 0) {
+    lines.push(
+      `**${errors.length} route(s) could not be reviewed — treat this run as incomplete, not clean:**`,
+      '',
+    );
+    for (const e of errors) {
+      const label = e.route ? `${e.route}${e.viewport && e.viewport !== 'n/a' ? ` (${e.viewport})` : ''}` : 'pipeline';
+      lines.push(`- ${label}: ${e.reason}`);
+    }
+    lines.push('');
   }
+
+  if (findings.length === 0) {
+    lines.push(errors.length > 0 ? 'No findings among the routes that were reviewed.' : 'No issues found.');
+    return lines.join('\n') + '\n';
+  }
+
   const byRoute = new Map();
   for (const f of findings) {
     if (!byRoute.has(f.route)) byRoute.set(f.route, { path: f.path, items: [] });
     byRoute.get(f.route).items.push(f);
   }
-  const lines = ['# Nightly visual review', '', `${findings.length} finding(s) across ${byRoute.size} route(s).`, ''];
+  lines.push(`${findings.length} finding(s) across ${byRoute.size} route(s).`, '');
   for (const [route, { path: routePath, items }] of byRoute) {
     lines.push(`## ${routePath} (${route})`);
     for (const item of items) {
@@ -141,44 +174,68 @@ function renderReport(findings) {
   return lines.join('\n');
 }
 
+function writeOutputs(findings, errors) {
+  fs.mkdirSync(VISUAL_DIR, { recursive: true });
+  fs.writeFileSync(path.join(VISUAL_DIR, 'findings.json'), JSON.stringify({ findings, errors }, null, 2));
+  const report = renderReport(findings, errors);
+  fs.writeFileSync(path.join(VISUAL_DIR, 'report.md'), report);
+  console.log(report);
+}
+
 async function main() {
   fs.mkdirSync(VISUAL_DIR, { recursive: true });
 
+  const findings = [];
+  const errors = [];
+
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
+    // Deliberately not an error entry: normal CI runs this script with no
+    // key and no manifest, and that path must stay silent. The scheduled
+    // workflow always sets the secret, so if it is ever missing there the
+    // pipeline itself is broken — the workflow's own "File findings" step
+    // treats a missing findings.json as exactly that signal.
     console.log('ANTHROPIC_API_KEY unset — skipping visual review');
     return;
   }
 
   const manifest = loadManifest();
   if (!manifest || manifest.length === 0) {
-    console.log(`No manifest at ${MANIFEST_PATH} — nothing to review`);
+    errors.push({ route: null, viewport: null, reason: `no manifest at ${MANIFEST_PATH} — review did not run` });
+    writeOutputs(findings, errors);
     return;
   }
 
-  const routes = groupByRoute(manifest);
+  const routes = groupByRoute(manifest, errors);
   if (routes.size === 0) {
-    console.log('Every capture in the manifest failed — nothing to review');
+    errors.push({ route: null, viewport: null, reason: 'every capture in the manifest failed — nothing to review' });
+    writeOutputs(findings, errors);
     return;
   }
 
-  const findings = [];
   for (const [route, group] of routes) {
     try {
       findings.push(...(await reviewRoute(apiKey, route, group)));
     } catch (err) {
-      console.error(`review of ${route} failed: ${err instanceof Error ? err.message : err}`);
+      const reason = `review failed: ${err instanceof Error ? err.message : err}`;
+      console.error(`${route}: ${reason}`);
+      errors.push({ route, viewport: null, reason });
     }
   }
 
-  fs.writeFileSync(path.join(VISUAL_DIR, 'findings.json'), JSON.stringify(findings, null, 2));
-  const report = renderReport(findings);
-  fs.writeFileSync(path.join(VISUAL_DIR, 'report.md'), report);
-  console.log(report);
+  writeOutputs(findings, errors);
 }
 
 main().catch((err) => {
   // Advisory tooling: log and exit 0 rather than failing a job that exists
   // to produce a report a human skims, not a gate anyone depends on being green.
-  console.error(`visual-review.mjs failed: ${err instanceof Error ? err.stack : err}`);
+  // Still write findings.json — an empty one would read as "reviewed, clean",
+  // which is exactly the outcome a crash must not produce.
+  const reason = `visual-review.mjs crashed: ${err instanceof Error ? err.stack : err}`;
+  console.error(reason);
+  try {
+    writeOutputs([], [{ route: null, viewport: null, reason }]);
+  } catch (writeErr) {
+    console.error(`could not even write the failure report: ${writeErr instanceof Error ? writeErr.stack : writeErr}`);
+  }
 });

@@ -289,6 +289,12 @@ visual-review-scheduled.yml` runs it nightly against testnet and files (or
 comments on) a `visual-review`-labelled issue only when there is something to
 report; it never fails the build.
 
+A route that could not be captured (a broken passkey registration, a
+navigation timeout) or reviewed (an Anthropic API error) is not silently
+dropped — it lands in `findings.json`'s `errors` array and in `report.md`
+as "could not be reviewed," so a broken run reads as incomplete rather than
+as a clean pass with nothing to say.
+
 **Off by default**, same reasoning as the synthetic payment: `npx playwright
 test` with no filter is what `ci.yml`'s `e2e` job runs, and a screenshot pass
 nobody reviews has no business slowing down every push. Run it explicitly:
