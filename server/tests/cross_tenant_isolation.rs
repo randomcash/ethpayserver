@@ -18,6 +18,14 @@
 //! are plain data the extractors produce, and `server/src/api/**` handlers
 //! are pinned to a concrete `State<PgAppState<A>>`, not a generic trait
 //! object, so there is no way to run them against `InMemoryDataService`.
+//!
+//! Every `#[ignore]`'d test below needs `DATABASE_URL` and is not run by the
+//! plain `cargo nextest run --workspace` pass. That is not a gap: CI's
+//! "Integration tests" step already runs `cargo nextest run -p data-service
+//! -p server --run-ignored only` against a real Postgres instance and gates
+//! merges on it, the same lane `plugin_invoice_creation_filter.rs` relies on.
+//! A test added to this file is exercised by that existing job with no
+//! further wiring.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -104,13 +112,17 @@ async fn seed_user(pool: &PgPool) -> Uuid {
 }
 
 fn user_info(id: Uuid) -> UserInfo {
+    user_info_with_role(id, auth::Role::User)
+}
+
+fn user_info_with_role(id: Uuid, role: auth::Role) -> UserInfo {
     UserInfo {
         id: UserId(id),
         email: None,
         primary_wallet_address: None,
         created_at: Utc::now(),
         last_login_at: None,
-        role: auth::Role::User,
+        role,
     }
 }
 
@@ -324,6 +336,83 @@ async fn list_invoices_with_another_tenants_store_id_is_refused() {
     );
 }
 
+/// The literal historical bug: a nil UUID once took a different code path
+/// than "no filter" or "a real foreign store id" and skipped both the
+/// membership check and the `WHERE store_id` clause, handing a merchant
+/// every invoice on the server. A nil `store_id` must be refused exactly
+/// like any other store A does not belong to, not treated as "everything".
+#[tokio::test]
+#[ignore]
+async fn list_invoices_with_a_nil_store_id_is_refused_like_any_foreign_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let _b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::invoices::list_invoices(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Query(server::api::invoices::ListInvoicesQuery {
+            store_id: Some(Uuid::nil()),
+            status: None,
+            currency: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status_of(result),
+        StatusCode::FORBIDDEN,
+        "a nil store_id must not be treated as 'every store'"
+    );
+}
+
+/// Contrasts the two membership-only tests above: a `ServerAdmin` asking for
+/// the same store filter as a `User` must not stop at the caller's own
+/// stores. If this bypass ever silently loosened to cover `Role::User` too,
+/// the earlier tests would already fail; this test is what proves the
+/// bypass is real for the role that is supposed to have it.
+#[tokio::test]
+#[ignore]
+async fn list_invoices_with_no_store_id_as_server_admin_sees_every_tenant() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::invoices::list_invoices(
+        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        State(state),
+        Query(server::api::invoices::ListInvoicesQuery {
+            store_id: None,
+            status: None,
+            currency: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await
+    .expect("a server admin must be able to list with no store filter");
+
+    let ids: Vec<String> = result.invoices.iter().map(|i| i.id.clone()).collect();
+    assert!(
+        ids.contains(&a.invoice.id.0),
+        "an admin's unfiltered view must still include their own invoice"
+    );
+    assert!(
+        ids.contains(&b.invoice.id.0),
+        "an admin's unfiltered view must reach every tenant, not just their own"
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn get_invoice_by_id_across_tenants_is_refused() {
@@ -346,6 +435,31 @@ async fn get_invoice_by_id_across_tenants_is_refused() {
         StatusCode::FORBIDDEN,
         "A must not be able to fetch B's invoice by id"
     );
+}
+
+/// The positive control for the test above: the same cross-tenant request,
+/// with the caller's role swapped to `ServerAdmin`, must succeed. Without
+/// this, a bug that made every caller FORBIDDEN regardless of role would
+/// still pass the negative test.
+#[tokio::test]
+#[ignore]
+async fn get_invoice_across_tenants_is_permitted_for_a_server_admin() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::invoices::get_invoice(
+        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        State(state),
+        Path(b.invoice.id.0.clone()),
+    )
+    .await
+    .expect("a server admin must be able to fetch any tenant's invoice by id");
+
+    assert_eq!(result.id, b.invoice.id.0);
 }
 
 #[tokio::test]
@@ -462,6 +576,76 @@ async fn list_payments_with_another_tenants_store_id_is_refused() {
         status_of(result),
         StatusCode::FORBIDDEN,
         "A must not be able to list B's payments by naming its store id directly"
+    );
+}
+
+/// The payments side of the same nil-UUID bug the invoice test above guards
+/// against: a nil `store_id` must be refused, not read as "every store".
+#[tokio::test]
+#[ignore]
+async fn list_payments_with_a_nil_store_id_is_refused_like_any_foreign_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let _b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::invoices::list_payments(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Query(server::api::invoices::ListPaymentsQuery {
+            store_id: Some(Uuid::nil()),
+            status: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status_of(result),
+        StatusCode::FORBIDDEN,
+        "a nil store_id must not be treated as 'every store'"
+    );
+}
+
+/// The payments side of `list_invoices_with_no_store_id_as_server_admin_sees_every_tenant`:
+/// a `ServerAdmin` with no store filter must reach every tenant's payments,
+/// not just their own.
+#[tokio::test]
+#[ignore]
+async fn list_payments_with_no_store_id_as_server_admin_sees_every_tenant() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::invoices::list_payments(
+        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        State(state),
+        Query(server::api::invoices::ListPaymentsQuery {
+            store_id: None,
+            status: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await
+    .expect("a server admin must be able to list payments with no store filter");
+
+    let ids: Vec<String> = result.payments.iter().map(|p| p.id.clone()).collect();
+    assert!(
+        ids.contains(&a.payment_id.to_string()),
+        "an admin's unfiltered view must still include their own payment"
+    );
+    assert!(
+        ids.contains(&b.payment_id.to_string()),
+        "an admin's unfiltered view must reach every tenant, not just their own"
     );
 }
 
