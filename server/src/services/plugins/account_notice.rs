@@ -25,19 +25,23 @@
 //! "delivered" from "nowhere to deliver to" would have no way to decide
 //! whether that is worth surfacing to an operator.
 //!
-//! Not yet reachable from a plugin: `payserver-plugin-host` has no wasm
-//! import for this at all (`git grep` for `notify_account` or
-//! `account_notice` in that crate finds nothing). That is a weaker claim
-//! than "staged like capability 3" - `invoice_issuer`'s `invoice_create`
-//! import was already linked into every plugin instance, with only its
-//! *publish* deferred until server startup finished building `AppState`;
-//! capability 7 has no equivalent import to defer into. Adding one is a
-//! `payserver-plugin-host` change, and that crate is pinned by revision in
-//! this repo's `Cargo.toml` - a change there does not reach this repo until
-//! the pin moves, which cannot happen in the same session that makes the
-//! change, since verifying the pin means building against a published
-//! revision, not a same-session commit on a branch that could still be
-//! rebased.
+//! Not yet reachable from a plugin, but the gap is now one mechanical step
+//! rather than an unstarted one. `payserver-plugin-host`'s `PluginHostCalls`
+//! trait has gained an `account_notice` method and a matching wasm import
+//! (`define_answering_call`, the same helper `invoice_create` and
+//! `merchant_volume` use), tested the same way those two are - instantiate a
+//! module that imports only `account_notice` and check the request reaches
+//! that method and no other. None of that is visible to this repo yet:
+//! `payserver-plugin-host` is pinned by revision in this repo's
+//! `Cargo.toml`, and a change there does not reach here until the pin moves,
+//! which needs the commons change merged first - a same-session commit on a
+//! branch that could still be rebased is not something a pin should ever
+//! point at. Once the pin does move, wiring this repo's side is: implement
+//! `account_notice` on [`super::host_calls::PluginCalls`], the same shape as
+//! `issuer`/`volume` there (a `DeferredNotifier` cell, since building a
+//! [`PluginAccountNotifier`] needs the full `PgAppState` that is not ready
+//! at plugin-registration time either), and call [`AccountNotifier::notify_account`]
+//! from it. No design decision is open at that point, only the wiring.
 //!
 //! Deciding *when* to call this is a second, independent gap: the
 //! thresholds that would trigger a warning are a billing plan's own config,
