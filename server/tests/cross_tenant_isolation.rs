@@ -78,13 +78,19 @@ impl SessionService for UnusedSessionService {
     }
 }
 
+/// `None` means "no `DATABASE_URL`, intentionally skipped" - the only case
+/// that may pass silently. A `DATABASE_URL` that fails to connect is not the
+/// same thing and must not collapse into the same silent `None`: that would
+/// turn a broken or misconfigured CI database into every test in this file
+/// reporting "passed" having run zero assertions, exactly the "test that
+/// cannot fail" shape this suite exists to avoid.
 async fn service() -> Option<PgDataService> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
-        .ok()?;
+        .unwrap_or_else(|e| panic!("DATABASE_URL is set but the pool failed to connect: {e}"));
     Some(PgDataService::new(pool))
 }
 
@@ -837,6 +843,129 @@ async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
     assert!(
         !ids.contains(&b.invoice.id.0),
         "an API key's unfiltered listing must not include another tenant's invoice"
+    );
+}
+
+/// The payment side of the test above. RCS-317 is open on an API key
+/// carrying more than its owner's scope, so every payment-reading endpoint
+/// - not just invoices - needs its own API-key-authenticated check, not just
+/// the session-based ones above.
+#[tokio::test]
+#[ignore]
+async fn an_api_key_cannot_reach_another_tenants_payments() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result =
+        server::api::invoices::get_payment(a_via_key, State(state.clone()), Path(b.payment_id))
+            .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "an API key must not fetch another tenant's payment by id"
+    );
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result = server::api::invoices::get_invoice_payments(
+        a_via_key,
+        State(state.clone()),
+        Path(b.invoice.id.0.clone()),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "an API key must not list another tenant's invoice's payments"
+    );
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result = server::api::invoices::get_invoice_status(
+        a_via_key,
+        State(state.clone()),
+        Path(b.invoice.id.0.clone()),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "an API key must not read another tenant's invoice status"
+    );
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let listed = server::api::invoices::list_payments(
+        a_via_key,
+        State(state),
+        Query(server::api::invoices::ListPaymentsQuery {
+            store_id: None,
+            status: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await
+    .expect("an api key with no store filter must see its owner's payments");
+
+    let ids: Vec<String> = listed.payments.iter().map(|p| p.id.clone()).collect();
+    assert!(ids.contains(&a.payment_id.to_string()));
+    assert!(
+        !ids.contains(&b.payment_id.to_string()),
+        "an API key's unfiltered payment listing must not include another tenant's payment"
+    );
+}
+
+/// The wallet side of the same boundary: a key authenticates as its owner,
+/// and the owner's wallet scoping applies exactly as it does to a session.
+#[tokio::test]
+#[ignore]
+async fn an_api_key_cannot_reach_another_tenants_wallets() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let listed = server::api::stores::list_wallets(a_via_key, State(state.clone()))
+        .await
+        .expect("listing one's own wallets via an api key must succeed");
+    assert!(
+        listed.iter().any(|w| w.id == a.wallet.id),
+        "A's own wallet must be listed via an api key"
+    );
+    assert!(
+        !listed.iter().any(|w| w.id == b.wallet.id),
+        "B's wallet leaked into A's api-key-authenticated wallet list"
+    );
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result =
+        server::api::stores::get_wallet_by_id(a_via_key, State(state.clone()), Path(b.wallet.id))
+            .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "an API key must not fetch another tenant's wallet by id"
+    );
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result = server::api::stores::get_store_wallet(
+        a_via_key,
+        State(state),
+        Path(b.store.id.0),
+        Query(server::api::stores::StoreWalletQuery { namespace: None }),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::FORBIDDEN,
+        "an API key must not read another tenant's store wallet"
     );
 }
 
