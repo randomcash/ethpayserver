@@ -849,7 +849,7 @@ async fn wallets_are_scoped_to_the_owning_account() {
 
     let result = server::api::stores::get_wallet_by_id(
         AuthenticatedUser(user_info(a.user_id)),
-        State(state),
+        State(state.clone()),
         Path(b.wallet.id),
     )
     .await;
@@ -858,6 +858,18 @@ async fn wallets_are_scoped_to_the_owning_account() {
         StatusCode::NOT_FOUND,
         "A must not be able to fetch B's wallet by id"
     );
+
+    // Positive control: without this, `get_wallet_by_id` refusing every
+    // caller, including one asking about their own wallet, would pass the
+    // assertion above for the wrong reason.
+    let own = server::api::stores::get_wallet_by_id(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.wallet.id),
+    )
+    .await
+    .expect("A must be able to fetch A's own wallet by id");
+    assert_eq!(own.id, a.wallet.id);
 }
 
 #[tokio::test]
@@ -926,7 +938,7 @@ async fn store_wallet_override_refuses_a_wallet_from_another_account() {
     // what must refuse pointing it at a wallet from B's account.
     let result = server::api::stores::configure_store_wallet(
         AuthenticatedUser(user_info(a.user_id)),
-        State(state),
+        State(state.clone()),
         Path(a.store.id.0),
         axum::Json(SetStoreWalletRequest {
             wallet_id: b.wallet.id,
@@ -939,6 +951,21 @@ async fn store_wallet_override_refuses_a_wallet_from_another_account() {
         StatusCode::NOT_FOUND,
         "A's own store must not be pinnable to B's wallet"
     );
+
+    // Positive control: without this, `configure_store_wallet` refusing
+    // every wallet id, including the caller's own, would pass the
+    // assertion above for the wrong reason.
+    let own = server::api::stores::configure_store_wallet(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.store.id.0),
+        axum::Json(SetStoreWalletRequest {
+            wallet_id: a.wallet.id,
+        }),
+    )
+    .await
+    .expect("A must be able to pin A's own store to A's own wallet");
+    assert_eq!(own.wallet.id, a.wallet.id);
 }
 
 // ============================================================================
@@ -1133,6 +1160,49 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
     .await
     .expect("an API key must be able to read its owner's own store wallet");
     assert_eq!(own.wallet.id, a.wallet.id);
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_api_key_cannot_reach_another_tenants_stores() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result =
+        server::api::stores::get_store(a_via_key, State(state.clone()), Path(b.store.id.0)).await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::FORBIDDEN,
+        "an API key must not fetch another tenant's store by id"
+    );
+
+    // Positive control: without this, `get_store` refusing every caller,
+    // API-key included, would pass the assertion above for the wrong
+    // reason.
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own = server::api::stores::get_store(a_via_key, State(state.clone()), Path(a.store.id.0))
+        .await
+        .expect("an API key must be able to fetch its owner's own store by id");
+    assert_eq!(own.id, a.store.id.0);
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let listed = server::api::stores::list_stores(a_via_key, State(state))
+        .await
+        .expect("listing one's own stores via an api key must succeed");
+    let ids: Vec<Uuid> = listed.iter().map(|s| s.id).collect();
+    assert!(
+        ids.contains(&a.store.id.0),
+        "A's own store must be listed via an api key"
+    );
+    assert!(
+        !ids.contains(&b.store.id.0),
+        "B's store leaked into A's api-key-authenticated store list"
+    );
 }
 
 // ============================================================================
