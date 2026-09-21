@@ -58,16 +58,25 @@ test.beforeAll(async ({ browser }) => {
     // A 404 is the expected shape of "not found", and this file deliberately
     // asks for it: the placeholder-id routes below have no real record to
     // find, the same way the nonexistent-invoice checkout test already did
-    // before this listener existed. What must never happen on any page is
-    // the server actually failing (5xx), a session that stopped being
-    // honoured after it was established (401/403 while `authenticated`), or
-    // scout's own light walk tripping the rate limiter.
+    // before this listener existed. A 401/403 before any session exists is
+    // the same kind of expected shape - the client probes /api/auth/me on
+    // every load, and that probe is supposed to fail pre-login. Everything
+    // else in the 4xx/5xx space is not expected anywhere in this walk: a 409
+    // or 422 from a payment or invoice endpoint is exactly the class of bug
+    // this listener exists to catch, not noise to filter past, and excluding
+    // it would leave every page but the intentionally-404ing ones unwatched -
+    // the same collect-and-print gap this file exists to close.
+    if (status === 404) return;
+    if ((status === 401 || status === 403) && !authenticated) return;
+
     if (status >= 500) {
       issue('NETWORK', `${req.method()} ${url.pathname} -> ${status}`);
-    } else if ((status === 401 || status === 403) && authenticated) {
-      issue('NETWORK', `${req.method()} ${url.pathname} -> ${status} while authenticated`);
     } else if (status === 429) {
       issue('NETWORK', `${req.method()} ${url.pathname} -> 429 (rate limited)`);
+    } else if (status === 401 || status === 403) {
+      issue('NETWORK', `${req.method()} ${url.pathname} -> ${status} while authenticated`);
+    } else if (status >= 400) {
+      issue('NETWORK', `${req.method()} ${url.pathname} -> ${status}`);
     }
   });
   // Connection-level failures (aborted, refused, DNS) never reach 'response'
@@ -124,15 +133,45 @@ async function gotoAuthed(path: string) {
 const DESKTOP_VIEWPORT = { width: 1280, height: 720 };
 const MOBILE_VIEWPORT = { width: 375, height: 812 };
 
-// Well-formed but real to nobody. A freshly registered scout account starts
-// with no invoices, payments, stores or wallets to click into, so a
-// placeholder id is the only way to reach these routes at all - it exercises
-// the same "not found" path a dead link would, which is enough to prove the
-// route mounts, doesn't panic, and doesn't hide a 500 behind a page that
-// looks fine. `/checkout/:id` behaves the same way and is included here too,
-// even though the "checkout page for nonexistent invoice" test below already
-// visits it once - that test predates the network and mobile checks, so this
-// walk covers it under both.
+/**
+ * The router itself (payserver-client's app/mod.rs) is never available to
+ * read here: CI's e2e job runs the published image pinned in
+ * ops/client-image.pin, and scout's own remote mode runs against a live
+ * deployment - in neither case is the Rust source on disk. The DOM is the
+ * only thing this test can actually inspect, so route discovery reads every
+ * link the app renders, anywhere on the page, not only ones tagged
+ * `.sidebar-link` - a page linked from a dashboard card or a settings tab is
+ * covered the same as one linked from the sidebar, without this file
+ * changing. Restricted to the authenticated app's own path prefixes so a
+ * mailto:, an external footer link, or a download href doesn't get treated
+ * as a route to navigate to - and so `/login`/`/register` don't turn up
+ * here: they're walked by the Unauthenticated tests above, and this crawl
+ * runs against a live session, where landing on either is exactly the
+ * signed-out state `gotoAuthed` exists to catch, not a route to add to it.
+ */
+const ROUTE_HREF_PATTERN = /^\/(evm(\/|$)|checkout\/)/;
+
+async function discoverLinkedRoutes(): Promise<string[]> {
+  const hrefs = await scoutPage
+    .locator('a[href]')
+    .evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? ''));
+  return [
+    ...new Set(
+      hrefs
+        .map((href) => href.split(/[?#]/)[0])
+        .filter((href) => ROUTE_HREF_PATTERN.test(href)),
+    ),
+  ];
+}
+
+// A route reachable only through a real record's id - invoice, payment,
+// store, wallet detail, checkout - is invisible to any DOM scan: a freshly
+// registered scout account has none of those records, so the app never
+// renders a link to one. That is not a defect in how discovery reads the
+// DOM; it is true of the DOM itself, and no amount of scanning more of it
+// fixes that. This is the one part of route coverage that has to stay a
+// hand list, for the same reason a 404 from these same routes is expected
+// rather than collected below.
 const PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000000';
 const PLACEHOLDER_ROUTES = [
   `/evm/invoices/${PLACEHOLDER_ID}`,
@@ -143,33 +182,60 @@ const PLACEHOLDER_ROUTES = [
   '/evm/nonexistent',
 ];
 
-/**
- * Every route currently reachable from the sidebar, read straight off the
- * router that renders it rather than hand-typed here - including the
- * "Account" section, which PluginLinks (payserver-client's app/layout.rs)
- * populates from whatever plugins this particular server has loaded. A page
- * added to either section is walked without this file changing; only the
- * routes below that no sidebar ever links to (details for a record this
- * account has none of, and checkout) need listing by hand.
- */
-async function discoverSidebarRoutes(): Promise<string[]> {
-  const hrefs = await scoutPage
-    .locator('.sidebar-link')
-    .evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? ''));
-  // Filters out the footer's external "Documentation" link, which carries
-  // the same `.sidebar-link` class but isn't a route this router mounts.
-  return [...new Set(hrefs)].filter((href) => href.startsWith('/'));
+// Safety valve, not an expected ceiling: this app has nowhere near this many
+// distinct routes, so hitting it means link discovery found something
+// unbounded (e.g. per-row links once this account has data) rather than that
+// coverage is actually this wide.
+const MAX_ROUTES = 40;
+
+const OVERFLOW_TOLERANCE_PX = 1;
+
+interface WalkOptions {
+  /** Keep discovering new links from each page visited. Off for the mobile
+   * pass, which reuses the desktop pass's already-complete route set instead
+   * of re-crawling a site that hasn't changed shape between the two. */
+  crawl?: boolean;
+  /** Flag pages that render wider than the viewport - the shape of "a table
+   * overflowing its card", the concrete bug the mobile pass exists for. */
+  checkOverflow?: boolean;
 }
 
-async function walkRoutes(routes: string[]) {
-  for (const path of routes) {
+async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise<string[]> {
+  const { crawl = true, checkOverflow = false } = opts;
+  const visited = new Set<string>();
+  const queue = [...seedRoutes];
+  const order: string[] = [];
+
+  while (queue.length > 0) {
+    const path = queue.shift()!;
+    if (visited.has(path)) continue;
+    visited.add(path);
+    order.push(path);
+
     // The only public route in the mix; everything else needs a session.
     if (path.startsWith('/checkout/')) {
       await goto(path);
     } else {
       await gotoAuthed(path);
     }
+
+    if (checkOverflow) {
+      const overflowPx = await scoutPage
+        .evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+        .catch(() => 0);
+      if (overflowPx > OVERFLOW_TOLERANCE_PX) {
+        issue('RESPONSIVE', `${path} overflows horizontally by ${overflowPx}px at mobile width`);
+      }
+    }
+
+    if (crawl && visited.size < MAX_ROUTES) {
+      for (const href of await discoverLinkedRoutes()) {
+        if (!visited.has(href) && !queue.includes(href)) queue.push(href);
+      }
+    }
   }
+
+  return order;
 }
 
 // ---------------------------------------------------------------------------
@@ -702,8 +768,8 @@ test.describe('Auth & Authenticated', () => {
     }
   });
 
-  // Shared between the two viewport passes below so the sidebar - and
-  // whatever plugins this server declared - is only discovered once.
+  // Shared between the two viewport passes below so the crawl - and whatever
+  // plugins this server declared - only has to run once.
   let discoveredRoutes: string[] = [];
 
   test('route coverage: desktop', async () => {
@@ -714,8 +780,7 @@ test.describe('Auth & Authenticated', () => {
     test.setTimeout(90_000);
 
     await gotoAuthed('/evm');
-    discoveredRoutes = [...(await discoverSidebarRoutes()), ...PLACEHOLDER_ROUTES];
-    await walkRoutes(discoveredRoutes);
+    discoveredRoutes = await walkRoutes([...(await discoverLinkedRoutes()), ...PLACEHOLDER_ROUTES]);
   });
 
   test('route coverage: mobile', async () => {
@@ -726,9 +791,14 @@ test.describe('Auth & Authenticated', () => {
     // Every UI bug reported by hand recently was on a phone - a table
     // overflowing its card, an unlabelled control, an amount clipped
     // mid-number - and nothing here had ever loaded a single page at a phone
-    // width to catch that class of problem before a person did.
+    // width to catch that class of problem before a person did. The overflow
+    // check below catches the first of those directly; an unlabelled control
+    // or a clipped number has no cheap, reliable DOM signal the way a
+    // horizontal overflow does; visible-but-wrong is a screenshot-diffing
+    // problem, not "nearly free", so it stays out of this pass rather than
+    // becoming a check that always passes.
     await scoutPage.setViewportSize(MOBILE_VIEWPORT);
-    await walkRoutes(discoveredRoutes);
+    await walkRoutes(discoveredRoutes, { crawl: false, checkOverflow: true });
     await scoutPage.setViewportSize(DESKTOP_VIEWPORT);
   });
 });
