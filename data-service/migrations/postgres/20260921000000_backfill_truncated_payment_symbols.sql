@@ -30,3 +30,26 @@ SET asset_symbol = COALESCE(
 )
 WHERE p.token_address IS NOT NULL
   AND p.asset_symbol ~* '^0x[0-9a-f]{6}\.\.\.$';
+
+-- payment_options.asset_symbol is copied from a merchant's own
+-- store_payment_methods.asset_symbol at invoice-option creation time
+-- (server/src/api/invoices/payment_options.rs), which is merchant-supplied
+-- input, not derived from an address - so the write path this migration
+-- exists for has never touched this table. Still applying the identical fix
+-- here rather than trusting that by inspection: the column has the same
+-- shape (chain_id, token_address) and if any row ever did end up in the
+-- truncated-address form, by whatever path, this makes the table correct
+-- rather than leaving it to another migration later.
+UPDATE payment_options po
+SET asset_symbol = COALESCE(
+    (
+        SELECT t.symbol
+        FROM tokens t
+        WHERE t.chain_id = po.chain_id
+          AND LOWER(t.address) = LOWER(po.token_address)
+        LIMIT 1
+    ),
+    'ERC20'
+)
+WHERE po.token_address IS NOT NULL
+  AND po.asset_symbol ~* '^0x[0-9a-f]{6}\.\.\.$';

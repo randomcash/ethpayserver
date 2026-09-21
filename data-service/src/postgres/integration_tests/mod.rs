@@ -11,6 +11,8 @@
 //! - `analytics`: Dashboard payment-volume aggregation
 //! - `wallet`: Account wallet derivation and store resolution
 //! - `wallet_migration`: the account-wallets migration run over old-shape data
+//! - `backfill_truncated_payment_symbols`: the truncated-address backfill,
+//!   resolving known tokens and falling back for the rest
 //! - `account_deletion`: what blocks deleting an account, against the real FKs
 //! - `store_creation`: a store and the membership that owns it, as one unit
 //! - `payout_claims`: which invoices a store's payouts already hold
@@ -24,6 +26,7 @@
 mod account_deletion;
 mod aggregation;
 mod analytics;
+mod backfill_truncated_payment_symbols;
 mod email_change;
 mod installed_plugins;
 mod invoice;
