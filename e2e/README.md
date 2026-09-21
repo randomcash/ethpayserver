@@ -253,9 +253,11 @@ E2E_TEST_MNEMONIC="..." E2E_API_TOKEN=ak_... E2E_SEPOLIA_RPC_URL=https://... \
 3. Create a user on testnet, mint an API key, store it as `E2E_API_TOKEN`.
 4. Store a Sepolia RPC endpoint as `E2E_SEPOLIA_RPC_URL`.
 5. Set `SENTRY_CRON_E2E_URL` to a Sentry Cron Monitor check-in URL. This is
-   required, not optional — the workflow checks in on every run, and if the
-   secret is unset it silently skips that step, so a failure or a run that
-   never happens pages nobody instead of paging a human.
+   required, not optional, and the workflow enforces it — the check-in step
+   fails the run while the secret is unset, loudly, every time, rather than
+   skipping quietly. Skipping quietly would mean neither a passing run, nor a
+   failing one, nor a run that never happens at all ever reached a person,
+   which is the whole thing the monitor exists to prevent.
 
 Nothing else needs provisioning: the test creates its own store, payment method
 and webhook config on each run.

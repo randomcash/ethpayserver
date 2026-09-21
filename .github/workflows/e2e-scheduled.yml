@@ -148,7 +148,16 @@ jobs:
           BROWSER: ${{ needs.browser.result }}
           SYNTHETIC: ${{ needs.synthetic-payment.result }}
         run: |
-          [ -n "$SENTRY_CRON_URL" ] || { echo "SENTRY_CRON_E2E_URL unset — skipping check-in"; exit 0; }
+          # Fail loud, every run, until a human creates the monitor - the same
+          # posture check-health-deep.sh takes. Skipping quietly is the exact
+          # failure this change exists to close: with the secret unset, neither
+          # a passing run, nor a failing one, nor a run that never happens at
+          # all would ever reach a person. The README beside this already says
+          # the secret is required; this is the code agreeing with it.
+          if [ -z "$SENTRY_CRON_URL" ]; then
+            echo "::error title=SENTRY_CRON_E2E_URL unset::No check-in was sent. Create the Sentry cron monitor and set this secret, or e2e failures page nobody."
+            exit 1
+          fi
           if [ "$BROWSER" = success ] && [ "$SYNTHETIC" = success ]; then
             status="ok"
           else

@@ -78,6 +78,8 @@ fail=0
 check() { # name expected_rc [extra_env...]
   local name="$1" want="$2" got
   shift 2
+  # Truncate first, so checkin_sent below reads only THIS run's check-ins.
+  : > "$CHECKIN_LOG"
   ( env HEALTH_URL="$HEALTH_URL" SENTRY_CRON_URL="$SENTRY_CRON_URL" "$@" "$GUARD" ) >/dev/null 2>&1
   got=$?
   if [ "$got" -ne "$want" ]; then
@@ -88,13 +90,37 @@ check() { # name expected_rc [extra_env...]
   fi
 }
 
+# Assert what actually REACHED the cron endpoint, not just the guard's exit code.
+#
+# The mock server captures every check-in to $CHECKIN_LOG precisely so the
+# `status=` it sends can be verified, and nothing read it back. That mattered
+# more than it sounds: if checkin() always posted status=ok, or dropped the
+# status argument entirely, every exit-code assertion in this file would still
+# pass - and the one mechanism in this change that pages a human would be dead
+# while the suite stayed green.
+checkin_sent() { # expected: ok | error | none
+  local want="$1" got
+  got=$(grep -oE 'status=(ok|error)' "$CHECKIN_LOG" 2>/dev/null | tail -1)
+  got="${got#status=}"
+  [ -z "$got" ] && got="none"
+  if [ "$got" != "$want" ]; then
+    echo "FAIL: check-in was status=$got, expected status=$want"
+    fail=1
+  else
+    echo "   -> checked in status=$got"
+  fi
+}
+
 echo 200 > "$STATUS_FILE"; healthy_body > "$BODY_FILE"
 check "healthy body passes" 0
+checkin_sent "ok"
 
 check "missing SENTRY_CRON_URL is refused, not silently skipped" 1 env -u SENTRY_CRON_URL
+checkin_sent "none"
 
 echo 500 > "$STATUS_FILE"
 check "non-200 is refused" 1
+checkin_sent "error"
 echo 200 > "$STATUS_FILE"
 
 cat > "$BODY_FILE" <<'JSON'
@@ -103,6 +129,7 @@ cat > "$BODY_FILE" <<'JSON'
  "rpcs":{"1":{"status":"ok","last_block":100}}}
 JSON
 check "monitor.data_fresh false is refused" 1
+checkin_sent "error"
 
 cat > "$BODY_FILE" <<'JSON'
 {"postgres":{"status":"ok"},"redis":{"status":"ok"},
@@ -151,10 +178,18 @@ check "an advancing block never trips the stall threshold" 0 env STALL_THRESHOLD
 # The stall tracker's own error sentinel must fail closed like every other
 # field here, not get treated as "nothing is stalled" - a state file the
 # tracker cannot write to should refuse the run, not pass it quietly.
+# Permission bits are ignored for root, so as root the nested mkdir would
+# succeed, the state write would succeed, and this case would test nothing
+# while appearing to fail. GitHub's ubuntu-latest is non-root; say so rather
+# than leaving it an assumption baked into a mode string.
+if [ "$(id -u)" -eq 0 ]; then
+  echo "SKIP: fail-closed case needs a non-root user (permission bits do not apply to root)"
+else
 mkdir -m 500 "$TMP/readonly"
 check "stall-check erroring (unwritable state dir) fails closed" 1 \
   env STALL_THRESHOLD=2 HEALTH_STATE_FILE="$TMP/readonly/nested/state.json"
 chmod 700 "$TMP/readonly"
+fi
 
 [ "$fail" -eq 0 ] && echo "check-health-deep.sh behaves as documented"
 exit "$fail"
