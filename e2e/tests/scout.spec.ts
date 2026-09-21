@@ -173,6 +173,14 @@ const MOBILE_VIEWPORT = { width: 375, height: 812 };
 const ROUTE_HREF_PATTERN = /^\/(evm(\/|$)|checkout\/)/;
 
 async function discoverLinkedRoutes(): Promise<string[]> {
+  // evaluateAll snapshots whatever matches right now and does not auto-wait
+  // the way a locator assertion would. gotoAuthed only waits for network-idle,
+  // not for the WASM client to finish hydrating, so calling this immediately
+  // after a navigation can undercount links - down to zero - with nothing to
+  // say it happened. Waiting for the first link to attach catches up with
+  // hydration without a fixed sleep; it's a no-op once links are already there,
+  // and a bounded wait (not a hang) on pages that never render one, like checkout.
+  await scoutPage.locator('a[href]').first().waitFor({ state: 'attached', timeout: 5_000 }).catch(() => {});
   const hrefs = await scoutPage
     .locator('a[href]')
     .evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? ''));
@@ -892,7 +900,13 @@ test.describe('Auth & Authenticated', () => {
     test.setTimeout(90_000);
 
     await gotoAuthed('/evm');
+    // '/evm' itself has to be seeded explicitly: discoverLinkedRoutes only
+    // returns links found ON this page, not the path of the page itself, and
+    // nothing guarantees the dashboard renders a self-referential <a
+    // href="/evm">. Without this, the busiest page in the app - the one every
+    // session lands on - would only reach the mobile pass by accident.
     discoveredRoutes = await walkRoutes([
+      '/evm',
       ...(await discoverLinkedRoutes()),
       ...(await discoverPluginRoutes()),
       ...PLACEHOLDER_ROUTES,
