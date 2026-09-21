@@ -132,6 +132,11 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// and a real `wasmtime::Linker`, by
 /// `a_plugin_can_ask_the_host_to_issue_an_invoice` in that crate's
 /// `runtime.rs` tests.
+///
+/// This type's own half - that a published `PluginHostApi`, not a test
+/// double, actually creates a real, correctly-priced invoice against a real
+/// database - is `a_real_issuer_creates_a_real_payable_invoice_in_base_units`
+/// in `server/tests/plugin_invoice_issuer.rs`.
 pub struct PluginHostApi<A> {
     state: PgAppState<A>,
     own_store_id: StoreId,
