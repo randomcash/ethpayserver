@@ -88,6 +88,19 @@ impl<T> EventConsumerDataService for T where
 {
 }
 
+/// What to do when an envelope fails to apply. Takes the chain and the
+/// outbox position that failed.
+///
+/// Production leaves this `None`, which logs and exits the process so
+/// Docker restarts it: there is no in-process fix for a `handle_event`
+/// error that lets the cursor stay honest, since the loop cannot un-fail
+/// the DB write and must not let a *later*, successful envelope on the same
+/// chain commit a cursor past this one - that would make the failed
+/// envelope unresumable forever, exactly the loss this whole mechanism
+/// exists to close. Tests set this to observe that the failure was reached
+/// without killing the test binary via `process::exit`.
+pub type ApplyFailureHook = Arc<dyn Fn(u64, i64) + Send + Sync>;
+
 /// Event consumer that processes monitor events and updates database state.
 ///
 /// Optionally sends webhook notifications when invoice status changes.
@@ -106,6 +119,7 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     /// registered. See `plugins::payment_observer`.
     payment_observers: Vec<Arc<dyn OwnStorePaymentObserver>>,
     own_store_id: Option<types::StoreId>,
+    on_apply_failure: Option<ApplyFailureHook>,
 }
 
 impl<
@@ -132,6 +146,7 @@ impl<
             email_sender,
             payment_observers: Vec::new(),
             own_store_id: None,
+            on_apply_failure: None,
         }
     }
 
@@ -150,6 +165,16 @@ impl<
     ) -> Self {
         self.own_store_id = Some(own_store_id);
         self.payment_observers = observers;
+        self
+    }
+
+    /// Override what happens when an envelope fails to apply.
+    ///
+    /// Only tests should call this - see [`ApplyFailureHook`] for why
+    /// production wants the default `process::exit(1)`.
+    #[must_use]
+    pub fn with_apply_failure_hook(mut self, hook: ApplyFailureHook) -> Self {
+        self.on_apply_failure = Some(hook);
         self
     }
 
@@ -215,7 +240,15 @@ impl<
         };
 
         while let Some(envelope) = event_stream.next().await {
-            self.apply_envelope(envelope, &mut cursors).await;
+            if !self.apply_envelope(envelope, &mut cursors).await {
+                // A failed apply already invoked `on_apply_failure` (which
+                // exits the process in production). Stopping the loop here
+                // too matters for the test hook path, where the override
+                // does not exit: without this, the next envelope on this
+                // chain could still apply and commit a cursor past the one
+                // that just failed.
+                break;
+            }
         }
 
         tracing::warn!("Event stream ended, consumer shutting down");
@@ -324,11 +357,23 @@ impl<
     /// committing first and then crashing before applying would silently
     /// lose the event - the exact failure this whole mechanism exists to
     /// close.
+    ///
+    /// Returns `false` when the caller must stop advancing this stream. A
+    /// `handle_event` failure is the case that matters: `cursors` holds one
+    /// scalar `(epoch, seq)` per chain, so if the caller kept going and a
+    /// *later* envelope on the same chain applied and committed, that
+    /// commit would move the chain's cursor past this failed one - on any
+    /// future resume (restart or otherwise) the dedup check above would
+    /// then treat the failed envelope as already applied and it would never
+    /// be redelivered. Stopping here instead means nothing commits past it,
+    /// so it stays exactly at the resume point until a retry (in
+    /// production, a process restart, since [`ApplyFailureHook`] defaults
+    /// to exiting) redelivers it.
     async fn apply_envelope(
         &self,
         envelope: EventEnvelope,
         cursors: &mut HashMap<u64, ChainCursor>,
-    ) {
+    ) -> bool {
         let chain_id = envelope.chain_id;
 
         if let Some(applied) = cursors.get(&chain_id)
@@ -338,12 +383,21 @@ impl<
             // Already applied. Reachable because resume uses one shared
             // low-water mark across chains: a chain further ahead than the
             // slowest one sees its own already-applied entries again.
-            return;
+            return true;
         }
 
         if let Err(e) = self.handle_event(envelope.event).await {
-            tracing::error!(error = %e, "Failed to handle event");
-            return;
+            tracing::error!(
+                chain_id,
+                seq = envelope.cursor.seq,
+                error = %e,
+                "failed to apply event; halting so the durable cursor cannot advance past it"
+            );
+            match &self.on_apply_failure {
+                Some(hook) => hook(chain_id, envelope.cursor.seq),
+                None => std::process::exit(1),
+            }
+            return false;
         }
 
         let cursor = ChainCursor {
@@ -357,9 +411,10 @@ impl<
             .await
         {
             tracing::error!(chain_id, error = %e, "failed to commit chain cursor");
-            return;
+            return true;
         }
         cursors.insert(chain_id, cursor);
+        true
     }
 
     /// Handle a single monitor event.

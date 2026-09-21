@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+mod apply_halts_on_failure;
 mod durable_resume;
 mod helpers;
 mod lineage_break;
@@ -9,6 +10,7 @@ mod payment_confirmed;
 mod payment_detected;
 mod reconcile_cursors;
 mod reorg;
+mod resume_uses_persisted_cursor;
 
 use std::sync::Arc;
 
