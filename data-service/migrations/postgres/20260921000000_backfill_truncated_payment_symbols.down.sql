@@ -1,0 +1,4 @@
+-- Irreversible: the truncated address the up migration replaced was never
+-- kept anywhere, so there is nothing to restore it from. Rolling back would
+-- mean guessing, which recreates the bug this migration fixes with less
+-- information than the row started with.
