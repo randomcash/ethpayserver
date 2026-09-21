@@ -50,7 +50,10 @@ async fn a_stale_chains_cursor_does_not_lower_the_resume_point_below_a_current_c
         ),
     ]);
 
-    let resume = consumer.reconcile_cursors(&mut cursors, new_epoch).await;
+    let resume = consumer
+        .reconcile_cursors(&mut cursors, new_epoch)
+        .await
+        .unwrap();
 
     assert_eq!(
         resume,
@@ -104,7 +107,10 @@ async fn the_resume_point_is_the_low_water_mark_across_every_chain_still_on_the_
         ),
     ]);
 
-    let resume = consumer.reconcile_cursors(&mut cursors, epoch).await;
+    let resume = consumer
+        .reconcile_cursors(&mut cursors, epoch)
+        .await
+        .unwrap();
 
     assert_eq!(
         resume,
@@ -151,7 +157,10 @@ async fn every_chain_mismatching_resumes_from_scratch_rather_than_a_stale_combin
         ),
     ]);
 
-    let resume = consumer.reconcile_cursors(&mut cursors, new_epoch).await;
+    let resume = consumer
+        .reconcile_cursors(&mut cursors, new_epoch)
+        .await
+        .unwrap();
 
     assert_eq!(
         resume, None,

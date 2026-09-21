@@ -101,6 +101,19 @@ impl<T> EventConsumerDataService for T where
 /// without killing the test binary via `process::exit`.
 pub type ApplyFailureHook = Arc<dyn Fn(u64, i64) + Send + Sync>;
 
+/// What to do when the consumer cannot safely continue at all - a startup
+/// step failed before a single envelope was ever read, a lineage break could
+/// not re-arm `watch_retry`, or the event stream itself ended for a reason
+/// other than the already-handled apply-failure path.
+///
+/// Production leaves this `None`, which logs and exits the process, same as
+/// [`ApplyFailureHook`]: none of these paths have an in-process retry that
+/// would do anything but spin against the same failing dependency, and
+/// returning quietly would leave a healthy-looking process with no consumer
+/// running at all - indistinguishable from an idle queue. Tests set this to
+/// observe the failure without killing the test binary.
+pub type ResumeFailureHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Event consumer that processes monitor events and updates database state.
 ///
 /// Optionally sends webhook notifications when invoice status changes.
@@ -120,6 +133,7 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     payment_observers: Vec<Arc<dyn OwnStorePaymentObserver>>,
     own_store_id: Option<types::StoreId>,
     on_apply_failure: Option<ApplyFailureHook>,
+    on_resume_failure: Option<ResumeFailureHook>,
 }
 
 impl<
@@ -147,6 +161,7 @@ impl<
             payment_observers: Vec::new(),
             own_store_id: None,
             on_apply_failure: None,
+            on_resume_failure: None,
         }
     }
 
@@ -178,6 +193,26 @@ impl<
         self
     }
 
+    /// Override what happens when the consumer cannot safely continue.
+    ///
+    /// Only tests should call this - see [`ResumeFailureHook`] for why
+    /// production wants the default `process::exit(1)`.
+    #[must_use]
+    pub fn with_resume_failure_hook(mut self, hook: ResumeFailureHook) -> Self {
+        self.on_resume_failure = Some(hook);
+        self
+    }
+
+    /// Fail loudly and irrecoverably: the caller has already logged what
+    /// went wrong, this decides how to react to it. See [`ResumeFailureHook`]
+    /// for why production always exits here rather than trying to carry on.
+    fn fatal(&self, reason: &str) {
+        match &self.on_resume_failure {
+            Some(hook) => hook(reason),
+            None => std::process::exit(1),
+        }
+    }
+
     /// Run the event consumer as a background task.
     ///
     /// This should be spawned with `tokio::spawn(consumer.run())`.
@@ -198,6 +233,7 @@ impl<
                     // DB hiccup would drop real cursors this server had.
                     // Refusing to start is the safe failure here.
                     tracing::error!(error = %e, "failed to load chain cursors; refusing to start");
+                    self.fatal("failed to load chain cursors");
                     return;
                 }
             };
@@ -206,11 +242,18 @@ impl<
             Ok(e) => e,
             Err(e) => {
                 tracing::error!(error = %e, "failed to read the event outbox's epoch");
+                self.fatal("failed to read the event outbox's epoch");
                 return;
             }
         };
 
-        let mut resume_from = self.reconcile_cursors(&mut cursors, bridge_epoch).await;
+        let mut resume_from = match self.reconcile_cursors(&mut cursors, bridge_epoch).await {
+            Ok(r) => r,
+            // `reconcile_cursors` already logged and called `fatal` for
+            // whatever went wrong; in production that already exited the
+            // process, so this `return` only matters to a test hook.
+            Err(()) => return,
+        };
 
         // Bounded to one retry: `subscribe_from` only ever reports
         // out-of-range for a `Some(cursor)` resume target, and the retry
@@ -228,17 +271,22 @@ impl<
                          resuming from the outbox's new oldest entry"
                     );
                     let chain_ids: Vec<u64> = cursors.keys().copied().collect();
-                    self.break_lineage(&mut cursors, &chain_ids).await;
+                    if !self.break_lineage(&mut cursors, &chain_ids).await {
+                        // `break_lineage` already logged and called `fatal`.
+                        return;
+                    }
                     resume_from = None;
                     retried = true;
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to subscribe to events");
+                    self.fatal("failed to subscribe to events");
                     return;
                 }
             }
         };
 
+        let mut apply_failed = false;
         while let Some(envelope) = event_stream.next().await {
             if !self.apply_envelope(envelope, &mut cursors).await {
                 // A failed apply already invoked `on_apply_failure` (which
@@ -247,11 +295,26 @@ impl<
                 // does not exit: without this, the next envelope on this
                 // chain could still apply and commit a cursor past the one
                 // that just failed.
+                apply_failed = true;
                 break;
             }
         }
 
-        tracing::warn!("Event stream ended, consumer shutting down");
+        if apply_failed {
+            tracing::warn!("Event stream ended after a failed apply, consumer shutting down");
+        } else {
+            // The stream itself ended - a dropped connection, a failed
+            // `XREAD`, a malformed entry the bridge refused to skip past.
+            // Nothing spawned this task with a shutdown signal, so this is
+            // never an expected outcome: left as a plain return, the process
+            // would keep running with no consumer at all, looking exactly
+            // like a healthy, idle one.
+            tracing::error!(
+                "event stream ended unexpectedly; halting so a restart resumes from the last \
+                 committed cursor instead of leaving a dead consumer running silently"
+            );
+            self.fatal("event stream ended unexpectedly");
+        }
     }
 
     /// Reconcile this server's stored cursors against the outbox's current
@@ -286,15 +349,20 @@ impl<
     /// does not pollute the low-water mark next time either. If every chain
     /// mismatches, there is nothing left to resume from and this returns
     /// `None`, same as a cold start.
+    ///
+    /// `Err(())` means a lineage break could not re-arm `watch_retry` for
+    /// every affected chain - see [`Self::break_lineage`] - and the caller
+    /// must stop rather than resume with a cursor built on top of an
+    /// incomplete break.
     async fn reconcile_cursors(
         &self,
         cursors: &mut HashMap<u64, ChainCursor>,
         bridge_epoch: i64,
-    ) -> Option<EventCursor> {
+    ) -> Result<Option<EventCursor>, ()> {
         if cursors.is_empty() {
             // Never resumed before: nothing stored to lose, so whatever the
             // outbox currently retains from its start is a strict gain.
-            return None;
+            return Ok(None);
         }
 
         let mismatched: Vec<u64> = cursors
@@ -311,15 +379,17 @@ impl<
                  their last commit cannot be replayed. Re-arming watch_retry for every watch \
                  on the affected chains."
             );
-            self.break_lineage(cursors, &mismatched).await;
+            if !self.break_lineage(cursors, &mismatched).await {
+                return Err(());
+            }
         }
 
         let min_seq = cursors.values().map(|c| c.seq).min();
-        min_seq.map(|seq| EventCursor {
+        Ok(min_seq.map(|seq| EventCursor {
             epoch: bridge_epoch,
             seq,
             block_height: 0,
-        })
+        }))
     }
 
     /// Re-arm `watch_retry` for `chain_ids`, then forget their cursors.
@@ -332,21 +402,47 @@ impl<
     /// once) - both mean the gap since the last commit cannot be replayed
     /// for the given chains, and re-driving every live watch within
     /// `watch_retry`'s normal cycle is the best available recovery.
-    async fn break_lineage(&self, cursors: &mut HashMap<u64, ChainCursor>, chain_ids: &[u64]) {
+    ///
+    /// `watch_retry` is the *only* safety net for whatever confirmed inside a
+    /// gap this replaces - see the module's own notes on the epoch mechanism.
+    /// If re-arming it fails for a chain (a DB blip, the same kind of
+    /// transient error this path exists to be robust against), there is
+    /// nothing left recovering that chain's payments: removing its cursor
+    /// anyway would make the break look clean, and keeping the stale cursor
+    /// around would let it blend back into the low-water mark next time
+    /// (exactly the bug the per-chain epoch check exists to rule out).
+    /// Neither is safe, so a chain whose re-arm fails keeps its stale cursor
+    /// and this reports failure to the caller, which halts instead of
+    /// resuming on top of an incomplete break.
+    async fn break_lineage(
+        &self,
+        cursors: &mut HashMap<u64, ChainCursor>,
+        chain_ids: &[u64],
+    ) -> bool {
+        let mut all_rearmed = true;
         for &chain_id in chain_ids {
-            if let Err(e) = self
+            match self
                 .data_service
                 .reset_chain_watch_notifications(chain_id)
                 .await
             {
-                tracing::error!(
-                    chain_id,
-                    error = %e,
-                    "failed to re-arm watch_retry after an event outbox lineage break"
-                );
+                Ok(_) => {
+                    cursors.remove(&chain_id);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        chain_id,
+                        error = %e,
+                        "failed to re-arm watch_retry after an event outbox lineage break"
+                    );
+                    all_rearmed = false;
+                }
             }
-            cursors.remove(&chain_id);
         }
+        if !all_rearmed {
+            self.fatal("failed to re-arm watch_retry after an event outbox lineage break");
+        }
+        all_rearmed
     }
 
     /// Apply one envelope and, only once it has been applied, durably

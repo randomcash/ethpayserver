@@ -47,16 +47,26 @@ const STREAM_MAXLEN: usize = 200_000;
 /// script as a single atomic unit, so no other client's commands - not even
 /// another invocation of this same script, nor a concurrent `bump_epoch` -
 /// can interleave with the `INCR`, the epoch read, and the `XADD` it feeds.
+///
+/// The epoch itself is seeded from `INCR` on a second counter key, not
+/// `TIME`/wall-clock: every caller that decides "is this cursor still
+/// trustworthy" does so with plain equality against the current epoch, so a
+/// repeated value would make a cursor from an invalidated lineage compare
+/// equal to a brand new one and be silently accepted. A clock can repeat a
+/// value it already issued - a backward NTP step, a VM restored from an
+/// older snapshot, a dead RTC on reboot; a counter that only ever increments
+/// cannot.
 const PUBLISH_SCRIPT: &str = r"
     local seq = redis.call('INCR', KEYS[2])
     local epoch = redis.call('GET', KEYS[3])
     if not epoch then
-        redis.call('SET', KEYS[3], ARGV[2], 'NX')
+        local candidate = redis.call('INCR', KEYS[4])
+        redis.call('SET', KEYS[3], candidate, 'NX')
         epoch = redis.call('GET', KEYS[3])
     end
     redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], seq .. '-0',
-        'epoch', epoch, 'seq', seq, 'chain_id', ARGV[3],
-        'block_height', ARGV[4], 'payload', ARGV[5])
+        'epoch', epoch, 'seq', seq, 'chain_id', ARGV[2],
+        'block_height', ARGV[3], 'payload', ARGV[4])
     return {seq, epoch}
 ";
 
@@ -148,13 +158,24 @@ impl RedisBridge {
         format!("{}:seq", self.events_channel)
     }
 
+    /// Key of the counter this outbox draws its epoch identity from.
+    ///
+    /// Separate from [`Self::epoch_key`] itself: the epoch key holds the
+    /// *current* value, but a monotonic source for that value has to survive
+    /// `bump_epoch` overwriting it, so the generator lives under its own key
+    /// rather than being derived from the epoch key's current contents.
+    fn epoch_gen_key(&self) -> String {
+        format!("{}:epoch_gen", self.events_channel)
+    }
+
     /// The outbox's epoch, creating one if this is the first publisher or
     /// resumer to ever see this outbox (a fresh deployment, or a Redis that
     /// lost the key along with everything else).
     ///
-    /// `SET ... NX` races safely: if two callers lose the key at once, only
-    /// one write sticks, and the follow-up `GET` returns whichever won for
-    /// both of them.
+    /// `SET ... NX` races safely: if two callers lose the key at once, both
+    /// draw a fresh value from [`Self::epoch_gen_key`] (so neither wastes the
+    /// other's), only one write sticks, and the follow-up `GET` returns
+    /// whichever won for both of them.
     async fn get_or_init_epoch(&self) -> EvmResult<i64> {
         let mut conn = self.publisher.clone();
         let key = self.epoch_key();
@@ -165,7 +186,13 @@ impl RedisBridge {
                 .map_err(|e| EvmError::Monitor(format!("corrupt epoch value {epoch:?}: {e}")));
         }
 
-        let candidate = chrono::Utc::now().timestamp_millis();
+        // See `PUBLISH_SCRIPT`'s doc comment for why this is a counter and
+        // not a timestamp: a repeated epoch value would let a cursor from an
+        // invalidated lineage compare equal to a brand new one.
+        let candidate: i64 = conn
+            .incr(self.epoch_gen_key(), 1)
+            .await
+            .map_err(|e| EvmError::Monitor(format!("redis INCR failed: {}", e)))?;
         let _: () = redis::cmd("SET")
             .arg(&key)
             .arg(candidate)
@@ -211,9 +238,6 @@ impl EventBridge for RedisBridge {
         let payload = serde_json::to_string(event)
             .map_err(|e| EvmError::Monitor(format!("event serialization failed: {}", e)))?;
 
-        // Only used if the epoch key does not exist yet; see the script's
-        // own doc comment for why this is not read separately beforehand.
-        let candidate_epoch = chrono::Utc::now().timestamp_millis();
         let chain_id = event.chain_id();
         let block_height = event.block_height();
 
@@ -222,8 +246,8 @@ impl EventBridge for RedisBridge {
             .key(&self.events_channel)
             .key(self.seq_key())
             .key(self.epoch_key())
+            .key(self.epoch_gen_key())
             .arg(self.maxlen)
-            .arg(candidate_epoch)
             .arg(chain_id)
             .arg(block_height)
             .arg(payload)
@@ -303,6 +327,15 @@ impl EventBridge for RedisBridge {
                                 .and_then(|v| redis::from_redis_value::<String>(v).ok())
                         };
 
+                        // `last_id` above already advanced past this entry, so a
+                        // plain `continue` here would move on for good: no cursor
+                        // gap to detect, no replay path to recover it - the same
+                        // permanent loss this whole mechanism exists to close,
+                        // just reached through a corrupt entry instead of a
+                        // crash. Ending the stream instead lets `run` react the
+                        // same way it does to any other fatal resume condition
+                        // (a dead connection, a failed `XREAD`): the consumer
+                        // halts rather than silently skipping a payment.
                         let (Some(epoch), Some(seq), Some(chain_id), Some(block_height), Some(payload)) = (
                             get_field("epoch").and_then(|v| v.parse().ok()),
                             get_field("seq").and_then(|v| v.parse().ok()),
@@ -310,8 +343,8 @@ impl EventBridge for RedisBridge {
                             get_field("block_height").and_then(|v| v.parse().ok()),
                             get_field("payload"),
                         ) else {
-                            warn!(id = %entry.id, "malformed stream entry, skipping");
-                            continue;
+                            error!(id = %entry.id, "malformed stream entry; ending the stream rather than skipping it");
+                            return;
                         };
 
                         match serde_json::from_str::<MonitorEvent>(&payload) {
@@ -321,7 +354,8 @@ impl EventBridge for RedisBridge {
                                 event,
                             },
                             Err(e) => {
-                                warn!(error = %e, payload = %payload, "failed to deserialize event");
+                                error!(error = %e, payload = %payload, "failed to deserialize event; ending the stream rather than skipping it");
+                                return;
                             }
                         }
                     }
@@ -338,11 +372,18 @@ impl EventBridge for RedisBridge {
 
     async fn bump_epoch(&self) -> EvmResult<i64> {
         let mut conn = self.publisher.clone();
+        // See `PUBLISH_SCRIPT`'s doc comment for why this draws from a
+        // counter rather than the wall clock: `INCR` can never hand back a
+        // value it has already issued, so a cursor stamped with any prior
+        // epoch can never compare equal to the one this produces.
+        let new_epoch: i64 = conn
+            .incr(self.epoch_gen_key(), 1)
+            .await
+            .map_err(|e| EvmError::Monitor(format!("redis INCR failed: {}", e)))?;
         // Unconditional SET, not `NX`: `get_or_init_epoch` uses `NX` because
         // it must not clobber a value another caller already agreed on, but
         // this is the one call whose entire job is to make every existing
         // agreement stale.
-        let new_epoch = chrono::Utc::now().timestamp_millis();
         let _: () = conn
             .set(self.epoch_key(), new_epoch)
             .await
