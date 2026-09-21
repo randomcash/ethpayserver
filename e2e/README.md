@@ -252,8 +252,10 @@ E2E_TEST_MNEMONIC="..." E2E_API_TOKEN=ak_... E2E_SEPOLIA_RPC_URL=https://... \
    when the balance hits zero.
 3. Create a user on testnet, mint an API key, store it as `E2E_API_TOKEN`.
 4. Store a Sepolia RPC endpoint as `E2E_SEPOLIA_RPC_URL`.
-5. Optionally set `HEALTHCHECK_E2E_URL` to a healthchecks.io check so a failure —
-   or a run that never happens — pages a human without anyone opening Actions.
+5. Set `SENTRY_CRON_E2E_URL` to a Sentry Cron Monitor check-in URL. This is
+   required, not optional — the workflow checks in on every run, and if the
+   secret is unset it silently skips that step, so a failure or a run that
+   never happens pages nobody instead of paging a human.
 
 Nothing else needs provisioning: the test creates its own store, payment method
 and webhook config on each run.
