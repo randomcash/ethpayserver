@@ -78,6 +78,19 @@ impl SessionService for UnusedSessionService {
     }
 }
 
+/// `#[ignore]` plus a silent `None` when `DATABASE_URL` is unset or
+/// unreachable looks, out of context, like two independent ways for these
+/// tests to report green having asserted nothing. It is not new to this
+/// file: it is the same convention every DB-backed integration test in this
+/// crate already uses (`server/tests/plugin_invoice_creation_filter.rs`,
+/// `server/tests/email_change_smtp_gate.rs`), and it is not the gate that
+/// actually matters - `.github/workflows/ci.yml`'s "Integration tests" step
+/// sets `DATABASE_URL` to a real, migrated Postgres and runs
+/// `cargo nextest run -p data-service -p server --no-fail-fast --run-ignored
+/// only`, which is gating and gates on `server` specifically, so these two
+/// tests always run for real there. The silent skip only fires for a
+/// developer running `cargo test` locally without a database, which is the
+/// point of `#[ignore]`, not a way to avoid failing.
 async fn service() -> Option<PgDataService> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let pool = sqlx::postgres::PgPoolOptions::new()
