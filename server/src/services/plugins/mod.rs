@@ -45,7 +45,13 @@
 //! verifies each artifact against its digest and registers it with the
 //! host - disabling, in the database, anything that fails, so a restart
 //! does not walk straight back into the same crash.
+//!
+//! `account_notice` is capability 7: tell an account something, through a
+//! channel and an address only the host chooses - a plugin names an account
+//! id, never a recipient. Host-side only for now; see that module's doc for
+//! why it has no wasmtime wiring yet.
 
+mod account_notice;
 mod boot;
 mod dispatch;
 mod filter;
@@ -59,6 +65,7 @@ mod pools;
 pub mod reconcile;
 mod storage;
 
+pub use account_notice::{AccountNotifier, PluginAccountNotifier};
 pub use boot::{
     DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, PluginBootReport, load_installed_plugins,
     report_boot,
@@ -111,3 +118,8 @@ pub use payserver_plugin_host::{
 // re-exported alongside the other two capabilities' names, and implemented on
 // `PluginHostApi` by `merchant_directory` (see that module).
 pub use data_service::{MerchantAccount, MerchantDirectoryReader, MerchantStore};
+
+// Capability 7: likewise no new type here - `AccountNotice` is the message
+// content and belongs next to the email service that delivers it, not
+// duplicated here for a capability that has no delivery logic of its own.
+pub use crate::services::email::AccountNotice;
