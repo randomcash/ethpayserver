@@ -22,6 +22,11 @@ name: Health monitor (deep)
 # advancing — status alone misses that. The actions/cache steps below persist
 # each chain's last_block across runs so check-health-deep.sh can catch a
 # block count that has gone flat, not just a chain that has gone unhealthy.
+#
+# One new cache entry per run (see the run_id in the key below) means this
+# never stops accumulating entries on its own; relied on for cleanup is
+# GitHub's automatic eviction of caches unused for 7 days and its 10GB-per-repo
+# LRU cap, not anything in this workflow.
 
 on:
   schedule:

@@ -132,6 +132,14 @@ jobs:
       - name: Migration guard self-test
         run: ./scripts/check-migrations.test.sh
 
+      # Proves check-health-deep.sh - the between-deploys watchdog for
+      # /health/deep - actually goes red on the failure modes it claims to
+      # catch (a stalled RPC, a monitor gone stale, its own state-tracking
+      # erroring), against a real local HTTP server rather than a comment
+      # asserting someone ran it once.
+      - name: Health check guard self-test
+        run: ./scripts/check-health-deep.test.sh
+
       - name: Format check
         run: cargo fmt --all -- --check
 
