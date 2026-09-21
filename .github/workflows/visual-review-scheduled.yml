@@ -1,0 +1,127 @@
+name: Nightly visual review (testnet)
+
+# A deterministic crawler can assert a page loaded, that no console error
+# fired, that no request 500'd — it cannot notice that a table runs off the
+# edge of its card, a primary button renders as an unlabelled blue rectangle,
+# or an amount reads "$30.000000000000000000". Every one of those was found by
+# a human looking at a phone, and none would have failed any test this repo
+# has. This walks the routes tests/scout.spec.ts already knows how to reach,
+# screenshots each at a mobile and a desktop viewport, and has an agent look
+# at every screenshot against a fixed rubric.
+#
+# Advisory only, on purpose: a model judging layout will produce false
+# positives, and a gate that cries wolf gets disabled or ignored — see
+# scripts/health-gate.sh's history. Findings land as a GitHub issue a person
+# skims in a minute; nothing here fails the build.
+
+on:
+  schedule:
+    # 06:40 UTC daily — after the 06:00 scheduled E2E run, so the two don't
+    # contend for the same testnet session budget.
+    - cron: "40 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  E2E_REMOTE: "true"
+  E2E_BASE_URL: https://testnet.random.cash
+  E2E_API_URL: https://testnet.random.cash
+  E2E_VISUAL_REVIEW: "true"
+
+jobs:
+  review:
+    name: Screenshot + review
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testnet
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: npm ci && npx playwright install --with-deps chromium
+
+      - name: Capture screenshots
+        working-directory: e2e
+        run: npx playwright test tests/visual-review.spec.ts
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-review-screenshots
+          path: e2e/test-results/visual/
+          retention-days: 14
+
+      - name: Run the review
+        working-directory: e2e
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node scripts/visual-review.mjs
+
+      - name: File findings
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const findingsPath = 'e2e/test-results/visual/findings.json';
+            const reportPath = 'e2e/test-results/visual/report.md';
+
+            if (!fs.existsSync(findingsPath)) {
+              console.log('No findings.json — review did not run (missing secret or manifest). Nothing to file.');
+              return;
+            }
+            const findings = JSON.parse(fs.readFileSync(findingsPath, 'utf8'));
+            if (findings.length === 0) {
+              console.log('Visual review found nothing to report.');
+              return;
+            }
+
+            const title = 'Nightly visual review: findings';
+            const report = fs.existsSync(reportPath) ? fs.readFileSync(reportPath, 'utf8') : '(report.md missing)';
+            const body = [
+              report,
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'Screenshots are attached as the `visual-review-screenshots` artifact on that run.',
+              'This is advisory — a model judging layout will produce false positives. Skim, then close what does not hold up.',
+            ].join('\n');
+
+            // Reuse the open issue if there is one, so a run that keeps finding
+            // the same thing does not file a fresh issue every night.
+            // per_page defaults to 30 and the listing includes pull requests, so
+            // without this the exact-title match can miss and duplicate.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'visual-review',
+              per_page: 100,
+            });
+            const match = existing.data.find(i => i.title === title);
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['visual-review'],
+              });
+            }

@@ -273,3 +273,30 @@ Each run creates a fresh store (`e2e-synthetic-<timestamp>`) and leaves it
 behind. The derivation index advances per payment method, so reusing one store
 would couple each run to the last; and on a failure the invoice and its payment
 rows are the evidence. Prune them by hand if testnet gets noisy.
+
+## Nightly visual review (`tests/visual-review.spec.ts`, `scripts/visual-review.mjs`)
+
+The routes scout.spec.ts already reaches — unauthenticated, then authenticated
+after one passkey registration — screenshotted at a mobile (375x812) and a
+desktop (1280x720) viewport. `scripts/visual-review.mjs` then sends each
+route's pair of screenshots to Claude against a fixed rubric (clipped content,
+an unlabelled control, a raw decimal where a formatted amount belongs, and so
+on) and writes `test-results/visual/report.md`.
+
+This is advisory, not a gate — a model judging layout will produce false
+positives, and a check that can go red on one gets disabled. `.github/workflows/
+visual-review-scheduled.yml` runs it nightly against testnet and files (or
+comments on) a `visual-review`-labelled issue only when there is something to
+report; it never fails the build.
+
+**Off by default**, same reasoning as the synthetic payment: `npx playwright
+test` with no filter is what `ci.yml`'s `e2e` job runs, and a screenshot pass
+nobody reviews has no business slowing down every push. Run it explicitly:
+
+```bash
+E2E_REMOTE=true E2E_VISUAL_REVIEW=true npx playwright test tests/visual-review.spec.ts
+ANTHROPIC_API_KEY=... node scripts/visual-review.mjs
+```
+
+`ANTHROPIC_API_KEY` is the only new secret this needs; without it the review
+script logs and exits cleanly rather than failing.
