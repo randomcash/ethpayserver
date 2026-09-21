@@ -204,12 +204,31 @@ interface PluginPagesResponse {
  * The billing plugin is the ticket's named example, but nothing here is
  * billing-specific - a new plugin with a new page is covered the moment it
  * is installed and enabled, without this file changing.
+ *
+ * This request goes through `scoutPage.request`, Playwright's
+ * `APIRequestContext` - it never touches the browser's network stack, so the
+ * `page.on('response')` listener in beforeAll never sees it. A broken
+ * plugins endpoint would otherwise fail silently: `discoverPluginRoutes`
+ * would return `[]`, the walk would visit zero billing pages, and both
+ * route-coverage tests would pass clean having checked nothing. Every exit
+ * path below is therefore its own issue() rather than a quiet empty array.
  */
 async function discoverPluginRoutes(): Promise<string[]> {
   const resp = await scoutPage.request.get('/api/plugins').catch(() => null);
-  if (!resp || !resp.ok()) return [];
+  if (!resp) {
+    issue('NETWORK', 'GET /api/plugins failed: no response');
+    return [];
+  }
+  if (!resp.ok()) {
+    issue('NETWORK', `GET /api/plugins -> ${resp.status()}`);
+    return [];
+  }
   const body: PluginPagesResponse | null = await resp.json().catch(() => null);
-  return (body?.plugins ?? []).flatMap((plugin) =>
+  if (body === null) {
+    issue('NETWORK', 'GET /api/plugins returned a body that could not be parsed as JSON');
+    return [];
+  }
+  return (body.plugins ?? []).flatMap((plugin) =>
     (plugin.pages ?? []).map((page) => `/evm/plugins/${plugin.id}/${page.path}`),
   );
 }
@@ -255,6 +274,7 @@ async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise
   const visited = new Set<string>();
   const queue = [...seedRoutes];
   const order: string[] = [];
+  let maxRoutesIssued = false;
 
   while (queue.length > 0) {
     const path = queue.shift()!;
@@ -283,9 +303,19 @@ async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise
       }
     }
 
-    if (crawl && visited.size < MAX_ROUTES) {
-      for (const href of await discoverLinkedRoutes()) {
-        if (!visited.has(href) && !queue.includes(href)) queue.push(href);
+    if (crawl) {
+      if (visited.size < MAX_ROUTES) {
+        for (const href of await discoverLinkedRoutes()) {
+          if (!visited.has(href) && !queue.includes(href)) queue.push(href);
+        }
+      } else if (!maxRoutesIssued) {
+        // Hitting the cap means either an unbounded source of links (e.g.
+        // per-row links once this account has data) or coverage genuinely
+        // cut off - either way that's a fact worth surfacing, not a silent
+        // stop. Guarded to fire once per walk rather than on every
+        // remaining page in the queue.
+        maxRoutesIssued = true;
+        issue('ROUTE_DISCOVERY', `Hit MAX_ROUTES (${MAX_ROUTES}) while crawling - coverage may be incomplete`);
       }
     }
   }
@@ -857,8 +887,11 @@ test.describe('Auth & Authenticated', () => {
     // problem, not "nearly free", so it stays out of this pass rather than
     // becoming a check that always passes.
     await scoutPage.setViewportSize(MOBILE_VIEWPORT);
-    await walkRoutes(discoveredRoutes, { crawl: false, checkOverflow: true });
-    await scoutPage.setViewportSize(DESKTOP_VIEWPORT);
+    try {
+      await walkRoutes(discoveredRoutes, { crawl: false, checkOverflow: true });
+    } finally {
+      await scoutPage.setViewportSize(DESKTOP_VIEWPORT);
+    }
   });
 });
 
