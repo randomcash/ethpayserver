@@ -25,22 +25,32 @@
 //! "delivered" from "nowhere to deliver to" would have no way to decide
 //! whether that is worth surfacing to an operator.
 //!
-//! Not yet reachable from a plugin: the wasm import this would sit behind is
-//! a `payserver-plugin-host` change, pinned by revision in this repo's
-//! `Cargo.toml`, and out of scope here. This is the host-side implementation
-//! the interface can be written and tested against first - capability 3
-//! (`invoice_issuer`) was built the same way before its wasmtime wiring
-//! landed.
+//! Not yet reachable from a plugin: `payserver-plugin-host` has no wasm
+//! import for this at all (`git grep` for `notify_account` or
+//! `account_notice` in that crate finds nothing). That is a weaker claim
+//! than "staged like capability 3" - `invoice_issuer`'s `invoice_create`
+//! import was already linked into every plugin instance, with only its
+//! *publish* deferred until server startup finished building `AppState`;
+//! capability 7 has no equivalent import to defer into. Adding one is a
+//! `payserver-plugin-host` change, and that crate is pinned by revision in
+//! this repo's `Cargo.toml` - a change there does not reach this repo until
+//! the pin moves, which cannot happen in the same session that makes the
+//! change, since verifying the pin means building against a published
+//! revision, not a same-session commit on a branch that could still be
+//! rebased.
 //!
-//! Deciding *when* to call this is not staged the same way - it is not here
-//! to stage. The thresholds that would trigger a warning are a billing
-//! plan's own config, not host state: neither this repository nor
-//! `payserver-commons` names a plan, a bracket or a per-plan warning window
-//! anywhere (`git grep` for either finds nothing). That decision belongs
-//! entirely to the billing plugin's own source, which is in neither
-//! checkout this worker has. A caller added here would have to invent the
-//! trigger it is calling on, which is a second product decision wearing
-//! this ticket's name.
+//! Deciding *when* to call this is a second, independent gap: the
+//! thresholds that would trigger a warning are a billing plan's own config,
+//! not host state. Neither this repository nor `payserver-commons` names a
+//! plan, a bracket or a per-plan warning window anywhere (`git grep` finds
+//! nothing in either checkout). The host side of invoice creation is
+//! structurally blind to the same thing - `InvoiceCreationFilterRequest`
+//! carries a store id and an account id and nothing else, so even the
+//! decision to *refuse* an invoice already happens entirely inside the
+//! plugin, opaque to this process. That decision belongs entirely to the
+//! billing plugin's own source, which is in neither checkout this worker
+//! has. A caller added here would have to invent the trigger it is calling
+//! on, which is a second product decision wearing this ticket's name.
 
 use async_trait::async_trait;
 use auth::{SessionService, UserRepository};
@@ -164,9 +174,11 @@ mod tests {
     // Every test above exercises `notice_address` directly. None would
     // notice if `notify_account` stopped calling it, read the wrong field
     // off `User`, swallowed a repository error, or called the sender with
-    // the wrong address - the exact glue the review that asked for these
-    // tests named. `#[ignore]`d and skipped with no `DATABASE_URL`,
-    // matching every other database-backed test in this codebase.
+    // the wrong address. `#[ignore]`d and skipped with no `DATABASE_URL`,
+    // matching every other database-backed test in this codebase - but not
+    // silently: CI's integration-test job runs `-p server --run-ignored
+    // only` with `DATABASE_URL` set, so these three do run and do gate
+    // merges, the same as the rest of that job.
     // =====================================================================
 
     /// Exists only to give `PgAppState<A>` a concrete auth-service type;
