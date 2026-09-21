@@ -259,6 +259,23 @@ const MAX_ROUTES = 40;
 
 const OVERFLOW_TOLERANCE_PX = 1;
 
+// Shared by walkRoutes below and by the unauthenticated login/register mobile
+// check further down - both are "does the page rendered at this viewport fit
+// it", and duplicating the evaluate() would let the two drift.
+async function recordOverflow(path: string) {
+  // null (not 0) on failure: this check's only job is to catch overflow, so a
+  // page that crashed mid-evaluate must not read the same as a page that
+  // measured cleanly at zero.
+  const overflowPx = await scoutPage
+    .evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    .catch(() => null);
+  if (overflowPx === null) {
+    issue('RESPONSIVE', `${path} overflow check could not run`);
+  } else if (overflowPx > OVERFLOW_TOLERANCE_PX) {
+    issue('RESPONSIVE', `${path} overflows horizontally by ${overflowPx}px at mobile width`);
+  }
+}
+
 interface WalkOptions {
   /** Keep discovering new links from each page visited. Off for the mobile
    * pass, which reuses the desktop pass's already-complete route set instead
@@ -290,17 +307,7 @@ async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise
     }
 
     if (checkOverflow) {
-      // null (not 0) on failure: this check's only job is to catch overflow,
-      // so a page that crashed mid-evaluate must not read the same as a page
-      // that measured cleanly at zero.
-      const overflowPx = await scoutPage
-        .evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
-        .catch(() => null);
-      if (overflowPx === null) {
-        issue('RESPONSIVE', `${path} overflow check could not run`);
-      } else if (overflowPx > OVERFLOW_TOLERANCE_PX) {
-        issue('RESPONSIVE', `${path} overflows horizontally by ${overflowPx}px at mobile width`);
-      }
+      await recordOverflow(path);
     }
 
     if (crawl) {
@@ -387,6 +394,26 @@ test.describe('Unauthenticated', () => {
     const signIn = scoutPage.getByText('Sign in').first();
     if (!await signIn.isVisible({ timeout: 3_000 }).catch(() => false)) {
       issue('REGISTER', '"Sign in" link not visible');
+    }
+  });
+
+  // Every UI bug reported by hand on 2026-09-20 was on a phone, and /login and
+  // /register are two of the original nine routes. The authenticated
+  // `route coverage: mobile` pass further down can't cover either: both pages
+  // redirect to the dashboard the instant a session exists (see ui-kit's
+  // LoginPage/RegisterPage), so visiting them post-login just re-checks the
+  // dashboard under a different URL. Checked here instead, while this suite
+  // still has no session - the only point at which either page actually
+  // renders.
+  test('login and register render without horizontal overflow on mobile', async () => {
+    await scoutPage.setViewportSize(MOBILE_VIEWPORT);
+    try {
+      await goto('/login');
+      await recordOverflow('/login');
+      await goto('/register');
+      await recordOverflow('/register');
+    } finally {
+      await scoutPage.setViewportSize(DESKTOP_VIEWPORT);
     }
   });
 
