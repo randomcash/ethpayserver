@@ -117,10 +117,10 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// The host side of the plugin API's write capability, bound to one
 /// instance's own store.
 ///
-/// Not yet wired to a plugin runtime - the wasmtime dispatch this will
-/// eventually sit behind does not call it yet. This is the host-side
-/// implementation the interface can be, and is, written and tested against
-/// first.
+/// Wired to the plugin runtime: `host_calls::PluginCalls::invoice_create`
+/// reaches this through a [`super::host_calls::DeferredIssuer`] that
+/// `server.rs` publishes at boot once a billing store is configured, so a
+/// wasm plugin's `invoice_create` import lands here, not on a stub.
 pub struct PluginHostApi<A> {
     state: PgAppState<A>,
     own_store_id: StoreId,
