@@ -480,7 +480,7 @@ async fn get_invoice_payments_across_tenants_is_refused() {
 
     let result = server::api::invoices::get_invoice_payments(
         AuthenticatedUser(user_info(a.user_id)),
-        State(state),
+        State(state.clone()),
         Path(b.invoice.id.0.clone()),
     )
     .await;
@@ -490,6 +490,17 @@ async fn get_invoice_payments_across_tenants_is_refused() {
         StatusCode::NOT_FOUND,
         "A must not be able to list B's invoice's payments"
     );
+
+    // Positive control: without this, an endpoint that 404s regardless of
+    // caller would pass the assertion above for the wrong reason.
+    let own = server::api::invoices::get_invoice_payments(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("A must be able to list payments on A's own invoice");
+    assert!(own.iter().any(|p| p.id == a.payment_id.to_string()));
 }
 
 #[tokio::test]
@@ -504,7 +515,7 @@ async fn get_invoice_status_across_tenants_is_refused() {
 
     let result = server::api::invoices::get_invoice_status(
         AuthenticatedUser(user_info(a.user_id)),
-        State(state),
+        State(state.clone()),
         Path(b.invoice.id.0.clone()),
     )
     .await;
@@ -514,6 +525,17 @@ async fn get_invoice_status_across_tenants_is_refused() {
         StatusCode::NOT_FOUND,
         "A must not be able to read B's invoice status"
     );
+
+    // Positive control: without this, an endpoint that 404s regardless of
+    // caller would pass the assertion above for the wrong reason.
+    let own = server::api::invoices::get_invoice_status(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("A must be able to read A's own invoice status");
+    assert_eq!(own.id, a.invoice.id.0);
 }
 
 // ============================================================================
@@ -667,7 +689,7 @@ async fn get_payment_by_id_across_tenants_is_refused() {
 
     let result = server::api::invoices::get_payment(
         AuthenticatedUser(user_info(a.user_id)),
-        State(state),
+        State(state.clone()),
         Path(b.payment_id),
     )
     .await;
@@ -676,6 +698,78 @@ async fn get_payment_by_id_across_tenants_is_refused() {
         result.unwrap_err(),
         StatusCode::NOT_FOUND,
         "A must not be able to fetch B's payment by id"
+    );
+
+    // Positive control: without this, an endpoint that 404s regardless of
+    // caller would pass the assertion above for the wrong reason.
+    let own = server::api::invoices::get_payment(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.payment_id),
+    )
+    .await
+    .expect("A must be able to fetch A's own payment by id");
+    assert_eq!(own.id, a.payment_id.to_string());
+}
+
+// ============================================================================
+// Stores
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn get_store_by_id_across_tenants_is_refused() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::stores::get_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.store.id.0),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::FORBIDDEN,
+        "A must not be able to fetch B's store by id"
+    );
+
+    // Positive control: without this, an endpoint that refuses regardless of
+    // caller would pass the assertion above for the wrong reason.
+    let own = server::api::stores::get_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.store.id.0),
+    )
+    .await
+    .expect("A must be able to fetch A's own store by id");
+    assert_eq!(own.id, a.store.id.0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_stores_never_includes_another_tenants_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result =
+        server::api::stores::list_stores(AuthenticatedUser(user_info(a.user_id)), State(state))
+            .await
+            .expect("listing one's own stores must succeed");
+
+    let ids: Vec<Uuid> = result.iter().map(|s| s.id).collect();
+    assert!(ids.contains(&a.store.id.0), "A's own store must be listed");
+    assert!(
+        !ids.contains(&b.store.id.0),
+        "B's store leaked into A's store list"
     );
 }
 
@@ -846,10 +940,10 @@ async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
     );
 }
 
-/// The payment side of the test above. RCS-317 is open on an API key
-/// carrying more than its owner's scope, so every payment-reading endpoint
-/// - not just invoices - needs its own API-key-authenticated check, not just
-/// the session-based ones above.
+/// The payment side of the test above. An API key that carried more than its
+/// owner's scope would be a distinct bug from session tenancy, so every
+/// payment-reading endpoint - not just invoices - needs its own
+/// API-key-authenticated check, not just the session-based ones above.
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_payments() {
@@ -993,8 +1087,9 @@ impl PageRenderer for RecordingRenderer {
 /// told the truth about who is asking. `get_page` resolves `viewer` and
 /// `account_id` only from the authenticated `UserInfo` it is handed - never
 /// from the path or query - so two different callers must never be recorded
-/// as the same account, and each must see their own identity, not the other
-/// one's.
+/// as the same account, each must see their own identity, not the other
+/// one's, and a `ServerAdmin` caller must be recorded as `Viewer::Admin`,
+/// not `Viewer::Merchant`.
 ///
 /// No real Postgres needed: `resolve_plugin`'s lookup fails against the
 /// lazily-connecting pool and falls back to treating the path segment as a
@@ -1014,6 +1109,7 @@ async fn plugin_page_viewer_and_account_are_always_the_callers_own() {
 
     let account_a = Uuid::new_v4();
     let account_b = Uuid::new_v4();
+    let account_admin = Uuid::new_v4();
 
     let _ = server::api::plugins::get_page(
         State(state.clone()),
@@ -1025,8 +1121,17 @@ async fn plugin_page_viewer_and_account_are_always_the_callers_own() {
     )
     .await;
     let _ = server::api::plugins::get_page(
-        State(state),
+        State(state.clone()),
         AuthenticatedUser(user_info(account_b)),
+        Path((
+            "cash.random.billing".to_string(),
+            "subscriptions".to_string(),
+        )),
+    )
+    .await;
+    let _ = server::api::plugins::get_page(
+        State(state),
+        AuthenticatedUser(user_info_with_role(account_admin, auth::Role::ServerAdmin)),
         Path((
             "cash.random.billing".to_string(),
             "subscriptions".to_string(),
@@ -1037,14 +1142,15 @@ async fn plugin_page_viewer_and_account_are_always_the_callers_own() {
     let seen = seen.lock().unwrap();
     assert_eq!(
         seen.len(),
-        2,
-        "both requests must have reached the renderer"
+        3,
+        "all three requests must have reached the renderer"
     );
     assert_eq!(seen[0].viewer, Viewer::Merchant);
     assert_eq!(
         seen[0].account_id.as_deref(),
         Some(account_a.to_string()).as_deref()
     );
+    assert_eq!(seen[1].viewer, Viewer::Merchant);
     assert_eq!(
         seen[1].account_id.as_deref(),
         Some(account_b.to_string()).as_deref()
@@ -1052,5 +1158,10 @@ async fn plugin_page_viewer_and_account_are_always_the_callers_own() {
     assert_ne!(
         seen[0].account_id, seen[1].account_id,
         "two different callers must never be recorded under the same account"
+    );
+    assert_eq!(
+        seen[2].viewer,
+        Viewer::Admin,
+        "a ServerAdmin caller must be recorded as the admin viewer, not the merchant one"
     );
 }
