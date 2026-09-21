@@ -31,6 +31,16 @@
 //! the interface can be written and tested against first - capability 3
 //! (`invoice_issuer`) was built the same way before its wasmtime wiring
 //! landed.
+//!
+//! Deciding *when* to call this is not staged the same way - it is not here
+//! to stage. The thresholds that would trigger a warning are a billing
+//! plan's own config, not host state: neither this repository nor
+//! `payserver-commons` names a plan, a bracket or a per-plan warning window
+//! anywhere (`git grep` for either finds nothing). That decision belongs
+//! entirely to the billing plugin's own source, which is in neither
+//! checkout this worker has. A caller added here would have to invent the
+//! trigger it is calling on, which is a second product decision wearing
+//! this ticket's name.
 
 use async_trait::async_trait;
 use auth::{SessionService, UserRepository};
@@ -106,7 +116,16 @@ fn notice_address(email: Option<String>) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::sync::{Arc, Mutex};
+
+    use auth::{Result as AuthResult, Session, SessionId, UserInfo};
+
     use super::*;
+    use crate::services::email::{
+        EmailChangeVerificationData, EmailError, EmailSender, ReceiptData,
+    };
+    use crate::state::PgAppState;
 
     #[test]
     fn an_account_with_an_email_is_notifiable() {
@@ -136,5 +155,202 @@ mod tests {
             panic!("a whitespace-only email must not resolve to an address");
         };
         assert!(err.contains("no email on file"), "{err}");
+    }
+
+    // =====================================================================
+    // notify_account - through the trait method itself, against a real
+    // database.
+    //
+    // Every test above exercises `notice_address` directly. None would
+    // notice if `notify_account` stopped calling it, read the wrong field
+    // off `User`, swallowed a repository error, or called the sender with
+    // the wrong address - the exact glue the review that asked for these
+    // tests named. `#[ignore]`d and skipped with no `DATABASE_URL`,
+    // matching every other database-backed test in this codebase.
+    // =====================================================================
+
+    /// Exists only to give `PgAppState<A>` a concrete auth-service type;
+    /// `notify_account` never calls it.
+    struct UnusedSessionService;
+
+    #[async_trait]
+    impl SessionService for UnusedSessionService {
+        async fn validate_session(
+            &self,
+            _session_id: SessionId,
+        ) -> AuthResult<(UserInfo, Session)> {
+            unimplemented!("not exercised by notify_account")
+        }
+        async fn logout(&self, _session_id: SessionId) -> AuthResult<()> {
+            unimplemented!("not exercised by notify_account")
+        }
+        async fn logout_all(&self, _session_id: SessionId) -> AuthResult<()> {
+            unimplemented!("not exercised by notify_account")
+        }
+        async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
+            unimplemented!("not exercised by notify_account")
+        }
+    }
+
+    /// Records every call instead of actually sending, so a test can assert
+    /// on the address and notice `notify_account` handed it - the one thing
+    /// a `NoopEmailSender` or a real SMTP transport can't tell a test.
+    #[derive(Default)]
+    struct RecordingEmailSender {
+        calls: Mutex<Vec<(String, AccountNotice)>>,
+    }
+
+    #[async_trait]
+    impl EmailSender for RecordingEmailSender {
+        async fn send_receipt(&self, _to: &str, _data: &ReceiptData) -> Result<(), EmailError> {
+            unimplemented!("not exercised by notify_account")
+        }
+
+        async fn send_email_change_verification(
+            &self,
+            _to: &str,
+            _data: &EmailChangeVerificationData,
+        ) -> Result<(), EmailError> {
+            unimplemented!("not exercised by notify_account")
+        }
+
+        async fn send_account_notice(
+            &self,
+            to: &str,
+            notice: &AccountNotice,
+        ) -> Result<(), EmailError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((to.to_string(), notice.clone()));
+            Ok(())
+        }
+
+        fn is_configured(&self) -> bool {
+            true
+        }
+    }
+
+    async fn live_service() -> Option<data_service::PgDataService> {
+        let database_url = std::env::var("DATABASE_URL").ok()?;
+        data_service::PgDataService::connect(&database_url)
+            .await
+            .ok()
+    }
+
+    /// `kdf_params`/`encrypted_symmetric_key` need real shape, not `{}`:
+    /// `get_user` deserialises both into `crypto::KdfParams`/`EncryptedBlob`,
+    /// and a `{}` blob fails there before `notify_account` ever gets a
+    /// `User` to read `email` off.
+    async fn seed_user(pool: &sqlx::PgPool, email: Option<&str>) -> UserId {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, kdf_params, encrypted_symmetric_key, \
+             recovery_verification_hash, kdf_salt_identifier) \
+             VALUES ($1, $2, \
+             '{\"algorithm\":\"argon2id\",\"memory_kb\":65536,\"iterations\":3,\"parallelism\":4,\"salt\":\"AAAA\"}'::jsonb, \
+             '{\"ciphertext\":\"AAAA\",\"iv\":\"AAAA\",\"mac\":\"AAAA\"}'::jsonb, \
+             'h', 'passkey:' || $1::text)",
+        )
+        .bind(id)
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        UserId(id)
+    }
+
+    fn notifier(
+        service: data_service::PgDataService,
+        sender: Arc<RecordingEmailSender>,
+    ) -> PluginAccountNotifier<UnusedSessionService> {
+        let state = PgAppState::new(
+            Arc::new(service),
+            Arc::new(UnusedSessionService),
+            None,
+            Arc::new(rates::NoOpRateProvider),
+            sender,
+        );
+        PluginAccountNotifier::new(state)
+    }
+
+    /// The happy path: an account with an email is delivered to, through
+    /// `notify_account` itself rather than `notice_address` in isolation.
+    #[tokio::test]
+    #[ignore]
+    async fn notify_account_delivers_to_the_accounts_own_email() {
+        let Some(service) = live_service().await else {
+            return;
+        };
+        let pool = service.pool().clone();
+        // Unique per run: `email` is unique on `users`, and the same fixture
+        // is shared with every other test in this suite.
+        let email = format!("merchant-{}@example.com", uuid::Uuid::new_v4());
+        let account_id = seed_user(&pool, Some(email.as_str())).await;
+        let sender = Arc::new(RecordingEmailSender::default());
+        let api = notifier(service, sender.clone());
+
+        let notice = AccountNotice {
+            subject: "You are approaching your bracket".to_string(),
+            body: "…".to_string(),
+        };
+        api.notify_account(account_id, &notice)
+            .await
+            .expect("an account with an email must be notifiable");
+
+        let calls = sender.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "must deliver exactly once");
+        assert_eq!(calls[0].0, email);
+        assert_eq!(calls[0].1, notice);
+    }
+
+    /// A wallet-only account, reached through the real method rather than
+    /// `notice_address` directly - proves `notify_account` actually threads
+    /// `User::email` through rather than, say, always resolving `Some`.
+    #[tokio::test]
+    #[ignore]
+    async fn notify_account_refuses_a_wallet_only_account() {
+        let Some(service) = live_service().await else {
+            return;
+        };
+        let pool = service.pool().clone();
+        let account_id = seed_user(&pool, None).await;
+        let sender = Arc::new(RecordingEmailSender::default());
+        let api = notifier(service, sender.clone());
+
+        let notice = AccountNotice {
+            subject: "subject".to_string(),
+            body: "body".to_string(),
+        };
+        let err = api
+            .notify_account(account_id, &notice)
+            .await
+            .expect_err("a wallet-only account has no channel to notify through");
+        assert!(err.contains("no email on file"), "{err}");
+        assert!(sender.calls.lock().unwrap().is_empty());
+    }
+
+    /// An account id that names nobody must be a named refusal, not a panic
+    /// on `Option::unwrap` or a silent no-op that looks like success.
+    #[tokio::test]
+    #[ignore]
+    async fn notify_account_refuses_an_account_that_does_not_exist() {
+        let Some(service) = live_service().await else {
+            return;
+        };
+        let sender = Arc::new(RecordingEmailSender::default());
+        let missing = UserId(uuid::Uuid::new_v4());
+        let api = notifier(service, sender.clone());
+
+        let notice = AccountNotice {
+            subject: "subject".to_string(),
+            body: "body".to_string(),
+        };
+        let err = api
+            .notify_account(missing, &notice)
+            .await
+            .expect_err("an unknown account id must not resolve to a notice sent");
+        assert!(err.contains("is not an account on this instance"), "{err}");
+        assert!(sender.calls.lock().unwrap().is_empty());
     }
 }
