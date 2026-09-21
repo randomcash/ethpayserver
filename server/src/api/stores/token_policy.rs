@@ -13,21 +13,21 @@ use data_service::{
     StoreTokenPolicyReader, StoreTokenPolicyWriter, TokenPolicyEntryInput, TokenPolicyMode,
 };
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::StoreScopedUser;
 use super::require_store_settings_permission;
 use crate::state::PgAppState;
 pub use api_types::{SetTokenPolicyRequest, TokenPolicyEntryPayload, TokenPolicyResponse};
 
 /// Get store token policy.
 pub async fn get_token_policy<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<Option<TokenPolicyResponse>>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let _ = state
         .data_service
@@ -62,7 +62,7 @@ where
 
 /// Set (upsert) store token policy.
 pub async fn set_token_policy<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<SetTokenPolicyRequest>,
@@ -70,7 +70,7 @@ pub async fn set_token_policy<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let _ = state
         .data_service
@@ -132,14 +132,14 @@ where
 
 /// Delete store token policy (revert to accept-all).
 pub async fn delete_token_policy<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let _ = state
         .data_service

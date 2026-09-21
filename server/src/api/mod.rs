@@ -38,7 +38,7 @@ pub mod users;
 pub mod webhook_deliveries;
 pub mod ws;
 
-pub use extractors::{AdminAuth, AuthenticatedUser, FreshlyAuthenticatedUser};
+pub use extractors::{AdminAuth, AuthenticatedUser, FreshlyAuthenticatedUser, StoreScopedUser};
 
 /// A status, optionally with a reason the caller can read.
 ///

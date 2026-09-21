@@ -11,6 +11,8 @@ use axum::{
 use auth::{Permission, Policies, Role, SessionId, SessionService, UserId, UserInfo};
 use chrono::{DateTime, Utc};
 
+use ::types::StoreId;
+
 use super::api_key_deprecation::DeprecationSlot;
 use super::api_key_hash::hash_api_key;
 use crate::state::PgAppState;
@@ -36,6 +38,22 @@ pub struct ApiKeyDeprecationInfo {
 /// - `Authorization: Bearer <uuid>` → session-based auth
 /// - `Authorization: Bearer ak_...` → API key auth
 pub struct AuthenticatedUser(pub UserInfo);
+
+/// Like `AuthenticatedUser`, but also carries the store-permission scope
+/// carried by the API key that authenticated this request, if any.
+///
+/// `None` covers session auth and every key that predates or has not been
+/// narrowed by per-key store scoping - both inherit the owner's role (and
+/// every store `user_has_store_permission` would grant it) in full, same as
+/// before this existed. `Some(set)` is intersected on top of whatever
+/// `user_has_store_permission` already grants the owner, never used alone -
+/// see `key_grants_store_permission`.
+///
+/// A separate type from `AuthenticatedUser` rather than a field added to it:
+/// that struct's single-field shape is destructured by ~80 call sites across
+/// this codebase, and only the handful that gate a store permission need to
+/// know a key's scope.
+pub struct StoreScopedUser(pub UserInfo, pub Option<Vec<String>>);
 
 /// How long ago a session must have been created to count as a fresh proof of
 /// a passkey or wallet assertion. Matches the window `cleanup_expired_challenges`
@@ -137,6 +155,22 @@ async fn validate_session<A>(
 where
     A: SessionService + 'static,
 {
+    validate_session_with_scope(parts, state)
+        .await
+        .map(|(user_info, _scope)| user_info)
+}
+
+/// Same as `validate_session`, but also returns the API key's stored store-
+/// permission scope (`None` for session auth). Split out so the ~80 call
+/// sites that only ever want `UserInfo` don't have to carry a scope they
+/// never look at - see `StoreScopedUser`.
+async fn validate_session_with_scope<A>(
+    parts: &mut Parts,
+    state: &PgAppState<A>,
+) -> Result<(UserInfo, Option<Vec<String>>), (StatusCode, &'static str)>
+where
+    A: SessionService + 'static,
+{
     let token = extract_bearer_token(parts)?;
 
     // If the token starts with "ak_", validate as API key
@@ -156,7 +190,10 @@ where
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
 
-    Ok(user_info)
+    // A session carries no key scope of its own - the caller is bound only
+    // by their role and store membership, same as before per-key scoping
+    // existed.
+    Ok((user_info, None))
 }
 
 /// Validate an API key and return the associated user info.
@@ -168,7 +205,7 @@ async fn validate_api_key<A>(
     raw_key: &str,
     parts: &mut Parts,
     state: &PgAppState<A>,
-) -> Result<UserInfo, (StatusCode, &'static str)>
+) -> Result<(UserInfo, Option<Vec<String>>), (StatusCode, &'static str)>
 where
     A: SessionService + 'static,
 {
@@ -259,7 +296,7 @@ where
             .await;
     });
 
-    Ok(user)
+    Ok((user, key_info.permissions))
 }
 
 /// Get the deprecation grace period in seconds (default: 48 hours).
@@ -287,6 +324,21 @@ where
     ) -> Result<Self, Self::Rejection> {
         let user_info = validate_session(parts, state).await?;
         Ok(AuthenticatedUser(user_info))
+    }
+}
+
+impl<A> FromRequestParts<PgAppState<A>> for StoreScopedUser
+where
+    A: SessionService + 'static,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &PgAppState<A>,
+    ) -> Result<Self, Self::Rejection> {
+        let (user_info, scope) = validate_session_with_scope(parts, state).await?;
+        Ok(StoreScopedUser(user_info, scope))
     }
 }
 
@@ -388,6 +440,43 @@ pub(super) fn key_retains_unrestricted_access(permissions: Option<&[String]>) ->
         None => true,
         Some(set) => set.iter().any(|p| p == Policies::UNRESTRICTED),
     }
+}
+
+/// Whether a key's stored scope grants `policy` on `store_id` - the other
+/// half of "effective permission is the intersection of the key's set and
+/// the owner's role", specifically for store permissions.
+///
+/// Unlike `ethpay.server.*`/`ethpay.user.*`, store policies ARE enforced
+/// individually today: `user_has_store_permission` checks one directly in
+/// SQL. So a call site gates a store action on both this AND that check,
+/// never this alone - a key can never exceed its owner, and this only ever
+/// narrows what the owner's own store membership already allows.
+///
+/// `None` (unscoped key, same as `key_retains_unrestricted_access`) and an
+/// `unrestricted` entry both grant everything. A bare policy string (e.g.
+/// `"ethpay.store.cancreateinvoice"`) grants it on every store the owner can
+/// reach - today's behaviour, and the default so an unscoped grant does not
+/// silently start requiring a store to be named. `"policy:storeId"` grants
+/// it only on that one store, matching BTCPay's own scoping convention.
+pub(super) fn key_grants_store_permission(
+    permissions: Option<&[String]>,
+    policy: &str,
+    store_id: StoreId,
+) -> bool {
+    let Some(set) = permissions else {
+        return true;
+    };
+    set.iter().any(|entry| {
+        if entry == Policies::UNRESTRICTED || entry == policy {
+            return true;
+        }
+        match entry.split_once(':') {
+            Some((entry_policy, entry_store_id)) => {
+                entry_policy == policy && entry_store_id == store_id.0.to_string()
+            }
+            None => false,
+        }
+    })
 }
 
 /// Pure predicate: is a deprecated key past its grace window at `now`?
@@ -513,5 +602,77 @@ mod tests {
         // a future edit to either can't silently desync a key that was
         // written as "unrestricted" from the one check that retains it.
         assert_eq!(Permission::Unrestricted.as_policy(), Policies::UNRESTRICTED);
+    }
+
+    fn store(n: u128) -> StoreId {
+        StoreId(uuid::Uuid::from_u128(n))
+    }
+
+    #[test]
+    fn an_unscoped_key_grants_every_store_permission() {
+        assert!(key_grants_store_permission(
+            None,
+            Policies::STORE_CREATE_INVOICE,
+            store(1)
+        ));
+    }
+
+    #[test]
+    fn unrestricted_grants_every_store_permission() {
+        let perms = vec![Policies::UNRESTRICTED.to_string()];
+        assert!(key_grants_store_permission(
+            Some(&perms),
+            Policies::STORE_CREATE_INVOICE,
+            store(1)
+        ));
+    }
+
+    #[test]
+    fn a_bare_store_policy_grants_it_on_any_store() {
+        let perms = vec![Policies::STORE_CREATE_INVOICE.to_string()];
+        assert!(key_grants_store_permission(
+            Some(&perms),
+            Policies::STORE_CREATE_INVOICE,
+            store(1)
+        ));
+        assert!(key_grants_store_permission(
+            Some(&perms),
+            Policies::STORE_CREATE_INVOICE,
+            store(2)
+        ));
+    }
+
+    #[test]
+    fn a_store_scoped_policy_is_refused_on_a_different_store() {
+        let perms = vec![format!("{}:{}", Policies::STORE_CREATE_INVOICE, store(1).0)];
+        assert!(key_grants_store_permission(
+            Some(&perms),
+            Policies::STORE_CREATE_INVOICE,
+            store(1)
+        ));
+        assert!(!key_grants_store_permission(
+            Some(&perms),
+            Policies::STORE_CREATE_INVOICE,
+            store(2)
+        ));
+    }
+
+    #[test]
+    fn a_grant_for_a_different_action_does_not_grant_this_one() {
+        let perms = vec![Policies::STORE_VIEW_SETTINGS.to_string()];
+        assert!(!key_grants_store_permission(
+            Some(&perms),
+            Policies::STORE_CREATE_INVOICE,
+            store(1)
+        ));
+    }
+
+    #[test]
+    fn an_empty_scope_grants_no_store_permission() {
+        assert!(!key_grants_store_permission(
+            Some(&[]),
+            Policies::STORE_CREATE_INVOICE,
+            store(1)
+        ));
     }
 }

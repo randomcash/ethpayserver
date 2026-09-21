@@ -10,7 +10,7 @@ use uuid::Uuid;
 use auth::repository::StoreRepository;
 use auth::{SessionService, StoreId};
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::StoreScopedUser;
 use super::require_store_settings_permission;
 use crate::state::PgAppState;
 pub use api_types::{StoreSettingsResponse, UpdateStoreSettingsRequest};
@@ -119,14 +119,14 @@ pub(crate) fn merge_notification_prefs(
     )
 )]
 pub async fn get_store_settings<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<StoreSettingsResponse>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // Verify store exists
     let _ = state
@@ -184,7 +184,7 @@ where
 )]
 #[allow(clippy::too_many_lines)] // PATCH handler validates + persists many optional fields
 pub async fn update_store_settings<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<UpdateStoreSettingsRequest>,
@@ -192,7 +192,7 @@ pub async fn update_store_settings<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // Verify store exists
     let _ = state

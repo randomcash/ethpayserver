@@ -12,7 +12,7 @@
 //! than being indistinguishable from an auth rejection.
 //!
 //! Calls the handler function directly against a real database rather than
-//! through the router: `AuthenticatedUser` and `State` are plain data the
+//! through the router: `StoreScopedUser` and `State` are plain data the
 //! extractors produce, so nothing about this assertion depends on routing or
 //! middleware, only on `create_invoice`'s own body.
 //!
@@ -38,7 +38,7 @@ use auth::{
 use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
-use server::api::AuthenticatedUser;
+use server::api::StoreScopedUser;
 use server::api::invoices::{CreateInvoiceRequest, create_invoice};
 use server::services::RedisEVMMonitor;
 use server::services::plugins::{
@@ -169,7 +169,7 @@ async fn a_denying_filter_blocks_the_real_endpoint_with_the_reason() {
     let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        StoreScopedUser(user_info(owner), None),
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -208,7 +208,7 @@ async fn permission_denies_before_the_filter_is_ever_consulted() {
     let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(stranger)),
+        StoreScopedUser(user_info(stranger), None),
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -243,7 +243,7 @@ async fn no_filters_reaches_past_the_filter_stage() {
     let state = app_state(Arc::new(pg), Vec::new());
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        StoreScopedUser(user_info(owner), None),
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -286,7 +286,7 @@ async fn our_own_billing_store_is_never_filtered() {
     );
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        StoreScopedUser(user_info(owner), None),
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -327,7 +327,7 @@ async fn the_exemption_covers_only_the_billing_store() {
     );
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        StoreScopedUser(user_info(owner), None),
         State(state),
         Json(invoice_request(merchant.id.0)),
     )
@@ -376,7 +376,7 @@ async fn the_filter_is_told_which_account_owns_the_store() {
     let state = app_state(Arc::new(pg), vec![Arc::new(Recording(seen.clone()))]);
 
     let _ = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        StoreScopedUser(user_info(owner), None),
         State(state),
         Json(invoice_request(store.id.0)),
     )

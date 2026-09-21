@@ -434,7 +434,7 @@ fn an_unspecified_enabled_still_checks_the_chain() {
 // the gate and not to some unrelated 400. The block was then restored.
 // =========================================================================
 
-use crate::api::extractors::AuthenticatedUser;
+use crate::api::extractors::{AuthenticatedUser, StoreScopedUser};
 use crate::state::PgAppState;
 use auth::{Role, SessionId, SessionService, UserInfo};
 use axum::Json;
@@ -482,6 +482,15 @@ fn admin_user(user_id: Uuid) -> AuthenticatedUser {
         last_login_at: None,
         role: Role::ServerAdmin,
     })
+}
+
+/// Same admin identity as `admin_user`, for handlers that gate a store
+/// permission and so need a key scope in hand - `None` (unscoped, same as
+/// session auth) since these tests exercise the ServerAdmin bypass in
+/// `require_store_settings_permission`, not the key-intersection path.
+fn admin_store_scoped_user(user_id: Uuid) -> StoreScopedUser {
+    let AuthenticatedUser(info) = admin_user(user_id);
+    StoreScopedUser(info, None)
 }
 
 async fn seed_handler_test_user(pool: &sqlx::PgPool) -> Uuid {
@@ -577,9 +586,14 @@ async fn a_tron_payment_method_is_refused_by_the_handler() {
         xpub: Some(HANDLER_TEST_XPUB.to_string()),
     };
 
-    let err = create_payment_method(admin_user(user_id), State(state), Path(store_id), Json(req))
-        .await
-        .expect_err("tron has no adapter and must be refused, not created");
+    let err = create_payment_method(
+        admin_store_scoped_user(user_id),
+        State(state),
+        Path(store_id),
+        Json(req),
+    )
+    .await
+    .expect_err("tron has no adapter and must be refused, not created");
 
     let (status, body) = body_of(err).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -611,10 +625,14 @@ async fn a_sepolia_payment_method_is_still_created_by_the_handler() {
         xpub: None,
     };
 
-    let (status, response) =
-        create_payment_method(admin_user(user_id), State(state), Path(store_id), Json(req))
-            .await
-            .expect("sepolia has a compiled-in adapter and must still be accepted");
+    let (status, response) = create_payment_method(
+        admin_store_scoped_user(user_id),
+        State(state),
+        Path(store_id),
+        Json(req),
+    )
+    .await
+    .expect("sepolia has a compiled-in adapter and must still be accepted");
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(

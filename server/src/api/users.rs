@@ -12,8 +12,8 @@ use sha3::Digest;
 use uuid::Uuid;
 
 use auth::{
-    ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Permission, Role, SessionService,
-    WalletCredential, WalletCredentialId, WalletRepository,
+    ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Permission, Policies, Role, SessionService,
+    UserId, WalletCredential, WalletCredentialId, WalletRepository,
 };
 use data_service::ApiKeyFullInfo;
 
@@ -70,19 +70,24 @@ pub struct CreateApiKeyPayload {
     pub name: String,
     /// Optional expiration time.
     pub expires_at: Option<DateTime<Utc>>,
-    /// The key's scope, chosen at creation. Only two shapes are accepted
-    /// today: `[]` (scoped to the owner's non-admin baseline) or
-    /// `["unrestricted"]` (see `auth::Policies::UNRESTRICTED`, inherits the
-    /// owner's role in full). Defaults to `[]` when omitted: a new key
-    /// starts able to do nothing beyond authenticating and must be
+    /// The key's scope, chosen at creation. Defaults to `[]` when omitted: a
+    /// new key starts able to do nothing beyond authenticating and must be
     /// deliberately widened, rather than silently inheriting everything its
-    /// owner can do. `unrestricted` is only accepted when the caller's own
+    /// owner can do.
+    ///
+    /// `["unrestricted"]` (see `auth::Policies::UNRESTRICTED`) inherits the
+    /// owner's role in full, and is only accepted when the caller's own
     /// current role grants it - a key can never exceed its owner, including
-    /// at the moment it is minted. See `validate_requested_permissions` for
-    /// why the vocabulary stops at these two shapes rather than the full
-    /// list of named policies: nothing in this server enforces those
-    /// individually yet, so offering a menu implying otherwise would be
-    /// worse than not offering it.
+    /// at the moment it is minted.
+    ///
+    /// Otherwise, any combination of `ethpay.store.*` policy strings (e.g.
+    /// `"ethpay.store.cancreateinvoice"`), each optionally suffixed with
+    /// `:<storeId>` to narrow the grant to one store rather than every
+    /// store the owner can reach. These are real, individually-enforced
+    /// grants - `user_has_store_permission` already checks each one in SQL -
+    /// unlike `ethpay.server.*`/`ethpay.user.*` policies, which nothing in
+    /// this server gates on individually and which `validate_requested_permissions`
+    /// therefore still refuses to name one at a time.
     #[serde(default)]
     pub permissions: Vec<String>,
 }
@@ -125,26 +130,50 @@ pub struct RotateApiKeyResponsePayload {
 pub struct UpdateApiKeyPermissionsPayload {
     /// `None`/`null` clears the key back to "inherit the owner's role in
     /// full". `Some` sets an explicit scope - see `CreateApiKeyPayload`'s
-    /// `permissions` field for the two shapes accepted and why.
+    /// `permissions` field for what is accepted and why.
     pub permissions: Option<Vec<String>>,
 }
 
-/// Is `requested` one of the two scopes this server can actually enforce?
+/// Is a single requested permission entry a store-scoped grant this server
+/// can actually enforce?
 ///
-/// Every admin gate in this codebase (there are over a dozen, from plugin
+/// `Policies::is_store_policy` names an action `user_has_store_permission`
+/// checks directly in SQL - real enforcement, unlike the server/user
+/// policies `validate_requested_permissions` still refuses below. Optionally
+/// suffixed with `:<storeId>` (`key_grants_store_permission` in
+/// `extractors.rs` is the other half that reads it) to narrow the grant to
+/// one store rather than every store the owner can reach; a malformed
+/// suffix is rejected outright rather than silently falling back to
+/// "every store" - a typo should fail the request, not widen it.
+fn is_store_scope_entry(entry: &str) -> bool {
+    match entry.split_once(':') {
+        Some((policy, store_id)) => {
+            Policies::is_store_policy(policy) && Uuid::parse_str(store_id).is_ok()
+        }
+        None => Policies::is_store_policy(entry),
+    }
+}
+
+/// Is `requested` a scope this server can actually enforce?
+///
+/// Every *admin* gate in this codebase (there are over a dozen, from plugin
 /// install to user role management) is a bare `role == Role::ServerAdmin`
 /// comparison, not a check against an individual `Permission` - see
 /// `validate_api_key`'s downgrade and `key_retains_unrestricted_access` in
 /// `extractors.rs`. So a stored set naming specific server or user policies
 /// (e.g. just `ethpay.server.canmanagetokens`) would be silently
 /// indistinguishable from an empty one: neither grants anything past a plain
-/// `User`'s fixed permissions. Offering a menu of individually-named actions
-/// that all collapse to the same outcome is worse than not offering it, so
-/// this only accepts what the server can actually tell apart: nothing beyond
-/// the owner's non-admin baseline (`[]`), or the owner's full role
-/// (`["unrestricted"]`). Widening this to real per-action scoping needs
-/// per-endpoint enforcement this codebase does not have yet, not a change
-/// here.
+/// `User`'s fixed permissions. This still refuses those: nothing beyond the
+/// owner's non-admin baseline (`[]`) or the owner's full role
+/// (`["unrestricted"]`) for that half.
+///
+/// Store permissions are different: `user_has_store_permission` already
+/// checks them individually, in SQL, at real call sites (invoice creation,
+/// store settings, store membership). A key naming one or more of those
+/// (`is_store_scope_entry`) is accepted regardless of `owner_role` - the
+/// grant is never wider than what `user_has_store_permission` would allow
+/// the owner anyway, since enforcement always intersects the two (see
+/// `key_grants_store_permission`), so there is nothing here to launder.
 ///
 /// `owner_role` is always the role belonging to the account the key
 /// authenticates as, never the caller's - the write-time half of "a key can
@@ -155,7 +184,10 @@ pub struct UpdateApiKeyPermissionsPayload {
 /// *admin's* role, which that key's own owner could never grant themselves -
 /// precisely the "promoting the owner must not widen keys already issued"
 /// failure this feature exists to close, from the other direction.
-fn validate_requested_permissions(owner_role: Role, requested: &[String]) -> Result<(), StatusCode> {
+fn validate_requested_permissions(
+    owner_role: Role,
+    requested: &[String],
+) -> Result<(), StatusCode> {
     match requested {
         [] => Ok(()),
         [single] if single == Permission::Unrestricted.as_policy() => {
@@ -165,6 +197,7 @@ fn validate_requested_permissions(owner_role: Role, requested: &[String]) -> Res
                 Err(StatusCode::BAD_REQUEST)
             }
         }
+        entries if entries.iter().all(|e| is_store_scope_entry(e)) => Ok(()),
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }
@@ -187,10 +220,10 @@ mod permission_scope_tests {
     }
 
     #[test]
-    fn a_named_individual_permission_is_rejected_even_for_an_admin_owner() {
-        // Nothing in this server enforces named permissions individually -
-        // accepting one here would promise scoping the rest of the codebase
-        // cannot deliver.
+    fn a_named_server_permission_is_rejected_even_for_an_admin_owner() {
+        // Nothing in this server enforces named server/user permissions
+        // individually - accepting one here would promise scoping the rest
+        // of the codebase cannot deliver.
         let named = vec![Permission::ServerManageTokens.as_policy().to_string()];
         assert!(validate_requested_permissions(Role::ServerAdmin, &named).is_err());
     }
@@ -202,6 +235,143 @@ mod permission_scope_tests {
             Permission::ServerViewUsers.as_policy().to_string(),
         ];
         assert!(validate_requested_permissions(Role::ServerAdmin, &mixed).is_err());
+    }
+
+    #[test]
+    fn a_bare_store_permission_is_accepted_for_any_owner_role() {
+        // Store permissions ARE enforced individually, so there is nothing
+        // to launder through a wider owner role - unlike `unrestricted`.
+        let named = vec![Permission::StoreCreateInvoice.as_policy().to_string()];
+        assert!(validate_requested_permissions(Role::User, &named).is_ok());
+        assert!(validate_requested_permissions(Role::ServerAdmin, &named).is_ok());
+    }
+
+    #[test]
+    fn a_store_permission_scoped_to_one_store_is_accepted() {
+        let scoped = vec![format!(
+            "{}:{}",
+            Permission::StoreCreateInvoice.as_policy(),
+            Uuid::new_v4()
+        )];
+        assert!(validate_requested_permissions(Role::User, &scoped).is_ok());
+    }
+
+    #[test]
+    fn several_store_permissions_together_are_accepted() {
+        let many = vec![
+            Permission::StoreCreateInvoice.as_policy().to_string(),
+            format!(
+                "{}:{}",
+                Permission::StoreViewSettings.as_policy(),
+                Uuid::new_v4()
+            ),
+        ];
+        assert!(validate_requested_permissions(Role::User, &many).is_ok());
+    }
+
+    #[test]
+    fn a_store_permission_with_a_malformed_store_id_is_rejected() {
+        let malformed = vec![format!(
+            "{}:not-a-uuid",
+            Permission::StoreCreateInvoice.as_policy()
+        )];
+        assert!(validate_requested_permissions(Role::User, &malformed).is_err());
+    }
+
+    #[test]
+    fn a_store_permission_mixed_with_unrestricted_is_rejected() {
+        let mixed = vec![
+            Permission::Unrestricted.as_policy().to_string(),
+            Permission::StoreCreateInvoice.as_policy().to_string(),
+        ];
+        assert!(validate_requested_permissions(Role::ServerAdmin, &mixed).is_err());
+    }
+}
+
+/// Whether `caller` may manage a given API key at all: its own owner always
+/// may; anyone else needs `ServerAdmin`. Used by every endpoint in this
+/// module that mutates or reveals a specific key by id.
+fn caller_may_manage_key(caller_id: UserId, caller_role: Role, key_owner_id: UserId) -> bool {
+    caller_id == key_owner_id || caller_role == Role::ServerAdmin
+}
+
+/// The role a requested permission scope must be validated against: always
+/// the key's own current owner, resolved without trusting the caller's role
+/// when the caller isn't that owner. This is the exact mechanism that stops
+/// a `ServerAdmin` editing someone else's key from laundering a grant
+/// through their own broader role - see `update_api_key_permissions`'s call
+/// site, which only fetches `fetched_owner_role` from the database when
+/// `caller_id != key_owner_id`.
+fn owner_role_for_permission_check(
+    caller_id: UserId,
+    caller_role: Role,
+    key_owner_id: UserId,
+    fetched_owner_role: Role,
+) -> Role {
+    if caller_id == key_owner_id {
+        caller_role
+    } else {
+        fetched_owner_role
+    }
+}
+
+/// Whether `caller_role` may reset a key's permissions back to `None`
+/// ("inherit the owner's role in full"). Only a `ServerAdmin` may - a key
+/// that has itself been narrowed away from `unrestricted` authenticates as
+/// a plain `User` (`validate_api_key`'s downgrade), so without this it
+/// could use this endpoint on its own row to undo its own narrowing.
+fn may_clear_to_inherit(caller_role: Role) -> bool {
+    caller_role == Role::ServerAdmin
+}
+
+#[cfg(test)]
+mod update_permissions_guard_tests {
+    use super::*;
+
+    #[test]
+    fn a_key_owner_may_always_manage_their_own_key() {
+        let uid = UserId(Uuid::new_v4());
+        assert!(caller_may_manage_key(uid, Role::User, uid));
+    }
+
+    #[test]
+    fn a_non_owner_needs_server_admin_to_manage_someone_elses_key() {
+        let caller = UserId(Uuid::new_v4());
+        let owner = UserId(Uuid::new_v4());
+        assert!(!caller_may_manage_key(caller, Role::User, owner));
+        assert!(caller_may_manage_key(caller, Role::ServerAdmin, owner));
+    }
+
+    #[test]
+    fn owner_role_check_uses_the_callers_own_role_when_they_own_the_key() {
+        let uid = UserId(Uuid::new_v4());
+        // fetched_owner_role is irrelevant here - the real handler never even
+        // fetches it in this branch - so pass a deliberately wrong value to
+        // prove it is ignored.
+        assert_eq!(
+            owner_role_for_permission_check(uid, Role::ServerAdmin, uid, Role::User),
+            Role::ServerAdmin
+        );
+    }
+
+    #[test]
+    fn owner_role_check_ignores_the_caller_when_editing_someone_elses_key() {
+        // The scenario the doc comment exists for: a ServerAdmin editing a
+        // plain User's key must be validated against that User's role, not
+        // the admin's own - otherwise the admin could launder an
+        // `unrestricted` grant onto a key whose owner could never hold it.
+        let admin = UserId(Uuid::new_v4());
+        let target_user = UserId(Uuid::new_v4());
+        assert_eq!(
+            owner_role_for_permission_check(admin, Role::ServerAdmin, target_user, Role::User),
+            Role::User
+        );
+    }
+
+    #[test]
+    fn only_a_server_admin_caller_may_clear_a_key_back_to_inherit() {
+        assert!(may_clear_to_inherit(Role::ServerAdmin));
+        assert!(!may_clear_to_inherit(Role::User));
     }
 }
 
@@ -508,7 +678,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    if key.user_id != user.id && user.role != Role::ServerAdmin {
+    if !caller_may_manage_key(user.id, user.role, key.user_id) {
         return Err(StatusCode::NOT_FOUND);
     }
 
@@ -518,13 +688,14 @@ where
     // when the caller isn't the owner: the common case (a user managing
     // their own key) already has this in hand.
     let owner_role = if key.user_id == user.id {
-        user.role
+        owner_role_for_permission_check(user.id, user.role, key.user_id, user.role)
     } else {
-        auth::UserRepository::get_user(&*state.data_service, key.user_id)
+        let fetched_owner_role = auth::UserRepository::get_user(&*state.data_service, key.user_id)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::NOT_FOUND)?
-            .role
+            .role;
+        owner_role_for_permission_check(user.id, user.role, key.user_id, fetched_owner_role)
     };
 
     let permissions = match &payload.permissions {
@@ -533,7 +704,7 @@ where
             Some(requested.clone())
         }
         None => {
-            if user.role != Role::ServerAdmin {
+            if !may_clear_to_inherit(user.role) {
                 return Err(StatusCode::BAD_REQUEST);
             }
             None

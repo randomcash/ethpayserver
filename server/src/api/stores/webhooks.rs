@@ -11,7 +11,7 @@ use auth::repository::StoreRepository;
 use auth::{SessionService, StoreId};
 use types::{StoreWebhookReader, StoreWebhookWriter};
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::StoreScopedUser;
 use super::require_store_settings_permission;
 use crate::state::PgAppState;
 pub use api_types::{ConfigureWebhookRequest, WebhookResponse};
@@ -33,14 +33,14 @@ pub use api_types::{ConfigureWebhookRequest, WebhookResponse};
     )
 )]
 pub async fn get_store_webhook<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<WebhookResponse>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let webhook = StoreWebhookReader::get_webhook(&*state.data_service, store_id)
         .await
@@ -80,7 +80,7 @@ where
     )
 )]
 pub async fn configure_store_webhook<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<ConfigureWebhookRequest>,
@@ -88,7 +88,7 @@ pub async fn configure_store_webhook<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // Validate webhook URL - must be HTTPS (or localhost for dev)
     if !req.webhook_url.starts_with("https://") && !req.webhook_url.starts_with("http://localhost")
@@ -145,14 +145,14 @@ where
     )
 )]
 pub async fn delete_store_webhook<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let deleted = StoreWebhookWriter::delete_webhook(&*state.data_service, store_id)
         .await
