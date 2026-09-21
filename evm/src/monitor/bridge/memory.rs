@@ -11,26 +11,35 @@
 //! - Commands flow from API server to monitor
 
 use super::{CommandStream, DurableEventStream, EventBridge, EventCursor, EventEnvelope};
-use crate::error::EvmResult;
+use crate::error::{EvmError, EvmResult};
 use crate::monitor::events::{MonitorCommand, MonitorEvent};
 use async_stream::stream;
 use async_trait::async_trait;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-/// The event outbox: every published envelope, in publish order.
+/// The event outbox: every retained published envelope, in publish order.
 ///
-/// A `Vec` behind a `Mutex` rather than a broadcast channel because the
+/// A queue behind a `Mutex` rather than a broadcast channel because the
 /// whole point is that a consumer which was not subscribed when an event
 /// was published can still see it later - a broadcast channel drops exactly
 /// that message, which is the bug this bridge exists to not reproduce.
-/// `entries[i].cursor.seq == i` always, so resuming from a cursor is a plain
-/// slice index.
+///
+/// `next_seq` is the seq the *next* published entry will get; it keeps
+/// counting up even past what `max_retained` lets `entries` hold, the same
+/// way a real outbox's sequence counter is a separate key from its retained
+/// data. The oldest retained seq is always `next_seq - entries.len()`.
 struct Outbox {
     epoch: i64,
-    entries: Vec<EventEnvelope>,
+    entries: VecDeque<EventEnvelope>,
+    next_seq: i64,
+    /// `None` means unbounded (production default). `Some(n)` caps
+    /// retention at `n` entries, trimming the oldest first - see
+    /// [`MemoryBridge::with_max_retained`].
+    max_retained: Option<usize>,
 }
 
 /// In-memory event bridge with a durable event outbox.
@@ -54,11 +63,28 @@ impl MemoryBridge {
     /// commands channel. The event outbox is unbounded: durability is the
     /// point, so there is nothing safe to drop from it here.
     pub fn with_capacity(capacity: usize) -> Self {
-        let (commands_tx, _) = broadcast::channel(capacity);
+        Self::new_inner(capacity, None)
+    }
+
+    /// Create a new in-memory bridge that only retains the last
+    /// `max_retained` entries.
+    ///
+    /// Test-only in practice, mirroring `RedisBridge::new_with_maxlen`: it
+    /// lets a test force `subscribe_from` to report `OUT_OF_RANGE` by
+    /// publishing a handful of entries past a small cap, rather than
+    /// needing a real Redis to reproduce retention loss.
+    pub fn with_max_retained(max_retained: usize) -> Self {
+        Self::new_inner(4096, Some(max_retained))
+    }
+
+    fn new_inner(commands_capacity: usize, max_retained: Option<usize>) -> Self {
+        let (commands_tx, _) = broadcast::channel(commands_capacity);
         Self {
             outbox: Arc::new(Mutex::new(Outbox {
                 epoch: 1,
-                entries: Vec::new(),
+                entries: VecDeque::new(),
+                next_seq: 0,
+                max_retained,
             })),
             notify: Arc::new(Notify::new()),
             commands_tx,
@@ -86,26 +112,57 @@ impl EventBridge for MemoryBridge {
     async fn publish(&self, event: &MonitorEvent) -> EvmResult<()> {
         {
             let mut outbox = self.outbox.lock().expect("outbox mutex poisoned");
-            let seq = outbox.entries.len() as i64;
+            let seq = outbox.next_seq;
+            outbox.next_seq += 1;
             let cursor = EventCursor {
                 epoch: outbox.epoch,
                 seq,
                 block_height: event.block_height() as i64,
             };
-            outbox.entries.push(EventEnvelope {
+            outbox.entries.push_back(EventEnvelope {
                 chain_id: event.chain_id(),
                 cursor,
                 event: event.clone(),
             });
+            if let Some(max) = outbox.max_retained {
+                while outbox.entries.len() > max {
+                    outbox.entries.pop_front();
+                }
+            }
         }
         self.notify.notify_waiters();
         Ok(())
     }
 
     async fn subscribe_from(&self, from: Option<EventCursor>) -> EvmResult<DurableEventStream> {
+        // Mirrors `RedisBridge::subscribe_from`: same epoch does not, on its
+        // own, mean `cursor.seq` is still retained, since trimming runs
+        // independently of the epoch key. A consumer resuming from a seq
+        // this outbox no longer holds must not silently start from whatever
+        // happens to be retained next - it needs the loud `OUT_OF_RANGE`
+        // path instead.
+        if let Some(cursor) = from {
+            let oldest_retained = {
+                let outbox = self.outbox.lock().expect("outbox mutex poisoned");
+                outbox
+                    .max_retained
+                    .map(|_| outbox.next_seq - outbox.entries.len() as i64)
+            };
+            if let Some(oldest) = oldest_retained
+                && oldest > cursor.seq + 1
+            {
+                let new_epoch = self.bump_epoch().await?;
+                return Err(EvmError::EventStreamOutOfRange(format!(
+                    "resume at seq {} is behind the oldest retained entry (seq {oldest}); \
+                     the outbox has moved to epoch {new_epoch}",
+                    cursor.seq
+                )));
+            }
+        }
+
         let outbox = Arc::clone(&self.outbox);
         let notify = Arc::clone(&self.notify);
-        let mut next_index = from.map(|c| (c.seq + 1).max(0) as usize).unwrap_or(0);
+        let mut next_seq = from.map(|c| c.seq + 1).unwrap_or(0);
 
         let s = stream! {
             loop {
@@ -115,7 +172,9 @@ impl EventBridge for MemoryBridge {
 
                 let batch: Vec<EventEnvelope> = {
                     let guard = outbox.lock().expect("outbox mutex poisoned");
-                    guard.entries.get(next_index..).map(<[_]>::to_vec).unwrap_or_default()
+                    let oldest_retained = guard.next_seq - guard.entries.len() as i64;
+                    let start = (next_seq - oldest_retained).max(0) as usize;
+                    guard.entries.range(start..).cloned().collect()
                 };
 
                 if batch.is_empty() {
@@ -124,7 +183,7 @@ impl EventBridge for MemoryBridge {
                 }
 
                 for envelope in batch {
-                    next_index += 1;
+                    next_seq = envelope.cursor.seq + 1;
                     yield envelope;
                 }
             }

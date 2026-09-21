@@ -20,9 +20,9 @@ use data_service::{
     ChainCursor, ChainCursorReader, ChainCursorWriter, PaymentOptionReader, PaymentTxIndexReader,
     PaymentTxIndexWriter, ReorgCandidateReader, ReorgWriter,
 };
+use evm::EvmError;
 use evm::monitor::bridge::{EventBridge, EventCursor, EventEnvelope};
 use evm::monitor::events::MonitorEvent;
-use evm::EvmError;
 use tokio_stream::StreamExt;
 use types::{
     InvoiceReader, InvoiceWriter, PaymentReader, PaymentWriter, StoreSettingsReader, TokenReader,
@@ -202,7 +202,8 @@ impl<
                         "resume position no longer retained; re-arming watch_retry and \
                          resuming from the outbox's new oldest entry"
                     );
-                    self.break_lineage(&mut cursors).await;
+                    let chain_ids: Vec<u64> = cursors.keys().copied().collect();
+                    self.break_lineage(&mut cursors, &chain_ids).await;
                     resume_from = None;
                     retried = true;
                 }
@@ -223,23 +224,35 @@ impl<
     /// Reconcile this server's stored cursors against the outbox's current
     /// epoch, returning where to resume.
     ///
-    /// A cursor whose epoch still matches is trustworthy: `seq` names a
-    /// position in the outbox that still exists, so resuming from the
-    /// lowest `seq` across all watched chains - the low-water mark - is
-    /// enough, since a chain further ahead simply re-sees (and
-    /// idempotently re-skips, in [`Self::apply_envelope`]) entries it has
-    /// already applied.
+    /// Each chain's cursor is judged on its own epoch, not the map's as a
+    /// whole: `apply_envelope` commits `envelope.cursor.epoch` per chain, as
+    /// events happen to arrive for it, so after a real lineage break a
+    /// busy chain can already be recommitted under the new epoch while an
+    /// idle one still carries a stored cursor from before it - both live in
+    /// the same `cursors` map at once. Picking one chain's epoch as
+    /// representative for all of them (as an earlier version of this did)
+    /// blends a stale, pre-break `seq` into the shared low-water mark; since
+    /// `seq` numbering can restart after a genuine backing-store loss, that
+    /// stale number can coincidentally land *above* where the new lineage
+    /// has actually progressed, and resuming from it skips every real event
+    /// below it forever, with no error - exactly the failure this whole
+    /// mechanism exists to rule out.
     ///
-    /// A mismatch means the outbox lost its own continuity (this being one
-    /// shared outbox, that happens to every chain in it at once, not one at
-    /// a time) - `seq` numbers from before the reset name a lineage that no
-    /// longer exists. There is no rescan-from-height fallback to fall back
-    /// to, so this does the next best thing: log loudly (this is the "page
-    /// someone" moment, not a silent one), re-arm `watch_retry` for every
-    /// chain that had a cursor, and resume from whatever the new outbox
-    /// currently retains from its oldest entry. Anything paid entirely
-    /// inside the gap is not recovered by this - only a payment still
-    /// pending when the gap closes is.
+    /// A chain whose epoch still matches is trustworthy: its `seq` names a
+    /// position in the current lineage, so resuming from the lowest `seq`
+    /// across every matching chain - the low-water mark - is enough, since
+    /// a chain further ahead simply re-sees (and idempotently re-skips, in
+    /// [`Self::apply_envelope`]) entries it has already applied.
+    ///
+    /// A chain whose epoch does not match means the outbox lost continuity
+    /// for it specifically - `seq` numbers from before the break name a
+    /// lineage that may no longer exist. There is no rescan-from-height
+    /// fallback to fall back to, so this does the next best thing: log
+    /// loudly (this is the "page someone" moment, not a silent one),
+    /// re-arm `watch_retry` for that chain, and forget its cursor so it
+    /// does not pollute the low-water mark next time either. If every chain
+    /// mismatches, there is nothing left to resume from and this returns
+    /// `None`, same as a cold start.
     async fn reconcile_cursors(
         &self,
         cursors: &mut HashMap<u64, ChainCursor>,
@@ -251,43 +264,43 @@ impl<
             return None;
         }
 
-        let stored_epoch = cursors.values().next().map(|c| c.epoch);
-        if stored_epoch == Some(bridge_epoch) {
-            // `unwrap_or_default` rather than `expect`: `cursors` was
-            // checked non-empty above, so `0` here is unreachable, not a
-            // real fallback.
-            let min_seq = cursors.values().map(|c| c.seq).min().unwrap_or_default();
-            return Some(EventCursor {
-                epoch: bridge_epoch,
-                seq: min_seq,
-                block_height: 0,
-            });
+        let mismatched: Vec<u64> = cursors
+            .iter()
+            .filter(|(_, c)| c.epoch != bridge_epoch)
+            .map(|(&chain_id, _)| chain_id)
+            .collect();
+
+        if !mismatched.is_empty() {
+            tracing::error!(
+                ?mismatched,
+                bridge_epoch,
+                "event outbox epoch changed since these chains last resumed; the gap since \
+                 their last commit cannot be replayed. Re-arming watch_retry for every watch \
+                 on the affected chains."
+            );
+            self.break_lineage(cursors, &mismatched).await;
         }
 
-        tracing::error!(
-            ?stored_epoch,
-            bridge_epoch,
-            "event outbox epoch changed since this server last resumed; the gap since its last \
-             commit cannot be replayed. Re-arming watch_retry for every watch on the affected \
-             chains and resuming from the outbox's oldest retained event."
-        );
-        self.break_lineage(cursors).await;
-        None
+        let min_seq = cursors.values().map(|c| c.seq).min();
+        min_seq.map(|seq| EventCursor {
+            epoch: bridge_epoch,
+            seq,
+            block_height: 0,
+        })
     }
 
-    /// Re-arm `watch_retry` for every chain this server had a cursor for,
-    /// then forget those cursors.
+    /// Re-arm `watch_retry` for `chain_ids`, then forget their cursors.
     ///
-    /// Shared by [`Self::reconcile_cursors`] (the stored epoch no longer
-    /// matches the outbox's) and [`Self::run`]'s resume loop (the outbox
-    /// reported the requested position as trimmed, which
-    /// [`evm::monitor::bridge::EventBridge::subscribe_from`] already turned
-    /// into a fresh epoch on its side) - both mean the gap since the last
-    /// commit cannot be replayed, and re-driving every live watch within
+    /// Shared by [`Self::reconcile_cursors`] (a subset of chains whose
+    /// stored epoch no longer matches the outbox's) and [`Self::run`]'s
+    /// resume loop (the outbox reported the requested position as trimmed,
+    /// which [`evm::monitor::bridge::EventBridge::subscribe_from`] already
+    /// turned into a fresh epoch on its side, invalidating every chain at
+    /// once) - both mean the gap since the last commit cannot be replayed
+    /// for the given chains, and re-driving every live watch within
     /// `watch_retry`'s normal cycle is the best available recovery.
-    async fn break_lineage(&self, cursors: &mut HashMap<u64, ChainCursor>) {
-        let chain_ids: Vec<u64> = cursors.keys().copied().collect();
-        for chain_id in chain_ids {
+    async fn break_lineage(&self, cursors: &mut HashMap<u64, ChainCursor>, chain_ids: &[u64]) {
+        for &chain_id in chain_ids {
             if let Err(e) = self
                 .data_service
                 .reset_chain_watch_notifications(chain_id)
@@ -299,8 +312,8 @@ impl<
                     "failed to re-arm watch_retry after an event outbox lineage break"
                 );
             }
+            cursors.remove(&chain_id);
         }
-        cursors.clear();
     }
 
     /// Apply one envelope and, only once it has been applied, durably

@@ -30,7 +30,8 @@ use tracing::{debug, error, warn};
 /// constant only bounds how much a resumer can fall behind before it fires.
 const STREAM_MAXLEN: usize = 200_000;
 
-/// Allocates `seq` and appends the entry under it in one atomic step.
+/// Allocates `seq`, reads (or creates) the current epoch, and appends the
+/// entry under both in one atomic step.
 ///
 /// A plain `INCR` followed by a separate `XADD <id>` round trip lets two
 /// concurrent publishers interleave: whichever `XADD` lands second at the
@@ -38,16 +39,25 @@ const STREAM_MAXLEN: usize = 200_000;
 /// own `INCR` and `XADD`. Stream entry IDs must be strictly increasing at
 /// the server, so Redis rejects that `XADD` outright - and because nothing
 /// durable was ever written for it, the event is gone with no cursor gap to
-/// detect and no replay path to recover it. Running both commands inside one
-/// script closes that: Redis executes a script as a single atomic unit, so
-/// no other client's commands - not even another invocation of this same
-/// script - can interleave between the `INCR` and the `XADD` it feeds.
+/// detect and no replay path to recover it. The epoch has the same problem
+/// one level up: reading it in a separate round trip before this script
+/// leaves a window where `bump_epoch` lands in between, so the entry is
+/// stamped with an epoch that is already stale by the time it is written.
+/// Running all three steps inside one script closes both: Redis executes a
+/// script as a single atomic unit, so no other client's commands - not even
+/// another invocation of this same script, nor a concurrent `bump_epoch` -
+/// can interleave with the `INCR`, the epoch read, and the `XADD` it feeds.
 const PUBLISH_SCRIPT: &str = r"
     local seq = redis.call('INCR', KEYS[2])
+    local epoch = redis.call('GET', KEYS[3])
+    if not epoch then
+        redis.call('SET', KEYS[3], ARGV[2], 'NX')
+        epoch = redis.call('GET', KEYS[3])
+    end
     redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], seq .. '-0',
-        'epoch', ARGV[2], 'seq', seq, 'chain_id', ARGV[3],
+        'epoch', epoch, 'seq', seq, 'chain_id', ARGV[3],
         'block_height', ARGV[4], 'payload', ARGV[5])
-    return seq
+    return {seq, epoch}
 ";
 
 /// Redis event bridge.
@@ -201,16 +211,19 @@ impl EventBridge for RedisBridge {
         let payload = serde_json::to_string(event)
             .map_err(|e| EvmError::Monitor(format!("event serialization failed: {}", e)))?;
 
-        let epoch = self.get_or_init_epoch().await?;
+        // Only used if the epoch key does not exist yet; see the script's
+        // own doc comment for why this is not read separately beforehand.
+        let candidate_epoch = chrono::Utc::now().timestamp_millis();
         let chain_id = event.chain_id();
         let block_height = event.block_height();
 
         let mut conn = self.publisher.clone();
-        let seq: i64 = Script::new(PUBLISH_SCRIPT)
+        let (seq, epoch): (i64, i64) = Script::new(PUBLISH_SCRIPT)
             .key(&self.events_channel)
             .key(self.seq_key())
+            .key(self.epoch_key())
             .arg(self.maxlen)
-            .arg(epoch)
+            .arg(candidate_epoch)
             .arg(chain_id)
             .arg(block_height)
             .arg(payload)
