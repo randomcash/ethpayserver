@@ -95,6 +95,16 @@ pub trait EventBridge: Send + Sync {
     /// belong to a lineage this outbox no longer has.
     async fn current_epoch(&self) -> EvmResult<i64>;
 
+    /// Invalidate the current outbox lineage and start a new one.
+    ///
+    /// Called when a resume target can no longer be honored - a cursor's
+    /// `seq` names a position the outbox no longer retains. The change is
+    /// visible to every caller sharing this outbox, not just the one that
+    /// detected the loss: the next [`EventBridge::current_epoch`] call from
+    /// any of them sees the new value, so nobody resumes from the broken
+    /// lineage without going through the loud path.
+    async fn bump_epoch(&self) -> EvmResult<i64>;
+
     // =========================================================================
     // Commands (API Server -> Monitor)
     // =========================================================================

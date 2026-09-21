@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod durable_resume;
 mod helpers;
+mod lineage_break;
 mod own_store_payments;
 mod payment_confirmed;
 mod payment_detected;

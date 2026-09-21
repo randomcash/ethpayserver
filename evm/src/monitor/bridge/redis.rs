@@ -17,8 +17,8 @@ use crate::monitor::events::{MonitorCommand, MonitorEvent};
 use async_stream::stream;
 use async_trait::async_trait;
 use redis::aio::ConnectionManager;
-use redis::streams::{StreamMaxlen, StreamReadOptions, StreamReadReply};
-use redis::{AsyncCommands, Client};
+use redis::streams::{StreamRangeReply, StreamReadOptions, StreamReadReply};
+use redis::{AsyncCommands, Client, Script};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, warn};
 
@@ -26,8 +26,29 @@ use tracing::{debug, error, warn};
 /// `XADD` rather than an exact trim's O(log n), and a consumer that falls
 /// this far behind needs the same loud "I cannot resume" fallback as one
 /// whose epoch changed - trying to save the last few thousand entries near
-/// the boundary buys nothing.
+/// the boundary buys nothing. `subscribe_from` enforces the fallback; this
+/// constant only bounds how much a resumer can fall behind before it fires.
 const STREAM_MAXLEN: usize = 200_000;
+
+/// Allocates `seq` and appends the entry under it in one atomic step.
+///
+/// A plain `INCR` followed by a separate `XADD <id>` round trip lets two
+/// concurrent publishers interleave: whichever `XADD` lands second at the
+/// server can carry the *smaller* `seq`, if that process paused between its
+/// own `INCR` and `XADD`. Stream entry IDs must be strictly increasing at
+/// the server, so Redis rejects that `XADD` outright - and because nothing
+/// durable was ever written for it, the event is gone with no cursor gap to
+/// detect and no replay path to recover it. Running both commands inside one
+/// script closes that: Redis executes a script as a single atomic unit, so
+/// no other client's commands - not even another invocation of this same
+/// script - can interleave between the `INCR` and the `XADD` it feeds.
+const PUBLISH_SCRIPT: &str = r"
+    local seq = redis.call('INCR', KEYS[2])
+    redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], seq .. '-0',
+        'epoch', ARGV[2], 'seq', seq, 'chain_id', ARGV[3],
+        'block_height', ARGV[4], 'payload', ARGV[5])
+    return seq
+";
 
 /// Redis event bridge.
 pub struct RedisBridge {
@@ -39,6 +60,10 @@ pub struct RedisBridge {
     events_channel: String,
     /// Channel name for commands (API server -> monitor).
     commands_channel: String,
+    /// Cap on retained stream entries. See [`STREAM_MAXLEN`]; only
+    /// overridden by [`RedisBridge::new_with_maxlen`], which exists so a
+    /// test can force a retention gap without publishing 200,000 entries.
+    maxlen: usize,
 }
 
 impl RedisBridge {
@@ -62,7 +87,25 @@ impl RedisBridge {
             publisher,
             events_channel: events_channel.to_string(),
             commands_channel: commands_channel.to_string(),
+            maxlen: STREAM_MAXLEN,
         })
+    }
+
+    /// Create a new Redis bridge with a non-default retention cap.
+    ///
+    /// Test-only in practice: production deployments want [`STREAM_MAXLEN`],
+    /// and this exists so a test can force a retention gap by publishing a
+    /// handful of entries against a small `maxlen` rather than 200,000
+    /// against the real one.
+    pub async fn new_with_maxlen(
+        url: &str,
+        events_channel: &str,
+        commands_channel: &str,
+        maxlen: usize,
+    ) -> EvmResult<Self> {
+        let mut bridge = Self::new(url, events_channel, commands_channel).await?;
+        bridge.maxlen = maxlen;
+        Ok(bridge)
     }
 
     /// Get the events stream key.
@@ -129,6 +172,23 @@ impl RedisBridge {
             .parse()
             .map_err(|e| EvmError::Monitor(format!("corrupt epoch value {epoch:?}: {e}")))
     }
+
+    /// The `seq` of the oldest entry this outbox still retains, or `None` if
+    /// it currently has none at all (nothing published yet, or trimmed down
+    /// to nothing).
+    async fn oldest_retained_seq(&self) -> EvmResult<Option<i64>> {
+        let mut conn = self.publisher.clone();
+        let reply: StreamRangeReply = conn
+            .xrange_count(&self.events_channel, "-", "+", 1)
+            .await
+            .map_err(|e| EvmError::Monitor(format!("redis XRANGE failed: {}", e)))?;
+
+        Ok(reply
+            .ids
+            .first()
+            .and_then(|entry| entry.id.split('-').next())
+            .and_then(|seq| seq.parse().ok()))
+    }
 }
 
 #[async_trait]
@@ -142,44 +202,49 @@ impl EventBridge for RedisBridge {
             .map_err(|e| EvmError::Monitor(format!("event serialization failed: {}", e)))?;
 
         let epoch = self.get_or_init_epoch().await?;
-
-        let mut conn = self.publisher.clone();
-        let seq: i64 = conn
-            .incr(self.seq_key(), 1)
-            .await
-            .map_err(|e| EvmError::Monitor(format!("redis INCR failed: {}", e)))?;
-
-        // Our own seq drives the entry's ID, so resuming "after seq" is a
-        // plain ID-range read - no separate index from our seq to Redis's
-        // own ID is needed. This is safe only because `seq` is assigned by
-        // one atomic INCR immediately above: IDs handed to XADD must be
-        // strictly increasing, and a monotonic counter with no gaps
-        // guarantees that.
-        let id = format!("{seq}-0");
         let chain_id = event.chain_id();
         let block_height = event.block_height();
 
-        let _: String = conn
-            .xadd_maxlen(
-                &self.events_channel,
-                StreamMaxlen::Approx(STREAM_MAXLEN),
-                &id,
-                &[
-                    ("epoch", epoch.to_string()),
-                    ("seq", seq.to_string()),
-                    ("chain_id", chain_id.to_string()),
-                    ("block_height", block_height.to_string()),
-                    ("payload", payload),
-                ],
-            )
+        let mut conn = self.publisher.clone();
+        let seq: i64 = Script::new(PUBLISH_SCRIPT)
+            .key(&self.events_channel)
+            .key(self.seq_key())
+            .arg(self.maxlen)
+            .arg(epoch)
+            .arg(chain_id)
+            .arg(block_height)
+            .arg(payload)
+            .invoke_async(&mut conn)
             .await
-            .map_err(|e| EvmError::Monitor(format!("redis XADD failed: {}", e)))?;
+            .map_err(|e| EvmError::Monitor(format!("redis publish script failed: {}", e)))?;
 
         debug!(stream = %self.events_channel, seq, epoch, "published event to redis stream");
         Ok(())
     }
 
     async fn subscribe_from(&self, from: Option<EventCursor>) -> EvmResult<DurableEventStream> {
+        // Same epoch does not, on its own, mean `cursor.seq` is still safe
+        // to resume from: `XADD ... MAXLEN` trims independently of the
+        // epoch key, so a consumer that falls behind the retention window
+        // can have its committed position trimmed out while the epoch never
+        // moved. Left unchecked, the `XREAD` below would silently resume
+        // from whatever the stream happens to retain next - exactly the
+        // "starting from wherever" failure this whole mechanism exists to
+        // rule out. Bumping the epoch here, rather than only reporting the
+        // gap, means every other caller sharing this outbox also sees the
+        // lineage break the next time it checks, not just this one.
+        if let Some(cursor) = from
+            && let Some(oldest) = self.oldest_retained_seq().await?
+            && oldest > cursor.seq + 1
+        {
+            let new_epoch = self.bump_epoch().await?;
+            return Err(EvmError::EventStreamOutOfRange(format!(
+                "resume at seq {} is behind the oldest retained entry (seq {oldest}); \
+                 the outbox has moved to epoch {new_epoch}",
+                cursor.seq
+            )));
+        }
+
         let client = self.client.clone();
         let stream_key = self.events_channel.clone();
         // XREAD returns entries with an ID strictly greater than the one
@@ -256,6 +321,20 @@ impl EventBridge for RedisBridge {
 
     async fn current_epoch(&self) -> EvmResult<i64> {
         self.get_or_init_epoch().await
+    }
+
+    async fn bump_epoch(&self) -> EvmResult<i64> {
+        let mut conn = self.publisher.clone();
+        // Unconditional SET, not `NX`: `get_or_init_epoch` uses `NX` because
+        // it must not clobber a value another caller already agreed on, but
+        // this is the one call whose entire job is to make every existing
+        // agreement stale.
+        let new_epoch = chrono::Utc::now().timestamp_millis();
+        let _: () = conn
+            .set(self.epoch_key(), new_epoch)
+            .await
+            .map_err(|e| EvmError::Monitor(format!("redis SET failed: {}", e)))?;
+        Ok(new_epoch)
     }
 
     // =========================================================================

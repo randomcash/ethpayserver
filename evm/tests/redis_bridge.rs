@@ -6,7 +6,7 @@
 
 use evm::monitor::bridge::{EventBridge, EventCursor, RedisBridge};
 use evm::monitor::events::{MonitorEvent, PaymentDetected};
-use evm::{Address, B256, U256};
+use evm::{Address, B256, EvmError, U256};
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
@@ -157,4 +157,51 @@ async fn live_events_published_after_subscribing_are_still_delivered() {
         .unwrap()
         .unwrap();
     assert_eq!(envelope.cursor.seq, 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn resuming_past_the_retention_window_bumps_the_epoch_and_fails_out_of_range() {
+    let suffix = Uuid::new_v4();
+    // A tiny cap so trimming is provoked by a handful of publishes rather
+    // than the real 200,000-entry default.
+    let bridge = RedisBridge::new_with_maxlen(
+        &redis_url(),
+        &format!("test:durable_resume:{suffix}:events"),
+        &format!("test:durable_resume:{suffix}:commands"),
+        3,
+    )
+    .await
+    .expect("connect to REDIS_URL");
+
+    for i in 0..20u8 {
+        bridge
+            .publish(&make_event(B256::from([i; 32])))
+            .await
+            .unwrap();
+    }
+
+    let epoch_before = bridge.current_epoch().await.unwrap();
+
+    // seq 1 was the first entry published; with a maxlen of 3 it has long
+    // since been trimmed out by the time 20 more have landed.
+    let result = bridge
+        .subscribe_from(Some(EventCursor {
+            epoch: epoch_before,
+            seq: 1,
+            block_height: 0,
+        }))
+        .await;
+
+    match result {
+        Err(EvmError::EventStreamOutOfRange(_)) => {}
+        Err(e) => panic!("expected EventStreamOutOfRange, got a different error: {e}"),
+        Ok(_) => panic!("expected EventStreamOutOfRange, got a stream"),
+    }
+
+    let epoch_after = bridge.current_epoch().await.unwrap();
+    assert_ne!(
+        epoch_before, epoch_after,
+        "a retention gap must bump the epoch so every other resumer sees the break too"
+    );
 }

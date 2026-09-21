@@ -22,6 +22,7 @@ use data_service::{
 };
 use evm::monitor::bridge::{EventBridge, EventCursor, EventEnvelope};
 use evm::monitor::events::MonitorEvent;
+use evm::EvmError;
 use tokio_stream::StreamExt;
 use types::{
     InvoiceReader, InvoiceWriter, PaymentReader, PaymentWriter, StoreSettingsReader, TokenReader,
@@ -163,8 +164,16 @@ impl<
             match ChainCursorReader::chain_cursors(&*self.data_service, ADAPTER_ID).await {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::error!(error = %e, "failed to load chain cursors; starting with none");
-                    HashMap::new()
+                    // A failed load is indistinguishable from an empty
+                    // `HashMap` to everything downstream, but they are not
+                    // the same thing: an empty map means "never resumed
+                    // before, nothing to lose," which skips the
+                    // epoch-mismatch check below and resumes from whatever
+                    // the outbox currently retains. Silently doing that on a
+                    // DB hiccup would drop real cursors this server had.
+                    // Refusing to start is the safe failure here.
+                    tracing::error!(error = %e, "failed to load chain cursors; refusing to start");
+                    return;
                 }
             };
 
@@ -176,13 +185,31 @@ impl<
             }
         };
 
-        let resume_from = self.reconcile_cursors(&mut cursors, bridge_epoch).await;
+        let mut resume_from = self.reconcile_cursors(&mut cursors, bridge_epoch).await;
 
-        let mut event_stream = match self.bridge.subscribe_from(resume_from).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to subscribe to events");
-                return;
+        // Bounded to one retry: `subscribe_from` only ever reports
+        // out-of-range for a `Some(cursor)` resume target, and the retry
+        // below always resumes with `None` - a second out-of-range report
+        // after that would mean the bridge itself is broken, not something
+        // re-arming watch_retry again can fix.
+        let mut retried = false;
+        let mut event_stream = loop {
+            match self.bridge.subscribe_from(resume_from).await {
+                Ok(stream) => break stream,
+                Err(EvmError::EventStreamOutOfRange(reason)) if !retried => {
+                    tracing::error!(
+                        reason = %reason,
+                        "resume position no longer retained; re-arming watch_retry and \
+                         resuming from the outbox's new oldest entry"
+                    );
+                    self.break_lineage(&mut cursors).await;
+                    resume_from = None;
+                    retried = true;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to subscribe to events");
+                    return;
+                }
             }
         };
 
@@ -244,7 +271,21 @@ impl<
              commit cannot be replayed. Re-arming watch_retry for every watch on the affected \
              chains and resuming from the outbox's oldest retained event."
         );
+        self.break_lineage(cursors).await;
+        None
+    }
 
+    /// Re-arm `watch_retry` for every chain this server had a cursor for,
+    /// then forget those cursors.
+    ///
+    /// Shared by [`Self::reconcile_cursors`] (the stored epoch no longer
+    /// matches the outbox's) and [`Self::run`]'s resume loop (the outbox
+    /// reported the requested position as trimmed, which
+    /// [`evm::monitor::bridge::EventBridge::subscribe_from`] already turned
+    /// into a fresh epoch on its side) - both mean the gap since the last
+    /// commit cannot be replayed, and re-driving every live watch within
+    /// `watch_retry`'s normal cycle is the best available recovery.
+    async fn break_lineage(&self, cursors: &mut HashMap<u64, ChainCursor>) {
         let chain_ids: Vec<u64> = cursors.keys().copied().collect();
         for chain_id in chain_ids {
             if let Err(e) = self
@@ -255,12 +296,11 @@ impl<
                 tracing::error!(
                     chain_id,
                     error = %e,
-                    "failed to re-arm watch_retry after an event outbox epoch change"
+                    "failed to re-arm watch_retry after an event outbox lineage break"
                 );
             }
         }
         cursors.clear();
-        None
     }
 
     /// Apply one envelope and, only once it has been applied, durably

@@ -136,6 +136,17 @@ impl EventBridge for MemoryBridge {
         Ok(self.outbox.lock().expect("outbox mutex poisoned").epoch)
     }
 
+    async fn bump_epoch(&self) -> EvmResult<i64> {
+        // The in-memory outbox is unbounded (see `Outbox`'s docs), so it
+        // never has a real retention-loss case to report on its own. This
+        // exists so a test can still exercise the epoch-mismatch resume path
+        // through the real `EventBridge` API rather than fabricating a
+        // mismatched epoch by hand.
+        let mut outbox = self.outbox.lock().expect("outbox mutex poisoned");
+        outbox.epoch += 1;
+        Ok(outbox.epoch)
+    }
+
     // =========================================================================
     // Commands (API Server -> Monitor)
     // =========================================================================

@@ -109,6 +109,16 @@ that are not in CI's path. Several people have lost an hour to this.
   tests are still not in it and need running locally. The gate above does not touch any of them either way, so run
   the `data-service` ones locally too when you touch that layer — CI will
   catch a failure regardless, but locally you see it sooner.
+- A separate `test` job step runs `evm`'s `#[ignore]`'d Redis integration
+  tests (`cargo nextest run -p evm --features redis --test redis_bridge
+  --run-ignored only -j 1`, against a `redis:7-alpine` service) — the `redis`
+  feature is off by default, so this is the only place
+  `evm/tests/redis_bridge.rs` ever compiles, let alone runs. That step also
+  gates merges. It names `--test redis_bridge` rather than building all of
+  `-p evm`'s tests: `evm/tests/payment_flow.rs` and `rpc_cost.rs` do not
+  compile scoped to `-p evm` alone (only under `--workspace`, where feature
+  unification with `server` happens to fix it) - naming the one binary this
+  step needs avoids tripping over that.
 
 ## Sensitive paths
 

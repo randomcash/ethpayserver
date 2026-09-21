@@ -1,6 +1,7 @@
 //! Test utilities for data service.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -40,11 +41,20 @@ pub struct InMemoryDataService {
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
     chain_cursors: RwLock<HashMap<(String, u64), ChainCursor>>,
+    // `reset_chain_watch_notifications` is otherwise a no-op here (see its
+    // impl below), so a test asserting a lineage break actually re-armed
+    // `watch_retry` has nothing else to check against.
+    watch_reset_calls: AtomicU64,
 }
 
 impl InMemoryDataService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How many times `reset_chain_watch_notifications` has been called.
+    pub fn watch_reset_calls(&self) -> u64 {
+        self.watch_reset_calls.load(Ordering::SeqCst)
     }
 
     /// Set up a webhook for a store (for testing).
@@ -504,7 +514,10 @@ impl ChainCursorWriter for InMemoryDataService {
 
     async fn reset_chain_watch_notifications(&self, _chain_id: u64) -> RepositoryResult<u64> {
         // `WatchedAddressWriter::mark_notified` is already a no-op above:
-        // this test double does not model `monitor_notified` at all.
+        // this test double does not model `monitor_notified` at all. The
+        // call still counts, so a test can assert this was reached without
+        // needing to model the column it would flip.
+        self.watch_reset_calls.fetch_add(1, Ordering::SeqCst);
         Ok(0)
     }
 }
