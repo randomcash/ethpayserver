@@ -10,6 +10,9 @@
 //! - `HOST` - Server host (default: 127.0.0.1)
 //! - `PORT` - Server port (default: 3000)
 //! - `LOG_LEVEL` - Log level: trace, debug, info, warn, error (default: info)
+//! - `LOG_FORMAT` - Log output format: `pretty` or `json` (default: pretty).
+//!   `json` is what a log shipper (e.g. Grafana Cloud's Loki agent) parses;
+//!   set it in any environment whose logs are actually collected.
 //! - `ENABLE_SWAGGER` - Enable Swagger UI at /swagger-ui (default: true)
 //!
 //! ## Redis Channels
@@ -73,6 +76,9 @@ pub struct Config {
     /// Log level (trace, debug, info, warn, error).
     pub log_level: String,
 
+    /// Log output format: `pretty` or `json`.
+    pub log_format: String,
+
     /// Enable Swagger UI at /swagger-ui.
     pub enable_swagger: bool,
 
@@ -115,6 +121,7 @@ impl Config {
     /// - `HOST` - Server host (default: 127.0.0.1)
     /// - `PORT` - Server port (default: 3000)
     /// - `LOG_LEVEL` - Log level (default: info)
+    /// - `LOG_FORMAT` - Log output format: `pretty` or `json` (default: pretty)
     /// - `ENABLE_SWAGGER` - Enable Swagger UI (default: true)
     /// - `ETHPAY_PLUGIN_DIR` - Plugin artifact directory (default: ./plugins)
     pub fn from_env() -> anyhow::Result<Self> {
@@ -132,6 +139,7 @@ impl Config {
             .map_err(|_| anyhow::anyhow!("PORT must be a valid number"))?;
 
         let log_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+        let log_format = env::var("LOG_FORMAT").unwrap_or_else(|_| "pretty".to_string());
 
         let enable_swagger = env::var("ENABLE_SWAGGER")
             .map(|v| v == "true" || v == "1")
@@ -148,6 +156,7 @@ impl Config {
             host,
             port,
             log_level,
+            log_format,
             enable_swagger,
             safe_mode,
             plugin_dir,
@@ -327,6 +336,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 3000,
             log_level: "info".to_string(),
+            log_format: "pretty".to_string(),
             enable_swagger: false,
             safe_mode: false,
             plugin_dir: PathBuf::from(DEFAULT_PLUGIN_DIR),

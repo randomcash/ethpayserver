@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
 
     // Initialize tracing (includes Sentry layer when DSN is configured)
-    init_tracing(&config.log_level);
+    init_tracing(&config.log_level, &config.log_format);
 
     // Report whether error reporting is actually on. `tracing::info!` before
     // this point has no subscriber to write to, so this must come after
@@ -527,13 +527,73 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(log_level: &str) {
+/// Whether `log_format` selects JSON output, and a warning to log for a value
+/// that is neither `json` nor `pretty` — an unrecognized value (a typo, wrong
+/// case) would otherwise silently fall back to the human-readable format a
+/// log shipper can't parse, with no signal that anything is wrong.
+fn resolve_log_format(log_format: &str) -> (bool, Option<String>) {
+    match log_format {
+        "json" => (true, None),
+        "pretty" => (false, None),
+        other => (
+            false,
+            Some(format!(
+                "LOG_FORMAT={other:?} is not \"json\" or \"pretty\"; defaulting to pretty"
+            )),
+        ),
+    }
+}
+
+fn init_tracing(log_level: &str, log_format: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(sentry_tracing::layer())
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // `json` is what a log shipper (Grafana Cloud's Loki agent) parses; any
+    // other value keeps the human-readable format for local/dev use.
+    let (json, warning) = resolve_log_format(log_format);
+
+    if json {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(sentry_tracing::layer())
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(sentry_tracing::layer())
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+
+    // Logged after `.init()` on purpose: there is no subscriber to write to
+    // before that.
+    if let Some(warning) = warning {
+        tracing::warn!("{warning}");
+    }
+}
+
+#[cfg(test)]
+mod tracing_config_tests {
+    use super::resolve_log_format;
+
+    #[test]
+    fn json_selects_json_with_no_warning() {
+        assert_eq!(resolve_log_format("json"), (true, None));
+    }
+
+    #[test]
+    fn pretty_selects_pretty_with_no_warning() {
+        assert_eq!(resolve_log_format("pretty"), (false, None));
+    }
+
+    #[test]
+    fn unrecognized_value_falls_back_to_pretty_with_a_warning() {
+        let (json, warning) = resolve_log_format("JSON");
+        assert!(!json);
+        assert!(
+            warning.is_some(),
+            "a typo'd LOG_FORMAT must not fail silently"
+        );
+    }
 }
