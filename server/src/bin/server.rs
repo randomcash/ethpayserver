@@ -293,11 +293,8 @@ async fn main() -> Result<()> {
     //    Created first because cleanup service needs it for expiration webhooks
     let webhook_config = WebhookConfig::from_env();
     tracing::debug!(?webhook_config, "Webhook config loaded");
-    let webhook_service = Arc::new(WebhookService::new(
-        Arc::clone(&data_service),
-        redis_url,
-        webhook_config,
-    )?);
+    let webhook_service =
+        Arc::new(WebhookService::new(Arc::clone(&data_service), redis_url, webhook_config).await?);
     tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
 

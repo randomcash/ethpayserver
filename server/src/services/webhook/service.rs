@@ -46,20 +46,31 @@ impl<D: WebhookDataService + 'static> WebhookSink for WebhookService<D> {
 /// 4. Records delivery status in the payment_events table
 pub struct WebhookService<D: WebhookDataService> {
     data_service: Arc<D>,
-    redis_client: redis::Client,
+    redis_conn: redis::aio::ConnectionManager,
     http_client: reqwest::Client,
     config: WebhookConfig,
 }
 
 impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// Create a new webhook service.
-    pub fn new(
+    ///
+    /// The Redis connection is established once here via a `ConnectionManager`,
+    /// which reconnects automatically on failure. A one-shot connection re-opened
+    /// on every call would repeat DNS resolution and the initial handshake for
+    /// every single job, so any brief hiccup in resolving the Redis hostname (a
+    /// container restart, for example) fails every in-flight operation instead
+    /// of just the reconnect.
+    pub async fn new(
         data_service: Arc<D>,
         redis_url: &str,
         config: WebhookConfig,
     ) -> Result<Self, WebhookError> {
         let redis_client =
             redis::Client::open(redis_url).map_err(|e| WebhookError::Redis(e.to_string()))?;
+
+        let redis_conn = redis::aio::ConnectionManager::new(redis_client)
+            .await
+            .map_err(|e| WebhookError::Redis(e.to_string()))?;
 
         let http_client = reqwest::Client::builder()
             .timeout(config.request_timeout)
@@ -68,7 +79,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
 
         Ok(Self {
             data_service,
-            redis_client,
+            redis_conn,
             http_client,
             config,
         })
@@ -78,11 +89,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     ///
     /// This adds the job to a Redis sorted set keyed by `scheduled_at` timestamp.
     pub async fn queue_webhook(&self, job: WebhookJob) -> Result<(), WebhookError> {
-        let mut conn = self
-            .redis_client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+        let mut conn = self.redis_conn.clone();
 
         let job_json =
             serde_json::to_string(&job).map_err(|e| WebhookError::Serialization(e.to_string()))?;
@@ -143,11 +150,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// or no jobs are ready yet.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // Redis dequeue + HTTP delivery + retry logic
     async fn process_next_job(&self) -> Result<bool, WebhookError> {
-        let mut conn = self
-            .redis_client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+        let mut conn = self.redis_conn.clone();
 
         let now = Utc::now().timestamp() as f64;
 
@@ -299,7 +302,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     }
 
     /// Update both queue depth gauges (total via ZCARD, ready via ZCOUNT).
-    async fn update_queue_gauges(&self, conn: &mut redis::aio::MultiplexedConnection) {
+    async fn update_queue_gauges(&self, conn: &mut redis::aio::ConnectionManager) {
         if let Ok(depth) = redis::cmd("ZCARD")
             .arg(&self.config.queue_key)
             .query_async::<u64>(conn)
@@ -491,5 +494,107 @@ mod tests {
         assert!(truncated.ends_with("..."));
 
         assert_eq!(truncate_error("", 500), "");
+    }
+
+    fn test_payload() -> crate::services::webhook::WebhookPayload {
+        use crate::services::webhook::{WebhookEventType, WebhookPayload};
+        use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
+
+        let invoice = InvoiceData {
+            id: InvoiceId::from_string("test-invoice".to_string()),
+            store_id: StoreId::new(),
+            currency: "ETH".to_string(),
+            status: InvoiceStatus::Expired,
+            amount: "1000".to_string(),
+            amount_received: "1000".to_string(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            metadata: None,
+            customer_email: None,
+            extra: None,
+        };
+        WebhookPayload::invoice_event(WebhookEventType::InvoiceExpired, &invoice)
+    }
+
+    /// A defect this regresses: both `queue_webhook` and `process_next_job`
+    /// used to call `redis::Client::get_multiplexed_async_connection()` fresh
+    /// on every invocation, so every Redis command re-resolved DNS and
+    /// re-opened a TCP connection instead of reusing one. On Docker's embedded
+    /// DNS resolver that shows up as an intermittent "no address associated
+    /// with hostname" under nothing worse than a burst of webhook jobs — the
+    /// resolver rate-limits, not the network. `ConnectionManager` (as already
+    /// used elsewhere in this codebase, see `data-service/src/redis`) opens
+    /// the connection once and reconnects internally, so a healthy run makes
+    /// exactly one TCP connection no matter how many jobs it queues.
+    ///
+    /// This proxies real Redis traffic through a listener that counts
+    /// accepted connections, so it needs a real Redis instance and is
+    /// `#[ignore]`d like this crate's other tests that need real
+    /// infrastructure. Point `TEST_REDIS_URL` at one to run it; it defaults to
+    /// `redis://127.0.0.1:6379`, the same port CI's `e2e` job uses.
+    #[tokio::test]
+    #[ignore = "requires a local Redis instance; set TEST_REDIS_URL (default redis://127.0.0.1:6379)"]
+    async fn test_redis_connection_is_reused_across_queue_calls() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tokio::net::{TcpListener, TcpStream};
+
+        let backend_addr = std::env::var("TEST_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+            .trim_start_matches("redis://")
+            .to_string();
+
+        // A transparent proxy in front of the real Redis instance that counts
+        // how many separate TCP connections the service opens through it.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let connection_count = Arc::new(AtomicUsize::new(0));
+
+        {
+            let connection_count = Arc::clone(&connection_count);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut inbound, _)) = listener.accept().await else {
+                        break;
+                    };
+                    connection_count.fetch_add(1, Ordering::SeqCst);
+                    let backend_addr = backend_addr.clone();
+                    tokio::spawn(async move {
+                        if let Ok(mut outbound) = TcpStream::connect(&backend_addr).await {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                    });
+                }
+            });
+        }
+
+        let data_service = Arc::new(data_service::InMemoryDataService::new());
+        let config = WebhookConfig {
+            queue_key: format!("test:webhook-conn-reuse:{}", uuid::Uuid::new_v4()),
+            ..WebhookConfig::default()
+        };
+        let service = WebhookService::new(data_service, &format!("redis://{proxy_addr}"), config)
+            .await
+            .expect("service should connect through the proxy");
+
+        for _ in 0..5 {
+            let job = WebhookJob::new(
+                uuid::Uuid::new_v4(),
+                "https://example.com/webhook".to_string(),
+                "secret".to_string(),
+                test_payload(),
+            );
+            service
+                .queue_webhook(job)
+                .await
+                .expect("queue_webhook should succeed");
+        }
+
+        assert_eq!(
+            connection_count.load(Ordering::SeqCst),
+            1,
+            "expected one persistent Redis connection reused across queue_webhook calls, not one opened per call"
+        );
     }
 }
