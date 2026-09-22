@@ -6,6 +6,26 @@
 //! Prometheus (`/metrics`, scraped from outside the process) and Sentry
 //! (pushed from inside, so it can raise threshold alerts) - see
 //! [`FanoutRecorder`].
+//!
+//! ## Volume cost before mainnet
+//!
+//! Sentry bills metrics ingest at $0.50/GB beyond a 5GB/month included quota
+//! (sentry.io/pricing, checked 2026-09-22). Serializing an actual captured
+//! [`sentry::protocol::Metric`] gives the per-point wire size:
+//!
+//! - A `payserver_chain_healthy`/`payserver_chain_block_lag` gauge (one
+//!   `chain_id` attribute) is ~200 bytes. At the default 15s poll
+//!   (`CHAIN_HEALTH_METRICS_INTERVAL_SECS`), [`set_chain_blocks`] and
+//!   [`set_chain_healthy`] together emit 4 gauges per poll per chain: 5760
+//!   polls/day * 4 * ~200B ≈ 4.4MB/day, ~130MB/month, per configured chain -
+//!   negligible even with a dozen chains watched.
+//! - [`record_http_request`] fires unconditionally on every HTTP request via
+//!   middleware: a counter + a histogram observation, each carrying
+//!   `method`/`path`/`status`, ~300 bytes apiece, ~600B/request. That reaches
+//!   the free tier's line at ~8.9M requests/month, and every request past
+//!   that costs ~$0.28/million. This is the metric worth sizing against real
+//!   mainnet traffic before launch - not the two gauges this ticket is
+//!   actually about, which cost nothing by comparison.
 
 use metrics::{
     Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
@@ -98,9 +118,20 @@ impl Recorder for FanoutRecorder {
 /// Sends a metric to Sentry with the key's labels attached as attributes, so
 /// e.g. `payserver_chain_healthy{chain_id="1"}` can be filtered/alerted on
 /// per chain in Sentry the same way it can be queried per chain in Prometheus.
+///
+/// Values go through the same secret/PII scrubber the error path uses
+/// ([`evm::telemetry::redact_secrets`]). The error path's `before_send` hook
+/// only runs on error events - this is a separate envelope - so without this
+/// a call site that labels a metric with an address, tx hash, or email would
+/// leak it to Sentry with none of the protection `scrub_event` gives
+/// everything else.
 fn sentry_labels(key: &Key) -> impl Iterator<Item = (String, String)> + '_ {
-    key.labels()
-        .map(|label| (label.key().to_string(), label.value().to_string()))
+    key.labels().map(|label| {
+        (
+            label.key().to_string(),
+            evm::telemetry::redact_secrets(label.value()),
+        )
+    })
 }
 
 struct SentryCounter {
@@ -122,6 +153,14 @@ impl CounterFn for SentryCounter {
         // No call site sets a counter to an absolute value today, and Sentry
         // counters are delta-additive with no "set to X" verb to translate
         // this into - forward to Prometheus, which does support it, only.
+        // debug_assert so a future call site that starts doing this fails a
+        // debug/test build immediately, rather than silently diverging with
+        // no signal at all in release.
+        debug_assert!(
+            false,
+            "counter {} called absolute() - not forwarded to Sentry",
+            self.key.name()
+        );
         self.prometheus.absolute(value);
     }
 }
@@ -144,6 +183,11 @@ impl GaugeFn for SentryGauge {
             metric = %self.key.name(),
             "gauge.increment() is not forwarded to Sentry - only set() is"
         );
+        debug_assert!(
+            false,
+            "gauge {} called increment() - not forwarded to Sentry",
+            self.key.name()
+        );
         self.prometheus.increment(value);
     }
 
@@ -151,6 +195,11 @@ impl GaugeFn for SentryGauge {
         tracing::warn!(
             metric = %self.key.name(),
             "gauge.decrement() is not forwarded to Sentry - only set() is"
+        );
+        debug_assert!(
+            false,
+            "gauge {} called decrement() - not forwarded to Sentry",
+            self.key.name()
         );
         self.prometheus.decrement(value);
     }
@@ -737,6 +786,132 @@ mod tests {
             .expect("histogram metric was not captured by Sentry");
         assert_eq!(histogram.r#type, sentry::protocol::MetricType::Distribution);
         assert_eq!(histogram.value, 0.25);
+    }
+
+    // The test above proves the wire format is right for arbitrary keys; this
+    // one proves it for the two gauges the ticket is actually about, reached
+    // the way production reaches them - through `set_chain_blocks` and
+    // `set_chain_healthy`, not a hand-built `Key`. If either function ever
+    // stopped using a plain `.set()`, or the recorder mapped the wrong
+    // `MetricType`, this goes red; nothing else in the suite would notice,
+    // since `payserver_chain_healthy`/`payserver_chain_block_lag` silently
+    // going stale in Sentry is exactly the "monitor falls behind and nothing
+    // says so" failure this migration exists to close.
+    //
+    // `metrics::with_local_recorder` scopes the recorder to this thread for
+    // the duration of the closure - unlike `metrics::set_global_recorder`,
+    // it's a thread-local, not a process-wide singleton other tests would
+    // race against, so the real `set_chain_blocks`/`set_chain_healthy` call
+    // sites can be exercised here without installing anything globally.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn fanout_recorder_forwards_real_chain_health_gauges_to_sentry() {
+        let recorder = FanoutRecorder {
+            prometheus: PrometheusBuilder::new().build_recorder(),
+        };
+
+        let envelopes = sentry::test::with_captured_envelopes(|| {
+            metrics::with_local_recorder(&recorder, || {
+                // Chain head advances to 103, the monitor's last processed
+                // block stays at 100: the monitor has silently fallen behind.
+                set_chain_blocks(1, Some(103), Some(100));
+                set_chain_healthy(1, false);
+            });
+
+            // Sentry batches metrics rather than sending them immediately -
+            // without this, the closure would return and the test hub would
+            // be torn down before anything reached the transport.
+            if let Some(client) = sentry::Hub::current().client() {
+                client.flush(Some(Duration::from_secs(5)));
+            }
+        });
+
+        let metrics: Vec<&sentry::protocol::Metric> = envelopes
+            .iter()
+            .flat_map(sentry::Envelope::items)
+            .filter_map(|item| match item {
+                sentry::protocol::EnvelopeItem::ItemContainer(
+                    sentry::protocol::ItemContainer::Metrics(metrics),
+                ) => Some(metrics.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        let healthy = metrics
+            .iter()
+            .find(|m| m.name.as_ref() == "payserver_chain_healthy")
+            .expect("payserver_chain_healthy was not captured by Sentry");
+        assert_eq!(healthy.r#type, sentry::protocol::MetricType::Gauge);
+        assert_eq!(healthy.value, 0.0);
+        assert_eq!(
+            healthy
+                .attributes
+                .get("chain_id")
+                .and_then(|a| a.0.as_str()),
+            Some("1")
+        );
+
+        let lag = metrics
+            .iter()
+            .find(|m| m.name.as_ref() == "payserver_chain_block_lag")
+            .expect("payserver_chain_block_lag was not captured by Sentry");
+        assert_eq!(lag.r#type, sentry::protocol::MetricType::Gauge);
+        assert_eq!(lag.value, 3.0);
+        assert_eq!(
+            lag.attributes.get("chain_id").and_then(|a| a.0.as_str()),
+            Some("1")
+        );
+    }
+
+    // The error path scrubs secrets/PII via `scrub_event` before an event
+    // leaves the process; this is the equivalent check for the metrics path,
+    // which is a separate envelope `scrub_event` never sees. No call site
+    // labels a metric with an address today, but nothing stops one from
+    // starting to - this proves that if it did, the address wouldn't reach
+    // Sentry raw.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn sentry_labels_scrubs_secret_shaped_values() {
+        let recorder = FanoutRecorder {
+            prometheus: PrometheusBuilder::new().build_recorder(),
+        };
+        let metadata = Metadata::new(module_path!(), metrics::Level::INFO, None);
+
+        let envelopes = sentry::test::with_captured_envelopes(|| {
+            let key = Key::from_parts(
+                "test_scrub_gauge",
+                vec![metrics::Label::new(
+                    "address",
+                    "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
+                )],
+            );
+            recorder.register_gauge(&key, &metadata).set(1.0);
+
+            if let Some(client) = sentry::Hub::current().client() {
+                client.flush(Some(Duration::from_secs(5)));
+            }
+        });
+
+        let metric = envelopes
+            .iter()
+            .flat_map(sentry::Envelope::items)
+            .filter_map(|item| match item {
+                sentry::protocol::EnvelopeItem::ItemContainer(
+                    sentry::protocol::ItemContainer::Metrics(metrics),
+                ) => Some(metrics.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .find(|m| m.name.as_ref() == "test_scrub_gauge")
+            .expect("gauge metric was not captured by Sentry");
+
+        let address = metric
+            .attributes
+            .get("address")
+            .and_then(|a| a.0.as_str())
+            .expect("address attribute missing");
+        assert_eq!(address, "[redacted-hex]");
     }
 
     #[test]
