@@ -918,6 +918,13 @@ where
     // After the account is actually gone, not before: a plugin holding data
     // for it (host capability 8) must never be told "closed" for an account
     // that a later failure in this handler left alive.
+    //
+    // This is the only account-deletion code path in this codebase today:
+    // `UserRepository::delete_user` has exactly one production caller, this
+    // one. An admin-initiated deletion route does not exist here yet - if one
+    // is added, it must call `notify_account_closed` the same way, or a
+    // plugin's data for that account will outlive it just as it did before
+    // this capability existed.
     notify_account_closed(&state.account_closed_observers, user.id).await;
 
     tracing::info!(user_id = %user.id.0, "account deleted at its owner's request");
