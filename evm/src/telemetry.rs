@@ -267,16 +267,24 @@ pub fn resolve_environment() -> String {
 /// Resolve `SENTRY_TRACES_SAMPLE_RATE`: the fraction of requests sampled for
 /// performance tracing, from `0.0` (none) to `1.0` (all). Defaults to `0.0`
 /// — no transactions leave the process — so tracing stays off until an
-/// environment opts in. An unset or unparseable value also falls back to
-/// `0.0` rather than failing boot over it, since (unlike the DSN/environment
-/// gate above) sending no transactions is always a safe default, never a
-/// silent hazard.
+/// environment opts in. An unset value falls back to `0.0` silently (that's
+/// the expected "not configured" state); an unparseable one also falls back
+/// to `0.0` rather than failing boot over it, since sending no transactions
+/// is always a safe default, but logs a warning first — otherwise a typo'd
+/// value is indistinguishable from an intentional `0.0` and can sit
+/// unnoticed indefinitely.
 #[must_use]
 pub fn resolve_traces_sample_rate() -> f32 {
-    std::env::var("SENTRY_TRACES_SAMPLE_RATE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0)
+    match std::env::var("SENTRY_TRACES_SAMPLE_RATE") {
+        Ok(raw) => raw.parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                value = %raw,
+                "SENTRY_TRACES_SAMPLE_RATE is not a valid number; falling back to 0.0"
+            );
+            0.0
+        }),
+        Err(_) => 0.0,
+    }
 }
 
 /// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
