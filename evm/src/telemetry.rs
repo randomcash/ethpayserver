@@ -329,10 +329,20 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
 /// sets this to `info` explicitly to get the noisier feed.
 #[must_use]
 pub fn resolve_sentry_log_level() -> tracing::Level {
-    std::env::var("SENTRY_LOG_LEVEL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(tracing::Level::WARN)
+    match std::env::var("SENTRY_LOG_LEVEL") {
+        Err(_) => tracing::Level::WARN,
+        Ok(value) => value.parse().unwrap_or_else(|_| {
+            // Unlike an unset var, this is a misconfiguration: someone set
+            // the knob and got it wrong, so the fallback to WARN should be
+            // visible rather than indistinguishable from "correctly set to
+            // WARN".
+            tracing::warn!(
+                value = %value,
+                "SENTRY_LOG_LEVEL is set but not a valid tracing level; defaulting to WARN"
+            );
+            tracing::Level::WARN
+        }),
+    }
 }
 
 /// Drops the `Log` flag from `filter` when `event_level` is more verbose than
@@ -606,7 +616,106 @@ mod tests {
     }
 
     #[test]
+    fn scrub_log_leaves_benign_attributes_unredacted() {
+        use sentry::protocol::LogAttribute;
+
+        let mut log = test_log("connecting");
+        log.attributes.insert(
+            "retry_count".to_string(),
+            LogAttribute(Value::Number(3.into())),
+        );
+        log.attributes.insert(
+            "status".to_string(),
+            LogAttribute(Value::String("connected".to_string())),
+        );
+
+        let scrubbed = scrub_log(log).expect("log passes through");
+        assert_eq!(
+            scrubbed.attributes.get("retry_count").unwrap().0,
+            Value::Number(3.into()),
+            "benign attribute should survive scrub_log unchanged"
+        );
+        assert_eq!(
+            scrubbed.attributes.get("status").unwrap().0,
+            Value::String("connected".to_string()),
+            "benign attribute should survive scrub_log unchanged"
+        );
+    }
+
+    /// Proves the wiring, not just the pure function: emits a `tracing::info!`
+    /// carrying a secret through a real `sentry_tracing::layer()` subscriber
+    /// and a real `sentry::Client` with `scrub_log` installed as
+    /// `before_send_log`, then inspects the envelope that would have left the
+    /// host. `scrub_log_redacts_secret_shaped_body` above calls `scrub_log`
+    /// directly, which proves the function redacts but not that the SDK
+    /// actually routes logs through it before sending — this is the
+    /// end-to-end check the ticket's "Check before shipping" section asked
+    /// for.
+    #[test]
+    fn scrub_log_redacts_a_secret_through_the_real_capture_pipeline() {
+        use tracing_subscriber::prelude::*;
+
+        let _dispatcher = tracing_subscriber::registry()
+            .with(sentry_tracing::layer())
+            .set_default();
+
+        let pk = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+
+        let envelopes = sentry::test::with_captured_envelopes_options(
+            || {
+                tracing::info!("loaded key {pk}");
+            },
+            sentry::ClientOptions {
+                enable_logs: true,
+                before_send_log: Some(Arc::new(scrub_log)),
+                ..Default::default()
+            },
+        );
+
+        let logs: Vec<_> = envelopes
+            .iter()
+            .flat_map(sentry::Envelope::items)
+            .filter_map(|item| match item {
+                sentry::protocol::EnvelopeItem::ItemContainer(
+                    sentry::protocol::ItemContainer::Logs(logs),
+                ) => Some(logs.iter()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        assert!(
+            !logs.is_empty(),
+            "expected at least one structured log to reach the envelope"
+        );
+        for log in &logs {
+            assert!(
+                !log.body.contains(pk),
+                "key survived the real subscriber -> sentry_tracing -> \
+                 before_send_log pipeline: {}",
+                log.body
+            );
+        }
+    }
+
+    #[test]
     fn resolve_sentry_log_level_defaults_to_warn_when_unset_or_invalid() {
+        use tracing_subscriber::prelude::*;
+
+        struct CapturesWarn(Arc<std::sync::Mutex<bool>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturesWarn {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    *self.0.lock().unwrap() = true;
+                }
+            }
+        }
+
         let previous = std::env::var("SENTRY_LOG_LEVEL").ok();
 
         // SAFETY: no other test reads or writes SENTRY_LOG_LEVEL.
@@ -619,7 +728,18 @@ mod tests {
         unsafe {
             std::env::set_var("SENTRY_LOG_LEVEL", "not-a-level");
         }
-        assert_eq!(resolve_sentry_log_level(), tracing::Level::WARN);
+        // An unparsable value (as opposed to an absent one) is a
+        // misconfiguration and must be visible, not silently identical to a
+        // deliberate WARN.
+        let saw_warn = Arc::new(std::sync::Mutex::new(false));
+        let subscriber = tracing_subscriber::registry().with(CapturesWarn(Arc::clone(&saw_warn)));
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(resolve_sentry_log_level(), tracing::Level::WARN);
+        });
+        assert!(
+            *saw_warn.lock().unwrap(),
+            "expected a WARN-level log when SENTRY_LOG_LEVEL is set but unparsable"
+        );
 
         // SAFETY: see above.
         unsafe {

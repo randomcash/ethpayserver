@@ -112,3 +112,10 @@ cognitive_complexity = "deny"
 # below. Test-only: the binaries run the regex implementation.
 scrub = { workspace = true }
 tokio = { version = "1.42", features = ["full", "test-util"] }
+# `test` unlocks `sentry::test::with_captured_envelopes_options`, which drives
+# a log through the real subscriber -> sentry_tracing -> before_send_log path
+# instead of calling `scrub_log` directly, so the test proves the wiring and
+# not just the pure function. `tracing-subscriber` installs the layer that
+# hooks `tracing::info!` up to that pipeline in the first place.
+sentry = { version = "0.47", default-features = false, features = ["test"] }
+tracing-subscriber = "0.3"
