@@ -118,4 +118,7 @@ tokio = { version = "1.42", features = ["full", "test-util"] }
 # not just the pure function. `tracing-subscriber` installs the layer that
 # hooks `tracing::info!` up to that pipeline in the first place.
 sentry = { version = "0.47", default-features = false, features = ["test"] }
-tracing-subscriber = "0.3"
+# `env-filter` builds the same `LOG_LEVEL` filter `server.rs` and
+# `evmmonitor/main.rs` do, so a test can construct their real layer stack
+# instead of a lookalike missing the filter that caused the independence bug.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

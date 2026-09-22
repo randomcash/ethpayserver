@@ -743,6 +743,52 @@ mod tests {
         );
     }
 
+    /// Regression test for a composition bug a review pass caught: a bare
+    /// `.with(filter)` layer sits in the same `Layered` stack as every other
+    /// layer, and `Layered::enabled` ANDs across all of them — so an event
+    /// the `LOG_LEVEL` filter rejects would never reach the Sentry layer's
+    /// `on_event` at all, making `SENTRY_LOG_LEVEL` only ever a *further*
+    /// restriction on top of `LOG_LEVEL`, never independent of it, exactly
+    /// contradicting the comment above the call sites in `server.rs` and
+    /// `evmmonitor/main.rs`. This builds that real stack — a strict
+    /// `LOG_LEVEL` filter per-layer-filtered onto the fmt layer, and
+    /// `sentry_log_event_filter` per-layer-filtered onto the Sentry layer,
+    /// the fix for that bug — and proves an INFO record still reaches Sentry
+    /// even though the sibling fmt layer's filter would drop it.
+    #[test]
+    fn sentry_log_event_filter_is_independent_of_the_log_level_filter_in_the_real_stack() {
+        use tracing_subscriber::prelude::*;
+
+        let _dispatcher = tracing_subscriber::registry()
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(sentry_log_event_filter(tracing::Level::INFO))
+                    .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_filter(tracing_subscriber::EnvFilter::new("error")),
+            )
+            .set_default();
+
+        let envelopes = sentry::test::with_captured_envelopes_options(
+            || {
+                tracing::info!(
+                    "should reach Sentry logs even though the sibling LOG_LEVEL=error filter would drop it"
+                );
+            },
+            client_options(None, None, "test".to_string()),
+        );
+
+        let logs = captured_logs(&envelopes);
+        assert!(
+            !logs.is_empty(),
+            "an INFO record should reach Sentry's structured logs even when a \
+             sibling layer's LOG_LEVEL filter is stricter (error) — SENTRY_LOG_LEVEL \
+             must be independent of LOG_LEVEL, not a further restriction on top of it"
+        );
+    }
+
     #[test]
     fn resolve_sentry_log_level_defaults_to_warn_when_unset_or_invalid() {
         use tracing_subscriber::prelude::*;
