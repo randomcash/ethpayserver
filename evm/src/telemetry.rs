@@ -28,6 +28,7 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use sentry::protocol::{Event, Value};
+use tracing::{Level, Metadata};
 
 /// Ordered `(pattern, replacement)` redaction rules applied to every free-text
 /// field. Compiled once and reused for the life of the process.
@@ -264,6 +265,31 @@ pub fn resolve_environment() -> String {
     std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
 }
 
+/// `sentry-tracing` event filter: same as [`sentry_tracing::default_event_filter`]
+/// except it downgrades `alloy_transport_ws`'s own `error!` logs to
+/// breadcrumbs instead of paged Sentry events.
+///
+/// That crate logs at `error!` whenever a single inbound WebSocket frame
+/// doesn't parse — including a bare `{"error": ...}` frame a provider sends
+/// with no `id`, which isn't a valid subscription notification or response.
+/// The log fires from inside its backend read loop, which already closes and
+/// reconnects with retries on its own (`alloy_pubsub`'s `PubSubService`
+/// re-subscribes everything once the socket is back) before this crate's
+/// block stream ever sees a gap. At the default mapping, one transient bad
+/// frame from an RPC provider pages exactly like a real outage would.
+///
+/// The genuine case — reconnection exhausted, the stream actually dies —
+/// still pages: it surfaces as this crate's own `error!("WebSocket
+/// subscription ended")` in `evm::monitor::source::rpc`, which is a
+/// different target and is untouched by this filter.
+#[must_use]
+pub fn sentry_event_filter(metadata: &Metadata<'_>) -> sentry_tracing::EventFilter {
+    if *metadata.level() == Level::ERROR && metadata.target().starts_with("alloy_transport_ws") {
+        return sentry_tracing::EventFilter::Breadcrumb;
+    }
+    sentry_tracing::default_event_filter(metadata)
+}
+
 /// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
 /// `before_send` hook and tagging events with [`resolve_environment`]. Shared
 /// by the `server` and `evmmonitor` binaries so the mainnet boot-gate and the
@@ -325,6 +351,60 @@ pub fn report_reporting_status(dsn_configured: bool, environment: &str) -> anyho
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `tracing::Subscriber` that runs [`sentry_event_filter`] on every
+    /// event it sees and records the verdict, so the filter can be tested
+    /// against real `tracing::Metadata` produced by the actual macros rather
+    /// than a hand-built one.
+    struct RecordingSubscriber(Arc<std::sync::Mutex<Vec<sentry_tracing::EventFilter>>>);
+
+    impl tracing::Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            self.0.lock().unwrap().push(sentry_event_filter(event.metadata()));
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// `alloy_transport_ws` logs `error!` for a single WebSocket frame that
+    /// failed to parse — the shape Sentry caught as ETHPAYSERVER-TESTNET-1
+    /// (a provider sending a bare `{"error": ...}` frame over a block
+    /// subscription). That log comes from a read loop that already
+    /// reconnects and re-subscribes on its own; without this filter it pages
+    /// exactly like a real outage on every transient bad frame. A real,
+    /// unrecovered failure must still page: this crate's own
+    /// `evm::monitor::source::rpc` target is untouched.
+    #[test]
+    fn alloy_ws_frame_noise_is_a_breadcrumb_but_our_own_subscription_failure_still_pages() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        tracing::subscriber::with_default(RecordingSubscriber(seen.clone()), || {
+            tracing::error!(target: "alloy_transport_ws", "failed to deserialize message");
+            tracing::error!(
+                target: "evm::monitor::source::rpc",
+                "WebSocket subscription ended"
+            );
+        });
+
+        let seen = seen.lock().unwrap();
+        let bits: Vec<u32> = seen.iter().map(|f| f.bits()).collect();
+        assert_eq!(
+            bits,
+            [
+                sentry_tracing::EventFilter::Breadcrumb.bits(),
+                sentry_tracing::EventFilter::Event.bits(),
+            ],
+            "alloy's own transient frame error must not page, but our subscription-ended error must: {seen:?}"
+        );
+    }
 
     #[test]
     fn redacts_eth_private_key_and_address() {

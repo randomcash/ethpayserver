@@ -555,13 +555,13 @@ fn init_tracing(log_level: &str, log_format: &str) {
     if json {
         tracing_subscriber::registry()
             .with(filter)
-            .with(sentry_tracing::layer())
+            .with(sentry_tracing::layer().event_filter(evm::telemetry::sentry_event_filter))
             .with(tracing_subscriber::fmt::layer().json())
             .init();
     } else {
         tracing_subscriber::registry()
             .with(filter)
-            .with(sentry_tracing::layer())
+            .with(sentry_tracing::layer().event_filter(evm::telemetry::sentry_event_filter))
             .with(tracing_subscriber::fmt::layer())
             .init();
     }
