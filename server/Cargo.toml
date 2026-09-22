@@ -56,8 +56,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error monitoring
-sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls"] }
-sentry-tracing = "0.47"
+sentry = { version = "0.49.3", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "metrics"] }
+sentry-tracing = "0.49.3"
 
 # Metrics
 metrics = "0.24"
@@ -109,6 +109,11 @@ data-service = { path = "../data-service", features = ["test-utils"] }
 evm = { path = "../evm", features = ["api", "redis", "test-utils"] }
 wat = "1.259.0"
 tempfile = "3"
+
+# Same crate/features as the `sentry` dependency above, plus `test`: gives
+# tests `sentry::test::with_captured_envelopes`, an isolated per-call Hub with
+# a captured transport. Dev-only, so it never reaches a production build.
+sentry = { version = "0.49.3", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "metrics", "test"] }
 
 # Clippy lints — catches panics on user-input paths at compile time.
 # `unwrap` / `expect` are allowed only in tests and in explicit initialisation

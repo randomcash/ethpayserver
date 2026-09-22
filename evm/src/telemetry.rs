@@ -24,7 +24,7 @@
 //! build for `wasm32`, which is the whole reason there are two.
 
 use std::borrow::Cow;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use regex::Regex;
 use sentry::protocol::{Event, Value};
@@ -279,18 +279,17 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
         .and_then(|s| s.parse().ok());
     let dsn_configured = dsn.is_some();
     let environment = resolve_environment();
-    let guard = sentry::init(sentry::ClientOptions {
-        dsn,
-        release,
-        environment: Some(Cow::Owned(environment.clone())),
+    let mut options = sentry::ClientOptions::new()
+        .maybe_release(release)
+        .environment(environment.clone())
         // Never attach default PII (IP, cookies, request bodies). This is a
         // payment processor.
-        send_default_pii: false,
+        .send_default_pii(false)
         // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
         // API keys, emails and on-chain addresses before events leave the host.
-        before_send: Some(Arc::new(scrub_event)),
-        ..Default::default()
-    });
+        .before_send(scrub_event);
+    options.dsn = dsn;
+    let guard = sentry::init(options);
     (guard, dsn_configured, environment)
 }
 
