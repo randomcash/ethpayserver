@@ -37,14 +37,47 @@
 //! inside their bracket. The symbols that were dropped come back with the
 //! answer so an operator can see a rate feed is missing rather than wondering
 //! why a merchant's gauge reads low.
+//!
+//! # `BulkMerchantVolumeReader`: the same question, for a table of accounts
+//!
+//! An operator table listing every account's standing cannot ask
+//! [`MerchantVolumeReader::merchant_volume`] once per row from inside a
+//! single wasm call and stay inside that call's deadline - the table has no
+//! bound on how many accounts it draws, and every row is a store lookup, a
+//! `payment_volume_by_day` query and a live rate lookup. Before this, an
+//! operator page could show who was lapsed or who had paid something
+//! (`credited_invoices`, the plugin's own subscription invoices) but not real
+//! settled volume at any scale that mattered, which is the row an operator
+//! most wants to see: who is about to cross a bracket.
+//!
+//! [`BulkMerchantVolumeReader::merchant_volumes`] answers for a batch: one
+//! [`data_service::PaymentAnalyticsReader::payment_volume_by_day_per_store`]
+//! query across every account's stores instead of one
+//! `payment_volume_by_day` per account, and one rate lookup per distinct
+//! asset in the batch instead of one per asset per account.
+//!
+//! **Not yet reachable from a plugin.** `payserver-plugin-host`'s
+//! `PluginHostCalls` trait has gained a `merchant_volumes` method and a
+//! matching wasm import (`define_answering_call`, the same helper
+//! `merchant_volume` uses), tested the same way that one is. None of that is
+//! visible to this repo yet: `payserver-plugin-host` is pinned by revision in
+//! this repo's `Cargo.toml`, and a change there does not reach here until the
+//! pin moves, which needs the commons change merged first - a same-session
+//! commit on a branch that could still be rebased is not something a pin
+//! should ever point at. Once the pin does move, wiring this repo's side is:
+//! implement `merchant_volumes` on [`super::host_calls::PluginCalls`], the
+//! same shape as `read_volume` there (a `DeferredBulkVolume` cell, a request
+//! carrying a list of account ids in place of one), and call
+//! [`BulkMerchantVolumeReader::merchant_volumes`] from it. No design decision
+//! is open at that point, only the wiring.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use async_trait::async_trait;
 use auth::SessionService;
 use auth::repository::StoreRepository;
 use chrono::{Duration, Utc};
-use data_service::{PaymentAnalyticsReader, PaymentVolumeQuery};
+use data_service::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
 use rust_decimal::Decimal;
 use types::{StoreId, UserId};
 
@@ -58,6 +91,14 @@ use crate::state::PgAppState;
 /// on, and is the clamp rather than a refusal so a plugin asking for too much
 /// gets an answer it can use instead of an error it has to handle.
 pub const MAX_WINDOW_DAYS: u32 = 366;
+
+/// The most accounts one bulk read will answer for.
+///
+/// `merchant_volumes` exists to turn N per-account calls into one, not to
+/// remove the ceiling on N entirely: a caller inside a wasm call deadline
+/// still needs a bound on how much work a single call can trigger, the same
+/// reason `storage_query` caps its statement count.
+pub const MAX_ACCOUNTS_PER_BULK_READ: usize = 500;
 
 /// One account's settled volume, quoted in a single currency.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +129,43 @@ pub trait MerchantVolumeReader: Send + Sync {
         window_days: u32,
         currency: &str,
     ) -> Result<MerchantVolume, String>;
+}
+
+/// One account's settled volume, as part of a [`BulkMerchantVolumeReader`]
+/// answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountVolume {
+    pub account_id: UserId,
+    pub volume: MerchantVolume,
+}
+
+/// Read many accounts' settled volume in one round trip.
+///
+/// A table listing every account's standing - the case this exists for -
+/// cannot call [`MerchantVolumeReader::merchant_volume`] once per row: each
+/// call is a store lookup, a `payment_volume_by_day` query and at least one
+/// live rate lookup, and a caller inside a wasm host call's deadline runs out
+/// of budget long before the table does. This asks once for the whole batch:
+/// one `payment_volume_by_day_per_store` query across every account's stores,
+/// and one rate lookup per distinct asset in the batch rather than one per
+/// account.
+///
+/// Accounts that own no stores are still answered, with a zero volume -
+/// omitting them would make "no data yet" indistinguishable from "the read
+/// failed for this one account" to a caller that only gets a list back.
+/// Duplicate account ids collapse to one entry, and the answer is ordered by
+/// account id rather than by request order.
+#[async_trait]
+pub trait BulkMerchantVolumeReader: Send + Sync {
+    /// # Errors
+    /// A message describing what could not be read, or that the batch
+    /// exceeded [`MAX_ACCOUNTS_PER_BULK_READ`].
+    async fn merchant_volumes(
+        &self,
+        account_ids: &[UserId],
+        window_days: u32,
+        currency: &str,
+    ) -> Result<Vec<AccountVolume>, String>;
 }
 
 /// The capability, over the instance's data service and rate provider.
@@ -173,6 +251,112 @@ impl<A: SessionService + 'static> MerchantVolumeReader for PluginMerchantVolume<
             currency: currency.to_string(),
             unpriced_assets: unpriced.into_iter().collect(),
         })
+    }
+}
+
+#[async_trait]
+impl<A: SessionService + 'static> BulkMerchantVolumeReader for PluginMerchantVolume<A> {
+    async fn merchant_volumes(
+        &self,
+        account_ids: &[UserId],
+        window_days: u32,
+        currency: &str,
+    ) -> Result<Vec<AccountVolume>, String> {
+        if account_ids.len() > MAX_ACCOUNTS_PER_BULK_READ {
+            return Err(format!(
+                "cannot read volume for {} accounts in one call; the limit is {MAX_ACCOUNTS_PER_BULK_READ}",
+                account_ids.len()
+            ));
+        }
+
+        let until = Utc::now();
+        let since = until - Duration::days(i64::from(window_days.clamp(1, MAX_WINDOW_DAYS)));
+
+        // Every account starts with an empty bucket list, so one that owns no
+        // stores - or owns stores with no payments in the window - still gets
+        // a zero-volume answer rather than silently dropping out of the
+        // batch. Keyed on the inner `Uuid` rather than `UserId` itself, which
+        // does not derive `Ord`.
+        let mut per_account_buckets: BTreeMap<uuid::Uuid, Vec<PaymentVolumeBucket>> = account_ids
+            .iter()
+            .map(|&account_id| (account_id.0, Vec::new()))
+            .collect();
+
+        let mut store_owner: HashMap<StoreId, UserId> = HashMap::new();
+        for &account_id in account_ids {
+            let stores =
+                StoreRepository::get_stores_owned_by(&*self.state.data_service, account_id)
+                    .await
+                    .map_err(|e| format!("could not read this account's stores: {e}"))?;
+            for store in stores {
+                store_owner.insert(store.id, account_id);
+            }
+        }
+
+        if !store_owner.is_empty() {
+            let buckets = PaymentAnalyticsReader::payment_volume_by_day_per_store(
+                &*self.state.data_service,
+                &PaymentVolumeQuery {
+                    store_ids: store_owner.keys().copied().collect(),
+                    since,
+                    until,
+                },
+            )
+            .await
+            .map_err(|e| format!("could not read this batch's payment volume: {e}"))?;
+
+            for bucket in buckets {
+                // Every store in this query came from `store_owner`, so the
+                // lookup cannot miss.
+                let Some(&account_id) = store_owner.get(&bucket.store_id) else {
+                    continue;
+                };
+                per_account_buckets
+                    .entry(account_id.0)
+                    .or_default()
+                    .push(PaymentVolumeBucket {
+                        day: bucket.day,
+                        asset_symbol: bucket.asset_symbol,
+                        decimals: bucket.decimals,
+                        raw_amount: bucket.raw_amount,
+                        payment_count: bucket.payment_count,
+                    });
+            }
+        }
+
+        let per_account_assets: BTreeMap<uuid::Uuid, BTreeMap<(String, u8), Decimal>> =
+            per_account_buckets
+                .into_iter()
+                .map(|(account_id, buckets)| (account_id, collapse_by_asset(buckets)))
+                .collect();
+
+        // One rate lookup per distinct asset across the whole batch, rather
+        // than one per asset per account - the saving that makes this call
+        // cheaper than looping the single-account reader.
+        let assets: Vec<String> = per_account_assets
+            .values()
+            .flat_map(|per_asset| per_asset.keys().map(|(asset, _)| asset.clone()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|asset| !asset.eq_ignore_ascii_case(currency))
+            .collect();
+        let rates = self.rates_for(&assets, currency).await;
+
+        Ok(per_account_assets
+            .into_iter()
+            .map(|(account_id, per_asset)| {
+                let (total, unpriced) =
+                    total_in(&per_asset, currency, |asset| rates.get(asset).copied());
+                AccountVolume {
+                    account_id: UserId(account_id),
+                    volume: MerchantVolume {
+                        volume: reportable(total).to_string(),
+                        currency: currency.to_string(),
+                        unpriced_assets: unpriced.into_iter().collect(),
+                    },
+                }
+            })
+            .collect())
     }
 }
 

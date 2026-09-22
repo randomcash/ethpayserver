@@ -6,7 +6,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{PaymentReader, PaymentWriter, RepositoryError, RepositoryResult, sqlx_to_repo_error};
-use types::{AssetType, InvoiceId, PaymentData, PaymentQueryParams};
+use types::{AssetType, InvoiceId, PaymentData, PaymentQueryParams, StoreId};
 
 use super::{PgDataService, search_contains_pattern, search_prefix_pattern};
 
@@ -530,7 +530,9 @@ impl PaymentEventWriter for PgDataService {
 // =============================================================================
 
 use super::conversions::chain_id_from_row;
-use crate::analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
+use crate::analytics::{
+    PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery, StorePaymentVolumeBucket,
+};
 
 #[async_trait]
 impl PaymentAnalyticsReader for PgDataService {
@@ -585,6 +587,66 @@ impl PaymentAnalyticsReader for PgDataService {
                     RepositoryError::Database(format!("negative token decimals: {raw_decimals}"))
                 })?;
                 Ok(PaymentVolumeBucket {
+                    day: row.get("day"),
+                    asset_symbol: row.get("asset_symbol"),
+                    decimals,
+                    raw_amount: row
+                        .get::<Option<String>, _>("raw_amount")
+                        .unwrap_or_default(),
+                    payment_count: row.get("payment_count"),
+                })
+            })
+            .collect()
+    }
+
+    async fn payment_volume_by_day_per_store(
+        &self,
+        query: &PaymentVolumeQuery,
+    ) -> RepositoryResult<Vec<StorePaymentVolumeBucket>> {
+        // Same short-circuit as `payment_volume_by_day`, for the same reason.
+        if query.store_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let store_ids: Vec<Uuid> = query.store_ids.iter().map(|s| s.0).collect();
+
+        // Identical to `payment_volume_by_day` with `i.store_id` carried into
+        // the SELECT and the group key rather than only the WHERE clause.
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                i.store_id AS store_id,
+                (p.detected_at AT TIME ZONE 'UTC')::date AS day,
+                p.asset_symbol AS asset_symbol,
+                COALESCE(po.decimals, 18)::smallint AS decimals,
+                SUM(p.amount)::text AS raw_amount,
+                COUNT(*) AS payment_count
+            FROM payments p
+            JOIN invoices i ON i.id = p.invoice_id
+            LEFT JOIN payment_options po ON po.id = p.payment_option_id
+            WHERE i.store_id = ANY($1)
+              AND p.reorged = FALSE
+              AND p.detected_at >= $2
+              AND p.detected_at < $3
+            GROUP BY 1, 2, 3, 4
+            ORDER BY 1, 2, 3, 4
+            "#,
+        )
+        .bind(&store_ids)
+        .bind(query.since)
+        .bind(query.until)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        rows.iter()
+            .map(|row| {
+                let raw_decimals: i16 = row.get("decimals");
+                let decimals = u8::try_from(raw_decimals).map_err(|_| {
+                    RepositoryError::Database(format!("negative token decimals: {raw_decimals}"))
+                })?;
+                Ok(StorePaymentVolumeBucket {
+                    store_id: StoreId(row.get("store_id")),
                     day: row.get("day"),
                     asset_symbol: row.get("asset_symbol"),
                     decimals,
