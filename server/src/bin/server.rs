@@ -302,20 +302,12 @@ async fn main() -> Result<()> {
     tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
 
-    // Mark the redis bridge and webhook worker as shutting down as soon as a
-    // stop signal arrives, so a subscription or job-loop error caused by the
-    // container's own network dropping out during teardown logs as expected
-    // shutdown noise rather than as a fault.
-    {
-        let bridge = Arc::clone(&bridge);
-        let webhook_service = Arc::clone(&webhook_service);
-        tokio::spawn(async move {
-            shutdown_signal().await;
-            tracing::info!("shutdown signal received");
-            bridge.begin_shutdown();
-            webhook_service.begin_shutdown();
-        });
-    }
+    // Cloned here rather than where they're used below (wired into axum's
+    // graceful shutdown, near the bottom of `main`) because `webhook_service`
+    // is moved into `state.webhook_sink` in the meantime and `bridge` would
+    // otherwise need a clone at that call site anyway.
+    let bridge_for_shutdown = Arc::clone(&bridge);
+    let webhook_service_for_shutdown = Arc::clone(&webhook_service);
 
     // 2. Invoice cleanup service - expires invoices and unwatches addresses
     //    Also queues webhook notifications when invoices expire
@@ -538,16 +530,29 @@ async fn main() -> Result<()> {
     }
 
     let listener = TcpListener::bind(&bind_addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(
+            bridge_for_shutdown,
+            webhook_service_for_shutdown,
+        ))
+        .await?;
 
     Ok(())
 }
 
 /// Resolves once the process receives a stop signal (Ctrl+C or SIGTERM).
 ///
-/// Mirrors evmmonitor's shutdown handling: this process has no other way to
-/// learn its container was asked to stop.
-async fn shutdown_signal() {
+/// Passed to `axum::serve(...).with_graceful_shutdown(...)`, which is what
+/// actually makes the signal stop the process — this process has no other
+/// way to learn its container was asked to stop. Marks the redis bridge and
+/// webhook worker as shutting down first, so a subscription or job-loop
+/// error caused by the container's own network dropping out during the
+/// drain that follows logs as expected shutdown noise rather than as a
+/// fault.
+async fn shutdown_signal(
+    bridge: Arc<RedisBridge>,
+    webhook_service: Arc<WebhookService<PgDataService>>,
+) {
     // Installing these handlers only fails if the OS refuses to let the
     // process register a signal handler at all, which would mean nothing
     // else in this process can be trusted to work either.
@@ -580,6 +585,10 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
+
+    tracing::info!("shutdown signal received");
+    bridge.begin_shutdown();
+    webhook_service.begin_shutdown();
 }
 
 /// Whether `log_format` selects JSON output, and a warning to log for a value

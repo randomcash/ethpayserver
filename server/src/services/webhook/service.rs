@@ -145,15 +145,6 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         );
 
         loop {
-            if self.shutting_down.load(Ordering::Relaxed) {
-                // Stop pulling new jobs once shutdown is requested, so the
-                // window in which a failure is expected-shutdown noise
-                // rather than a real fault is bounded to this check, not to
-                // however long the rest of the process takes to exit.
-                tracing::info!("Webhook delivery service stopping: shutdown in progress");
-                break;
-            }
-
             match self.process_next_job().await {
                 Ok(true) => {
                     // Processed a job, immediately check for more
@@ -551,12 +542,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_stops_without_touching_redis_once_shutdown_is_requested() {
-        // No Redis is reachable at this address. If `run()` reached
-        // `process_next_job()` it would error, log, sleep for
-        // `poll_interval` and loop again rather than returning — so this
-        // only passes because the shutdown check at the top of the loop
-        // exits before ever calling it.
+    async fn run_keeps_draining_the_queue_after_shutdown_is_requested() {
+        // Shutdown only changes the log level `process_next_job` errors are
+        // reported at (see `log_process_error`); it must not stop the loop
+        // from picking up whatever jobs are still queued, or a container
+        // that takes a moment to actually exit would stop delivering
+        // webhooks the instant the stop signal arrived rather than at exit.
         let service = Arc::new(
             WebhookService::new(
                 Arc::new(data_service::InMemoryDataService::default()),
@@ -567,8 +558,12 @@ mod tests {
         );
         service.begin_shutdown();
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), service.run())
-            .await
-            .expect("run() must return promptly once shutdown was requested before it started");
+        let handle = tokio::spawn(Arc::clone(&service).run());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !handle.is_finished(),
+            "run() must keep looping after shutdown was requested, not return early"
+        );
+        handle.abort();
     }
 }
