@@ -300,13 +300,23 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
 /// `alloy_transport_ws` logs at `error!` for every ordinary WebSocket hiccup a
 /// long-lived RPC connection sees - a proxy resetting an idle socket, a
 /// missed keepalive pong - and `sentry_tracing`'s default filter turns any
-/// `error!` into a full Sentry event regardless of which crate logged it.
-/// `RpcBlockSource` (`evm::monitor::source::rpc`) already resubscribes past
-/// exactly this kind of drop once the stream goes quiet, so every blip the
-/// library logs was paging as if nothing were handling it. This keeps that
-/// target at a breadcrumb instead - a real outage's event still carries the
-/// disconnects that led to it - while leaving every other target, including
-/// our own `error!` calls, on the default behaviour.
+/// `error!` into a full Sentry event regardless of which crate logged it. So
+/// every blip the library logs was paging as if nothing were handling it,
+/// even though something was: every `alloy_transport_ws` backend error closes
+/// its connection handle with an error signal that `alloy_pubsub`'s service
+/// loop (`alloy_pubsub::service`) always catches, and that loop always
+/// attempts reconnection before giving up.
+///
+/// That is what makes demoting the whole target safe rather than a blanket
+/// swallow: `alloy_pubsub::service` is the *only* caller of the WS backend,
+/// so nothing here can silently drop a connection without going through it,
+/// and when its retries are actually exhausted it logs its own `error!`
+/// ("Reconnect failed after N attempts, shutting down") under the
+/// `alloy_pubsub` target - a sibling crate this filter does not touch, so
+/// that event still reaches Sentry. A transient reset stays a breadcrumb; a
+/// connection `alloy_pubsub` truly cannot re-establish still pages, just
+/// under a different logger than the one that first noticed the drop. See
+/// `alloy_pubsub_giving_up_still_pages` below.
 #[must_use]
 pub fn sentry_event_filter(metadata: &tracing::Metadata) -> sentry_tracing::EventFilter {
     if metadata.target().starts_with("alloy_transport_ws") {
@@ -691,6 +701,28 @@ mod tests {
         assert!(
             filter.contains(sentry_tracing::EventFilter::Event),
             "an error from our own code must still reach Sentry as an event, got {filter:?}"
+        );
+    }
+
+    /// Every `alloy_transport_ws` backend error routes through
+    /// `alloy_pubsub`'s service loop, which always tries to reconnect before
+    /// giving up. When it genuinely exhausts its retries it logs its own
+    /// `error!` under the `alloy_pubsub` target, not `alloy_transport_ws` -
+    /// so demoting the latter to a breadcrumb does not hide a connection that
+    /// never comes back. This is the escalation path the ticket warned
+    /// against silently papering over; unlike the transient-reset case, it
+    /// must still resolve to `Event`.
+    #[test]
+    fn alloy_pubsub_giving_up_still_pages() {
+        let filter = observed_filter(|| {
+            tracing::error!(
+                target: "alloy_pubsub::service",
+                "Reconnect failed after 10 attempts, shutting down: backend gone"
+            );
+        });
+        assert!(
+            filter.contains(sentry_tracing::EventFilter::Event),
+            "a WS connection alloy_pubsub gave up reconnecting must still page, got {filter:?}"
         );
     }
 
