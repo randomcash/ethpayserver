@@ -269,19 +269,29 @@ pub fn resolve_environment() -> String {
 /// except it downgrades `alloy_transport_ws`'s own `error!` logs to
 /// breadcrumbs instead of paged Sentry events.
 ///
-/// That crate logs at `error!` whenever a single inbound WebSocket frame
-/// doesn't parse — including a bare `{"error": ...}` frame a provider sends
-/// with no `id`, which isn't a valid subscription notification or response.
-/// The log fires from inside its backend read loop, which already closes and
-/// reconnects with retries on its own (`alloy_pubsub`'s `PubSubService`
-/// re-subscribes everything once the socket is back) before this crate's
-/// block stream ever sees a gap. At the default mapping, one transient bad
-/// frame from an RPC provider pages exactly like a real outage would.
+/// This is a whole-target match, not a match on one message, because it's
+/// audited against every `error!` call site in that crate's native backend
+/// (`alloy-transport-ws` 1.8.3: a frame that doesn't parse, a close frame, a
+/// missed keepalive pong, a dropped socket), and every one of them ends the
+/// same way — the backend loop breaks and calls `close_with_error()`, handing
+/// off to `alloy_pubsub`'s own retry-with-backoff (`PubSubService`
+/// reconnects and re-subscribes on its own, 10 attempts 3s apart by default)
+/// before this crate's block stream ever sees a gap. There is no `error!` in
+/// that crate for a case that *isn't* retried underneath it, so narrowing the
+/// match to the one message this ticket happened to catch would leave the
+/// rest of the same noise — a missed pong, a dropped socket — still paging.
 ///
 /// The genuine case — reconnection exhausted, the stream actually dies —
-/// still pages: it surfaces as this crate's own `error!("WebSocket
-/// subscription ended")` in `evm::monitor::source::rpc`, which is a
-/// different target and is untouched by this filter.
+/// still pages, and does so from two targets neither touched by this filter:
+/// `alloy_pubsub::service`'s own `error!("Reconnect failed after N attempts,
+/// shutting down")`, and, once that closes the subscription stream, this
+/// crate's `error!("WebSocket subscription ended")` in
+/// `evm::monitor::source::rpc`.
+///
+/// `alloy` is pinned by a caret (`"1.0"` in `evm/Cargo.toml`), so a routine
+/// point release can change this without bumping our version constraint —
+/// re-run this audit against the resolved `alloy-transport-ws` version if
+/// this filter is ever suspected of over- or under-matching.
 #[must_use]
 pub fn sentry_event_filter(metadata: &Metadata<'_>) -> sentry_tracing::EventFilter {
     if *metadata.level() == Level::ERROR && metadata.target().starts_with("alloy_transport_ws") {
