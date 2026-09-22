@@ -269,6 +269,20 @@ pub fn resolve_environment() -> String {
 /// except it downgrades `alloy_transport_ws`'s own `error!` logs to
 /// breadcrumbs instead of paged Sentry events.
 ///
+/// There is no defect of ours to fix here: the log this filter targets is
+/// emitted entirely inside `alloy_transport_ws`'s own source, for a
+/// malformed frame a provider sent, and this crate never sees the bytes
+/// before that library's read loop does. That makes it the environmental
+/// case — a peer sending something unexpected — and a `error!` log line
+/// that already gets a full reconnect-and-resubscribe underneath it is not
+/// a silent failure to paper over. But leaving it at the default severity
+/// and just noting "this is fine" somewhere doesn't stop the next
+/// transient frame from paging on-call again; downgrading it to a
+/// breadcrumb here is what actually stops that, and it's backed by an
+/// audit (below) and a test that the genuine failure case — reconnection
+/// exhausted, the stream actually dies — still pages. Treat this function,
+/// not a comment elsewhere, as the record of that determination.
+///
 /// This is a whole-target match, not a match on one message, because it's
 /// audited against every `error!` call site in that crate's native backend
 /// (`alloy-transport-ws` 1.8.3: a frame that doesn't parse, a close frame, a
@@ -419,6 +433,29 @@ mod tests {
                 sentry_tracing::EventFilter::Event.bits(),
             ],
             "alloy's own transient frame error must not page, but our subscription-ended error must: {seen:?}"
+        );
+    }
+
+    /// The audited call sites live in `alloy_transport_ws::native` — a
+    /// submodule, not the crate root — so the filter has to match on the
+    /// target *prefix*, not equality. This proves that distinction actually
+    /// matters: it fires `error!` under the submodule target and would still
+    /// pass if `sentry_event_filter` used `==` instead of `starts_with`
+    /// against the one target the other test exercises, but not against this
+    /// one.
+    #[test]
+    fn alloy_ws_submodule_targets_are_also_a_breadcrumb() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        tracing::subscriber::with_default(RecordingSubscriber(seen.clone()), || {
+            tracing::error!(target: "alloy_transport_ws::native", "WS server missed a pong");
+        });
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter().map(|f| f.bits()).collect::<Vec<_>>(),
+            [sentry_tracing::EventFilter::Breadcrumb.bits()],
+            "a submodule target under alloy_transport_ws must also be treated as noise: {seen:?}"
         );
     }
 
