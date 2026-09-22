@@ -1,6 +1,7 @@
 //! Webhook delivery service: queue, delivery loop, signing, and retry handling.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -49,6 +50,12 @@ pub struct WebhookService<D: WebhookDataService> {
     redis_client: redis::Client,
     http_client: reqwest::Client,
     config: WebhookConfig,
+    /// Set once the owning process has asked to stop.
+    ///
+    /// The job loop keeps polling regardless of errors, so a Redis failure
+    /// caused by the container's network dropping out during shutdown reads
+    /// identically to a real fault unless we know shutdown was asked for.
+    shutting_down: AtomicBool,
 }
 
 impl<D: WebhookDataService + 'static> WebhookService<D> {
@@ -71,7 +78,17 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             redis_client,
             http_client,
             config,
+            shutting_down: AtomicBool::new(false),
         })
+    }
+
+    /// Mark this service as shutting down intentionally.
+    ///
+    /// Call this from the process's own shutdown handler. A job-loop error
+    /// logged afterwards is downgraded from `error` to `info` — it is the
+    /// expected shape of a container being torn down, not a fault.
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Relaxed);
     }
 
     /// Queue a webhook for delivery.
@@ -130,10 +147,23 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     tokio::time::sleep(self.config.poll_interval).await;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "Error processing webhook job");
+                    self.log_process_error(&e);
                     tokio::time::sleep(self.config.poll_interval).await;
                 }
             }
+        }
+    }
+
+    /// Log a `process_next_job` failure at the level its cause deserves.
+    ///
+    /// During an intentional shutdown, the container's network can drop out
+    /// from under this loop's Redis connection, which fails identically to a
+    /// real fault. Only the unrequested case should reach Sentry.
+    fn log_process_error(&self, e: &WebhookError) {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            tracing::info!(error = %e, "Webhook job processing failed during shutdown");
+        } else {
+            tracing::error!(error = %e, "Error processing webhook job");
         }
     }
 

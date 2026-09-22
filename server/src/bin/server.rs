@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::TcpListener;
+use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -301,6 +302,21 @@ async fn main() -> Result<()> {
     tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
 
+    // Mark the redis bridge and webhook worker as shutting down as soon as a
+    // stop signal arrives, so a subscription or job-loop error caused by the
+    // container's own network dropping out during teardown logs as expected
+    // shutdown noise rather than as a fault.
+    {
+        let bridge = Arc::clone(&bridge);
+        let webhook_service = Arc::clone(&webhook_service);
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            tracing::info!("shutdown signal received");
+            bridge.begin_shutdown();
+            webhook_service.begin_shutdown();
+        });
+    }
+
     // 2. Invoice cleanup service - expires invoices and unwatches addresses
     //    Also queues webhook notifications when invoices expire
     let cleanup_config = CleanupConfig::from_env();
@@ -525,6 +541,45 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Resolves once the process receives a stop signal (Ctrl+C or SIGTERM).
+///
+/// Mirrors evmmonitor's shutdown handling: this process has no other way to
+/// learn its container was asked to stop.
+async fn shutdown_signal() {
+    // Installing these handlers only fails if the OS refuses to let the
+    // process register a signal handler at all, which would mean nothing
+    // else in this process can be trusted to work either.
+    #[allow(
+        clippy::expect_used,
+        reason = "handler registration failure is unrecoverable at startup"
+    )]
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    #[allow(
+        clippy::expect_used,
+        reason = "handler registration failure is unrecoverable at startup"
+    )]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 /// Whether `log_format` selects JSON output, and a warning to log for a value

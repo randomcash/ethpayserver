@@ -234,6 +234,12 @@ async fn main() -> anyhow::Result<()> {
     shutdown_signal().await;
     info!("shutdown signal received");
 
+    // Mark the bridge as shutting down before anything else, so a
+    // subscription that ends while we tear down (the compose network can
+    // drop out from under a still-running container) logs as expected
+    // rather than as a fault.
+    bridge.begin_shutdown();
+
     // Abort background tasks
     command_handle.abort();
     health_handle.abort();
