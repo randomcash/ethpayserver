@@ -22,10 +22,16 @@ name: Nightly visual review (testnet)
 # scripts/sentry-poll.sh in central-infrastructure won't even put a Sentry
 # *link* in this repo for the same reason. The full report (what's wrong, per
 # route and viewport) goes to the run's artifact instead, which isn't
-# search-indexed or rendered as public issue text. Routing findings into
-# Linear itself — what the ticket actually asked for — needs a poll on the
-# private side reading this artifact, the same shape as sentry-poll.sh; that
-# is a central-infrastructure change, not one this workflow can make alone.
+# search-indexed or rendered as public issue text.
+#
+# Routing findings into Linear itself — what the ticket actually asked for —
+# is deliberately not attempted from here: it would need a poll reading this
+# artifact from the private side and a Linear write credential, the same
+# shape as sentry-poll.sh, and this repo is public — it must never hold that
+# credential, and no automation dispatched against this checkout has commit
+# access to central-infrastructure to add the poll that would use it. That
+# makes this a central-infrastructure change with its own review, not
+# unfinished work this workflow can close by degrees.
 
 on:
   schedule:
