@@ -19,9 +19,24 @@
 //! the rule on `payserver_chain_block_lag` should use `max` (catches the
 //! worst lag in the window, not one smoothed by a moment of catching up).
 //! This is configured where the alert rule itself lives, in Sentry, not in
-//! this module - there is nothing here to set. Confirming the rule fires end
-//! to end needs a live Sentry project and was not verified in this change;
-//! see the PR description for what was and wasn't checked.
+//! this module - there is nothing here to set.
+//!
+//! **Verification status: the SDK-level contract is confirmed, the alert
+//! itself is not.** `fanout_recorder_forwards_real_chain_health_gauges_to_sentry`
+//! (in this module's tests) proves `payserver_chain_healthy` and
+//! `payserver_chain_block_lag` reach Sentry as `Gauge`-typed points with the
+//! right value and `chain_id` attribute, through the real
+//! `set_chain_healthy`/`set_chain_blocks` call sites - everything this
+//! process controls. Whether a threshold alert rule configured against that
+//! gauge actually fires is a property of the Sentry project the rule lives
+//! in, not of this code, and there is no test-double for "does the alert
+//! fire" - it needs a live Sentry project to check by creating the rule and
+//! triggering it. That check was not done: no live Sentry project was
+//! available in this change. Per the ticket that added this module, an
+//! unconfirmed alert is the one finding that decides whether metrics also
+//! ship to a second vendor (Grafana) as a fallback alerting path - treat
+//! this as unconfirmed, not as working, until someone with access to the
+//! real Sentry project creates the two rules and watches one fire.
 //!
 //! ## Volume cost before mainnet
 //!
@@ -69,8 +84,20 @@ static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 /// here before Sentry has configured the process Hub would silently capture
 /// against a disabled client. `server/src/bin/server.rs` calls `init_sentry`
 /// first for this reason; keep that order if this call site ever moves.
+///
+/// That ordering is checked at runtime, not just documented: this refuses to
+/// install the recorder (returning an error rather than a panic, since a
+/// misordered boot should fail the same way any other startup precondition
+/// does) unless [`sentry_hub_has_client`] confirms `init_sentry` already ran.
 /// Panics if called twice.
 pub fn init_metrics() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        sentry_hub_has_client(),
+        "init_metrics called before evm::telemetry::init_sentry - every metric captured \
+         to Sentry from this point on would write to a Hub with no client bound and be \
+         silently dropped, including payserver_chain_healthy/payserver_chain_block_lag"
+    );
+
     let prometheus = PrometheusBuilder::new().build_recorder();
     let handle = prometheus.handle();
     metrics::set_global_recorder(FanoutRecorder { prometheus })
@@ -87,6 +114,20 @@ pub fn init_metrics() -> anyhow::Result<()> {
     describe_histograms();
 
     Ok(())
+}
+
+/// Whether `sentry::init` has already bound a client to the process `Hub`.
+///
+/// `sentry::init` calls `Hub::current().bind_client(Some(client))`
+/// unconditionally - even with no `SENTRY_DSN` set, it binds a client that's
+/// simply disabled (drops events instead of sending them) rather than
+/// leaving the client slot empty. So this distinguishes "`init_sentry` ran"
+/// from "`init_sentry` has not run yet", not "a DSN is configured" - exactly
+/// the distinction [`init_metrics`] needs, since a disabled client still
+/// makes `sentry::metrics::*().capture()` a safe no-op, while no client at
+/// all means the call silently vanishes with no client to even be disabled.
+fn sentry_hub_has_client() -> bool {
+    sentry::Hub::current().client().is_some()
 }
 
 /// Forwards every counter/gauge/histogram registration to the wrapped
@@ -162,6 +203,15 @@ struct SentryCounter {
 
 impl CounterFn for SentryCounter {
     fn increment(&self, value: u64) {
+        // `value as f64` is lossy above 2^53 - fine for every counter today
+        // (each is an event count, not an asset-denominated total - see the
+        // module doc), but this trait boundary has no way to stop a future
+        // counter from carrying wei/satoshi volume instead, at which point
+        // Prometheus would stay exact while this silently rounds. Sentry's
+        // counter API is `f64`-only, so there is no lossless alternative
+        // here - a call site that starts recording amounts through a
+        // `Counter` needs to keep the exact total in Prometheus and treat
+        // the Sentry side as an approximation, not the other way round.
         self.prometheus.increment(value);
         let metric = sentry_labels(&self.key).fold(
             sentry::metrics::counter(self.key.name().to_string(), value as f64),
@@ -681,6 +731,54 @@ mod tests {
         describe_gauges();
         describe_histograms();
         handle
+    }
+
+    // Nothing in this test binary calls the real, unscoped `sentry::init` -
+    // every Sentry-touching test below goes through
+    // `sentry::test::with_captured_envelopes`, which binds a client to a
+    // scoped `Hub` for the duration of its closure only and restores the
+    // previous (clientless) `Hub` afterwards, on any thread. So outside such
+    // a closure the process `Hub` reliably has no client bound, the same as
+    // in a fresh process that hasn't called `evm::telemetry::init_sentry`
+    // yet - which is what makes the next two tests meaningful rather than
+    // order-dependent.
+    #[test]
+    fn sentry_hub_has_client_is_false_before_sentry_init() {
+        assert!(
+            !sentry_hub_has_client(),
+            "no test in this file calls the real sentry::init, so the process Hub must \
+             not have a client bound here - if it does, something is leaking a bound \
+             client across tests and every test below this in the run order is suspect"
+        );
+    }
+
+    // Pins the runtime guard `init_metrics` added specifically because the
+    // Sentry-forwarding half of every metric depends on an ordering
+    // invariant (`init_sentry` before `init_metrics`) that used to be
+    // documented only in a comment - nothing would have caught it if
+    // `server/src/bin/server.rs` ever got the two calls backwards. This
+    // drives `init_metrics` for real, with no client bound to the Hub (see
+    // `sentry_hub_has_client_is_false_before_sentry_init` above), and checks
+    // it fails closed instead of installing a recorder that would silently
+    // drop every metric sent to Sentry, including
+    // `payserver_chain_healthy`/`payserver_chain_block_lag`.
+    //
+    // Safe to call the real `init_metrics` here even though
+    // `metrics::set_global_recorder` is a process-wide singleton: the
+    // ordering check runs first and returns an error before that call is
+    // ever reached, so this can't poison the recorder for any other test.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn init_metrics_refuses_to_start_before_sentry_is_initialized() {
+        let err = init_metrics().expect_err(
+            "init_metrics must fail closed when called before evm::telemetry::init_sentry \
+             has bound a client to the process Hub, not silently install a recorder that \
+             drops every metric it tries to send to Sentry",
+        );
+        assert!(
+            err.to_string().contains("init_sentry"),
+            "error should name the missing precondition, got: {err}"
+        );
     }
 
     // Exercises `FanoutRecorder` directly, without going through
