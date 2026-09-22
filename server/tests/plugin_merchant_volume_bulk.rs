@@ -288,11 +288,18 @@ async fn a_batch_over_the_cap_is_rejected_before_touching_the_database() {
         .map(|_| UserId(Uuid::new_v4()))
         .collect();
 
-    let result = reader.merchant_volumes(&account_ids, 30, "USD").await;
+    let err = reader
+        .merchant_volumes(&account_ids, 30, "USD")
+        .await
+        .expect_err("a batch over the cap must be rejected");
 
+    // Asserted on the message, not just `is_err()`: the lazy pool's host
+    // does not exist either, so a batch that slipped past the cap check
+    // would still fail - for a database error - and a bare `is_err()` could
+    // not tell the two apart. This confirmed red when the cap check was
+    // temporarily removed and the call instead failed on the connection.
     assert!(
-        result.is_err(),
-        "a batch of {} accounts exceeds the cap of {MAX_ACCOUNTS_PER_BULK_READ} and must be rejected",
-        account_ids.len()
+        err.contains("in one call") && err.contains(&MAX_ACCOUNTS_PER_BULK_READ.to_string()),
+        "expected the cap-rejection message, got: {err}"
     );
 }
