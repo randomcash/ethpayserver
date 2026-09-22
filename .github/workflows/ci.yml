@@ -338,13 +338,26 @@ jobs:
             if [ "$attempt" = 3 ]; then echo "::error::apt failed 3 times"; exit 1; fi
           done
 
+      # SENTRY_RELEASE has to be a real env var at compile time: the binaries
+      # read it with `option_env!`, which resolves when rustc runs and never
+      # sees anything set later (a runtime env var, a Docker ENV on a base
+      # image, etc). Same 7 chars as `sha_tag` and `EXPECTED_SHA` below, so
+      # the release Sentry shows matches the build_sha the deploy check
+      # verifies against.
       - name: Build server
+        env:
+          SENTRY_RELEASE: ${{ github.sha }}
         run: |
+          export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
           cargo build --release --bin ethpayserver
           cargo build --release --bin migrate_postgres
 
       - name: Build monitor
-        run: cargo build --release --bin evmmonitor --features monitor-bin
+        env:
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: |
+          export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
+          cargo build --release --bin evmmonitor --features monitor-bin
 
       # upload-artifact@v4 roots the archive at the least common ancestor of the
       # paths given. While `client/dist/` was in this list that ancestor was the
