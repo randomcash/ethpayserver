@@ -13,6 +13,19 @@ name: Nightly visual review (testnet)
 # positives, and a gate that cries wolf gets disabled or ignored — see
 # scripts/health-gate.sh's history. Findings land as a GitHub issue a person
 # skims in a minute; nothing here fails the build.
+#
+# ethpayserver is public. The issue below deliberately carries counts and
+# routes only, never the per-finding "what is wrong" text — that text
+# describes live defects in a production payment processor's UI (an
+# unlabelled control, a raw decimal, a disabled button with no reason given),
+# and this org already treats that class of detail as private-tracker-only:
+# scripts/sentry-poll.sh in central-infrastructure won't even put a Sentry
+# *link* in this repo for the same reason. The full report (what's wrong, per
+# route and viewport) goes to the run's artifact instead, which isn't
+# search-indexed or rendered as public issue text. Routing findings into
+# Linear itself — what the ticket actually asked for — needs a poll on the
+# private side reading this artifact, the same shape as sentry-poll.sh; that
+# is a central-infrastructure change, not one this workflow can make alone.
 
 on:
   schedule:
@@ -53,19 +66,23 @@ jobs:
         working-directory: e2e
         run: npx playwright test tests/visual-review.spec.ts
 
-      - name: Upload screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: visual-review-screenshots
-          path: e2e/test-results/visual/
-          retention-days: 14
-
       - name: Run the review
         working-directory: e2e
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: node scripts/visual-review.mjs
+
+      # Screenshots, manifest.json, findings.json and report.md together, and
+      # only now — after the review step has written its output, not before.
+      # This artifact is where the actual per-finding "what is wrong" text
+      # lives; the issue filed below deliberately does not repeat it.
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-review-report
+          path: e2e/test-results/visual/
+          retention-days: 14
 
       - name: File findings
         if: always()
@@ -74,7 +91,6 @@ jobs:
           script: |
             const fs = require('fs');
             const findingsPath = 'e2e/test-results/visual/findings.json';
-            const reportPath = 'e2e/test-results/visual/report.md';
 
             // findings.json is always written once the review step actually
             // ran, even when it found nothing or ran into trouble — see
@@ -95,17 +111,41 @@ jobs:
             }
 
             const title = 'Nightly visual review: findings';
-            const report = fs.existsSync(reportPath)
-              ? fs.readFileSync(reportPath, 'utf8')
-              : ['# Nightly visual review', '', ...errors.map(e => `- ${e.reason}`)].join('\n');
-            const body = [
-              report,
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            // Counts and routes only — never `what_is_wrong`. That text
+            // describes live defects in a production payment processor's UI,
+            // and this issue is public, durable and search-indexed. The full
+            // report is in the `visual-review-report` artifact on this run.
+            const lines = ['# Nightly visual review', ''];
+            if (findings.length > 0) {
+              const byRoute = new Map();
+              for (const f of findings) byRoute.set(f.route, (byRoute.get(f.route) ?? 0) + 1);
+              lines.push(`${findings.length} finding(s) across ${byRoute.size} route(s):`, '');
+              for (const [route, count] of byRoute) lines.push(`- \`${route}\`: ${count}`);
+              lines.push('');
+            }
+            if (errors.length > 0) {
+              lines.push(`${errors.length} route(s) could not be reviewed — treat this run as incomplete, not clean:`, '');
+              for (const e of errors) {
+                const label = e.route ? `${e.route}${e.viewport && e.viewport !== 'n/a' ? ` (${e.viewport})` : ''}` : 'pipeline';
+                lines.push(`- ${label}: ${e.reason}`);
+              }
+              lines.push('');
+            }
+            lines.push(
+              `Run: ${runUrl}`,
               '',
-              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              'Per-finding detail (what is wrong, per route and viewport) and the',
+              'screenshots themselves are in the `visual-review-report` artifact on',
+              'that run, not here — advisory findings describe live defects in a',
+              'production payment processor and do not belong in a public, indexed',
+              'issue.',
               '',
-              'Screenshots are attached as the `visual-review-screenshots` artifact on that run.',
-              'This is advisory — a model judging layout will produce false positives. Skim, then close what does not hold up.',
-            ].join('\n');
+              'This is advisory — a model judging layout will produce false positives.',
+              'Pull the artifact, skim it, then close what does not hold up.',
+            );
+            const body = lines.join('\n');
 
             // Reuse the open issue if there is one, so a run that keeps finding
             // the same thing does not file a fresh issue every night.

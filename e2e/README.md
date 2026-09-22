@@ -289,6 +289,11 @@ visual-review-scheduled.yml` runs it nightly against testnet and files (or
 comments on) a `visual-review`-labelled issue only when there is something to
 report; it never fails the build.
 
+This repo is public, so the issue carries counts and affected routes only —
+never the per-finding "what is wrong" text, which describes live defects in a
+production payment processor's UI. The full report, findings.json and the
+screenshots themselves are the `visual-review-report` artifact on the run.
+
 A route that could not be captured (a broken passkey registration, a
 navigation timeout) or reviewed (an Anthropic API error) is not silently
 dropped — it lands in `findings.json`'s `errors` array and in `report.md`

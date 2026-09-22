@@ -59,12 +59,20 @@ const test = base.extend({});
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async ({ browser }) => {
+  // `test.skip(!RUN, ...)` inside each test body is a runtime skip — Playwright
+  // still runs the describe's beforeAll/afterAll either way. Without this guard,
+  // every unfiltered `npx playwright test` (i.e. ci.yml's `e2e` job, on every
+  // push) opens a browser context and writes an empty manifest.json into
+  // test-results/visual/, contradicting "a screenshot pass nobody reviews has
+  // no business slowing down every push."
+  if (!RUN) return;
   fs.mkdirSync(VISUAL_DIR, { recursive: true });
   const ctx = await browser.newContext();
   sharedPage = await ctx.newPage();
 });
 
 test.afterAll(async () => {
+  if (!RUN) return;
   fs.writeFileSync(path.join(VISUAL_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2));
   console.log(`\n=== VISUAL REVIEW: ${manifest.length} capture(s), ${manifest.filter(m => m.error).length} error(s) ===`);
   for (const m of manifest) {
