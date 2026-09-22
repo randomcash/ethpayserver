@@ -6,16 +6,21 @@
 //! up, every distinct id mints its own transaction name - unbounded
 //! cardinality and an unreadable performance page.
 //!
-//! Review finding, fixed: an earlier version of this test rebuilt a small
-//! router of its own instead of the real one, so it could not catch a
-//! regression in `server.rs`'s actual route table or `.layer()` ordering -
-//! it only proved sentry-tower behaves as documented when wired the way
-//! that file wired it. This version calls `server::api::router` - the exact
-//! function `server.rs` calls to build the router it serves - against a real
-//! Postgres connection, and layers it the same way `server.rs` does, so a
-//! reordering of the two `.layer()` calls or a dropped
-//! `tower-axum-matched-path` feature there fails this test instead of only
-//! showing up later on a live dashboard.
+//! Review finding, fixed for real this time: two earlier versions of this
+//! test proved only that sentry-tower behaves as documented when wired a
+//! particular way - first by rebuilding a small router of its own, then by
+//! calling the real `server::api::router` but hand-copying the two
+//! `.layer()` calls `bin/server.rs::main` makes inline. Both left a
+//! reordering or a dropped layer in `main` free to regress unnoticed,
+//! because `server/tests/` links the library crate, not the `main` binary,
+//! and nothing forced the copy to match.
+//!
+//! `server::api::with_sentry_performance_tracing` closes that gap: it is
+//! the one function `main` calls to add these layers, and this test calls
+//! the same function on the same `server::api::router` output. There is no
+//! second copy left to drift - a reordering or a dropped
+//! `tower-axum-matched-path` feature there fails this test, not just a
+//! stand-in for it.
 //!
 //! Needs `DATABASE_URL`; skips (does not fail) when it's unset, the same
 //! convention the other ignored integration tests in this directory use.
@@ -80,12 +85,12 @@ fn transaction_name_is_the_route_pattern_not_the_request_uri() {
     };
     let state = app_state(Arc::new(pg));
 
-    // The exact router-building call `server.rs` makes, layered the exact
-    // same way (same two layers, same order) - so this test exercises the
-    // real wiring, not a stand-in for it.
-    let app = server::api::router(state, false, None, None, None)
-        .layer(sentry::integrations::tower::SentryHttpLayer::new().enable_transaction())
-        .layer(sentry::integrations::tower::NewSentryLayer::<axum::extract::Request>::new_from_top());
+    // The exact router-building call `server.rs` makes, passed through the
+    // exact function `server.rs` calls to add the Sentry layers - so a
+    // change to either in `main` is exercised here too, not just in a copy.
+    let app = server::api::with_sentry_performance_tracing(server::api::router(
+        state, false, None, None, None,
+    ));
 
     let options = sentry::ClientOptions {
         // Sample everything: the property under test is the transaction's

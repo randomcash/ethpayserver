@@ -608,3 +608,23 @@ where
 
     app
 }
+
+/// Add the Sentry performance-tracing layers: a transaction per request,
+/// named from the matched route pattern (`tower-axum-matched-path`) rather
+/// than the raw request URI. Without this, every distinct invoice/store/etc.
+/// id mints its own transaction name — unbounded cardinality, an unreadable
+/// performance page.
+///
+/// Pulled out of `bin/server.rs::main` so the integration test in
+/// `server/tests/sentry_transaction_naming.rs` applies the exact same
+/// layers, in the exact same order, to the exact same router `main` serves —
+/// a copy-pasted pair of `.layer()` calls in the test would drift silently
+/// if this one ever changed.
+pub fn with_sentry_performance_tracing(router: Router) -> Router {
+    // Axum runs middleware in the reverse order it's `.layer()`-ed, so
+    // `NewSentryLayer` must be added last to end up outermost of
+    // `SentryHttpLayer`, per sentry-tower's documented ordering.
+    router
+        .layer(sentry::integrations::tower::SentryHttpLayer::new().enable_transaction())
+        .layer(sentry::integrations::tower::NewSentryLayer::<axum::extract::Request>::new_from_top())
+}
