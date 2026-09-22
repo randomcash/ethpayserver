@@ -246,11 +246,12 @@ async fn main() -> anyhow::Result<()> {
     // `abort()` only takes effect on the task's next poll, so if the task
     // isn't already mid-poll when we call it, the task is dropped before
     // that tail (and its shutdown-vs-fault log line) ever runs.
-    if tokio::time::timeout(std::time::Duration::from_secs(1), &mut command_handle)
-        .await
-        .is_err()
-    {
-        command_handle.abort();
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut command_handle).await {
+        Err(_) => command_handle.abort(),
+        Ok(Err(join_error)) => {
+            tracing::warn!(error = %join_error, "command handler task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
     }
     health_handle.abort();
 

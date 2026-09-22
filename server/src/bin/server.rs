@@ -341,7 +341,7 @@ async fn main() -> Result<()> {
         Some((store_id, observers)) => event_consumer.with_own_store_payments(store_id, observers),
         None => event_consumer,
     };
-    tokio::spawn(event_consumer.run());
+    let mut event_consumer_handle = tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
 
     // 4. Watch retry service - retries failed WatchAddress commands
@@ -536,6 +536,23 @@ async fn main() -> Result<()> {
             webhook_service_for_shutdown,
         ))
         .await?;
+
+    // Give the events subscription the same chance evmmonitor's command
+    // subscription gets: a moment to notice its own connection ending and
+    // log itself as a shutdown (see redis.rs's `subscribe` tail) before the
+    // process exits out from under it. Without this wait, axum's graceful
+    // drain can finish and `main` return well before the compose network
+    // teardown actually breaks the redis connection, so the task is simply
+    // dropped mid-poll and its tail — the info/error decision this whole
+    // change is about — never runs at all.
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut event_consumer_handle).await
+    {
+        Err(_) => event_consumer_handle.abort(),
+        Ok(Err(join_error)) => {
+            tracing::warn!(error = %join_error, "event consumer task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
 
     Ok(())
 }
