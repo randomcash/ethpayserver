@@ -137,6 +137,16 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// double, actually creates a real, correctly-priced invoice against a real
 /// database - is `a_real_issuer_creates_a_real_payable_invoice_in_base_units`
 /// in `server/tests/plugin_invoice_issuer.rs`.
+///
+/// The `server.rs` call site that does the publishing (`plugin_issuer.publish`,
+/// guarded on a configured billing store) has no test of its own, but that is
+/// this repository's existing convention, not a gap this capability
+/// introduced: capability 6's identical boot-time call,
+/// `plugin_capabilities.volume.publish`, is exercised the same way -
+/// `a_published_volume_reader_answers_a_plugin_in_its_own_units` in
+/// `host_calls.rs` publishes a hand-built `FixedVolume`, never `main`'s real
+/// one. Neither capability's `server.rs` wiring runs under a test that boots
+/// the actual binary, because none of this repo's tests do that.
 pub struct PluginHostApi<A> {
     state: PgAppState<A>,
     own_store_id: StoreId,
