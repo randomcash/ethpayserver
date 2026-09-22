@@ -136,11 +136,22 @@ impl GaugeFn for SentryGauge {
         // No call site increments/decrements a gauge today (every gauge here
         // is `.set()`); Sentry gauges take a point-in-time value, and a bare
         // delta can't be turned into one without duplicating the Prometheus
-        // atomic here, so only `set` is forwarded to Sentry.
+        // atomic here, so only `set` is forwarded to Sentry. Warn rather than
+        // silently diverge if that ever changes - a gauge feeding a threshold
+        // alert (e.g. `payserver_chain_healthy`) would go stale in Sentry
+        // while `/metrics` kept moving, with nothing else to say so.
+        tracing::warn!(
+            metric = %self.key.name(),
+            "gauge.increment() is not forwarded to Sentry - only set() is"
+        );
         self.prometheus.increment(value);
     }
 
     fn decrement(&self, value: f64) {
+        tracing::warn!(
+            metric = %self.key.name(),
+            "gauge.decrement() is not forwarded to Sentry - only set() is"
+        );
         self.prometheus.decrement(value);
     }
 
@@ -604,10 +615,8 @@ mod tests {
     // every value the facade records, even though every counter/gauge/
     // histogram handle now also carries a Sentry-forwarding wrapper.
     //
-    // The Sentry-forwarding side of the same handles was verified manually
-    // against a local mock Sentry endpoint (not exercised here, since it
-    // needs a real `sentry::init` bound to the process-global Hub, which
-    // would race with any other test doing the same).
+    // The Sentry-forwarding side of these same handles is covered by
+    // `fanout_recorder_forwards_to_sentry_with_correct_types` below.
     #[test]
     fn fanout_recorder_still_updates_prometheus() {
         let prometheus = PrometheusBuilder::new().build_recorder();
@@ -634,6 +643,100 @@ mod tests {
         assert!(output.contains("test_fanout_counter 1"));
         assert!(output.contains("test_fanout_gauge{chain_id=\"1\"} 3"));
         assert!(output.contains("test_fanout_histogram"));
+    }
+
+    // Proves the half of `FanoutRecorder` the test above can't: that a
+    // counter, a gauge, and a histogram each reach Sentry with the right
+    // `MetricType` and the label attached as an attribute -
+    // `payserver_chain_healthy`/`payserver_chain_block_lag` are gauges with a
+    // `chain_id` label, and an alert rule needs both the type and the
+    // attribute to work.
+    //
+    // `sentry::test::with_captured_envelopes` binds a fresh, isolated `Hub`
+    // with a `TestTransport` for the duration of the closure - it never
+    // touches the process-global `Hub`, so unlike a real `sentry::init` it
+    // doesn't race with `set_global_recorder`-based tests elsewhere in this
+    // module or in this file's other tests.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn fanout_recorder_forwards_to_sentry_with_correct_types() {
+        let recorder = FanoutRecorder {
+            prometheus: PrometheusBuilder::new().build_recorder(),
+        };
+        let metadata = Metadata::new(module_path!(), metrics::Level::INFO, None);
+
+        let envelopes = sentry::test::with_captured_envelopes(|| {
+            let counter_key = Key::from_parts(
+                "test_sentry_counter",
+                vec![metrics::Label::new("chain_id", "1")],
+            );
+            recorder
+                .register_counter(&counter_key, &metadata)
+                .increment(2);
+
+            let gauge_key = Key::from_parts(
+                "test_sentry_gauge",
+                vec![metrics::Label::new("chain_id", "1")],
+            );
+            recorder.register_gauge(&gauge_key, &metadata).set(7.0);
+
+            let histogram_key = Key::from_parts("test_sentry_histogram", vec![]);
+            recorder
+                .register_histogram(&histogram_key, &metadata)
+                .record(0.25);
+
+            // Sentry batches metrics (flushed every 100 items or 5 seconds)
+            // rather than sending them immediately - without this, the
+            // closure would return and the test hub would be torn down
+            // before anything reached the transport.
+            if let Some(client) = sentry::Hub::current().client() {
+                client.flush(Some(Duration::from_secs(5)));
+            }
+        });
+
+        let metrics: Vec<&sentry::protocol::Metric> = envelopes
+            .iter()
+            .flat_map(sentry::Envelope::items)
+            .filter_map(|item| match item {
+                sentry::protocol::EnvelopeItem::ItemContainer(
+                    sentry::protocol::ItemContainer::Metrics(metrics),
+                ) => Some(metrics.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        let counter = metrics
+            .iter()
+            .find(|m| m.name.as_ref() == "test_sentry_counter")
+            .expect("counter metric was not captured by Sentry");
+        assert_eq!(counter.r#type, sentry::protocol::MetricType::Counter);
+        assert_eq!(counter.value, 2.0);
+        assert_eq!(
+            counter
+                .attributes
+                .get("chain_id")
+                .and_then(|a| a.0.as_str()),
+            Some("1")
+        );
+
+        let gauge = metrics
+            .iter()
+            .find(|m| m.name.as_ref() == "test_sentry_gauge")
+            .expect("gauge metric was not captured by Sentry");
+        assert_eq!(gauge.r#type, sentry::protocol::MetricType::Gauge);
+        assert_eq!(gauge.value, 7.0);
+        assert_eq!(
+            gauge.attributes.get("chain_id").and_then(|a| a.0.as_str()),
+            Some("1")
+        );
+
+        let histogram = metrics
+            .iter()
+            .find(|m| m.name.as_ref() == "test_sentry_histogram")
+            .expect("histogram metric was not captured by Sentry");
+        assert_eq!(histogram.r#type, sentry::protocol::MetricType::Distribution);
+        assert_eq!(histogram.value, 0.25);
     }
 
     #[test]
