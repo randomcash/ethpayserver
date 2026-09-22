@@ -56,7 +56,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error monitoring
-sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls"] }
+# `tower-axum-matched-path`: performance transactions are named from the
+# route pattern (`/api/invoices/{id}`), not the request URI. Without it every
+# distinct invoice/store/etc. id creates its own transaction name, which is
+# unbounded cardinality and an unreadable performance page.
+sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "tower-axum-matched-path"] }
 sentry-tracing = "0.47"
 
 # Metrics
@@ -109,6 +113,8 @@ data-service = { path = "../data-service", features = ["test-utils"] }
 evm = { path = "../evm", features = ["api", "redis", "test-utils"] }
 wat = "1.259.0"
 tempfile = "3"
+# `test`: captures envelopes instead of sending them, for the transaction-naming test below.
+sentry = { version = "0.47", default-features = false, features = ["test"] }
 
 # Clippy lints — catches panics on user-input paths at compile time.
 # `unwrap` / `expect` are allowed only in tests and in explicit initialisation

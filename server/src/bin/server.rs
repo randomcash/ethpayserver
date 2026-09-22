@@ -512,6 +512,7 @@ async fn main() -> Result<()> {
             .allow_methods(Any)
             .allow_headers(Any),
     );
+    let app = api::with_sentry_performance_tracing(app);
 
     // Start server
     let bind_addr = config.bind_address();

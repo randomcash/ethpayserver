@@ -264,6 +264,29 @@ pub fn resolve_environment() -> String {
     std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
 }
 
+/// Resolve `SENTRY_TRACES_SAMPLE_RATE`: the fraction of requests sampled for
+/// performance tracing, from `0.0` (none) to `1.0` (all). Defaults to `0.0`
+/// — no transactions leave the process — so tracing stays off until an
+/// environment opts in. An unset value falls back to `0.0` silently (that's
+/// the expected "not configured" state); an unparseable one also falls back
+/// to `0.0` rather than failing boot over it, since sending no transactions
+/// is always a safe default, but logs a warning first — otherwise a typo'd
+/// value is indistinguishable from an intentional `0.0` and can sit
+/// unnoticed indefinitely.
+#[must_use]
+pub fn resolve_traces_sample_rate() -> f32 {
+    match std::env::var("SENTRY_TRACES_SAMPLE_RATE") {
+        Ok(raw) => raw.parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                value = %raw,
+                "SENTRY_TRACES_SAMPLE_RATE is not a valid number; falling back to 0.0"
+            );
+            0.0
+        }),
+        Err(_) => 0.0,
+    }
+}
+
 /// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
 /// `before_send` hook and tagging events with [`resolve_environment`]. Shared
 /// by the `server` and `evmmonitor` binaries so the mainnet boot-gate and the
@@ -286,6 +309,7 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
         // Never attach default PII (IP, cookies, request bodies). This is a
         // payment processor.
         send_default_pii: false,
+        traces_sample_rate: resolve_traces_sample_rate(),
         // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
         // API keys, emails and on-chain addresses before events leave the host.
         before_send: Some(Arc::new(scrub_event)),
@@ -325,6 +349,38 @@ pub fn report_reporting_status(dsn_configured: bool, environment: &str) -> anyho
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Restores an env var to its pre-test value on drop, so a mid-test
+    /// panic (an assertion failing partway through a multi-step test) can't
+    /// leave the var set for every later test in the same process — env vars
+    /// are process-global and `cargo test`/`nextest` run tests in threads of
+    /// the same process, not one process per test.
+    struct RestoreEnvVar {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl RestoreEnvVar {
+        fn capture(name: &'static str) -> Self {
+            Self {
+                name,
+                previous: std::env::var(name).ok(),
+            }
+        }
+    }
+
+    impl Drop for RestoreEnvVar {
+        fn drop(&mut self) {
+            // SAFETY: the env vars this guard restores are only ever touched
+            // by the single test that owns it.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
 
     #[test]
     fn redacts_eth_private_key_and_address() {
@@ -615,10 +671,10 @@ mod tests {
 
     #[test]
     fn resolve_environment_does_not_default_an_absent_var_to_a_permitted_value() {
-        // Owns SENTRY_ENVIRONMENT for the duration of the test and restores
-        // whatever was there before, since this is a process-global var and
+        // Owns SENTRY_ENVIRONMENT for the duration of the test; restored on
+        // drop (including on panic) since this is a process-global var and
         // no other test touches it.
-        let previous = std::env::var("SENTRY_ENVIRONMENT").ok();
+        let _restore = RestoreEnvVar::capture("SENTRY_ENVIRONMENT");
 
         // SAFETY: no other test reads or writes SENTRY_ENVIRONMENT.
         unsafe {
@@ -640,13 +696,35 @@ mod tests {
             std::env::set_var("SENTRY_ENVIRONMENT", "testnet");
         }
         assert_eq!(resolve_environment(), "testnet");
+    }
+
+    #[test]
+    fn resolve_traces_sample_rate_defaults_to_zero() {
+        // Owns SENTRY_TRACES_SAMPLE_RATE for the duration of the test;
+        // restored on drop (including on panic) since this is a
+        // process-global var and no other test touches it.
+        let _restore = RestoreEnvVar::capture("SENTRY_TRACES_SAMPLE_RATE");
+
+        // SAFETY: no other test reads or writes SENTRY_TRACES_SAMPLE_RATE.
+        unsafe {
+            std::env::remove_var("SENTRY_TRACES_SAMPLE_RATE");
+        }
+        assert_eq!(resolve_traces_sample_rate(), 0.0, "unset must default to 0.0");
 
         // SAFETY: see above.
         unsafe {
-            match &previous {
-                Some(value) => std::env::set_var("SENTRY_ENVIRONMENT", value),
-                None => std::env::remove_var("SENTRY_ENVIRONMENT"),
-            }
+            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "not-a-number");
         }
+        assert_eq!(
+            resolve_traces_sample_rate(),
+            0.0,
+            "unparseable must fall back to 0.0, not panic"
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "0.1");
+        }
+        assert_eq!(resolve_traces_sample_rate(), 0.1);
     }
 }
