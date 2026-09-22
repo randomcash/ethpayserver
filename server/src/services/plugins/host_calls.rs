@@ -896,6 +896,75 @@ mod tests {
         storage.uninstall(&plugin, true).await.unwrap();
     }
 
+    /// The module doc's own canonical example - `UPDATE subscriptions SET
+    /// ... WHERE account_id = $2` - is never run against a real row
+    /// anywhere in this file; only `INSERT` is. That gap matters because
+    /// the shape is not academic: a plugin marking an account cancelled,
+    /// same as one advancing `paid_until`, is exactly this statement, and
+    /// its `rows_affected` is the only signal such a plugin has that the
+    /// write actually matched something rather than silently no-op'ing on
+    /// a stale or wrong account id.
+    ///
+    /// It is also the sharp edge the comment on `rows_affected` above
+    /// warns about, proven rather than just asserted: an `UPDATE` with no
+    /// `RETURNING` reports zero rows *even when it matches and changes
+    /// one*, because this call counts rows `fetch_all` returned, not rows
+    /// Postgres changed. `RETURNING` is what turns that back into a
+    /// trustworthy signal.
+    #[tokio::test]
+    #[ignore]
+    async fn an_update_without_returning_cannot_confirm_its_own_match() {
+        let Some((calls, schema, storage, plugin)) = live("cash.random.hc.update").await else {
+            return;
+        };
+
+        calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"INSERT INTO \"{schema}\".subscriptions (account_id) VALUES ($1)","params":["acct-3"]}}]}}"#
+            )))
+            .await
+            .expect("the fixture row must insert");
+
+        let blind = calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"UPDATE \"{schema}\".subscriptions SET paid_until = now() WHERE account_id = $1","params":["acct-3"]}}]}}"#
+            )))
+            .await
+            .expect("the update itself must succeed");
+        assert_eq!(
+            blind.results[0].rows_affected, "0",
+            "documented behaviour: an UPDATE with no RETURNING reports zero \
+             rows even though this one matched and changed acct-3"
+        );
+
+        let confirmed = calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"UPDATE \"{schema}\".subscriptions SET paid_until = now() WHERE account_id = $1 RETURNING account_id","params":["acct-3"]}}]}}"#
+            )))
+            .await
+            .expect("the update itself must succeed");
+        assert_eq!(
+            confirmed.results[0].rows_affected, "1",
+            "RETURNING is what makes rows_affected trustworthy for a write \
+             that needs to know whether it matched anything"
+        );
+
+        let missed = calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"UPDATE \"{schema}\".subscriptions SET paid_until = now() WHERE account_id = $1 RETURNING account_id","params":["acct-does-not-exist"]}}]}}"#
+            )))
+            .await
+            .expect("an update matching nothing is not an error");
+        assert_eq!(
+            missed.results[0].rows_affected, "0",
+            "and a real miss still reads as zero, so the signal round-trips \
+             both ways"
+        );
+
+        storage.drop_role(&plugin).await.unwrap();
+        storage.uninstall(&plugin, true).await.unwrap();
+    }
+
     /// The property billing actually depends on: advancing `paid_until` and
     /// recording which invoice paid for it must both happen or neither. A
     /// failure in the second statement must not leave the first committed, or
