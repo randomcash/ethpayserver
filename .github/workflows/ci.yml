@@ -140,6 +140,12 @@ jobs:
       - name: Health check guard self-test
         run: ./scripts/check-health-deep.test.sh
 
+      # The deploy gate decides whether a cutover is allowed to stand, and CI
+      # runs it post-deploy - so every refusal branch in it was code nobody had
+      # ever seen refuse anything. Same reasoning as the guard self-test above.
+      - name: Deploy health gate self-test
+        run: ./scripts/health-gate.test.sh
+
       - name: Format check
         run: cargo fmt --all -- --check
 
