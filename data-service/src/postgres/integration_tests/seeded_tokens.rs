@@ -54,6 +54,26 @@ async fn optimism_sepolia_usdc_resolves() {
 
 #[tokio::test]
 #[ignore]
+async fn linea_usdc_resolves_by_lowercased_address() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+
+    let token = TokenReader::get_by_address(
+        &service,
+        &ChainId::evm(59_144),
+        "0x176211869ca2b568f2a7d4ee941e073a821ee1ff",
+    )
+    .await
+    .expect("query succeeds")
+    .expect("Linea USDC is seeded");
+
+    assert_eq!(token.symbol.as_deref(), Some("USDC"));
+    assert_eq!(token.decimals, Some(6));
+}
+
+#[tokio::test]
+#[ignore]
 async fn scroll_weth_decimals_round_trip_to_the_right_display_amount() {
     let Some(service) = create_test_service().await else {
         return;
