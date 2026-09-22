@@ -20,6 +20,7 @@ use data_service::ApiKeyFullInfo;
 use super::api_key_hash::hash_api_key;
 use super::extractors::{AuthenticatedUser, FreshlyAuthenticatedUser};
 use crate::services::EmailChangeVerificationData;
+use crate::services::plugins::notify_account_closed;
 use crate::state::PgAppState;
 pub use api_types::{
     ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
@@ -913,6 +914,11 @@ where
                 "Could not delete the account.".to_string(),
             )
         })?;
+
+    // After the account is actually gone, not before: a plugin holding data
+    // for it (host capability 8) must never be told "closed" for an account
+    // that a later failure in this handler left alive.
+    notify_account_closed(&state.account_closed_observers, user.id).await;
 
     tracing::info!(user_id = %user.id.0, "account deleted at its owner's request");
     Ok(StatusCode::NO_CONTENT)

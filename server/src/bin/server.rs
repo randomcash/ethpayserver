@@ -30,8 +30,8 @@ use server::{
 };
 use server::{
     DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, DEFAULT_MAX_IN_FLIGHT, PluginArtifacts,
-    PluginHost, PluginPools, host_version, invoice_creation_filters, load_installed_plugins,
-    own_store_payment_reporting, payment_observers, report_boot,
+    PluginHost, PluginPools, account_closed_observers, host_version, invoice_creation_filters,
+    load_installed_plugins, own_store_payment_reporting, payment_observers, report_boot,
 };
 
 #[tokio::main]
@@ -271,6 +271,12 @@ async fn main() -> Result<()> {
         ),
         None => (Vec::new(), Vec::new()),
     };
+    let plugin_account_closed_observers: Vec<
+        Arc<dyn server::services::plugins::AccountClosedObserver>,
+    > = match plugin_host.as_ref() {
+        Some(host) => account_closed_observers(host, &loaded),
+        None => Vec::new(),
+    };
 
     // Capability 4 needs both a store to watch and something to tell. Either
     // one missing means no dispatch at all: an instance with a billing store
@@ -392,6 +398,9 @@ async fn main() -> Result<()> {
     // installed, which is every deployment today; before this line it was
     // empty even then.
     state.invoice_creation_filters = plugin_filters;
+    // Capability 8. Empty until a plugin is installed, the same as the filter
+    // list above - see `AppState::account_closed_observers`.
+    state.account_closed_observers = plugin_account_closed_observers;
     // Never filtered: see `AppState::billing_store_id`.
     state.billing_store_id = billing_store_id;
 

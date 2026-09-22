@@ -31,9 +31,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use auth::UserId;
 use payserver_plugin_api::{PluginId, PluginKind};
 use serde::{Deserialize, Serialize};
 
+use super::account_closed::AccountClosedObserver;
 use super::filter::{FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest};
 use super::payment_observer::{OwnStorePayment, OwnStorePaymentObserver};
 use payserver_plugin_host::{FilterOutcome, PluginHost};
@@ -43,6 +45,9 @@ pub const FILTER_INVOICE_CREATION: &str = "filter_invoice_creation";
 
 /// The export told that an own-store invoice settled.
 pub const PAYMENT_SETTLED: &str = "payment_settled";
+
+/// The export told that an account no longer exists.
+pub const ACCOUNT_CLOSED: &str = "account_closed";
 
 /// Shown to the merchant when a filter refuses but says nothing useful, or
 /// cannot run at all and its manifest fails closed.
@@ -205,6 +210,61 @@ pub fn invoice_creation_filters(
                 Arc::clone(host),
                 id.clone(),
             )) as Arc<dyn InvoiceCreationFilter>
+        })
+        .collect()
+}
+
+/// One plugin, told that an account no longer exists.
+pub struct PluginAccountClosedObserver {
+    host: Arc<PluginHost>,
+    id: PluginId,
+}
+
+impl PluginAccountClosedObserver {
+    #[must_use]
+    pub fn new(host: Arc<PluginHost>, id: PluginId) -> Self {
+        Self { host, id }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct WireAccountClosed {
+    account_id: String,
+}
+
+#[async_trait]
+impl AccountClosedObserver for PluginAccountClosedObserver {
+    async fn account_closed(&self, account_id: UserId) {
+        // Fire-and-forget, the same as `PluginPaymentObserver::payment_settled`
+        // above - see that impl's comment for why `run_action` is the whole
+        // guarantee this capability needs.
+        self.host.run_action(
+            &self.id,
+            ACCOUNT_CLOSED,
+            &WireAccountClosed {
+                account_id: account_id.0.to_string(),
+            },
+        );
+    }
+}
+
+/// Adapters for every loaded plugin, to be told an account was deleted.
+///
+/// Unfiltered by kind, for the same reason [`payment_observers`] is: an
+/// action has no failure mode to resolve, so there is no "refuses everything"
+/// hazard a kind check would be protecting against.
+#[must_use]
+pub fn account_closed_observers(
+    host: &Arc<PluginHost>,
+    loaded: &[PluginId],
+) -> Vec<Arc<dyn AccountClosedObserver>> {
+    loaded
+        .iter()
+        .map(|id| {
+            Arc::new(PluginAccountClosedObserver::new(
+                Arc::clone(host),
+                id.clone(),
+            )) as Arc<dyn AccountClosedObserver>
         })
         .collect()
 }
@@ -532,6 +592,40 @@ mod tests {
             filter.filter_invoice_creation(a_store()).await,
             FilterVerdict::Allow
         );
+    }
+
+    /// Observers are not kind-filtered here either, mirroring payment
+    /// notifications - see that function's doc for why.
+    #[test]
+    fn every_loaded_plugin_is_offered_account_closed() {
+        let host = host();
+        host.register(
+            manifest("cash.random.anaction", "action", None),
+            &trapping(ACCOUNT_CLOSED),
+        )
+        .unwrap();
+
+        let loaded = vec![PluginId::new("cash.random.anaction").unwrap()];
+        assert_eq!(account_closed_observers(&host, &loaded).len(), 1);
+    }
+
+    /// An observer must never panic or block on a plugin that cannot answer -
+    /// the account is already deleted by the time it is called.
+    #[tokio::test]
+    async fn an_account_closed_observer_survives_a_plugin_that_cannot_answer() {
+        let host = host();
+        host.register(
+            manifest("cash.random.broken", "action", None),
+            &trapping(ACCOUNT_CLOSED),
+        )
+        .unwrap();
+
+        let observer = PluginAccountClosedObserver::new(
+            Arc::clone(&host),
+            PluginId::new("cash.random.broken").unwrap(),
+        );
+
+        observer.account_closed(UserId(Uuid::new_v4())).await;
     }
 
     /// An observer must never panic or block on a plugin that cannot answer -

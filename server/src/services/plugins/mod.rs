@@ -50,7 +50,14 @@
 //! channel and an address only the host chooses - a plugin names an account
 //! id, never a recipient. Host-side only for now; see that module's doc for
 //! why it has no wasmtime wiring yet.
+//!
+//! `account_closed` is capability 8: tell every plugin an account no longer
+//! exists, the mirror image of `payment_observer`'s capability 4. Unlike
+//! capability 7 it needs no new wasmtime wiring at all - `run_action` was
+//! already generic over the export it calls, so this is a new capability
+//! module and a new dispatch adapter, not a change to the host.
 
+mod account_closed;
 mod account_notice;
 mod boot;
 mod dispatch;
@@ -65,13 +72,15 @@ mod pools;
 pub mod reconcile;
 mod storage;
 
+pub use account_closed::{AccountClosedObserver, notify_account_closed};
 pub use account_notice::{AccountNotifier, PluginAccountNotifier};
 pub use boot::{
     DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, PluginBootReport, load_installed_plugins,
     report_boot,
 };
 pub use dispatch::{
-    FILTER_INVOICE_CREATION, PAYMENT_SETTLED, PluginInvoiceCreationFilter, PluginPaymentObserver,
+    ACCOUNT_CLOSED, FILTER_INVOICE_CREATION, PAYMENT_SETTLED, PluginAccountClosedObserver,
+    PluginInvoiceCreationFilter, PluginPaymentObserver, account_closed_observers,
     invoice_creation_filters, own_store_payment_reporting, payment_observers,
 };
 pub use filter::{
