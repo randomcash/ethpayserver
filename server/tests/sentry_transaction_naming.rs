@@ -33,13 +33,19 @@ use rates::NoOpRateProvider;
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 
+/// `None` means "DATABASE_URL unset" - the legitimate skip this ignored test's
+/// caller treats as "not run here". A set-but-unreachable URL is a different,
+/// real failure and must not collapse into that same skip path, so it panics
+/// instead of returning `None` - otherwise a broken connection string would
+/// make this the only automated guard on route-pattern naming pass green
+/// having never touched the router it's meant to check.
 async fn service() -> Option<PgDataService> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
-        .ok()?;
+        .expect("DATABASE_URL is set but the database is unreachable");
     Some(PgDataService::new(pool))
 }
 
