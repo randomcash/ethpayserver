@@ -286,6 +286,35 @@ pub fn resolve_environment() -> String {
     std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
 }
 
+/// Builds the `ClientOptions` [`init_sentry`] hands to `sentry::init`. Split
+/// out so a test can construct the exact options production uses — via
+/// `sentry::test::with_captured_envelopes_options` — instead of hand-rolling
+/// a lookalike `ClientOptions` that could quietly drift from what actually
+/// ships.
+fn client_options(
+    dsn: Option<sentry::types::Dsn>,
+    release: Option<Cow<'static, str>>,
+    environment: String,
+) -> sentry::ClientOptions {
+    sentry::ClientOptions {
+        dsn,
+        release,
+        environment: Some(Cow::Owned(environment)),
+        // Never attach default PII (IP, cookies, request bodies). This is a
+        // payment processor.
+        send_default_pii: false,
+        // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
+        // API keys, emails and on-chain addresses before events leave the host.
+        before_send: Some(Arc::new(scrub_event)),
+        // Structured logs (see `sentry_log_event_filter` for which levels
+        // actually reach this). Same mandatory scrubber, via the separate
+        // hook logs go through.
+        enable_logs: true,
+        before_send_log: Some(Arc::new(scrub_log)),
+        ..Default::default()
+    }
+}
+
 /// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
 /// `before_send` hook and tagging events with [`resolve_environment`]. Shared
 /// by the `server` and `evmmonitor` binaries so the mainnet boot-gate and the
@@ -301,23 +330,7 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
         .and_then(|s| s.parse().ok());
     let dsn_configured = dsn.is_some();
     let environment = resolve_environment();
-    let guard = sentry::init(sentry::ClientOptions {
-        dsn,
-        release,
-        environment: Some(Cow::Owned(environment.clone())),
-        // Never attach default PII (IP, cookies, request bodies). This is a
-        // payment processor.
-        send_default_pii: false,
-        // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
-        // API keys, emails and on-chain addresses before events leave the host.
-        before_send: Some(Arc::new(scrub_event)),
-        // Structured logs (see `sentry_log_event_filter` for which levels
-        // actually reach this). Same mandatory scrubber, via the separate
-        // hook logs go through.
-        enable_logs: true,
-        before_send_log: Some(Arc::new(scrub_log)),
-        ..Default::default()
-    });
+    let guard = sentry::init(client_options(dsn, release, environment.clone()));
     (guard, dsn_configured, environment)
 }
 
@@ -410,17 +423,17 @@ mod tests {
 
     #[test]
     fn redacts_eth_private_key_and_address() {
-        let pk = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let pk = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let addr = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
         let out = redact_secrets(&format!("signing with {pk} to {addr}"));
-        assert!(!out.contains("4c0883a6"), "private key leaked: {out}");
+        assert!(!out.contains("deadbeefdead"), "private key leaked: {out}");
         assert!(!out.contains("71C7656E"), "address leaked: {out}");
         assert!(out.contains("[redacted-hex]"));
     }
 
     #[test]
     fn redacts_bare_64_hex_private_key() {
-        let pk = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let out = redact_secrets(&format!("key={pk}"));
         assert!(!out.contains(pk), "bare key leaked: {out}");
     }
@@ -575,7 +588,7 @@ mod tests {
 
     #[test]
     fn scrub_log_redacts_secret_shaped_body() {
-        let pk = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let log = test_log(&format!("loaded key {pk}"));
 
         let scrubbed = scrub_log(log).expect("log passes through");
@@ -642,48 +655,50 @@ mod tests {
         );
     }
 
+    /// Collects the `Log` items out of a batch of captured envelopes.
+    fn captured_logs(envelopes: &[sentry::Envelope]) -> Vec<Log> {
+        envelopes
+            .iter()
+            .flat_map(|envelope| envelope.items())
+            .filter_map(|item| match item {
+                sentry::protocol::EnvelopeItem::ItemContainer(
+                    sentry::protocol::ItemContainer::Logs(logs),
+                ) => Some(logs.iter().cloned()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
     /// Proves the wiring, not just the pure function: emits a `tracing::info!`
-    /// carrying a secret through a real `sentry_tracing::layer()` subscriber
-    /// and a real `sentry::Client` with `scrub_log` installed as
-    /// `before_send_log`, then inspects the envelope that would have left the
-    /// host. `scrub_log_redacts_secret_shaped_body` above calls `scrub_log`
-    /// directly, which proves the function redacts but not that the SDK
-    /// actually routes logs through it before sending — this is the
-    /// end-to-end check the ticket's "Check before shipping" section asked
-    /// for.
+    /// carrying a secret through the exact layer construction `server.rs` and
+    /// `evmmonitor/main.rs` use — `sentry_tracing::layer().event_filter(
+    /// sentry_log_event_filter(min_level))` — and a real `sentry::Client`
+    /// built from [`client_options`], the same function [`init_sentry`]
+    /// calls, so a later edit that drops `enable_logs`/`before_send_log`
+    /// from production breaks this test too. `scrub_log_redacts_secret_shaped_body`
+    /// above calls `scrub_log` directly, which proves the function redacts
+    /// but not that the SDK actually routes logs through it before sending —
+    /// this is the end-to-end check the ticket's "Check before shipping"
+    /// section asked for.
     #[test]
     fn scrub_log_redacts_a_secret_through_the_real_capture_pipeline() {
         use tracing_subscriber::prelude::*;
 
         let _dispatcher = tracing_subscriber::registry()
-            .with(sentry_tracing::layer())
+            .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)))
             .set_default();
 
-        let pk = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
         let envelopes = sentry::test::with_captured_envelopes_options(
             || {
                 tracing::info!("loaded key {pk}");
             },
-            sentry::ClientOptions {
-                enable_logs: true,
-                before_send_log: Some(Arc::new(scrub_log)),
-                ..Default::default()
-            },
+            client_options(None, None, "test".to_string()),
         );
 
-        let logs: Vec<_> = envelopes
-            .iter()
-            .flat_map(sentry::Envelope::items)
-            .filter_map(|item| match item {
-                sentry::protocol::EnvelopeItem::ItemContainer(
-                    sentry::protocol::ItemContainer::Logs(logs),
-                ) => Some(logs.iter()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-
+        let logs = captured_logs(&envelopes);
         assert!(
             !logs.is_empty(),
             "expected at least one structured log to reach the envelope"
@@ -696,6 +711,36 @@ mod tests {
                 log.body
             );
         }
+    }
+
+    /// Companion to the test above: proves `sentry_log_event_filter`'s
+    /// threshold is actually consulted when wired into a live
+    /// `sentry_tracing` layer, not just when `apply_log_level_gate` is called
+    /// directly. Without this, a builder quirk that silently ignores
+    /// `.event_filter(...)` — so every record keeps `sentry_tracing`'s
+    /// default filtering regardless of `SENTRY_LOG_LEVEL` — would pass every
+    /// other test in this file.
+    #[test]
+    fn sentry_log_event_filter_suppresses_a_record_below_the_threshold_through_a_real_subscriber() {
+        use tracing_subscriber::prelude::*;
+
+        let _dispatcher = tracing_subscriber::registry()
+            .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::ERROR)))
+            .set_default();
+
+        let envelopes = sentry::test::with_captured_envelopes_options(
+            || {
+                tracing::info!("should not reach Sentry logs when min_level=ERROR");
+            },
+            client_options(None, None, "test".to_string()),
+        );
+
+        let logs = captured_logs(&envelopes);
+        assert!(
+            logs.is_empty(),
+            "an INFO record should not become a Sentry log when \
+             sentry_log_event_filter is wired with min_level=ERROR: {logs:?}"
+        );
     }
 
     #[test]
@@ -813,7 +858,7 @@ mod tests {
         let mut event = Event {
             message: Some(
                 "panic: invalid key \
-                 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+                 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
                     .to_string(),
             ),
             ..Default::default()
@@ -824,7 +869,7 @@ mod tests {
         );
 
         let scrubbed = scrub_event(event).expect("event passes through");
-        assert!(!scrubbed.message.unwrap().contains("4c0883a6"));
+        assert!(!scrubbed.message.unwrap().contains("deadbeefdead"));
         let extra = scrubbed.extra.get("ctx").and_then(Value::as_str).unwrap();
         assert!(!extra.contains("supersecret"), "extra leaked: {extra}");
     }
@@ -846,8 +891,8 @@ mod tests {
             "auth failed for eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc-_123 (401)",
             "eyJ.a.b eyJa..b eyJa.b.c",
             "0x742d35Cc6634C0532925a3b844Bc454e4438f44e paid 0x1234",
-            "tx 4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 mined",
-            "zz4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318zz",
+            "tx deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef mined",
+            "zzdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefzz",
             "GET https://eth-mainnet.g.alchemy.com/v2/9f8e7d6c5b4a3210zz failed",
             "wss://polygon-mainnet.infura.io:443/ws/v3/0123456789abcdefzz closed",
             "https://api.coingecko.com/api/v3/simple/price?ids=ethereum",
