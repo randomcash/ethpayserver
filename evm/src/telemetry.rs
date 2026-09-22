@@ -368,20 +368,23 @@ mod tests {
         fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
         fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
         fn event(&self, event: &tracing::Event<'_>) {
-            self.0.lock().unwrap().push(sentry_event_filter(event.metadata()));
+            self.0
+                .lock()
+                .unwrap()
+                .push(sentry_event_filter(event.metadata()));
         }
         fn enter(&self, _span: &tracing::span::Id) {}
         fn exit(&self, _span: &tracing::span::Id) {}
     }
 
     /// `alloy_transport_ws` logs `error!` for a single WebSocket frame that
-    /// failed to parse — the shape Sentry caught as ETHPAYSERVER-TESTNET-1
-    /// (a provider sending a bare `{"error": ...}` frame over a block
-    /// subscription). That log comes from a read loop that already
-    /// reconnects and re-subscribes on its own; without this filter it pages
-    /// exactly like a real outage on every transient bad frame. A real,
-    /// unrecovered failure must still page: this crate's own
-    /// `evm::monitor::source::rpc` target is untouched.
+    /// failed to parse — for example a provider sending a bare
+    /// `{"error": ...}` frame with no `id` over a block subscription, which
+    /// isn't a valid notification or response. That log comes from a read
+    /// loop that already reconnects and re-subscribes on its own; without
+    /// this filter it pages exactly like a real outage on every transient
+    /// bad frame. A real, unrecovered failure must still page: this crate's
+    /// own `evm::monitor::source::rpc` target is untouched.
     #[test]
     fn alloy_ws_frame_noise_is_a_breadcrumb_but_our_own_subscription_failure_still_pages() {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
