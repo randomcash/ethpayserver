@@ -252,14 +252,14 @@ fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
         "json" => {
             tracing_subscriber::registry()
                 .with(filter)
-                .with(sentry_tracing::layer())
+                .with(sentry_tracing::layer().event_filter(evm::telemetry::sentry_event_filter))
                 .with(tracing_subscriber::fmt::layer().json())
                 .init();
         }
         _ => {
             tracing_subscriber::registry()
                 .with(filter)
-                .with(sentry_tracing::layer())
+                .with(sentry_tracing::layer().event_filter(evm::telemetry::sentry_event_filter))
                 .with(tracing_subscriber::fmt::layer())
                 .init();
         }

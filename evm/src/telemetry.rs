@@ -294,6 +294,27 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
     (guard, dsn_configured, environment)
 }
 
+/// Sentry event filter for the `sentry_tracing` layer installed by the
+/// `server` and `evmmonitor` binaries.
+///
+/// `alloy_transport_ws` logs at `error!` for every ordinary WebSocket hiccup a
+/// long-lived RPC connection sees - a proxy resetting an idle socket, a
+/// missed keepalive pong - and `sentry_tracing`'s default filter turns any
+/// `error!` into a full Sentry event regardless of which crate logged it.
+/// `RpcBlockSource` (`evm::monitor::source::rpc`) already resubscribes past
+/// exactly this kind of drop once the stream goes quiet, so every blip the
+/// library logs was paging as if nothing were handling it. This keeps that
+/// target at a breadcrumb instead - a real outage's event still carries the
+/// disconnects that led to it - while leaving every other target, including
+/// our own `error!` calls, on the default behaviour.
+#[must_use]
+pub fn sentry_event_filter(metadata: &tracing::Metadata) -> sentry_tracing::EventFilter {
+    if metadata.target().starts_with("alloy_transport_ws") {
+        return sentry_tracing::EventFilter::Breadcrumb;
+    }
+    sentry_tracing::default_event_filter(metadata)
+}
+
 /// Log whether error reporting is on, at INFO, always — never the DSN itself
 /// — and refuse to continue when [`reporting_status`] says this environment
 /// must not run disabled.
@@ -611,6 +632,66 @@ mod tests {
         assert!(report_reporting_status(false, "dev").is_ok());
         assert!(report_reporting_status(false, "mainnet").is_err());
         assert!(report_reporting_status(false, "").is_err());
+    }
+
+    /// Captures the [`sentry_tracing::EventFilter`] `sentry_event_filter`
+    /// assigns to the next event recorded while `f` runs, by installing it as
+    /// a real tracing layer rather than hand-building a `Metadata`.
+    fn observed_filter(f: impl FnOnce()) -> sentry_tracing::EventFilter {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Option<sentry_tracing::EventFilter>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                *self.0.lock().expect("lock poisoned") =
+                    Some(sentry_event_filter(event.metadata()));
+            }
+        }
+
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        tracing::subscriber::with_default(subscriber, f);
+        capture
+            .0
+            .lock()
+            .expect("lock poisoned")
+            .take()
+            .expect("event was recorded")
+    }
+
+    #[test]
+    fn ws_transport_reset_is_a_breadcrumb_not_a_page() {
+        let filter = observed_filter(|| {
+            tracing::error!(
+                target: "alloy_transport_ws::native",
+                "WebSocket protocol error: Connection reset without closing handshake"
+            );
+        });
+        assert!(
+            filter.contains(sentry_tracing::EventFilter::Breadcrumb),
+            "expected a breadcrumb, got {filter:?}"
+        );
+        assert!(
+            !filter.contains(sentry_tracing::EventFilter::Event),
+            "a WS drop the monitor already resubscribes past should not page: got {filter:?}"
+        );
+    }
+
+    #[test]
+    fn our_own_errors_still_page() {
+        let filter = observed_filter(|| {
+            tracing::error!(target: "evm::monitor::chain::lifecycle", "block stream error");
+        });
+        assert!(
+            filter.contains(sentry_tracing::EventFilter::Event),
+            "an error from our own code must still reach Sentry as an event, got {filter:?}"
+        );
     }
 
     #[test]
