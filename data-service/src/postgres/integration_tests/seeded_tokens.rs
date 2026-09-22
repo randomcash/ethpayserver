@@ -1,10 +1,14 @@
 //! The tokens seeded for zkSync Era, Linea, Scroll and the Sepolia-family
-//! testnets, resolved the way a real payment resolves them.
+//! testnets, resolved by `TokenReader::get_by_address` the way a real payment
+//! resolves them: a lowercase address read off the chain against a
+//! checksummed seed row.
 //!
-//! A row nothing looks up is the same bug as no row at all - `payment_handler`
-//! calls `TokenReader::get_by_address` with a lowercase address it read off
-//! the chain, so a seed row that only matches its own checksummed casing back
-//! would still leave every real payment showing a truncated address.
+//! A row nothing looks up is the same bug as no row at all. These tests prove
+//! the rows exist and resolve case-insensitively against a real, migrated
+//! database; the `server` crate's `event_consumer` tests separately prove that
+//! `handle_payment_detected` - the actual call site a payment reaches this
+//! lookup through - turns that resolution into the symbol on the payment
+//! record instead of the `ERC20` fallback.
 
 use types::{ChainId, TokenReader};
 

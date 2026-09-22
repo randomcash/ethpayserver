@@ -54,4 +54,8 @@ INSERT INTO tokens (token_type, chain_id, address, symbol, name, decimals) VALUE
     ('erc20', 'eip155:84532', '0x036CbD53842c5426634e7929541eC2318f3dCF7e', 'USDC', 'USD Coin', 6),
     ('erc20', 'eip155:43113', '0x5425890298aed601595a70AB815c96711a31Bc65', 'USDC', 'USD Coin', 6),
     ('erc20', 'eip155:80002', '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582', 'USDC', 'USD Coin', 6)
-ON CONFLICT DO NOTHING;
+-- Named explicitly so a violation of some other constraint on this table
+-- surfaces as an error instead of silently matching this ON CONFLICT and
+-- dropping a row - the same "empty result instead of a query that couldn't
+-- run" failure this migration is otherwise careful to avoid.
+ON CONFLICT ON CONSTRAINT tokens_unique DO NOTHING;
