@@ -28,6 +28,7 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use sentry::protocol::{Event, Value};
+use tracing::{Level, Metadata};
 
 /// Ordered `(pattern, replacement)` redaction rules applied to every free-text
 /// field. Compiled once and reused for the life of the process.
@@ -264,6 +265,58 @@ pub fn resolve_environment() -> String {
     std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
 }
 
+/// `sentry-tracing` event filter: same as [`sentry_tracing::default_event_filter`]
+/// except it downgrades `alloy_transport_ws`'s own `error!` logs to
+/// breadcrumbs instead of paged Sentry events.
+///
+/// There is no defect of ours to fix here: the log this filter targets is
+/// emitted entirely inside `alloy_transport_ws`'s own source, for a
+/// malformed frame a provider sent, and this crate never sees the bytes
+/// before that library's read loop does. That makes it the environmental
+/// case — a peer sending something unexpected — and a `error!` log line
+/// that already gets a full reconnect-and-resubscribe underneath it is not
+/// a silent failure to paper over. But leaving it at the default severity
+/// and just noting "this is fine" somewhere doesn't stop the next
+/// transient frame from paging on-call again; downgrading it to a
+/// breadcrumb here is what actually stops that, and it's backed by an
+/// audit (below) and a test that the genuine failure case — reconnection
+/// exhausted, the stream actually dies — still pages. Treat this function,
+/// not a comment elsewhere, as the record of that determination.
+///
+/// This is a whole-target match, not a match on one message, because it's
+/// audited against every `error!` call site in that crate's native backend
+/// (`alloy-transport-ws` 1.8.3: a frame that doesn't parse, a close frame, a
+/// missed keepalive pong, a dropped socket), and every one of them ends the
+/// same way — the backend loop breaks and calls `close_with_error()`, handing
+/// off to `alloy_pubsub`'s own retry-with-backoff (`PubSubService`
+/// reconnects and re-subscribes on its own, 10 attempts 3s apart by default)
+/// before this crate's block stream ever sees a gap. There is no `error!` in
+/// that crate for a case that *isn't* retried underneath it, so narrowing the
+/// match to the one message this ticket happened to catch would leave the
+/// rest of the same noise — a missed pong, a dropped socket — still paging.
+///
+/// The genuine case — reconnection exhausted, the stream actually dies —
+/// still pages, and does so from two targets neither touched by this filter:
+/// `alloy_pubsub::service`'s own `error!("Reconnect failed after N attempts,
+/// shutting down")`, and, once that closes the subscription stream, this
+/// crate's `error!("WebSocket subscription ended")` in
+/// `evm::monitor::source::rpc`.
+///
+/// `alloy` is pinned by a caret (`"1.0"` in `evm/Cargo.toml`), so a routine
+/// point release can change this without bumping our version constraint. The
+/// `alloy_transport_ws_pin_matches_the_audited_release` test below fails the
+/// build the moment `Cargo.lock` resolves `alloy-transport-ws` to a release
+/// other than the one this audit covers — so this isn't just a comment asking
+/// a human to remember. Re-run the audit against the new release's
+/// `error!()` call sites and move that test's pinned version forward.
+#[must_use]
+pub fn sentry_event_filter(metadata: &Metadata<'_>) -> sentry_tracing::EventFilter {
+    if *metadata.level() == Level::ERROR && metadata.target().starts_with("alloy_transport_ws") {
+        return sentry_tracing::EventFilter::Breadcrumb;
+    }
+    sentry_tracing::default_event_filter(metadata)
+}
+
 /// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
 /// `before_send` hook and tagging events with [`resolve_environment`]. Shared
 /// by the `server` and `evmmonitor` binaries so the mainnet boot-gate and the
@@ -325,6 +378,114 @@ pub fn report_reporting_status(dsn_configured: bool, environment: &str) -> anyho
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `tracing::Subscriber` that runs [`sentry_event_filter`] on every
+    /// event it sees and records the verdict, so the filter can be tested
+    /// against real `tracing::Metadata` produced by the actual macros rather
+    /// than a hand-built one.
+    struct RecordingSubscriber(Arc<std::sync::Mutex<Vec<sentry_tracing::EventFilter>>>);
+
+    impl tracing::Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(sentry_event_filter(event.metadata()));
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// `alloy_transport_ws` logs `error!` for a single WebSocket frame that
+    /// failed to parse — for example a provider sending a bare
+    /// `{"error": ...}` frame with no `id` over a block subscription, which
+    /// isn't a valid notification or response. That log comes from a read
+    /// loop that already reconnects and re-subscribes on its own; without
+    /// this filter it pages exactly like a real outage on every transient
+    /// bad frame. A real, unrecovered failure must still page: this crate's
+    /// own `evm::monitor::source::rpc` target is untouched.
+    #[test]
+    fn alloy_ws_frame_noise_is_a_breadcrumb_but_our_own_subscription_failure_still_pages() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        tracing::subscriber::with_default(RecordingSubscriber(seen.clone()), || {
+            tracing::error!(target: "alloy_transport_ws", "failed to deserialize message");
+            tracing::error!(
+                target: "evm::monitor::source::rpc",
+                "WebSocket subscription ended"
+            );
+        });
+
+        let seen = seen.lock().unwrap();
+        let bits: Vec<u32> = seen.iter().map(|f| f.bits()).collect();
+        assert_eq!(
+            bits,
+            [
+                sentry_tracing::EventFilter::Breadcrumb.bits(),
+                sentry_tracing::EventFilter::Event.bits(),
+            ],
+            "alloy's own transient frame error must not page, but our subscription-ended error must: {seen:?}"
+        );
+    }
+
+    /// The audited call sites live in `alloy_transport_ws::native` — a
+    /// submodule, not the crate root — so the filter has to match on the
+    /// target *prefix*, not equality. This proves that distinction actually
+    /// matters: it fires `error!` under the submodule target and would still
+    /// pass if `sentry_event_filter` used `==` instead of `starts_with`
+    /// against the one target the other test exercises, but not against this
+    /// one.
+    #[test]
+    fn alloy_ws_submodule_targets_are_also_a_breadcrumb() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        tracing::subscriber::with_default(RecordingSubscriber(seen.clone()), || {
+            tracing::error!(target: "alloy_transport_ws::native", "WS server missed a pong");
+        });
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter().map(|f| f.bits()).collect::<Vec<_>>(),
+            [sentry_tracing::EventFilter::Breadcrumb.bits()],
+            "a submodule target under alloy_transport_ws must also be treated as noise: {seen:?}"
+        );
+    }
+
+    /// `sentry_event_filter` treats every `error!` from `alloy_transport_ws`
+    /// as retried-underneath noise, on the strength of an audit of that
+    /// crate's specific call sites — not on the message. `alloy` is pinned by
+    /// a caret, so `cargo update` can move `alloy-transport-ws` to a release
+    /// that audit never saw. This fails the moment that happens, instead of
+    /// silently trusting a comment that may no longer be true.
+    #[test]
+    fn alloy_transport_ws_pin_matches_the_audited_release() {
+        /// The `alloy-transport-ws` release [`sentry_event_filter`]'s
+        /// whole-target match was audited against.
+        const AUDITED_ALLOY_TRANSPORT_WS_VERSION: &str = "1.8.3";
+
+        let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"));
+        let resolved = lock
+            .split("\n\n")
+            .find(|pkg| pkg.contains("name = \"alloy-transport-ws\"\n"))
+            .and_then(|pkg| pkg.lines().find(|l| l.starts_with("version = ")))
+            .and_then(|l| l.split('"').nth(1))
+            .expect("Cargo.lock must resolve exactly one `alloy-transport-ws` entry");
+        assert_eq!(
+            resolved, AUDITED_ALLOY_TRANSPORT_WS_VERSION,
+            "alloy-transport-ws moved from the version sentry_event_filter's target match was \
+             audited against ({AUDITED_ALLOY_TRANSPORT_WS_VERSION}) to {resolved}. Re-run that \
+             audit against the new release's error!() call sites, then move \
+             AUDITED_ALLOY_TRANSPORT_WS_VERSION forward."
+        );
+    }
 
     #[test]
     fn redacts_eth_private_key_and_address() {

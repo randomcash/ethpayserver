@@ -24,7 +24,7 @@ test-utils = []
 hot-wallet = []
 # Sentry `before_send` PII scrubber. Shared by the `server` and
 # `evmmonitor` binaries so both run one audited scrubber implementation.
-sentry-scrub = ["dep:sentry", "dep:regex", "dep:anyhow"]
+sentry-scrub = ["dep:sentry", "dep:regex", "dep:anyhow", "dep:sentry-tracing"]
 monitor-bin = ["redis", "types", "data-service", "data-service/redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "dep:sentry", "dep:sentry-tracing", "sentry-scrub", "tokio/full"]
 
 [dependencies]
