@@ -248,18 +248,29 @@ async fn main() -> anyhow::Result<()> {
 fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
     let filter = EnvFilter::try_new(level)?;
 
+    // Independent of `filter` above: gates which levels become Sentry
+    // *structured logs* specifically, so testnet can ship INFO there while
+    // mainnet ships WARN and above, regardless of what LOG_LEVEL prints.
+    let sentry_log_level = evm::telemetry::resolve_sentry_log_level();
+
     match format {
         "json" => {
             tracing_subscriber::registry()
                 .with(filter)
-                .with(sentry_tracing::layer())
+                .with(
+                    sentry_tracing::layer()
+                        .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level)),
+                )
                 .with(tracing_subscriber::fmt::layer().json())
                 .init();
         }
         _ => {
             tracing_subscriber::registry()
                 .with(filter)
-                .with(sentry_tracing::layer())
+                .with(
+                    sentry_tracing::layer()
+                        .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level)),
+                )
                 .with(tracing_subscriber::fmt::layer())
                 .init();
         }
