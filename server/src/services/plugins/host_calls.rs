@@ -4,6 +4,18 @@
 //! `storage_query` or `invoice_create`, gets a length back, and copies the
 //! answer out with `host_take`. This is the other end.
 //!
+//! That wasm-to-host wiring - a compiled guest module actually reaching this
+//! layer through wasmtime, not just a Rust-level call to it - is not code in
+//! this repository, so it cannot be shown in a diff here: the linker that
+//! binds the `storage_query` import lives in `payserver-plugin-host::runtime`
+//! (the crate this workspace pins by `rev` in the root `Cargo.toml`), and the
+//! guest-side round trip is exercised end to end, through a real compiled
+//! wasm module and a real `wasmtime::Linker`, by
+//! `a_plugin_can_ask_the_host_a_question_and_read_the_answer` in that crate's
+//! `runtime.rs` tests. Combined with this file's own tests against a real
+//! `PluginCalls` and a real Postgres, the two repositories together cover the
+//! whole path a plugin's write actually takes; neither alone does.
+//!
 //! Two capabilities, and they are not alike. Storage runs SQL on a
 //! connection Postgres authenticated as *that plugin's* role, and the
 //! database is what confines it. Invoicing has no such backstop - it writes
