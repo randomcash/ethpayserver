@@ -7,6 +7,22 @@
 //! (pushed from inside, so it can raise threshold alerts) - see
 //! [`FanoutRecorder`].
 //!
+//! ## Alerting on a gauge in Sentry
+//!
+//! Sentry buckets metric points over a flush window and exposes the bucket
+//! through an aggregation (min/max/avg/sum/...), not the raw last-write value
+//! Prometheus's `/metrics` shows. Picking the wrong aggregation for a health
+//! alert can hide the exact failure it exists to catch: `avg` on
+//! `payserver_chain_healthy` (1/0) would only dip below 1, not hit 0, while
+//! the chain is unhealthy for part of a window. The alert rule on
+//! `payserver_chain_healthy` should use `min` (catches any 0 in the window);
+//! the rule on `payserver_chain_block_lag` should use `max` (catches the
+//! worst lag in the window, not one smoothed by a moment of catching up).
+//! This is configured where the alert rule itself lives, in Sentry, not in
+//! this module - there is nothing here to set. Confirming the rule fires end
+//! to end needs a live Sentry project and was not verified in this change;
+//! see the PR description for what was and wasn't checked.
+//!
 //! ## Volume cost before mainnet
 //!
 //! Sentry bills metrics ingest at $0.50/GB beyond a 5GB/month included quota
@@ -48,7 +64,12 @@ static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 /// installed side by side - every one of the ~69 call sites across the
 /// codebase keeps using the same `metrics` facade macros unchanged.
 ///
-/// Must be called once at startup. Panics if called twice.
+/// Must be called once at startup, and after `evm::telemetry::init_sentry` -
+/// `sentry::metrics::*().capture()` writes to `Hub::current()`, so a call
+/// here before Sentry has configured the process Hub would silently capture
+/// against a disabled client. `server/src/bin/server.rs` calls `init_sentry`
+/// first for this reason; keep that order if this call site ever moves.
+/// Panics if called twice.
 pub fn init_metrics() -> anyhow::Result<()> {
     let prometheus = PrometheusBuilder::new().build_recorder();
     let handle = prometheus.handle();
@@ -153,9 +174,14 @@ impl CounterFn for SentryCounter {
         // No call site sets a counter to an absolute value today, and Sentry
         // counters are delta-additive with no "set to X" verb to translate
         // this into - forward to Prometheus, which does support it, only.
-        // debug_assert so a future call site that starts doing this fails a
-        // debug/test build immediately, rather than silently diverging with
-        // no signal at all in release.
+        // Warn (release builds too, unlike debug_assert) so a future call
+        // site that starts doing this doesn't silently diverge Sentry from
+        // Prometheus with no signal at all - same treatment as the gauge
+        // increment()/decrement() case below.
+        tracing::warn!(
+            metric = %self.key.name(),
+            "counter.absolute() is not forwarded to Sentry - only increment() is"
+        );
         debug_assert!(
             false,
             "counter {} called absolute() - not forwarded to Sentry",
@@ -692,6 +718,45 @@ mod tests {
         assert!(output.contains("test_fanout_counter 1"));
         assert!(output.contains("test_fanout_gauge{chain_id=\"1\"} 3"));
         assert!(output.contains("test_fanout_histogram"));
+    }
+
+    // The three verbs below (`absolute`, gauge `increment`/`decrement`) are
+    // guarded by a `debug_assert!` precisely because no call site uses them
+    // today - a guard nothing exercises is a guard nobody knows still works.
+    // These pin that it actually fires in a debug/test build (the build
+    // nextest runs in CI) if that ever stops being true, rather than the
+    // no-call-site claim quietly going stale.
+    #[test]
+    #[should_panic(expected = "not forwarded to Sentry")]
+    fn counter_absolute_panics_in_debug_builds() {
+        let recorder = FanoutRecorder {
+            prometheus: PrometheusBuilder::new().build_recorder(),
+        };
+        let metadata = Metadata::new(module_path!(), metrics::Level::INFO, None);
+        let key = Key::from_parts("test_absolute_guard", vec![]);
+        recorder.register_counter(&key, &metadata).absolute(5);
+    }
+
+    #[test]
+    #[should_panic(expected = "not forwarded to Sentry")]
+    fn gauge_increment_panics_in_debug_builds() {
+        let recorder = FanoutRecorder {
+            prometheus: PrometheusBuilder::new().build_recorder(),
+        };
+        let metadata = Metadata::new(module_path!(), metrics::Level::INFO, None);
+        let key = Key::from_parts("test_increment_guard", vec![]);
+        recorder.register_gauge(&key, &metadata).increment(1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "not forwarded to Sentry")]
+    fn gauge_decrement_panics_in_debug_builds() {
+        let recorder = FanoutRecorder {
+            prometheus: PrometheusBuilder::new().build_recorder(),
+        };
+        let metadata = Metadata::new(module_path!(), metrics::Level::INFO, None);
+        let key = Key::from_parts("test_decrement_guard", vec![]);
+        recorder.register_gauge(&key, &metadata).decrement(1.0);
     }
 
     // Proves the half of `FanoutRecorder` the test above can't: that a
