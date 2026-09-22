@@ -13,6 +13,14 @@ use crate::metrics;
 
 use super::{WebhookConfig, WebhookError, WebhookJob};
 
+/// Whether a `process_next_job` failure is a fault worth reporting.
+///
+/// Split out from `log_process_error` so the shutdown/fault decision itself
+/// is unit-testable without a live Redis connection.
+fn process_error_is_fault(shutting_down: bool) -> bool {
+    !shutting_down
+}
+
 /// Trait for data service requirements in WebhookService.
 pub trait WebhookDataService: PaymentEventWriter + WebhookDeliveryWriter + Send + Sync {}
 
@@ -137,6 +145,15 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         );
 
         loop {
+            if self.shutting_down.load(Ordering::Relaxed) {
+                // Stop pulling new jobs once shutdown is requested, so the
+                // window in which a failure is expected-shutdown noise
+                // rather than a real fault is bounded to this check, not to
+                // however long the rest of the process takes to exit.
+                tracing::info!("Webhook delivery service stopping: shutdown in progress");
+                break;
+            }
+
             match self.process_next_job().await {
                 Ok(true) => {
                     // Processed a job, immediately check for more
@@ -160,10 +177,10 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// from under this loop's Redis connection, which fails identically to a
     /// real fault. Only the unrequested case should reach Sentry.
     fn log_process_error(&self, e: &WebhookError) {
-        if self.shutting_down.load(Ordering::Relaxed) {
-            tracing::info!(error = %e, "Webhook job processing failed during shutdown");
-        } else {
+        if process_error_is_fault(self.shutting_down.load(Ordering::Relaxed)) {
             tracing::error!(error = %e, "Error processing webhook job");
+        } else {
+            tracing::info!(error = %e, "Webhook job processing failed during shutdown");
         }
     }
 
@@ -521,5 +538,37 @@ mod tests {
         assert!(truncated.ends_with("..."));
 
         assert_eq!(truncate_error("", 500), "");
+    }
+
+    #[test]
+    fn process_error_during_shutdown_is_not_a_fault() {
+        assert!(!process_error_is_fault(true));
+    }
+
+    #[test]
+    fn process_error_without_shutdown_is_a_fault() {
+        assert!(process_error_is_fault(false));
+    }
+
+    #[tokio::test]
+    async fn run_stops_without_touching_redis_once_shutdown_is_requested() {
+        // No Redis is reachable at this address. If `run()` reached
+        // `process_next_job()` it would error, log, sleep for
+        // `poll_interval` and loop again rather than returning — so this
+        // only passes because the shutdown check at the top of the loop
+        // exits before ever calling it.
+        let service = Arc::new(
+            WebhookService::new(
+                Arc::new(data_service::InMemoryDataService::default()),
+                "redis://127.0.0.1:1",
+                WebhookConfig::default(),
+            )
+            .expect("valid redis URL"),
+        );
+        service.begin_shutdown();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), service.run())
+            .await
+            .expect("run() must return promptly once shutdown was requested before it started");
     }
 }

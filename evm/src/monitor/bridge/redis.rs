@@ -20,6 +20,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
+/// Whether a subscription stream ending is a fault worth reporting.
+///
+/// Split out from the two stream tails below so the shutdown/fault decision
+/// itself is unit-testable without a live redis connection.
+fn subscription_end_is_fault(shutting_down: bool) -> bool {
+    !shutting_down
+}
+
 /// Redis pub/sub event bridge.
 pub struct RedisBridge {
     /// Redis client for creating connections.
@@ -145,10 +153,10 @@ impl EventBridge for RedisBridge {
                     }
                 }
             }
-            if shutting_down.load(Ordering::Relaxed) {
-                info!(channel = %channel, "redis events subscription ended: shutdown in progress");
-            } else {
+            if subscription_end_is_fault(shutting_down.load(Ordering::Relaxed)) {
                 error!(channel = %channel, "redis events subscription ended unexpectedly");
+            } else {
+                info!(channel = %channel, "redis events subscription ended: shutdown in progress");
             }
         };
 
@@ -207,10 +215,10 @@ impl EventBridge for RedisBridge {
                     }
                 }
             }
-            if shutting_down.load(Ordering::Relaxed) {
-                info!(channel = %channel, "redis commands subscription ended: shutdown in progress");
-            } else {
+            if subscription_end_is_fault(shutting_down.load(Ordering::Relaxed)) {
                 error!(channel = %channel, "redis commands subscription ended unexpectedly");
+            } else {
+                info!(channel = %channel, "redis commands subscription ended: shutdown in progress");
             }
         };
 
@@ -253,5 +261,15 @@ mod tests {
         // Just verify URL parsing works
         let result = Client::open("redis://localhost:6379");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn subscription_end_during_shutdown_is_not_a_fault() {
+        assert!(!subscription_end_is_fault(true));
+    }
+
+    #[test]
+    fn subscription_end_without_shutdown_is_a_fault() {
+        assert!(subscription_end_is_fault(false));
     }
 }

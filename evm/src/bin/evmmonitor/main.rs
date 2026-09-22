@@ -213,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
     let command_coordinator = coordinator.clone();
     let command_bridge = bridge.clone();
     let command_persistence = persistence.clone();
-    let command_handle = tokio::spawn(async move {
+    let mut command_handle = tokio::spawn(async move {
         handle_commands(
             commands_stream,
             command_coordinator,
@@ -240,8 +240,18 @@ async fn main() -> anyhow::Result<()> {
     // rather than as a fault.
     bridge.begin_shutdown();
 
-    // Abort background tasks
-    command_handle.abort();
+    // Give the command subscription a moment to notice its connection ending
+    // on its own and log itself as a shutdown before we forcibly cancel it.
+    // Aborting immediately would race the stream's own end-of-stream tail:
+    // `abort()` only takes effect on the task's next poll, so if the task
+    // isn't already mid-poll when we call it, the task is dropped before
+    // that tail (and its shutdown-vs-fault log line) ever runs.
+    if tokio::time::timeout(std::time::Duration::from_secs(1), &mut command_handle)
+        .await
+        .is_err()
+    {
+        command_handle.abort();
+    }
     health_handle.abort();
 
     // Graceful shutdown
