@@ -22,9 +22,9 @@ test-utils = []
 # which is a deliberate product decision, not something this flag should
 # drift into on its own.
 hot-wallet = []
-# Sentry `before_send` PII scrubber. Shared by the `server` and
-# `evmmonitor` binaries so both run one audited scrubber implementation.
-sentry-scrub = ["dep:sentry", "dep:regex", "dep:anyhow"]
+# Sentry `before_send` PII scrubber and tracing event filter. Shared by the
+# `server` and `evmmonitor` binaries so both run one audited implementation.
+sentry-scrub = ["dep:sentry", "dep:regex", "dep:anyhow", "dep:sentry-tracing"]
 monitor-bin = ["redis", "types", "data-service", "data-service/redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "dep:sentry", "dep:sentry-tracing", "sentry-scrub", "tokio/full"]
 
 [dependencies]
@@ -112,3 +112,11 @@ cognitive_complexity = "deny"
 # below. Test-only: the binaries run the regex implementation.
 scrub = { workspace = true }
 tokio = { version = "1.42", features = ["full", "test-util"] }
+# Test-only: installs a real tracing layer to observe `sentry_event_filter`'s
+# decisions rather than hand-building `tracing::Metadata`.
+tracing-subscriber = "0.3"
+# Test-only: the server side of a real WebSocket handshake, used to make
+# `alloy_pubsub`/`alloy_transport_ws` (pulled in transitively via `alloy`)
+# hit an actual connection reset in ws_pubsub_retry_escalation.rs. Pinned to
+# 0.28, the exact version alloy-transport-ws 1.8.3 itself depends on.
+tokio-tungstenite = "0.28"
