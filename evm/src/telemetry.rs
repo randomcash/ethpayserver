@@ -289,9 +289,12 @@ pub fn resolve_environment() -> String {
 /// `evm::monitor::source::rpc`.
 ///
 /// `alloy` is pinned by a caret (`"1.0"` in `evm/Cargo.toml`), so a routine
-/// point release can change this without bumping our version constraint —
-/// re-run this audit against the resolved `alloy-transport-ws` version if
-/// this filter is ever suspected of over- or under-matching.
+/// point release can change this without bumping our version constraint. The
+/// `alloy_transport_ws_pin_matches_the_audited_release` test below fails the
+/// build the moment `Cargo.lock` resolves `alloy-transport-ws` to a release
+/// other than the one this audit covers — so this isn't just a comment asking
+/// a human to remember. Re-run the audit against the new release's
+/// `error!()` call sites and move that test's pinned version forward.
 #[must_use]
 pub fn sentry_event_filter(metadata: &Metadata<'_>) -> sentry_tracing::EventFilter {
     if *metadata.level() == Level::ERROR && metadata.target().starts_with("alloy_transport_ws") {
@@ -416,6 +419,34 @@ mod tests {
                 sentry_tracing::EventFilter::Event.bits(),
             ],
             "alloy's own transient frame error must not page, but our subscription-ended error must: {seen:?}"
+        );
+    }
+
+    /// `sentry_event_filter` treats every `error!` from `alloy_transport_ws`
+    /// as retried-underneath noise, on the strength of an audit of that
+    /// crate's specific call sites — not on the message. `alloy` is pinned by
+    /// a caret, so `cargo update` can move `alloy-transport-ws` to a release
+    /// that audit never saw. This fails the moment that happens, instead of
+    /// silently trusting a comment that may no longer be true.
+    #[test]
+    fn alloy_transport_ws_pin_matches_the_audited_release() {
+        /// The `alloy-transport-ws` release [`sentry_event_filter`]'s
+        /// whole-target match was audited against.
+        const AUDITED_ALLOY_TRANSPORT_WS_VERSION: &str = "1.8.3";
+
+        let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"));
+        let resolved = lock
+            .split("\n\n")
+            .find(|pkg| pkg.contains("name = \"alloy-transport-ws\"\n"))
+            .and_then(|pkg| pkg.lines().find(|l| l.starts_with("version = ")))
+            .and_then(|l| l.split('"').nth(1))
+            .expect("Cargo.lock must resolve exactly one `alloy-transport-ws` entry");
+        assert_eq!(
+            resolved, AUDITED_ALLOY_TRANSPORT_WS_VERSION,
+            "alloy-transport-ws moved from the version sentry_event_filter's target match was \
+             audited against ({AUDITED_ALLOY_TRANSPORT_WS_VERSION}) to {resolved}. Re-run that \
+             audit against the new release's error!() call sites, then move \
+             AUDITED_ALLOY_TRANSPORT_WS_VERSION forward."
         );
     }
 
