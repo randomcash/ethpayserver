@@ -264,6 +264,21 @@ pub fn resolve_environment() -> String {
     std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
 }
 
+/// Resolve `SENTRY_TRACES_SAMPLE_RATE`: the fraction of requests sampled for
+/// performance tracing, from `0.0` (none) to `1.0` (all). Defaults to `0.0`
+/// — no transactions leave the process — so tracing stays off until an
+/// environment opts in. An unset or unparseable value also falls back to
+/// `0.0` rather than failing boot over it, since (unlike the DSN/environment
+/// gate above) sending no transactions is always a safe default, never a
+/// silent hazard.
+#[must_use]
+pub fn resolve_traces_sample_rate() -> f32 {
+    std::env::var("SENTRY_TRACES_SAMPLE_RATE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0)
+}
+
 /// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
 /// `before_send` hook and tagging events with [`resolve_environment`]. Shared
 /// by the `server` and `evmmonitor` binaries so the mainnet boot-gate and the
@@ -286,6 +301,7 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
         // Never attach default PII (IP, cookies, request bodies). This is a
         // payment processor.
         send_default_pii: false,
+        traces_sample_rate: resolve_traces_sample_rate(),
         // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
         // API keys, emails and on-chain addresses before events leave the host.
         before_send: Some(Arc::new(scrub_event)),
@@ -646,6 +662,44 @@ mod tests {
             match &previous {
                 Some(value) => std::env::set_var("SENTRY_ENVIRONMENT", value),
                 None => std::env::remove_var("SENTRY_ENVIRONMENT"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_traces_sample_rate_defaults_to_zero() {
+        // Owns SENTRY_TRACES_SAMPLE_RATE for the duration of the test and
+        // restores whatever was there before, since this is a process-global
+        // var and no other test touches it.
+        let previous = std::env::var("SENTRY_TRACES_SAMPLE_RATE").ok();
+
+        // SAFETY: no other test reads or writes SENTRY_TRACES_SAMPLE_RATE.
+        unsafe {
+            std::env::remove_var("SENTRY_TRACES_SAMPLE_RATE");
+        }
+        assert_eq!(resolve_traces_sample_rate(), 0.0, "unset must default to 0.0");
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "not-a-number");
+        }
+        assert_eq!(
+            resolve_traces_sample_rate(),
+            0.0,
+            "unparseable must fall back to 0.0, not panic"
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "0.1");
+        }
+        assert_eq!(resolve_traces_sample_rate(), 0.1);
+
+        // SAFETY: see above.
+        unsafe {
+            match &previous {
+                Some(value) => std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", value),
+                None => std::env::remove_var("SENTRY_TRACES_SAMPLE_RATE"),
             }
         }
     }

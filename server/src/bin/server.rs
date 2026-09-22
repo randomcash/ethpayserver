@@ -511,7 +511,15 @@ async fn main() -> Result<()> {
             .allow_origin(Any)
             .allow_methods(Any)
             .allow_headers(Any),
-    );
+    )
+    // Performance-tracing transaction per request, named from the matched
+    // route (`tower-axum-matched-path`) rather than the raw request URI —
+    // otherwise every distinct invoice/store/etc. id mints its own
+    // transaction name. Axum runs middleware in the reverse order it's
+    // `.layer()`-ed, so `NewSentryLayer` must be added last to end up
+    // outermost of `SentryHttpLayer`, per sentry-tower's documented ordering.
+    .layer(sentry::integrations::tower::SentryHttpLayer::new().enable_transaction())
+    .layer(sentry::integrations::tower::NewSentryLayer::<axum::extract::Request>::new_from_top());
 
     // Start server
     let bind_addr = config.bind_address();

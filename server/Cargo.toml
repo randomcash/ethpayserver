@@ -56,7 +56,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error monitoring
-sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls"] }
+# `tower-axum-matched-path`: performance transactions are named from the
+# route pattern (`/api/invoices/{id}`), not the request URI. Without it every
+# distinct invoice/store/etc. id creates its own transaction name, which is
+# unbounded cardinality and an unreadable performance page.
+sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "tower-axum-matched-path"] }
 sentry-tracing = "0.47"
 
 # Metrics
