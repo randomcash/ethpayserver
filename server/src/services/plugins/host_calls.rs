@@ -914,8 +914,18 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn an_update_without_returning_cannot_confirm_its_own_match() {
+        // Unlike the file's other `live()`-gated tests, a silent skip here
+        // would defeat the point: this test exists to *prove* the
+        // `rows_affected` footgun, and a green run that never touched
+        // Postgres would look identical to one that did. CI always has
+        // `DATABASE_URL` set for `--ignored` runs; a bare `cargo test
+        // --ignored` without it fails loudly instead.
         let Some((calls, schema, storage, plugin)) = live("cash.random.hc.update").await else {
-            return;
+            panic!(
+                "DATABASE_URL must be set to run this test - it exists to \
+                 prove a real Postgres behaviour, so skipping it silently \
+                 would prove nothing"
+            );
         };
 
         calls
