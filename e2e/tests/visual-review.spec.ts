@@ -11,7 +11,7 @@
  * would run on every push and capture screenshots nobody reviews. Run it
  * explicitly with E2E_VISUAL_REVIEW=true, as the scheduled workflow does.
  */
-import { test as base, type Page } from '@playwright/test';
+import { test as base, expect, type Page } from '@playwright/test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { setupVirtualAuthenticator, register } from '../fixtures/auth';
@@ -27,8 +27,11 @@ const VIEWPORTS = [
 ] as const;
 
 // The routes scout.spec.ts is already known to reach unauthenticated and
-// after a single passkey registration. Kept in step with that file rather
-// than re-deriving a route list some other way.
+// after a single passkey registration. Hand-listed rather than imported —
+// scout's paths live inline in each test body, not behind an export — but
+// the "route coverage stays in sync" test below reads scout.spec.ts's source
+// and fails the (always-on) build if a route it reaches is missing here, so
+// the two lists can drift for a commit but not past CI.
 const UNAUTHENTICATED_ROUTES: [string, string][] = [
   ['login', '/login'],
   ['register', '/register'],
@@ -124,8 +127,12 @@ test.describe('Authenticated routes', () => {
       await register(sharedPage);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // 'register-flow', not 'register': the /register *page* capture above
+      // already owns the 'register' key, and groupByRoute buckets by that
+      // string alone. Reusing it here would make a flaky passkey ceremony
+      // read, in the report, as a defect on the /register page itself.
       manifest.push({
-        route: 'register',
+        route: 'register-flow',
         path: '/register',
         viewport: 'n/a',
         file: null,
@@ -151,4 +158,28 @@ test.describe('Authenticated routes', () => {
       await capture(route, urlPath);
     }
   });
+});
+
+// Static, no browser, not gated on E2E_VISUAL_REVIEW — this runs on every
+// unfiltered `npx playwright test` (ci.yml's `e2e` job), so a route added to
+// scout.spec.ts's walk and not mirrored above fails the next push instead of
+// just quietly never getting screenshotted. A hand-duplicated list with
+// nothing to catch drift is indistinguishable, months later, from one that's
+// still accurate.
+test('scout.spec.ts route coverage stays in sync with this file', () => {
+  const scoutSrc = fs.readFileSync(path.join('tests', 'scout.spec.ts'), 'utf8');
+  const reached = new Set([...scoutSrc.matchAll(/goto(?:Authed)?\('([^']+)'\)/g)].map((m) => m[1]));
+
+  // Not nav routes: /checkout/:id is a per-invoice page (there is no generic
+  // "the" checkout page to screenshot), and /evm/nonexistent is scout's
+  // deliberate 404 check, not a page this review should judge on its merits.
+  reached.delete('/checkout/00000000-0000-0000-0000-000000000000');
+  reached.delete('/evm/nonexistent');
+
+  const known = new Set([...UNAUTHENTICATED_ROUTES, ...AUTHENTICATED_ROUTES].map(([, p]) => p));
+  const missing = [...reached].filter((p) => !known.has(p));
+  expect(
+    missing,
+    `scout.spec.ts reaches ${missing.join(', ')} but this file's route lists do not — add it above`,
+  ).toHaveLength(0);
 });
