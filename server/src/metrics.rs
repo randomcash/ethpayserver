@@ -1,22 +1,39 @@
-//! Prometheus metrics for ethpayserver.
+//! Application metrics for ethpayserver.
 //!
 //! Provides application-level metrics for monitoring invoice processing,
-//! payment detection, webhook delivery, and service health.
+//! payment detection, webhook delivery, and service health. Every metric goes
+//! through the vendor-neutral `metrics` facade and is recorded to both
+//! Prometheus (`/metrics`, scraped from outside the process) and Sentry
+//! (pushed from inside, so it can raise threshold alerts) - see
+//! [`FanoutRecorder`].
 
-use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use std::sync::OnceLock;
+use metrics::{
+    Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
+    SharedString, Unit, counter, describe_counter, describe_gauge, describe_histogram, gauge,
+    histogram,
+};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle, PrometheusRecorder};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// Global metrics handle for rendering.
 static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
-/// Initialize the Prometheus metrics recorder.
+/// Initialize the metrics recorder: Prometheus for `/metrics`, and Sentry's
+/// Application Metrics API alongside it so gauges like
+/// `payserver_chain_healthy` can raise threshold alerts.
+///
+/// `metrics::set_global_recorder` accepts only one recorder per process, so
+/// [`FanoutRecorder`] wraps the Prometheus recorder rather than the two being
+/// installed side by side - every one of the ~69 call sites across the
+/// codebase keeps using the same `metrics` facade macros unchanged.
 ///
 /// Must be called once at startup. Panics if called twice.
-pub fn init_metrics() -> Result<(), metrics_exporter_prometheus::BuildError> {
-    let builder = PrometheusBuilder::new();
-    let handle = builder.install_recorder()?;
+pub fn init_metrics() -> anyhow::Result<()> {
+    let prometheus = PrometheusBuilder::new().build_recorder();
+    let handle = prometheus.handle();
+    metrics::set_global_recorder(FanoutRecorder { prometheus })
+        .map_err(|_| anyhow::anyhow!("metrics recorder already installed"))?;
 
     // Store handle globally - panic if already set (programming error)
     if METRICS_HANDLE.set(handle).is_err() {
@@ -29,6 +46,128 @@ pub fn init_metrics() -> Result<(), metrics_exporter_prometheus::BuildError> {
     describe_histograms();
 
     Ok(())
+}
+
+/// Forwards every counter/gauge/histogram registration to the wrapped
+/// Prometheus recorder - so `/metrics` renders exactly as before - and, on
+/// every recorded value, also captures the same observation through Sentry's
+/// metrics API. The Sentry side is vendor-specific and lives only here; every
+/// call site still goes through the vendor-neutral `metrics` facade.
+struct FanoutRecorder {
+    prometheus: PrometheusRecorder,
+}
+
+impl Recorder for FanoutRecorder {
+    fn describe_counter(&self, key: KeyName, unit: Option<Unit>, description: SharedString) {
+        self.prometheus.describe_counter(key, unit, description);
+    }
+
+    fn describe_gauge(&self, key: KeyName, unit: Option<Unit>, description: SharedString) {
+        self.prometheus.describe_gauge(key, unit, description);
+    }
+
+    fn describe_histogram(&self, key: KeyName, unit: Option<Unit>, description: SharedString) {
+        self.prometheus.describe_histogram(key, unit, description);
+    }
+
+    fn register_counter(&self, key: &Key, metadata: &Metadata<'_>) -> Counter {
+        let prometheus = self.prometheus.register_counter(key, metadata);
+        Counter::from_arc(Arc::new(SentryCounter {
+            prometheus,
+            key: key.clone(),
+        }))
+    }
+
+    fn register_gauge(&self, key: &Key, metadata: &Metadata<'_>) -> Gauge {
+        let prometheus = self.prometheus.register_gauge(key, metadata);
+        Gauge::from_arc(Arc::new(SentryGauge {
+            prometheus,
+            key: key.clone(),
+        }))
+    }
+
+    fn register_histogram(&self, key: &Key, metadata: &Metadata<'_>) -> Histogram {
+        let prometheus = self.prometheus.register_histogram(key, metadata);
+        Histogram::from_arc(Arc::new(SentryHistogram {
+            prometheus,
+            key: key.clone(),
+        }))
+    }
+}
+
+/// Sends a metric to Sentry with the key's labels attached as attributes, so
+/// e.g. `payserver_chain_healthy{chain_id="1"}` can be filtered/alerted on
+/// per chain in Sentry the same way it can be queried per chain in Prometheus.
+fn sentry_labels(key: &Key) -> impl Iterator<Item = (String, String)> + '_ {
+    key.labels()
+        .map(|label| (label.key().to_string(), label.value().to_string()))
+}
+
+struct SentryCounter {
+    prometheus: Counter,
+    key: Key,
+}
+
+impl CounterFn for SentryCounter {
+    fn increment(&self, value: u64) {
+        self.prometheus.increment(value);
+        let metric = sentry_labels(&self.key).fold(
+            sentry::metrics::counter(self.key.name().to_string(), value as f64),
+            |metric, (k, v)| metric.attribute(k, v),
+        );
+        metric.capture();
+    }
+
+    fn absolute(&self, value: u64) {
+        // No call site sets a counter to an absolute value today, and Sentry
+        // counters are delta-additive with no "set to X" verb to translate
+        // this into - forward to Prometheus, which does support it, only.
+        self.prometheus.absolute(value);
+    }
+}
+
+struct SentryGauge {
+    prometheus: Gauge,
+    key: Key,
+}
+
+impl GaugeFn for SentryGauge {
+    fn increment(&self, value: f64) {
+        // No call site increments/decrements a gauge today (every gauge here
+        // is `.set()`); Sentry gauges take a point-in-time value, and a bare
+        // delta can't be turned into one without duplicating the Prometheus
+        // atomic here, so only `set` is forwarded to Sentry.
+        self.prometheus.increment(value);
+    }
+
+    fn decrement(&self, value: f64) {
+        self.prometheus.decrement(value);
+    }
+
+    fn set(&self, value: f64) {
+        self.prometheus.set(value);
+        let metric = sentry_labels(&self.key).fold(
+            sentry::metrics::gauge(self.key.name().to_string(), value),
+            |metric, (k, v)| metric.attribute(k, v),
+        );
+        metric.capture();
+    }
+}
+
+struct SentryHistogram {
+    prometheus: Histogram,
+    key: Key,
+}
+
+impl HistogramFn for SentryHistogram {
+    fn record(&self, value: f64) {
+        self.prometheus.record(value);
+        let metric = sentry_labels(&self.key).fold(
+            sentry::metrics::distribution(self.key.name().to_string(), value),
+            |metric, (k, v)| metric.attribute(k, v),
+        );
+        metric.capture();
+    }
 }
 
 /// Render metrics in Prometheus format.
@@ -456,6 +595,45 @@ mod tests {
         describe_gauges();
         describe_histograms();
         handle
+    }
+
+    // Exercises `FanoutRecorder` directly, without going through
+    // `metrics::set_global_recorder` (a process-wide singleton other tests
+    // in this module also touch). Proves the Prometheus side - the
+    // `/metrics` escape hatch this ticket promises to keep - still gets
+    // every value the facade records, even though every counter/gauge/
+    // histogram handle now also carries a Sentry-forwarding wrapper.
+    //
+    // The Sentry-forwarding side of the same handles was verified manually
+    // against a local mock Sentry endpoint (not exercised here, since it
+    // needs a real `sentry::init` bound to the process-global Hub, which
+    // would race with any other test doing the same).
+    #[test]
+    fn fanout_recorder_still_updates_prometheus() {
+        let prometheus = PrometheusBuilder::new().build_recorder();
+        let recorder = FanoutRecorder { prometheus };
+        let metadata = Metadata::new(module_path!(), metrics::Level::INFO, None);
+
+        let counter_key = Key::from_parts("test_fanout_counter", vec![]);
+        recorder
+            .register_counter(&counter_key, &metadata)
+            .increment(1);
+
+        let gauge_key = Key::from_parts(
+            "test_fanout_gauge",
+            vec![metrics::Label::new("chain_id", "1")],
+        );
+        recorder.register_gauge(&gauge_key, &metadata).set(3.0);
+
+        let histogram_key = Key::from_parts("test_fanout_histogram", vec![]);
+        recorder
+            .register_histogram(&histogram_key, &metadata)
+            .record(0.5);
+
+        let output = recorder.prometheus.handle().render();
+        assert!(output.contains("test_fanout_counter 1"));
+        assert!(output.contains("test_fanout_gauge{chain_id=\"1\"} 3"));
+        assert!(output.contains("test_fanout_histogram"));
     }
 
     #[test]
