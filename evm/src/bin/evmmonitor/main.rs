@@ -249,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
     match tokio::time::timeout(std::time::Duration::from_secs(1), &mut command_handle).await {
         Err(_) => command_handle.abort(),
         Ok(Err(join_error)) => {
-            tracing::warn!(error = %join_error, "command handler task ended unexpectedly during shutdown");
+            tracing::error!(error = %join_error, "command handler task ended unexpectedly during shutdown");
         }
         Ok(Ok(())) => {}
     }

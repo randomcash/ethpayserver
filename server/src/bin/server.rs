@@ -299,7 +299,7 @@ async fn main() -> Result<()> {
         redis_url,
         webhook_config,
     )?);
-    tokio::spawn(Arc::clone(&webhook_service).run());
+    let mut webhook_handle = tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
 
     // Cloned here rather than where they're used below (wired into axum's
@@ -549,7 +549,23 @@ async fn main() -> Result<()> {
     {
         Err(_) => event_consumer_handle.abort(),
         Ok(Err(join_error)) => {
-            tracing::warn!(error = %join_error, "event consumer task ended unexpectedly during shutdown");
+            tracing::error!(error = %join_error, "event consumer task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
+
+    // The webhook worker's loop never returns on its own (see `run()` in
+    // service.rs) — it keeps draining the queue for as long as it's alive,
+    // which is the point, so this wait always ends in the timeout branch.
+    // What it buys is the same thing as the event consumer's wait: a moment
+    // for `process_next_job`'s in-flight call to finish and log itself as
+    // shutdown noise (via `begin_shutdown()`, set above) before the task is
+    // torn down, rather than being dropped mid-poll by process exit with no
+    // handle ever joined on it at all.
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut webhook_handle).await {
+        Err(_) => webhook_handle.abort(),
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "webhook worker task ended unexpectedly during shutdown");
         }
         Ok(Ok(())) => {}
     }
