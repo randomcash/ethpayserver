@@ -26,7 +26,8 @@ use data_service::store_creation::StoreCreationWriter;
 use rates::{ExchangeRate, RateError, RateProvider};
 use server::services::RedisEVMMonitor;
 use server::services::plugins::{
-    BulkMerchantVolumeReader, MerchantVolumeReader, PluginMerchantVolume,
+    BulkMerchantVolumeReader, MAX_ACCOUNTS_PER_BULK_READ, MerchantVolumeReader,
+    PluginMerchantVolume,
 };
 use server::state::PgAppState;
 use types::{
@@ -187,9 +188,7 @@ fn state(data_service: Arc<PgDataService>) -> PgAppState<UnusedSessionService> {
 #[tokio::test]
 #[ignore]
 async fn bulk_volume_matches_the_single_account_reader_and_does_not_blend_accounts() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await.expect("DATABASE_URL required");
     let account_a = seed_user(pg.pool()).await;
     let account_b = seed_user(pg.pool()).await;
 
@@ -250,9 +249,7 @@ async fn bulk_volume_matches_the_single_account_reader_and_does_not_blend_accoun
 #[tokio::test]
 #[ignore]
 async fn an_account_with_no_stores_gets_a_zero_entry_not_a_dropped_one() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await.expect("DATABASE_URL required");
     let has_stores = seed_user(pg.pool()).await;
     let no_stores = seed_user(pg.pool()).await;
     seed_store_with_payment(&pg, has_stores, "ETH", "2000000000000000000").await;
@@ -273,4 +270,29 @@ async fn an_account_with_no_stores_gets_a_zero_entry_not_a_dropped_one() {
         .find(|v| v.account_id == UserId(no_stores))
         .expect("storeless account present in the batch");
     assert_eq!(empty.volume.volume, "0");
+}
+
+/// Review finding, fixed: the cap that keeps this call inside a wasm
+/// deadline had no test at all. The check runs before any database or rate
+/// lookup, so this needs neither seeding nor `DATABASE_URL` - `connect_lazy`
+/// validates the URL and nothing more, and a batch over the cap is rejected
+/// before the connection would ever be used.
+#[tokio::test]
+async fn a_batch_over_the_cap_is_rejected_before_touching_the_database() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://merchant-volume-cap-test-unused/db")
+        .expect("connect_lazy only validates the URL, it does not connect");
+    let reader = PluginMerchantVolume::new(state(Arc::new(PgDataService::new(pool))));
+
+    let account_ids: Vec<UserId> = (0..MAX_ACCOUNTS_PER_BULK_READ + 1)
+        .map(|_| UserId(Uuid::new_v4()))
+        .collect();
+
+    let result = reader.merchant_volumes(&account_ids, 30, "USD").await;
+
+    assert!(
+        result.is_err(),
+        "a batch of {} accounts exceeds the cap of {MAX_ACCOUNTS_PER_BULK_READ} and must be rejected",
+        account_ids.len()
+    );
 }
