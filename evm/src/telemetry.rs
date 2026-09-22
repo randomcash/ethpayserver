@@ -301,25 +301,55 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
 /// long-lived RPC connection sees - a proxy resetting an idle socket, a
 /// missed keepalive pong - and `sentry_tracing`'s default filter turns any
 /// `error!` into a full Sentry event regardless of which crate logged it. So
-/// every blip the library logs was paging as if nothing were handling it,
-/// even though something was: every `alloy_transport_ws` backend error closes
-/// its connection handle with an error signal that `alloy_pubsub`'s service
-/// loop (`alloy_pubsub::service`) always catches, and that loop always
-/// attempts reconnection before giving up.
+/// every blip the library logs was paging as if nothing were handling it.
 ///
-/// That is what makes demoting the whole target safe rather than a blanket
-/// swallow: `alloy_pubsub::service` is the *only* caller of the WS backend,
-/// so nothing here can silently drop a connection without going through it,
-/// and when its retries are actually exhausted it logs its own `error!`
-/// ("Reconnect failed after N attempts, shutting down") under the
-/// `alloy_pubsub` target - a sibling crate this filter does not touch, so
-/// that event still reaches Sentry. A transient reset stays a breadcrumb; a
-/// connection `alloy_pubsub` truly cannot re-establish still pages, just
-/// under a different logger than the one that first noticed the drop. See
-/// `alloy_pubsub_giving_up_still_pages` below.
+/// This filter only ever needs to swallow an *isolated* blip, never a
+/// persistent failure, because it is not the backstop for a connection that
+/// stays down: `ChainMonitor::resubscribe_if_stalled`
+/// (`evm/src/monitor/chain/lifecycle.rs`) already watches for that on its own
+/// clock, independent of anything `alloy_transport_ws` or `alloy_pubsub` logs
+/// or doesn't log. It resubscribes and logs its own `error!` under
+/// `evm::monitor::chain::lifecycle` - a target this filter never touches -
+/// once a block stream has gone silent for `stall_timeout`. So a transient
+/// reset stays a breadcrumb, and a connection that never recovers pages
+/// within one stall window regardless of what the WS layer's own retry logic
+/// happens to be doing underneath it. `our_own_errors_still_page` below
+/// covers that target generically.
+///
+/// An earlier version of this filter argued instead that `alloy_pubsub`'s own
+/// service loop (`alloy_pubsub::service`) always logs a paging `error!` when
+/// *it* gives up retrying, and used that as the backstop. That turned out not
+/// to hold in general: `evm/tests/ws_pubsub_retry_escalation.rs` runs the
+/// real `alloy_pubsub`/`alloy_transport_ws` retry loop (pinned to `alloy =
+/// "1.0"`, resolved in `Cargo.lock` to 1.8.3) against a WS server that
+/// completes the handshake and then resets every connection, including
+/// retries, and `alloy_pubsub::service` never logs at all - it just
+/// reconnects, dies, and reconnects again, forever. Traced against that
+/// pinned source: `reconnect_with_retries`
+/// (`alloy-pubsub-1.8.3/src/service.rs:195`) only counts a `reconnect()` call
+/// as a failed attempt if establishing the connection itself errors; a
+/// connection that establishes fine and then dies immediately after counts as
+/// a *successful* reconnect, so `max_retries` is never approached and the
+/// give-up log at `service.rs:205` is never reached. That is a real gap in
+/// `alloy_pubsub`, not a defect in this filter - it just means this filter
+/// cannot lean on it, which is why the actual backstop is our own
+/// `resubscribe_if_stalled` instead.
+///
+/// `alloy_pubsub_giving_up_still_pages` below documents the narrower case
+/// where `alloy_pubsub`'s give-up log does still apply - the connection
+/// attempt itself fails outright (DNS, refused, TLS) rather than flapping -
+/// which still pages correctly since this filter never touches that target
+/// either. It is not relied on as the general backstop.
+///
+/// Only `error!`-level `alloy_transport_ws` events are demoted: the noise
+/// this exists to quiet is specifically the `error!` call sites in
+/// `alloy_transport_ws::native`, not `debug!`/`trace!` chatter the same
+/// target might log, so this filter does not touch those.
 #[must_use]
 pub fn sentry_event_filter(metadata: &tracing::Metadata) -> sentry_tracing::EventFilter {
-    if metadata.target().starts_with("alloy_transport_ws") {
+    if *metadata.level() == tracing::Level::ERROR
+        && metadata.target().starts_with("alloy_transport_ws")
+    {
         return sentry_tracing::EventFilter::Breadcrumb;
     }
     sentry_tracing::default_event_filter(metadata)
@@ -693,6 +723,11 @@ mod tests {
         );
     }
 
+    /// `evm::monitor::chain::lifecycle` is `resubscribe_if_stalled`'s own
+    /// target - the real backstop for a connection that never recovers, on a
+    /// clock independent of the WS layer. This target is untouched by
+    /// `sentry_event_filter`, so it pages regardless of what
+    /// `alloy_transport_ws`/`alloy_pubsub` do or don't log underneath it.
     #[test]
     fn our_own_errors_still_page() {
         let filter = observed_filter(|| {
@@ -704,14 +739,16 @@ mod tests {
         );
     }
 
-    /// Every `alloy_transport_ws` backend error routes through
-    /// `alloy_pubsub`'s service loop, which always tries to reconnect before
-    /// giving up. When it genuinely exhausts its retries it logs its own
-    /// `error!` under the `alloy_pubsub` target, not `alloy_transport_ws` -
-    /// so demoting the latter to a breadcrumb does not hide a connection that
-    /// never comes back. This is the escalation path the ticket warned
-    /// against silently papering over; unlike the transient-reset case, it
-    /// must still resolve to `Event`.
+    /// A narrower case than the general backstop above: when a WS *connection
+    /// attempt itself* fails outright (DNS, refused, TLS) rather than
+    /// completing and then flapping, `alloy_pubsub`'s service loop does
+    /// exhaust its retries and logs its own `error!` under the `alloy_pubsub`
+    /// target, not `alloy_transport_ws` - so demoting the latter to a
+    /// breadcrumb does not hide that failure either.
+    /// `ws_pubsub_retry_escalation.rs` shows this does *not* generalise to a
+    /// connection that keeps completing its handshake and then resetting -
+    /// see `sentry_event_filter`'s doc comment for why that case relies on
+    /// `resubscribe_if_stalled` instead.
     #[test]
     fn alloy_pubsub_giving_up_still_pages() {
         let filter = observed_filter(|| {

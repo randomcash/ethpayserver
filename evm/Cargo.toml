@@ -115,3 +115,8 @@ tokio = { version = "1.42", features = ["full", "test-util"] }
 # Test-only: installs a real tracing layer to observe `sentry_event_filter`'s
 # decisions rather than hand-building `tracing::Metadata`.
 tracing-subscriber = "0.3"
+# Test-only: the server side of a real WebSocket handshake, used to make
+# `alloy_pubsub`/`alloy_transport_ws` (pulled in transitively via `alloy`)
+# hit an actual connection reset in ws_pubsub_retry_escalation.rs. Pinned to
+# 0.28, the exact version alloy-transport-ws 1.8.3 itself depends on.
+tokio-tungstenite = "0.28"
