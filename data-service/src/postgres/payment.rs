@@ -643,7 +643,7 @@ impl PaymentAnalyticsReader for PgDataService {
             .map(|row| {
                 let raw_decimals: i16 = row.get("decimals");
                 let decimals = u8::try_from(raw_decimals).map_err(|_| {
-                    RepositoryError::Database(format!("negative token decimals: {raw_decimals}"))
+                    RepositoryError::Database(format!("invalid token decimals: {raw_decimals}"))
                 })?;
                 Ok(StorePaymentVolumeBucket {
                     store_id: StoreId(row.get("store_id")),

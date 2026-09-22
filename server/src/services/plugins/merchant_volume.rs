@@ -272,57 +272,7 @@ impl<A: SessionService + 'static> BulkMerchantVolumeReader for PluginMerchantVol
         let until = Utc::now();
         let since = until - Duration::days(i64::from(window_days.clamp(1, MAX_WINDOW_DAYS)));
 
-        // Every account starts with an empty bucket list, so one that owns no
-        // stores - or owns stores with no payments in the window - still gets
-        // a zero-volume answer rather than silently dropping out of the
-        // batch. Keyed on the inner `Uuid` rather than `UserId` itself, which
-        // does not derive `Ord`.
-        let mut per_account_buckets: BTreeMap<uuid::Uuid, Vec<PaymentVolumeBucket>> = account_ids
-            .iter()
-            .map(|&account_id| (account_id.0, Vec::new()))
-            .collect();
-
-        let mut store_owner: HashMap<StoreId, UserId> = HashMap::new();
-        for &account_id in account_ids {
-            let stores =
-                StoreRepository::get_stores_owned_by(&*self.state.data_service, account_id)
-                    .await
-                    .map_err(|e| format!("could not read this account's stores: {e}"))?;
-            for store in stores {
-                store_owner.insert(store.id, account_id);
-            }
-        }
-
-        if !store_owner.is_empty() {
-            let buckets = PaymentAnalyticsReader::payment_volume_by_day_per_store(
-                &*self.state.data_service,
-                &PaymentVolumeQuery {
-                    store_ids: store_owner.keys().copied().collect(),
-                    since,
-                    until,
-                },
-            )
-            .await
-            .map_err(|e| format!("could not read this batch's payment volume: {e}"))?;
-
-            for bucket in buckets {
-                // Every store in this query came from `store_owner`, so the
-                // lookup cannot miss.
-                let Some(&account_id) = store_owner.get(&bucket.store_id) else {
-                    continue;
-                };
-                per_account_buckets
-                    .entry(account_id.0)
-                    .or_default()
-                    .push(PaymentVolumeBucket {
-                        day: bucket.day,
-                        asset_symbol: bucket.asset_symbol,
-                        decimals: bucket.decimals,
-                        raw_amount: bucket.raw_amount,
-                        payment_count: bucket.payment_count,
-                    });
-            }
-        }
+        let per_account_buckets = self.buckets_by_account(account_ids, since, until).await?;
 
         let per_account_assets: BTreeMap<uuid::Uuid, BTreeMap<(String, u8), Decimal>> =
             per_account_buckets
@@ -361,6 +311,81 @@ impl<A: SessionService + 'static> BulkMerchantVolumeReader for PluginMerchantVol
 }
 
 impl<A: SessionService + 'static> PluginMerchantVolume<A> {
+    /// Every requested account's raw payment buckets, keyed by the account's
+    /// inner `Uuid` (`UserId` does not derive `Ord`).
+    ///
+    /// Every account starts with an empty bucket list, so one that owns no
+    /// stores - or owns stores with no payments in the window - still gets a
+    /// zero-volume answer rather than silently dropping out of the batch.
+    async fn buckets_by_account(
+        &self,
+        account_ids: &[UserId],
+        since: chrono::DateTime<Utc>,
+        until: chrono::DateTime<Utc>,
+    ) -> Result<BTreeMap<uuid::Uuid, Vec<PaymentVolumeBucket>>, String> {
+        let mut per_account_buckets: BTreeMap<uuid::Uuid, Vec<PaymentVolumeBucket>> = account_ids
+            .iter()
+            .map(|&account_id| (account_id.0, Vec::new()))
+            .collect();
+
+        let mut store_owner: HashMap<StoreId, UserId> = HashMap::new();
+        for &account_id in account_ids {
+            let stores =
+                StoreRepository::get_stores_owned_by(&*self.state.data_service, account_id)
+                    .await
+                    .map_err(|e| format!("could not read this account's stores: {e}"))?;
+            for store in stores {
+                store_owner.insert(store.id, account_id);
+            }
+        }
+
+        if store_owner.is_empty() {
+            return Ok(per_account_buckets);
+        }
+
+        let buckets = PaymentAnalyticsReader::payment_volume_by_day_per_store(
+            &*self.state.data_service,
+            &PaymentVolumeQuery {
+                store_ids: store_owner.keys().copied().collect(),
+                since,
+                until,
+            },
+        )
+        .await
+        .map_err(|e| format!("could not read this batch's payment volume: {e}"))?;
+
+        for bucket in buckets {
+            // Every store in this query came from `store_owner`, so the
+            // lookup cannot miss - but a miss here would silently
+            // under-report an account's volume, so a future regression that
+            // breaks that invariant is loud rather than quiet.
+            let Some(&account_id) = store_owner.get(&bucket.store_id) else {
+                debug_assert!(
+                    false,
+                    "a payment_volume_by_day_per_store bucket named a store not present in store_owner"
+                );
+                tracing::error!(
+                    store_id = %bucket.store_id.0,
+                    "a bulk volume bucket named a store with no known owner; \
+                     its volume is dropped from every account's total"
+                );
+                continue;
+            };
+            per_account_buckets
+                .entry(account_id.0)
+                .or_default()
+                .push(PaymentVolumeBucket {
+                    day: bucket.day,
+                    asset_symbol: bucket.asset_symbol,
+                    decimals: bucket.decimals,
+                    raw_amount: bucket.raw_amount,
+                    payment_count: bucket.payment_count,
+                });
+        }
+
+        Ok(per_account_buckets)
+    }
+
     /// How much of each asset one unit of `currency` buys.
     ///
     /// Direct first, because that is the same question invoice creation asks
