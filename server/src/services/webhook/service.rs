@@ -46,7 +46,8 @@ impl<D: WebhookDataService + 'static> WebhookSink for WebhookService<D> {
 /// 4. Records delivery status in the payment_events table
 pub struct WebhookService<D: WebhookDataService> {
     data_service: Arc<D>,
-    redis_conn: redis::aio::ConnectionManager,
+    redis_client: redis::Client,
+    redis_conn: tokio::sync::OnceCell<redis::aio::ConnectionManager>,
     http_client: reqwest::Client,
     config: WebhookConfig,
 }
@@ -54,23 +55,25 @@ pub struct WebhookService<D: WebhookDataService> {
 impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// Create a new webhook service.
     ///
-    /// The Redis connection is established once here via a `ConnectionManager`,
-    /// which reconnects automatically on failure. A one-shot connection re-opened
-    /// on every call would repeat DNS resolution and the initial handshake for
-    /// every single job, so any brief hiccup in resolving the Redis hostname (a
-    /// container restart, for example) fails every in-flight operation instead
-    /// of just the reconnect.
-    pub async fn new(
+    /// `redis::Client::open` only parses the URL; it does not connect. The
+    /// actual `ConnectionManager` is established lazily, on the first call to
+    /// `queue_webhook`/`process_next_job`, and cached for every call after
+    /// that. A one-shot connection re-opened on every call would repeat DNS
+    /// resolution and the initial handshake for every single job, so any
+    /// brief hiccup in resolving the Redis hostname (a container restart, for
+    /// example) failed every in-flight operation instead of just the one call
+    /// that triggered the reconnect. But connecting eagerly here instead would
+    /// turn that same hiccup into a startup failure for the whole server if it
+    /// happens to land during boot, which is a larger blast radius than the
+    /// webhook subsystem this is about — so construction stays infallible on
+    /// Redis reachability, same as the plain `Client::open` this replaces.
+    pub fn new(
         data_service: Arc<D>,
         redis_url: &str,
         config: WebhookConfig,
     ) -> Result<Self, WebhookError> {
         let redis_client =
             redis::Client::open(redis_url).map_err(|e| WebhookError::Redis(e.to_string()))?;
-
-        let redis_conn = redis::aio::ConnectionManager::new(redis_client)
-            .await
-            .map_err(|e| WebhookError::Redis(e.to_string()))?;
 
         let http_client = reqwest::Client::builder()
             .timeout(config.request_timeout)
@@ -79,17 +82,31 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
 
         Ok(Self {
             data_service,
-            redis_conn,
+            redis_client,
+            redis_conn: tokio::sync::OnceCell::new(),
             http_client,
             config,
         })
+    }
+
+    /// Get the shared connection, establishing it on first use.
+    async fn connection(&self) -> Result<redis::aio::ConnectionManager, WebhookError> {
+        let conn = self
+            .redis_conn
+            .get_or_try_init(|| async {
+                redis::aio::ConnectionManager::new(self.redis_client.clone())
+                    .await
+                    .map_err(|e| WebhookError::Redis(e.to_string()))
+            })
+            .await?;
+        Ok(conn.clone())
     }
 
     /// Queue a webhook for delivery.
     ///
     /// This adds the job to a Redis sorted set keyed by `scheduled_at` timestamp.
     pub async fn queue_webhook(&self, job: WebhookJob) -> Result<(), WebhookError> {
-        let mut conn = self.redis_conn.clone();
+        let mut conn = self.connection().await?;
 
         let job_json =
             serde_json::to_string(&job).map_err(|e| WebhookError::Serialization(e.to_string()))?;
@@ -150,7 +167,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// or no jobs are ready yet.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // Redis dequeue + HTTP delivery + retry logic
     async fn process_next_job(&self) -> Result<bool, WebhookError> {
-        let mut conn = self.redis_conn.clone();
+        let mut conn = self.connection().await?;
 
         let now = Utc::now().timestamp() as f64;
 
@@ -575,8 +592,7 @@ mod tests {
             ..WebhookConfig::default()
         };
         let service = WebhookService::new(data_service, &format!("redis://{proxy_addr}"), config)
-            .await
-            .expect("service should connect through the proxy");
+            .expect("service should be constructed");
 
         for _ in 0..5 {
             let job = WebhookJob::new(
@@ -596,5 +612,26 @@ mod tests {
             1,
             "expected one persistent Redis connection reused across queue_webhook calls, not one opened per call"
         );
+    }
+
+    /// A defect this regresses: an earlier version of the connection-reuse
+    /// fix above made `WebhookService::new` await a live `ConnectionManager`
+    /// during construction. That meant the exact DNS hiccup this service is
+    /// meant to tolerate mid-run ("no address associated with hostname") took
+    /// down the whole server at boot instead of just degrading webhook
+    /// delivery, if it happened to land while `new` was awaiting. Construction
+    /// must never touch the network — connectivity is discovered lazily, on
+    /// the first real command.
+    #[test]
+    fn new_does_not_require_redis_to_be_reachable() {
+        let data_service = Arc::new(data_service::InMemoryDataService::new());
+        let config = WebhookConfig::default();
+
+        WebhookService::new(
+            data_service,
+            "redis://this-host-does-not-resolve.invalid:6379",
+            config,
+        )
+        .expect("construction must not depend on Redis being reachable");
     }
 }
