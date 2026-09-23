@@ -21,7 +21,7 @@ impl ServerSettingsRepository for PgDataService {
                    -- because no row existed, so `fetch_optional` returned
                    -- `None` and the decode never ran.
                    enabled_chain_ids::text[] AS enabled_chain_ids,
-                   billing_store_id
+                   operator_store_id
             FROM server_settings WHERE id = 1
             "#,
         )
@@ -71,8 +71,11 @@ impl ServerSettingsRepository for PgDataService {
                     }
                 })
                 .collect(),
+            // Field name still `billing_store_id`: it comes from
+            // `auth::ServerSettings` in payserver-commons, pinned by rev and
+            // not yet renamed there - see that repository's own commit.
             billing_store_id: r
-                .get::<Option<uuid::Uuid>, _>("billing_store_id")
+                .get::<Option<uuid::Uuid>, _>("operator_store_id")
                 .map(types::StoreId),
         }))
     }
@@ -80,14 +83,14 @@ impl ServerSettingsRepository for PgDataService {
     async fn upsert_server_settings(&self, settings: &ServerSettings) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO server_settings (id, default_confirmations, invoice_expiry_minutes, rate_limit_rpm, enabled_chain_ids, billing_store_id, updated_at)
+            INSERT INTO server_settings (id, default_confirmations, invoice_expiry_minutes, rate_limit_rpm, enabled_chain_ids, operator_store_id, updated_at)
             VALUES (1, $1, $2, $3, $4, $5, NOW())
             ON CONFLICT (id) DO UPDATE SET
                 default_confirmations = EXCLUDED.default_confirmations,
                 invoice_expiry_minutes = EXCLUDED.invoice_expiry_minutes,
                 rate_limit_rpm = EXCLUDED.rate_limit_rpm,
                 enabled_chain_ids = EXCLUDED.enabled_chain_ids,
-                billing_store_id = EXCLUDED.billing_store_id,
+                operator_store_id = EXCLUDED.operator_store_id,
                 updated_at = NOW()
             "#,
         )

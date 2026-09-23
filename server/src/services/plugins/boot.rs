@@ -106,7 +106,7 @@ pub struct PluginBootReport {
     ///
     /// Reachable is still not the same as *called*. A filter is only offered
     /// the hook if its manifest declares `kind = "filter"`, and own-store
-    /// payment reporting additionally needs `ETHPAY_BILLING_STORE_ID` set.
+    /// payment reporting additionally needs `ETHPAY_OPERATOR_STORE_ID` set.
     pub loaded: Vec<PluginId>,
     /// Installed but switched off - by an admin, or by a previous boot that
     /// could not load it. Carries the recorded reason where there is one.

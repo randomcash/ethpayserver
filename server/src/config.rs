@@ -47,14 +47,14 @@
 //! - `ETHPAY_DISABLE_PLUGINS` - Safe mode: boot with every plugin disabled
 //!   (default: false). Same effect as the `--disable-plugins` CLI flag.
 //! - `ETHPAY_PLUGIN_DIR` - Where installed plugins' wasm lives
-//! - `ETHPAY_BILLING_STORE_ID` - The store this instance bills its own
-//!   subscriptions through. Unset on any instance that sells nothing to
-//!   itself; a plugin is told about payments on this store and no other.
-//!   (default: ./plugins)
+//! - `ETHPAY_OPERATOR_STORE_ID` - The operator's own store: where this
+//!   instance issues and settles its own invoices, if it issues any to
+//!   itself at all. Unset on any instance that does not; a plugin is told
+//!   about payments on this store and no other. (default: ./plugins)
 //! - `ETHPAY_OPERATOR_ACCOUNT_ID` - The account that may own
-//!   `ETHPAY_BILLING_STORE_ID`. Unset refuses every nomination of a billing
-//!   store, since an unowned nomination is exactly the thing that must never
-//!   pass by default.
+//!   `ETHPAY_OPERATOR_STORE_ID`. Unset refuses every nomination of an
+//!   operator store, since an unowned nomination is exactly the thing that
+//!   must never pass by default.
 
 use secrecy::{ExposeSecret, SecretString};
 use std::env;
@@ -102,21 +102,23 @@ pub struct Config {
     /// it is what a server with no plugins installed looks like.
     pub plugin_dir: PathBuf,
 
-    /// The store this instance issues, and settles, its own invoices on.
+    /// The operator's own store: where this instance issues, and settles,
+    /// its own invoices.
     ///
-    /// `None` on an instance that sells nothing to itself, which is every
-    /// deployment without a billing plugin. It must stay `None` rather than
-    /// defaulting to anything: a wrong value here would hand a plugin a
-    /// merchant's payments, and there is no value that is safely wrong.
-    pub billing_store_id: Option<types::StoreId>,
+    /// `None` on an instance that issues no invoices to itself, which is
+    /// every deployment without a plugin that needs one. It must stay `None`
+    /// rather than defaulting to anything: a wrong value here would hand a
+    /// plugin a merchant's payments, and there is no value that is safely
+    /// wrong.
+    pub operator_store_id: Option<types::StoreId>,
 
-    /// The account `billing_store_id` must be owned by.
+    /// The account `operator_store_id` must be owned by.
     ///
-    /// Set once, outside the admin settings API, so that nominating a
-    /// billing store answers "does this belong to the operator" against a
+    /// Set once, outside the admin settings API, so that nominating an
+    /// operator store answers "does this belong to the operator" against a
     /// value nobody can move by saving a settings form. `None` refuses every
     /// nomination - the same "no value is safely wrong" reasoning as
-    /// `billing_store_id` above, since a missing operator account is
+    /// `operator_store_id` above, since a missing operator account is
     /// indistinguishable from one an attacker chose not to set.
     pub operator_account_id: Option<types::UserId>,
 }
@@ -174,7 +176,7 @@ impl Config {
             enable_swagger,
             safe_mode,
             plugin_dir,
-            billing_store_id: billing_store_id_from(|key| env::var(key).ok()),
+            operator_store_id: operator_store_id_from(|key| env::var(key).ok()),
             operator_account_id: operator_account_id_from(|key| env::var(key).ok()),
         };
 
@@ -284,20 +286,18 @@ where
         .map_or_else(|| PathBuf::from(DEFAULT_PLUGIN_DIR), PathBuf::from)
 }
 
-/// The store this instance bills its own subscriptions through, from
-/// `ETHPAY_BILLING_STORE_ID`.
+/// The operator's own store, from `ETHPAY_OPERATOR_STORE_ID`.
 ///
 /// Absent, blank and unparseable all yield `None`, and all three are logged as
 /// nothing rather than guessed at. This id decides which payments a plugin is
-/// told about, so the failure mode for a typo has to be "the billing plugin
-/// hears nothing" - noticed quickly and harmlessly - rather than "the billing
-/// plugin hears about some merchant's store", which is a disclosure nobody
-/// would spot.
-pub fn billing_store_id_from<F>(lookup: F) -> Option<types::StoreId>
+/// told about, so the failure mode for a typo has to be "the plugin hears
+/// nothing" - noticed quickly and harmlessly - rather than "the plugin hears
+/// about some merchant's store", which is a disclosure nobody would spot.
+pub fn operator_store_id_from<F>(lookup: F) -> Option<types::StoreId>
 where
     F: Fn(&str) -> Option<String>,
 {
-    let raw = lookup("ETHPAY_BILLING_STORE_ID")?;
+    let raw = lookup("ETHPAY_OPERATOR_STORE_ID")?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -307,18 +307,18 @@ where
         Err(e) => {
             tracing::error!(
                 error = %e,
-                "ETHPAY_BILLING_STORE_ID is not a UUID; this instance will report no own-store payments"
+                "ETHPAY_OPERATOR_STORE_ID is not a UUID; this instance will report no own-store payments"
             );
             None
         }
     }
 }
 
-/// The account that may own the billing store, from
+/// The account that may own the operator store, from
 /// `ETHPAY_OPERATOR_ACCOUNT_ID`.
 ///
 /// Absent, blank and unparseable all yield `None`, the same treatment
-/// [`billing_store_id_from`] gives its variable and for the same reason: a
+/// [`operator_store_id_from`] gives its variable and for the same reason: a
 /// typo here must fail closed (every nomination refused) rather than fail
 /// open (nobody's account required).
 pub fn operator_account_id_from<F>(lookup: F) -> Option<types::UserId>
@@ -335,7 +335,7 @@ where
         Err(e) => {
             tracing::error!(
                 error = %e,
-                "ETHPAY_OPERATOR_ACCOUNT_ID is not a UUID; this instance will refuse every billing store nomination"
+                "ETHPAY_OPERATOR_ACCOUNT_ID is not a UUID; this instance will refuse every operator store nomination"
             );
             None
         }
@@ -383,7 +383,7 @@ mod tests {
             enable_swagger: false,
             safe_mode: false,
             plugin_dir: PathBuf::from(DEFAULT_PLUGIN_DIR),
-            billing_store_id: None,
+            operator_store_id: None,
             operator_account_id: None,
         };
         let rendered = format!("{config:?}");
