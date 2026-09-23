@@ -64,7 +64,14 @@ impl HdWallet {
             .to_seed(Some(passphrase))
             .map_err(|e| EvmError::InvalidMnemonic(format!("failed to derive seed: {}", e)))?;
 
-        let master_key = XPriv::root_from_seed(&seed[..], None)
+        // `root_from_seed(_, None)` defaults to `Hint::SegWit`, which would
+        // render an account xpub with BIP-84 ("zpub") version bytes instead
+        // of the BIP-44 ("xpub") ones every merchant wallet and this crate's
+        // own docs mean by "xpub". The hint changes nothing about derivation
+        // - addresses come out identical either way - only how a key
+        // encodes to base58, so this is spelled out explicitly rather than
+        // left to the library default.
+        let master_key = XPriv::root_from_seed(&seed[..], Some(Hint::Legacy))
             .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
 
         Ok(Self { master_key })
@@ -79,7 +86,7 @@ impl HdWallet {
             )));
         }
 
-        let master_key = XPriv::root_from_seed(seed, None)
+        let master_key = XPriv::root_from_seed(seed, Some(Hint::Legacy))
             .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
 
         Ok(Self { master_key })
@@ -197,6 +204,13 @@ impl HdWallet {
             .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
 
         Ok(account_key.verify_key())
+    }
+
+    /// [`Self::account_xpub_for`], base58-encoded - the exact string a
+    /// merchant pastes into `POST /wallets`.
+    pub fn account_xpub_string_for(&self, family: ChainFamily) -> EvmResult<String> {
+        MainnetEncoder::xpub_to_base58(&self.account_xpub_for(family)?)
+            .map_err(|e| EvmError::WalletDerivation(e.to_string()))
     }
 }
 
@@ -391,6 +405,32 @@ mod tests {
     /// The same seed at `m/44'/195'/0'` - Tron. Note that nothing about the
     /// two strings says which is which.
     const TRON_ACCOUNT_XPUB: &str = "xpub6D1AabNHCupeiLM65ZR9UStMhJ1vCpyV4XbZdyhMZBiJXALQtmn9p42VTQckoHVn8WNqS7dqnJokZHAHcHGoaQgmv8D45oNUKx6DZMNZBCd";
+
+    /// `HdWallet` must export the exact string a real wallet would - not just
+    /// something `XpubDeriver` can parse back.
+    ///
+    /// Every other test that touches `EVM_ACCOUNT_XPUB`/`TRON_ACCOUNT_XPUB`
+    /// hands the literal to `XpubDeriver::from_xpub`, which round-trips fine
+    /// no matter which BIP-32/49/84 encoding produced the bytes - the base58
+    /// version prefix only picks which of `xpub`/`ypub`/`zpub` comes out, and
+    /// parsing recovers it either way. That let `HdWallet::from_mnemonic`
+    /// default to the underlying library's `Hint::SegWit` and export `zpub…`
+    /// silently: every derived address stayed correct, `validate_xpub` still
+    /// accepted the result, and nothing here caught that the string handed to
+    /// a merchant no longer looked anything like the `xpub…` this repo's own
+    /// docs and API examples promise.
+    #[test]
+    fn account_xpub_string_matches_what_a_real_wallet_exports() {
+        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
+        assert_eq!(
+            wallet.account_xpub_string_for(ChainFamily::Evm).unwrap(),
+            EVM_ACCOUNT_XPUB
+        );
+        assert_eq!(
+            wallet.account_xpub_string_for(ChainFamily::Tron).unwrap(),
+            TRON_ACCOUNT_XPUB
+        );
+    }
 
     #[test]
     fn test_wallet_from_mnemonic() {

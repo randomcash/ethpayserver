@@ -196,6 +196,41 @@ Response (`201 Created`):
 ETHPayServer derives unique payment addresses from an extended public key
 (BIP-32 xpub). This means the server never holds private keys.
 
+### Where do I get an xpub?
+
+Not from MetaMask - it has no export flow for one. That is architectural, not
+an oversight: Ethereum's account model gives it nothing to export. A Bitcoin
+wallet's UI shows an xpub because many receiving addresses unlock from that
+one key; MetaMask shows you a single address per account instead. Hardware
+wallets are no different for the same reason - neither Trezor Suite nor
+Ledger Live has an "export xpub" control for an Ethereum account. Look at
+either one's advanced account view and you will find that control for
+Bitcoin, and nothing for Ethereum.
+
+Two ways to actually get one, in the order worth trying:
+
+1. **Generate a dedicated receiving wallet.** Run the offline tool in this
+   repository - `cargo run --bin derive-xpub -- generate` (from `evm/`, or
+   pass `-p evm` from the workspace root). It links no HTTP client, so it has
+   no way to transmit anything, and it prints a fresh BIP-39 mnemonic, the
+   account xpub derived from it, and the first three receiving addresses so
+   you can sanity-check them against `verification_addresses` below before
+   trusting the key with a single invoice. This should be a wallet made for
+   receiving payments, not the one holding your other funds - the practice a
+   payout wallet should follow regardless of where the key comes from.
+2. **Derive from a seed phrase you already hold**, as a last resort. The same
+   tool takes it: `cargo run --bin derive-xpub -- from-existing` reads a
+   mnemonic from stdin, one line, and never as a command-line argument -
+   arguments end up in shell history and process listings, a mnemonic should
+   end up in neither. MetaMask derives its accounts at `m/44'/60'/0'/0/i`, so
+   the account-level extended key sitting above every address it shows you is
+   at `m/44'/60'/0'` - the same path this tool and this server both use. Do
+   this only on a machine you trust, offline if you can manage it: typing a
+   seed phrase into any piece of software is indistinguishable, to your
+   future self, from the exact thing every wallet-draining phishing site
+   asks for. If that risk is not one you are willing to take, use option 1
+   instead and set up the new wallet as your store's payout destination.
+
 Wallets belong to the account, not to a store. Every store uses the account's
 primary wallet for a chain family unless it is pinned to a different one.
 
