@@ -84,6 +84,43 @@ pub enum MonitorEvent {
     StatusReport(StatusReport),
 }
 
+impl MonitorEvent {
+    /// The chain this event is about. Every variant carries one, so the
+    /// outbox can tag an envelope without knowing the event's inner shape.
+    pub fn chain_id(&self) -> u64 {
+        match self {
+            MonitorEvent::PaymentDetected(e) => e.chain_id,
+            MonitorEvent::PaymentConfirmed(e) => e.chain_id,
+            MonitorEvent::ReorgDetected(e) => e.chain_id,
+            MonitorEvent::MonitorStarted { chain_id }
+            | MonitorEvent::MonitorStopped { chain_id } => *chain_id,
+            MonitorEvent::MonitorError { chain_id, .. } => *chain_id,
+            MonitorEvent::AddressWatched(e) => e.chain_id,
+            MonitorEvent::AddressUnwatched(e) => e.chain_id,
+            MonitorEvent::StatusReport(e) => e.chain_id,
+        }
+    }
+
+    /// Best-available chain height as of this event, for outbox diagnostics.
+    ///
+    /// Not part of resume decisions - only `seq`/`epoch` decide where to
+    /// resume from - so a variant with no natural height (a watch
+    /// confirmation, a status log) reporting `0` here is harmless.
+    pub fn block_height(&self) -> u64 {
+        match self {
+            MonitorEvent::PaymentDetected(e) => e.block_number,
+            MonitorEvent::PaymentConfirmed(e) => e.block_number,
+            MonitorEvent::ReorgDetected(e) => e.fork_block,
+            MonitorEvent::StatusReport(e) => e.current_block,
+            MonitorEvent::MonitorStarted { .. }
+            | MonitorEvent::MonitorStopped { .. }
+            | MonitorEvent::MonitorError { .. }
+            | MonitorEvent::AddressWatched(_)
+            | MonitorEvent::AddressUnwatched(_) => 0,
+        }
+    }
+}
+
 /// Event confirming an address is now being watched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddressWatched {

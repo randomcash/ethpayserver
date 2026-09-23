@@ -1,9 +1,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+mod apply_halts_on_failure;
+mod durable_resume;
 mod helpers;
+mod lineage_break;
+mod multi_chain_resume;
+mod out_of_range_retry;
 mod own_store_payments;
 mod payment_confirmed;
 mod payment_detected;
+mod reconcile_cursors;
 mod reorg;
+mod resume_failure_hook;
+mod resume_uses_persisted_cursor;
 
 use std::sync::Arc;
 

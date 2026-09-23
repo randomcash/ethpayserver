@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -18,6 +19,7 @@ use types::{
 use uuid::Uuid;
 
 use crate::analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
+use crate::chain_cursor::{ChainCursor, ChainCursorReader, ChainCursorWriter};
 use crate::{UpsertDeliveryParams, WebhookDeliveryWriter};
 
 /// In-memory implementation of all repository traits for testing.
@@ -38,11 +40,43 @@ pub struct InMemoryDataService {
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
+    chain_cursors: RwLock<HashMap<(String, u64), ChainCursor>>,
+    // `reset_chain_watch_notifications` is otherwise a no-op here (see its
+    // impl below), so a test asserting a lineage break actually re-armed
+    // `watch_retry` has nothing else to check against.
+    watch_reset_calls: AtomicU64,
+    // Lets a test force `chain_cursors` to fail, to exercise how a consumer
+    // reacts to a DB error at startup - which is not the same thing as an
+    // empty result (see `ChainCursorReader::chain_cursors`'s own doc
+    // comment), and nothing else in this test double can produce it.
+    fail_chain_cursors: AtomicBool,
+    // Lets a test force `reset_chain_watch_notifications` to fail, to
+    // exercise a lineage break whose re-arm cannot be trusted to have
+    // happened - the one case this test double cannot otherwise reach, since
+    // it is normally a no-op that always succeeds.
+    fail_reset_chain_watch_notifications: AtomicBool,
 }
 
 impl InMemoryDataService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How many times `reset_chain_watch_notifications` has been called.
+    pub fn watch_reset_calls(&self) -> u64 {
+        self.watch_reset_calls.load(Ordering::SeqCst)
+    }
+
+    /// Force the next (and every subsequent) `chain_cursors` call to fail.
+    pub fn set_fail_chain_cursors(&self, fail: bool) {
+        self.fail_chain_cursors.store(fail, Ordering::SeqCst);
+    }
+
+    /// Force the next (and every subsequent) `reset_chain_watch_notifications`
+    /// call to fail.
+    pub fn set_fail_reset_chain_watch_notifications(&self, fail: bool) {
+        self.fail_reset_chain_watch_notifications
+            .store(fail, Ordering::SeqCst);
     }
 
     /// Set up a webhook for a store (for testing).
@@ -470,6 +504,56 @@ impl crate::reorg::ReorgWriter for InMemoryDataService {
             payment.confirmed_at = None;
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ChainCursorReader for InMemoryDataService {
+    async fn chain_cursors(&self, adapter_id: &str) -> RepositoryResult<HashMap<u64, ChainCursor>> {
+        if self.fail_chain_cursors.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated chain_cursors failure".to_string(),
+            ));
+        }
+        let cursors = self.chain_cursors.read().unwrap();
+        Ok(cursors
+            .iter()
+            .filter(|((adapter, _), _)| adapter == adapter_id)
+            .map(|((_, chain_id), cursor)| (*chain_id, *cursor))
+            .collect())
+    }
+}
+
+#[async_trait]
+impl ChainCursorWriter for InMemoryDataService {
+    async fn commit_chain_cursor(
+        &self,
+        adapter_id: &str,
+        chain_id: u64,
+        cursor: ChainCursor,
+    ) -> RepositoryResult<()> {
+        self.chain_cursors
+            .write()
+            .unwrap()
+            .insert((adapter_id.to_string(), chain_id), cursor);
+        Ok(())
+    }
+
+    async fn reset_chain_watch_notifications(&self, _chain_id: u64) -> RepositoryResult<u64> {
+        if self
+            .fail_reset_chain_watch_notifications
+            .load(Ordering::SeqCst)
+        {
+            return Err(RepositoryError::Database(
+                "simulated reset_chain_watch_notifications failure".to_string(),
+            ));
+        }
+        // `WatchedAddressWriter::mark_notified` is already a no-op above:
+        // this test double does not model `monitor_notified` at all. The
+        // call still counts, so a test can assert this was reached without
+        // needing to model the column it would flip.
+        self.watch_reset_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
     }
 }
 

@@ -1,25 +1,55 @@
-//! In-memory event bridge using tokio broadcast channels.
+//! In-memory event bridge using a durable outbox behind a mutex.
 //!
 //! Useful for testing and single-process deployments where the monitor
 //! runs in the same process as the API server.
 //!
 //! Supports bidirectional communication:
-//! - Events flow from monitor to API server
+//! - Events flow from monitor to API server, through a durable outbox that
+//!   survives a consumer dropping its stream and resubscribing (unlike the
+//!   commands side, which stays a plain broadcast: `watch_retry` already
+//!   covers a lost command).
 //! - Commands flow from API server to monitor
 
-use super::{CommandStream, EventBridge, EventStream};
-use crate::error::EvmResult;
+use super::{CommandStream, DurableEventStream, EventBridge, EventCursor, EventEnvelope};
+use crate::error::{EvmError, EvmResult};
 use crate::monitor::events::{MonitorCommand, MonitorEvent};
+use async_stream::stream;
 use async_trait::async_trait;
-use tokio::sync::broadcast;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{Notify, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-/// In-memory event bridge using tokio broadcast channels.
+/// The event outbox: every retained published envelope, in publish order.
+///
+/// A queue behind a `Mutex` rather than a broadcast channel because the
+/// whole point is that a consumer which was not subscribed when an event
+/// was published can still see it later - a broadcast channel drops exactly
+/// that message, which is the bug this bridge exists to not reproduce.
+///
+/// `next_seq` is the seq the *next* published entry will get; it keeps
+/// counting up even past what `max_retained` lets `entries` hold, the same
+/// way a real outbox's sequence counter is a separate key from its retained
+/// data. The oldest retained seq is always `next_seq - entries.len()`.
+struct Outbox {
+    epoch: i64,
+    entries: VecDeque<EventEnvelope>,
+    next_seq: i64,
+    /// `None` means unbounded (production default). `Some(n)` caps
+    /// retention at `n` entries, trimming the oldest first - see
+    /// [`MemoryBridge::with_max_retained`].
+    max_retained: Option<usize>,
+}
+
+/// In-memory event bridge with a durable event outbox.
 pub struct MemoryBridge {
-    /// Events channel (monitor -> API server).
-    events_tx: broadcast::Sender<MonitorEvent>,
-    /// Commands channel (API server -> monitor).
+    outbox: Arc<Mutex<Outbox>>,
+    /// Woken on every publish so a live `subscribe_from` tail notices new
+    /// entries without polling.
+    notify: Arc<Notify>,
+    /// Commands channel (API server -> monitor). Fire-and-forget is fine
+    /// here: `watch_retry` re-drives a lost command within 30 seconds.
     commands_tx: broadcast::Sender<MonitorCommand>,
 }
 
@@ -29,19 +59,36 @@ impl MemoryBridge {
         Self::with_capacity(4096)
     }
 
-    /// Create a new in-memory bridge with specified capacity.
+    /// Create a new in-memory bridge with specified capacity for the
+    /// commands channel. The event outbox is unbounded: durability is the
+    /// point, so there is nothing safe to drop from it here.
     pub fn with_capacity(capacity: usize) -> Self {
-        let (events_tx, _) = broadcast::channel(capacity);
-        let (commands_tx, _) = broadcast::channel(capacity);
-        Self {
-            events_tx,
-            commands_tx,
-        }
+        Self::new_inner(capacity, None)
     }
 
-    /// Get a raw broadcast sender for events (for direct use).
-    pub fn events_sender(&self) -> broadcast::Sender<MonitorEvent> {
-        self.events_tx.clone()
+    /// Create a new in-memory bridge that only retains the last
+    /// `max_retained` entries.
+    ///
+    /// Test-only in practice, mirroring `RedisBridge::new_with_maxlen`: it
+    /// lets a test force `subscribe_from` to report `OUT_OF_RANGE` by
+    /// publishing a handful of entries past a small cap, rather than
+    /// needing a real Redis to reproduce retention loss.
+    pub fn with_max_retained(max_retained: usize) -> Self {
+        Self::new_inner(4096, Some(max_retained))
+    }
+
+    fn new_inner(commands_capacity: usize, max_retained: Option<usize>) -> Self {
+        let (commands_tx, _) = broadcast::channel(commands_capacity);
+        Self {
+            outbox: Arc::new(Mutex::new(Outbox {
+                epoch: 1,
+                entries: VecDeque::new(),
+                next_seq: 0,
+                max_retained,
+            })),
+            notify: Arc::new(Notify::new()),
+            commands_tx,
+        }
     }
 
     /// Get a raw broadcast sender for commands (for direct use).
@@ -63,15 +110,100 @@ impl EventBridge for MemoryBridge {
     // =========================================================================
 
     async fn publish(&self, event: &MonitorEvent) -> EvmResult<()> {
-        // Ignore send errors (no receivers is fine)
-        let _ = self.events_tx.send(event.clone());
+        {
+            let mut outbox = self.outbox.lock().expect("outbox mutex poisoned");
+            let seq = outbox.next_seq;
+            outbox.next_seq += 1;
+            let cursor = EventCursor {
+                epoch: outbox.epoch,
+                seq,
+                block_height: event.block_height() as i64,
+            };
+            outbox.entries.push_back(EventEnvelope {
+                chain_id: event.chain_id(),
+                cursor,
+                event: event.clone(),
+            });
+            if let Some(max) = outbox.max_retained {
+                while outbox.entries.len() > max {
+                    outbox.entries.pop_front();
+                }
+            }
+        }
+        self.notify.notify_waiters();
         Ok(())
     }
 
-    async fn subscribe(&self) -> EvmResult<EventStream> {
-        let rx = self.events_tx.subscribe();
-        let stream = BroadcastStream::new(rx).filter_map(|result| result.ok());
-        Ok(Box::pin(stream))
+    async fn subscribe_from(&self, from: Option<EventCursor>) -> EvmResult<DurableEventStream> {
+        // Mirrors `RedisBridge::subscribe_from`: same epoch does not, on its
+        // own, mean `cursor.seq` is still retained, since trimming runs
+        // independently of the epoch key. A consumer resuming from a seq
+        // this outbox no longer holds must not silently start from whatever
+        // happens to be retained next - it needs the loud `OUT_OF_RANGE`
+        // path instead.
+        if let Some(cursor) = from {
+            let oldest_retained = {
+                let outbox = self.outbox.lock().expect("outbox mutex poisoned");
+                outbox
+                    .max_retained
+                    .map(|_| outbox.next_seq - outbox.entries.len() as i64)
+            };
+            if let Some(oldest) = oldest_retained
+                && oldest > cursor.seq + 1
+            {
+                let new_epoch = self.bump_epoch().await?;
+                return Err(EvmError::EventStreamOutOfRange(format!(
+                    "resume at seq {} is behind the oldest retained entry (seq {oldest}); \
+                     the outbox has moved to epoch {new_epoch}",
+                    cursor.seq
+                )));
+            }
+        }
+
+        let outbox = Arc::clone(&self.outbox);
+        let notify = Arc::clone(&self.notify);
+        let mut next_seq = from.map(|c| c.seq + 1).unwrap_or(0);
+
+        let s = stream! {
+            loop {
+                // Register interest before checking, so a publish landing
+                // between the check and the await is never missed.
+                let notified = notify.notified();
+
+                let batch: Vec<EventEnvelope> = {
+                    let guard = outbox.lock().expect("outbox mutex poisoned");
+                    let oldest_retained = guard.next_seq - guard.entries.len() as i64;
+                    let start = (next_seq - oldest_retained).max(0) as usize;
+                    guard.entries.range(start..).cloned().collect()
+                };
+
+                if batch.is_empty() {
+                    notified.await;
+                    continue;
+                }
+
+                for envelope in batch {
+                    next_seq = envelope.cursor.seq + 1;
+                    yield envelope;
+                }
+            }
+        };
+        Ok(Box::pin(s))
+    }
+
+    async fn current_epoch(&self) -> EvmResult<i64> {
+        Ok(self.outbox.lock().expect("outbox mutex poisoned").epoch)
+    }
+
+    async fn bump_epoch(&self) -> EvmResult<i64> {
+        // The in-memory outbox is unbounded (see `Outbox`'s docs), so it
+        // never has a real retention-loss case to report on its own. This
+        // exists so a test can still exercise the epoch-mismatch resume path
+        // through the real `EventBridge` API rather than fabricating a
+        // mismatched epoch by hand.
+        let mut outbox = self.outbox.lock().expect("outbox mutex poisoned");
+        outbox.epoch += 1;
+        Ok(outbox.epoch)
     }
 
     // =========================================================================
@@ -142,11 +274,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memory_bridge_events_pubsub() {
+    async fn test_memory_bridge_events_durable() {
         let bridge = MemoryBridge::new();
 
         // Subscribe first
-        let mut stream = bridge.subscribe().await.unwrap();
+        let mut stream = bridge.subscribe_from(None).await.unwrap();
 
         // Publish event
         let event = make_event();
@@ -158,12 +290,57 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        match received {
+        match received.event {
             MonitorEvent::PaymentDetected(p) => {
                 assert_eq!(p.chain_id, 1);
             }
             _ => panic!("unexpected event type"),
         }
+        assert_eq!(received.cursor.seq, 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_bridge_events_survive_a_late_subscriber() {
+        let bridge = MemoryBridge::new();
+
+        // Nobody is subscribed yet when this publishes - the point of a
+        // durable outbox is that this is not lost, unlike plain pub/sub.
+        bridge.publish(&make_event()).await.unwrap();
+
+        let mut stream = bridge.subscribe_from(None).await.unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.cursor.seq, 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_bridge_resumes_after_a_cursor() {
+        let bridge = MemoryBridge::new();
+
+        bridge.publish(&make_event()).await.unwrap(); // seq 0
+        bridge.publish(&make_event()).await.unwrap(); // seq 1
+        bridge.publish(&make_event()).await.unwrap(); // seq 2
+
+        let cursor = EventCursor {
+            epoch: bridge.current_epoch().await.unwrap(),
+            seq: 0,
+            block_height: 0,
+        };
+        let mut stream = bridge.subscribe_from(Some(cursor)).await.unwrap();
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.cursor.seq, 1);
+
+        let second = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.cursor.seq, 2);
     }
 
     #[tokio::test]
@@ -195,8 +372,8 @@ mod tests {
     async fn test_memory_bridge_multiple_subscribers() {
         let bridge = MemoryBridge::new();
 
-        let mut stream1 = bridge.subscribe().await.unwrap();
-        let mut stream2 = bridge.subscribe().await.unwrap();
+        let mut stream1 = bridge.subscribe_from(None).await.unwrap();
+        let mut stream2 = bridge.subscribe_from(None).await.unwrap();
 
         let event = make_event();
         bridge.publish(&event).await.unwrap();

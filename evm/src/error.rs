@@ -65,6 +65,15 @@ pub enum EvmError {
     #[error("subscription error: {0}")]
     Subscription(String),
 
+    /// The requested resume position no longer exists in the durable event
+    /// outbox - trimmed by retention, or naming a lineage the outbox no
+    /// longer vouches for. The bridge has already started a new epoch by
+    /// the time this is returned; the caller must not retry with the same
+    /// cursor and must not silently resume "from now" - it has to re-arm
+    /// delivery for whatever this position covered and resume fresh.
+    #[error("event stream out of range: {0}")]
+    EventStreamOutOfRange(String),
+
     /// Monitor error.
     #[error("monitor error: {0}")]
     Monitor(String),

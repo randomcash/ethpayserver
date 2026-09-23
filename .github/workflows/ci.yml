@@ -244,6 +244,15 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -292,6 +301,25 @@ jobs:
             cargo run --release --bin migrate_postgres
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
             cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1
+
+      # `evm`'s `redis` feature is off by default, so evm/tests/redis_bridge.rs
+      # (the only coverage for the production Redis event bridge - XADD/XREAD
+      # entry-ID framing, epoch persistence, retention-loss detection) was
+      # compiled by neither this job nor the "Unit tests" step above, and ran
+      # in no CI workflow at all. A test that never runs is worse than no
+      # test: this crate's Redis-specific invariants shipped with zero
+      # automated coverage until this step existed.
+      #
+      # Scoped to `--test redis_bridge` rather than `-p evm`: `evm/tests/`
+      # also has `payment_flow.rs` and `rpc_cost.rs`, which fail to compile
+      # on their own (pre-existing, unrelated to Redis) unless built as part
+      # of the whole `--workspace`, where feature unification with `server`
+      # papers over it. `-p evm` alone hits that failure and would sink this
+      # step; naming the one binary this step actually needs sidesteps it.
+      - name: Redis event bridge integration tests
+        run: |
+          REDIS_URL="redis://127.0.0.1:6379" \
+            cargo nextest run -p evm --features redis --test redis_bridge --no-fail-fast --run-ignored only -j 1
 
   # Runs on pull requests too, deliberately. This used to be branch-only, so a
   # dependency a PR introduced was invisible until after it merged - and then

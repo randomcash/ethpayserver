@@ -7,6 +7,7 @@ use sqlx::postgres::{PgPool, Postgres};
 use uuid::Uuid;
 
 mod auth;
+mod chain_cursor;
 mod conversions;
 mod email_change;
 mod installed_plugins;
