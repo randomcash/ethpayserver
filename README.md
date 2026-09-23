@@ -562,14 +562,24 @@ The Leptos/WASM client reports to the same backend independently, via the
 
 ## Plugins
 
-A plugin host (`payserver-plugin-host`, in payserver-commons) loads and runs
-merchant-installed plugins as wasmtime modules, each declaring pages and
-routes that are mounted under `/plugins/{id}`. The host's own auth wraps a
-plugin's entire mount before any plugin code runs, and a plugin's `pages` and
-`routes` segments are kept structurally separate so one plugin can never
-shadow another's page. Installed plugins are tracked in the `installed_plugins`
-table; `server/src/api/plugins.rs` and `server/src/api/admin/plugins.rs` are
-the mounting and management code respectively.
+A plugin host (`payserver-plugin-host`, in payserver-commons) loads
+merchant-installed plugins as wasmtime modules. Of the two things a manifest
+can declare, only one is live: `pages` — a plugin's declared page tree — are
+served today at `GET /plugins/{id}/pages/{path}`, mounted directly in
+`server/src/api/mod.rs` and requiring the same `AuthenticatedUser` extractor
+every core handler uses.
+
+A plugin's own `routes` are reserved a separate segment
+(`/plugins/{id}/routes/...`, kept apart from `pages` so neither can shadow the
+other) and `server/src/api/plugins.rs::router()` exists to mount them behind
+the host's own auth — but nothing in the live server calls it, and nothing in
+this build can ask a loaded plugin for its own router in the first place, so
+`declared_routes` is always empty today. It is a seam for a future slice, not
+a reachable endpoint.
+
+Installed plugins are tracked in the `installed_plugins` table. Install,
+enable, disable and uninstall are admin-only and live under `/admin/plugins`,
+handled by `server/src/api/admin/plugins.rs`.
 
 ## Development Status
 
