@@ -4,6 +4,18 @@
 //! `storage_query` or `invoice_create`, gets a length back, and copies the
 //! answer out with `host_take`. This is the other end.
 //!
+//! That wasm-to-host wiring - a compiled guest module actually reaching this
+//! layer through wasmtime, not just a Rust-level call to it - is not code in
+//! this repository, so it cannot be shown in a diff here: the linker that
+//! binds the `storage_query` import lives in `payserver-plugin-host::runtime`
+//! (the crate this workspace pins by `rev` in the root `Cargo.toml`), and the
+//! guest-side round trip is exercised end to end, through a real compiled
+//! wasm module and a real `wasmtime::Linker`, by
+//! `a_plugin_can_ask_the_host_a_question_and_read_the_answer` in that crate's
+//! `runtime.rs` tests. Combined with this file's own tests against a real
+//! `PluginCalls` and a real Postgres, the two repositories together cover the
+//! whole path a plugin's write actually takes; neither alone does.
+//!
 //! Two capabilities, and they are not alike. Storage runs SQL on a
 //! connection Postgres authenticated as *that plugin's* role, and the
 //! database is what confines it. Invoicing has no such backstop - it writes
@@ -890,6 +902,85 @@ mod tests {
             row["amount"],
             Some("129.000000000000000000".to_string()),
             "the amount must cross with every digit Postgres stored"
+        );
+
+        storage.drop_role(&plugin).await.unwrap();
+        storage.uninstall(&plugin, true).await.unwrap();
+    }
+
+    /// The module doc's own canonical example - `UPDATE subscriptions SET
+    /// ... WHERE account_id = $2` - is never run against a real row
+    /// anywhere in this file; only `INSERT` is. That gap matters because
+    /// the shape is not academic: a plugin marking an account cancelled,
+    /// same as one advancing `paid_until`, is exactly this statement, and
+    /// its `rows_affected` is the only signal such a plugin has that the
+    /// write actually matched something rather than silently no-op'ing on
+    /// a stale or wrong account id.
+    ///
+    /// It is also the sharp edge the comment on `rows_affected` above
+    /// warns about, proven rather than just asserted: an `UPDATE` with no
+    /// `RETURNING` reports zero rows *even when it matches and changes
+    /// one*, because this call counts rows `fetch_all` returned, not rows
+    /// Postgres changed. `RETURNING` is what turns that back into a
+    /// trustworthy signal.
+    #[tokio::test]
+    #[ignore]
+    async fn an_update_without_returning_cannot_confirm_its_own_match() {
+        // Unlike the file's other `live()`-gated tests, a silent skip here
+        // would defeat the point: this test exists to *prove* the
+        // `rows_affected` footgun, and a green run that never touched
+        // Postgres would look identical to one that did. CI always has
+        // `DATABASE_URL` set for `--ignored` runs; a bare `cargo test
+        // --ignored` without it fails loudly instead.
+        let Some((calls, schema, storage, plugin)) = live("cash.random.hc.update").await else {
+            panic!(
+                "DATABASE_URL must be set to run this test - it exists to \
+                 prove a real Postgres behaviour, so skipping it silently \
+                 would prove nothing"
+            );
+        };
+
+        calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"INSERT INTO \"{schema}\".subscriptions (account_id) VALUES ($1)","params":["acct-3"]}}]}}"#
+            )))
+            .await
+            .expect("the fixture row must insert");
+
+        let blind = calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"UPDATE \"{schema}\".subscriptions SET paid_until = now() WHERE account_id = $1","params":["acct-3"]}}]}}"#
+            )))
+            .await
+            .expect("the update itself must succeed");
+        assert_eq!(
+            blind.results[0].rows_affected, "0",
+            "documented behaviour: an UPDATE with no RETURNING reports zero \
+             rows even though this one matched and changed acct-3"
+        );
+
+        let confirmed = calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"UPDATE \"{schema}\".subscriptions SET paid_until = now() WHERE account_id = $1 RETURNING account_id","params":["acct-3"]}}]}}"#
+            )))
+            .await
+            .expect("the update itself must succeed");
+        assert_eq!(
+            confirmed.results[0].rows_affected, "1",
+            "RETURNING is what makes rows_affected trustworthy for a write \
+             that needs to know whether it matched anything"
+        );
+
+        let missed = calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"UPDATE \"{schema}\".subscriptions SET paid_until = now() WHERE account_id = $1 RETURNING account_id","params":["acct-does-not-exist"]}}]}}"#
+            )))
+            .await
+            .expect("an update matching nothing is not an error");
+        assert_eq!(
+            missed.results[0].rows_affected, "0",
+            "and a real miss still reads as zero, so the signal round-trips \
+             both ways"
         );
 
         storage.drop_role(&plugin).await.unwrap();

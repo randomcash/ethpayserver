@@ -4,7 +4,8 @@
 //! carry secrets or customer data: wallet/private keys, mnemonics, API keys,
 //! JWTs, bearer tokens, emails, on-chain addresses/hashes, HTTP request bodies,
 //! or per-user identity. [`scrub_event`] is installed as the Sentry
-//! `before_send` hook in every binary that initialises Sentry, and
+//! `before_send` hook in every binary that initialises Sentry, [`scrub_log`]
+//! as `before_send_log` for the separate structured-logs pipeline, and
 //! [`redact_secrets`] redacts secret-shaped substrings from free-text fields.
 //!
 //! This lives in `evm` (rather than being duplicated per binary) so the
@@ -27,7 +28,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
-use sentry::protocol::{Event, Value};
+use sentry::protocol::{Event, Log, Value};
 
 /// Ordered `(pattern, replacement)` redaction rules applied to every free-text
 /// field. Compiled once and reused for the life of the process.
@@ -211,6 +212,27 @@ pub fn scrub_event(mut event: Event<'static>) -> Option<Event<'static>> {
     Some(event)
 }
 
+/// Sentry `before_send_log` hook: strip PII/secrets before a structured log
+/// record leaves the process.
+///
+/// Structured logs are a separate Sentry pipeline from events/breadcrumbs —
+/// `before_send` above never sees them — so without this hook a log line
+/// that interpolated a mnemonic, a JWT, or an on-chain address would ship
+/// unredacted. Mirrors [`scrub_event`]: `body` is the free-text message,
+/// `attributes` is the structured-data map, redacted the same way `extra` is.
+#[must_use]
+pub fn scrub_log(mut log: Log) -> Option<Log> {
+    log.body = redact_secrets(&log.body);
+    for (key, attribute) in log.attributes.iter_mut() {
+        if is_sensitive_key(key) {
+            attribute.0 = Value::String("[redacted]".to_string());
+        } else {
+            redact_value(&mut attribute.0);
+        }
+    }
+    Some(log)
+}
+
 /// Whether error reporting is on, and — when it is off — whether that is
 /// acceptable for the environment reporting failed to catch this itself once:
 /// a disabled integration looks identical to a working one unless something
@@ -264,6 +286,35 @@ pub fn resolve_environment() -> String {
     std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
 }
 
+/// Builds the `ClientOptions` [`init_sentry`] hands to `sentry::init`. Split
+/// out so a test can construct the exact options production uses — via
+/// `sentry::test::with_captured_envelopes_options` — instead of hand-rolling
+/// a lookalike `ClientOptions` that could quietly drift from what actually
+/// ships.
+fn client_options(
+    dsn: Option<sentry::types::Dsn>,
+    release: Option<Cow<'static, str>>,
+    environment: String,
+) -> sentry::ClientOptions {
+    sentry::ClientOptions {
+        dsn,
+        release,
+        environment: Some(Cow::Owned(environment)),
+        // Never attach default PII (IP, cookies, request bodies). This is a
+        // payment processor.
+        send_default_pii: false,
+        // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
+        // API keys, emails and on-chain addresses before events leave the host.
+        before_send: Some(Arc::new(scrub_event)),
+        // Structured logs (see `sentry_log_event_filter` for which levels
+        // actually reach this). Same mandatory scrubber, via the separate
+        // hook logs go through.
+        enable_logs: true,
+        before_send_log: Some(Arc::new(scrub_log)),
+        ..Default::default()
+    }
+}
+
 /// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
 /// `before_send` hook and tagging events with [`resolve_environment`]. Shared
 /// by the `server` and `evmmonitor` binaries so the mainnet boot-gate and the
@@ -279,19 +330,63 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
         .and_then(|s| s.parse().ok());
     let dsn_configured = dsn.is_some();
     let environment = resolve_environment();
-    let guard = sentry::init(sentry::ClientOptions {
-        dsn,
-        release,
-        environment: Some(Cow::Owned(environment.clone())),
-        // Never attach default PII (IP, cookies, request bodies). This is a
-        // payment processor.
-        send_default_pii: false,
-        // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
-        // API keys, emails and on-chain addresses before events leave the host.
-        before_send: Some(Arc::new(scrub_event)),
-        ..Default::default()
-    });
+    let guard = sentry::init(client_options(dsn, release, environment.clone()));
     (guard, dsn_configured, environment)
+}
+
+/// Env var controlling which tracing levels become Sentry *structured logs*,
+/// independently of `LOG_LEVEL` (which controls what the process emits at
+/// all, e.g. to stdout/Loki). Unset or unparsable resolves to `WARN`, the
+/// stricter option, so a deploy that forgets to set this does not start
+/// billing/shipping `mainnet` INFO logs to a third party by default; testnet
+/// sets this to `info` explicitly to get the noisier feed.
+#[must_use]
+pub fn resolve_sentry_log_level() -> tracing::Level {
+    match std::env::var("SENTRY_LOG_LEVEL") {
+        Err(_) => tracing::Level::WARN,
+        Ok(value) => value.parse().unwrap_or_else(|_| {
+            // Unlike an unset var, this is a misconfiguration: someone set
+            // the knob and got it wrong, so the fallback to WARN should be
+            // visible rather than indistinguishable from "correctly set to
+            // WARN".
+            tracing::warn!(
+                value = %value,
+                "SENTRY_LOG_LEVEL is set but not a valid tracing level; defaulting to WARN"
+            );
+            tracing::Level::WARN
+        }),
+    }
+}
+
+/// Drops the `Log` flag from `filter` when `event_level` is more verbose than
+/// `min_level`. Split out from [`sentry_log_event_filter`] so the threshold
+/// logic is testable without constructing a real `tracing::Metadata`.
+fn apply_log_level_gate(
+    filter: sentry_tracing::EventFilter,
+    event_level: tracing::Level,
+    min_level: tracing::Level,
+) -> sentry_tracing::EventFilter {
+    if event_level > min_level {
+        filter.difference(sentry_tracing::EventFilter::Log)
+    } else {
+        filter
+    }
+}
+
+/// Wraps [`sentry_tracing::default_event_filter`], additionally dropping the
+/// `Log` flag for any record more verbose than `min_level` — the knob behind
+/// [`resolve_sentry_log_level`]. Breadcrumbs and error events are untouched:
+/// this only changes whether a record also becomes a Sentry structured log.
+pub fn sentry_log_event_filter(
+    min_level: tracing::Level,
+) -> impl Fn(&tracing::Metadata<'_>) -> sentry_tracing::EventFilter + Send + Sync + 'static {
+    move |metadata| {
+        apply_log_level_gate(
+            sentry_tracing::default_event_filter(metadata),
+            *metadata.level(),
+            min_level,
+        )
+    }
 }
 
 /// Log whether error reporting is on, at INFO, always — never the DSN itself
@@ -328,17 +423,17 @@ mod tests {
 
     #[test]
     fn redacts_eth_private_key_and_address() {
-        let pk = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let pk = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let addr = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
         let out = redact_secrets(&format!("signing with {pk} to {addr}"));
-        assert!(!out.contains("4c0883a6"), "private key leaked: {out}");
+        assert!(!out.contains("deadbeefdead"), "private key leaked: {out}");
         assert!(!out.contains("71C7656E"), "address leaked: {out}");
         assert!(out.contains("[redacted-hex]"));
     }
 
     #[test]
     fn redacts_bare_64_hex_private_key() {
-        let pk = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let out = redact_secrets(&format!("key={pk}"));
         assert!(!out.contains(pk), "bare key leaked: {out}");
     }
@@ -480,6 +575,320 @@ mod tests {
         assert_eq!(redact_secrets(msg), msg);
     }
 
+    fn test_log(body: &str) -> Log {
+        Log {
+            level: sentry::protocol::LogLevel::Info,
+            body: body.to_string(),
+            trace_id: None,
+            timestamp: std::time::SystemTime::now(),
+            severity_number: None,
+            attributes: Default::default(),
+        }
+    }
+
+    #[test]
+    fn scrub_log_redacts_secret_shaped_body() {
+        let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let log = test_log(&format!("loaded key {pk}"));
+
+        let scrubbed = scrub_log(log).expect("log passes through");
+        assert!(!scrubbed.body.contains(pk), "key leaked: {}", scrubbed.body);
+    }
+
+    #[test]
+    fn scrub_log_redacts_sensitive_keyed_attribute_regardless_of_shape() {
+        use sentry::protocol::LogAttribute;
+
+        let mut log = test_log("connecting");
+        log.attributes.insert(
+            "mnemonic".to_string(),
+            LogAttribute(Value::String("not-shaped-like-a-secret".to_string())),
+        );
+
+        let scrubbed = scrub_log(log).expect("log passes through");
+        let value = &scrubbed.attributes.get("mnemonic").unwrap().0;
+        assert_eq!(value, &Value::String("[redacted]".to_string()));
+    }
+
+    #[test]
+    fn scrub_log_redacts_secret_shaped_attribute_under_an_innocuous_key() {
+        use sentry::protocol::LogAttribute;
+
+        let mut log = test_log("connecting");
+        log.attributes.insert(
+            "context".to_string(),
+            LogAttribute(Value::String("token=sk_live_supersecret".to_string())),
+        );
+
+        let scrubbed = scrub_log(log).expect("log passes through");
+        let value = &scrubbed.attributes.get("context").unwrap().0;
+        assert!(
+            !format!("{value:?}").contains("supersecret"),
+            "attribute leaked: {value:?}"
+        );
+    }
+
+    #[test]
+    fn scrub_log_leaves_benign_attributes_unredacted() {
+        use sentry::protocol::LogAttribute;
+
+        let mut log = test_log("connecting");
+        log.attributes.insert(
+            "retry_count".to_string(),
+            LogAttribute(Value::Number(3.into())),
+        );
+        log.attributes.insert(
+            "status".to_string(),
+            LogAttribute(Value::String("connected".to_string())),
+        );
+
+        let scrubbed = scrub_log(log).expect("log passes through");
+        assert_eq!(
+            scrubbed.attributes.get("retry_count").unwrap().0,
+            Value::Number(3.into()),
+            "benign attribute should survive scrub_log unchanged"
+        );
+        assert_eq!(
+            scrubbed.attributes.get("status").unwrap().0,
+            Value::String("connected".to_string()),
+            "benign attribute should survive scrub_log unchanged"
+        );
+    }
+
+    /// Collects the `Log` items out of a batch of captured envelopes.
+    fn captured_logs(envelopes: &[sentry::Envelope]) -> Vec<Log> {
+        envelopes
+            .iter()
+            .flat_map(|envelope| envelope.items())
+            .filter_map(|item| match item {
+                sentry::protocol::EnvelopeItem::ItemContainer(
+                    sentry::protocol::ItemContainer::Logs(logs),
+                ) => Some(logs.iter().cloned()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Proves the wiring, not just the pure function: emits a `tracing::info!`
+    /// carrying a secret through the exact layer construction `server.rs` and
+    /// `evmmonitor/main.rs` use — `sentry_tracing::layer().event_filter(
+    /// sentry_log_event_filter(min_level))` — and a real `sentry::Client`
+    /// built from [`client_options`], the same function [`init_sentry`]
+    /// calls, so a later edit that drops `enable_logs`/`before_send_log`
+    /// from production breaks this test too. `scrub_log_redacts_secret_shaped_body`
+    /// above calls `scrub_log` directly, which proves the function redacts
+    /// but not that the SDK actually routes logs through it before sending —
+    /// this is the end-to-end check the ticket's "Check before shipping"
+    /// section asked for.
+    #[test]
+    fn scrub_log_redacts_a_secret_through_the_real_capture_pipeline() {
+        use tracing_subscriber::prelude::*;
+
+        let _dispatcher = tracing_subscriber::registry()
+            .with(
+                sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)),
+            )
+            .set_default();
+
+        let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+        let envelopes = sentry::test::with_captured_envelopes_options(
+            || {
+                tracing::info!("loaded key {pk}");
+            },
+            client_options(None, None, "test".to_string()),
+        );
+
+        let logs = captured_logs(&envelopes);
+        assert!(
+            !logs.is_empty(),
+            "expected at least one structured log to reach the envelope"
+        );
+        for log in &logs {
+            assert!(
+                !log.body.contains(pk),
+                "key survived the real subscriber -> sentry_tracing -> \
+                 before_send_log pipeline: {}",
+                log.body
+            );
+        }
+    }
+
+    /// Companion to the test above: proves `sentry_log_event_filter`'s
+    /// threshold is actually consulted when wired into a live
+    /// `sentry_tracing` layer, not just when `apply_log_level_gate` is called
+    /// directly. Without this, a builder quirk that silently ignores
+    /// `.event_filter(...)` — so every record keeps `sentry_tracing`'s
+    /// default filtering regardless of `SENTRY_LOG_LEVEL` — would pass every
+    /// other test in this file.
+    #[test]
+    fn sentry_log_event_filter_suppresses_a_record_below_the_threshold_through_a_real_subscriber() {
+        use tracing_subscriber::prelude::*;
+
+        let _dispatcher = tracing_subscriber::registry()
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(sentry_log_event_filter(tracing::Level::ERROR)),
+            )
+            .set_default();
+
+        let envelopes = sentry::test::with_captured_envelopes_options(
+            || {
+                tracing::info!("should not reach Sentry logs when min_level=ERROR");
+            },
+            client_options(None, None, "test".to_string()),
+        );
+
+        let logs = captured_logs(&envelopes);
+        assert!(
+            logs.is_empty(),
+            "an INFO record should not become a Sentry log when \
+             sentry_log_event_filter is wired with min_level=ERROR: {logs:?}"
+        );
+    }
+
+    /// Regression test for a composition bug a review pass caught: a bare
+    /// `.with(filter)` layer sits in the same `Layered` stack as every other
+    /// layer, and `Layered::enabled` ANDs across all of them — so an event
+    /// the `LOG_LEVEL` filter rejects would never reach the Sentry layer's
+    /// `on_event` at all, making `SENTRY_LOG_LEVEL` only ever a *further*
+    /// restriction on top of `LOG_LEVEL`, never independent of it, exactly
+    /// contradicting the comment above the call sites in `server.rs` and
+    /// `evmmonitor/main.rs`. This builds that real stack — a strict
+    /// `LOG_LEVEL` filter per-layer-filtered onto the fmt layer, and
+    /// `sentry_log_event_filter` per-layer-filtered onto the Sentry layer,
+    /// the fix for that bug — and proves an INFO record still reaches Sentry
+    /// even though the sibling fmt layer's filter would drop it.
+    #[test]
+    fn sentry_log_event_filter_is_independent_of_the_log_level_filter_in_the_real_stack() {
+        use tracing_subscriber::prelude::*;
+
+        let _dispatcher = tracing_subscriber::registry()
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(sentry_log_event_filter(tracing::Level::INFO))
+                    .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_filter(tracing_subscriber::EnvFilter::new("error")),
+            )
+            .set_default();
+
+        let envelopes = sentry::test::with_captured_envelopes_options(
+            || {
+                tracing::info!(
+                    "should reach Sentry logs even though the sibling LOG_LEVEL=error filter would drop it"
+                );
+            },
+            client_options(None, None, "test".to_string()),
+        );
+
+        let logs = captured_logs(&envelopes);
+        assert!(
+            !logs.is_empty(),
+            "an INFO record should reach Sentry's structured logs even when a \
+             sibling layer's LOG_LEVEL filter is stricter (error) — SENTRY_LOG_LEVEL \
+             must be independent of LOG_LEVEL, not a further restriction on top of it"
+        );
+    }
+
+    #[test]
+    fn resolve_sentry_log_level_defaults_to_warn_when_unset_or_invalid() {
+        use tracing_subscriber::prelude::*;
+
+        struct CapturesWarn(Arc<std::sync::Mutex<bool>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturesWarn {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    *self.0.lock().unwrap() = true;
+                }
+            }
+        }
+
+        let previous = std::env::var("SENTRY_LOG_LEVEL").ok();
+
+        // SAFETY: no other test reads or writes SENTRY_LOG_LEVEL.
+        unsafe {
+            std::env::remove_var("SENTRY_LOG_LEVEL");
+        }
+        assert_eq!(resolve_sentry_log_level(), tracing::Level::WARN);
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_LOG_LEVEL", "not-a-level");
+        }
+        // An unparsable value (as opposed to an absent one) is a
+        // misconfiguration and must be visible, not silently identical to a
+        // deliberate WARN.
+        let saw_warn = Arc::new(std::sync::Mutex::new(false));
+        let subscriber = tracing_subscriber::registry().with(CapturesWarn(Arc::clone(&saw_warn)));
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(resolve_sentry_log_level(), tracing::Level::WARN);
+        });
+        assert!(
+            *saw_warn.lock().unwrap(),
+            "expected a WARN-level log when SENTRY_LOG_LEVEL is set but unparsable"
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_LOG_LEVEL", "info");
+        }
+        assert_eq!(resolve_sentry_log_level(), tracing::Level::INFO);
+
+        // SAFETY: see above.
+        unsafe {
+            match &previous {
+                Some(value) => std::env::set_var("SENTRY_LOG_LEVEL", value),
+                None => std::env::remove_var("SENTRY_LOG_LEVEL"),
+            }
+        }
+    }
+
+    #[test]
+    fn apply_log_level_gate_strips_log_flag_only_below_threshold() {
+        use sentry_tracing::EventFilter;
+
+        let full = EventFilter::Breadcrumb | EventFilter::Log;
+
+        // At min_level=WARN: ERROR and WARN keep the Log flag, INFO/DEBUG/TRACE lose it.
+        for level in [tracing::Level::ERROR, tracing::Level::WARN] {
+            assert!(
+                apply_log_level_gate(full, level, tracing::Level::WARN).contains(EventFilter::Log),
+                "{level:?} should keep the Log flag at min_level=WARN"
+            );
+        }
+        for level in [
+            tracing::Level::INFO,
+            tracing::Level::DEBUG,
+            tracing::Level::TRACE,
+        ] {
+            assert!(
+                !apply_log_level_gate(full, level, tracing::Level::WARN).contains(EventFilter::Log),
+                "{level:?} should lose the Log flag at min_level=WARN"
+            );
+        }
+
+        // Non-Log flags are untouched either way.
+        assert!(
+            apply_log_level_gate(full, tracing::Level::INFO, tracing::Level::WARN)
+                .contains(EventFilter::Breadcrumb)
+        );
+
+        // At min_level=INFO, INFO now keeps the Log flag too.
+        assert!(
+            apply_log_level_gate(full, tracing::Level::INFO, tracing::Level::INFO)
+                .contains(EventFilter::Log)
+        );
+    }
+
     #[test]
     fn scrub_event_drops_request_user_and_server_name() {
         let event = Event {
@@ -500,7 +909,7 @@ mod tests {
         let mut event = Event {
             message: Some(
                 "panic: invalid key \
-                 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+                 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
                     .to_string(),
             ),
             ..Default::default()
@@ -511,7 +920,7 @@ mod tests {
         );
 
         let scrubbed = scrub_event(event).expect("event passes through");
-        assert!(!scrubbed.message.unwrap().contains("4c0883a6"));
+        assert!(!scrubbed.message.unwrap().contains("deadbeefdead"));
         let extra = scrubbed.extra.get("ctx").and_then(Value::as_str).unwrap();
         assert!(!extra.contains("supersecret"), "extra leaked: {extra}");
     }
@@ -533,8 +942,8 @@ mod tests {
             "auth failed for eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc-_123 (401)",
             "eyJ.a.b eyJa..b eyJa.b.c",
             "0x742d35Cc6634C0532925a3b844Bc454e4438f44e paid 0x1234",
-            "tx 4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 mined",
-            "zz4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318zz",
+            "tx deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef mined",
+            "zzdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefzz",
             "GET https://eth-mainnet.g.alchemy.com/v2/9f8e7d6c5b4a3210zz failed",
             "wss://polygon-mainnet.infura.io:443/ws/v3/0123456789abcdefzz closed",
             "https://api.coingecko.com/api/v3/simple/price?ids=ethereum",

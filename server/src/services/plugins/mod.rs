@@ -71,7 +71,8 @@ pub use boot::{
     report_boot,
 };
 pub use dispatch::{
-    FILTER_INVOICE_CREATION, PAYMENT_SETTLED, PluginInvoiceCreationFilter, PluginPaymentObserver,
+    CANCEL_SUBSCRIPTION, CancelSubscriptionOutcome, FILTER_INVOICE_CREATION, PAYMENT_SETTLED,
+    PluginInvoiceCreationFilter, PluginPaymentObserver, cancel_subscription,
     invoice_creation_filters, own_store_payment_reporting, payment_observers,
 };
 pub use filter::{

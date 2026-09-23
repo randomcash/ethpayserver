@@ -7,6 +7,12 @@
 #   2. build_sha matches EXPECTED_SHA (if set)
 #   3. Postgres and Redis report "ok"
 #   4. All RPC chains report "ok" (no chain in error/disconnected state)
+#   5. monitor.data_fresh is true
+#
+# (4) does not imply (5): an empty `rpcs` map — evmmonitor unreachable, or the
+# chain-health fetch itself erroring — has no chain to name as bad, so it
+# passes (4) vacuously while data_fresh is false. That gap let a cutover pass
+# with the monitor not actually reporting anything.
 #
 # If the gate does not pass within the timeout, exit 1 — the previous
 # container image stays live (Docker Compose health-check prevents cutover).
@@ -82,11 +88,18 @@ print(','.join(bad) if bad else '')
     continue
   fi
 
+  if [[ "$MONITOR_FRESH" != "True" ]]; then
+    log "monitor.data_fresh=$MONITOR_FRESH (elapsed ${ELAPSED}s)"
+    sleep $INTERVAL
+    ELAPSED=$((ELAPSED + INTERVAL))
+    continue
+  fi
+
   # All checks passed
-  log "HEALTHY — sha=$BUILD_SHA pg=ok redis=ok rpcs=all_ok (${ELAPSED}s)"
+  log "HEALTHY — sha=$BUILD_SHA pg=ok redis=ok rpcs=all_ok monitor.data_fresh=true (${ELAPSED}s)"
   exit 0
 done
 
 log "TIMEOUT after ${HEALTH_TIMEOUT}s — deploy health gate FAILED"
-log "Last response: pg=$PG_STATUS redis=$REDIS_STATUS rpc_bad=$RPC_BAD sha=$BUILD_SHA"
+log "Last response: pg=$PG_STATUS redis=$REDIS_STATUS rpc_bad=$RPC_BAD monitor_fresh=$MONITOR_FRESH sha=$BUILD_SHA"
 exit 1
