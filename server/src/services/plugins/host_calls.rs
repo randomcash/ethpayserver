@@ -203,6 +203,39 @@ impl std::fmt::Debug for DeferredVolume {
     }
 }
 
+/// The same late-binding cell for the batched form of capability 6.
+///
+/// Its own cell rather than reusing [`DeferredVolume`]'s, for the same
+/// reason that one is not folded into [`DeferredIssuer`]: nothing requires
+/// the two to be published together, even though in practice an instance
+/// that can answer for one account can answer for many.
+#[derive(Clone, Default)]
+pub struct DeferredBulkVolume(Arc<std::sync::OnceLock<Arc<dyn super::BulkMerchantVolumeReader>>>);
+
+impl DeferredBulkVolume {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publish the reader. Returns whether this call is the one that set it.
+    pub fn publish(&self, reader: Arc<dyn super::BulkMerchantVolumeReader>) -> bool {
+        self.0.set(reader).is_ok()
+    }
+
+    fn get(&self) -> Option<&Arc<dyn super::BulkMerchantVolumeReader>> {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Debug for DeferredBulkVolume {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DeferredBulkVolume")
+            .field(&self.get().is_some())
+            .finish()
+    }
+}
+
 /// The late-bound host capabilities a plugin's imports resolve through.
 ///
 /// One struct rather than one parameter per cell, because these are threaded
@@ -216,6 +249,9 @@ pub struct DeferredCapabilities {
     pub issuer: DeferredIssuer,
     /// Capability 6: reading what an account settled over a window.
     pub volume: DeferredVolume,
+    /// Capability 6, batched: the same question for many accounts in one
+    /// call.
+    pub bulk_volume: DeferredBulkVolume,
 }
 
 /// One plugin's host imports: its database, and whether it may invoice.
@@ -235,6 +271,9 @@ pub struct PluginCalls {
     /// anything does. Unpublished means the plugin is told so, rather than
     /// being handed a zero it would read as "this merchant sold nothing".
     volume: DeferredVolume,
+    /// The batched form of `volume`, for a plugin asking about many accounts
+    /// in one call. Same unpublished behaviour: an error, never a zero.
+    bulk_volume: DeferredBulkVolume,
     /// The runtime to drive the async database work on.
     ///
     /// [`PluginHostCalls`] is sync because the runtime calls plugins from
@@ -255,6 +294,7 @@ impl PluginCalls {
             pools,
             issuer: DeferredIssuer::default(),
             volume: DeferredVolume::default(),
+            bulk_volume: DeferredBulkVolume::default(),
             handle: tokio::runtime::Handle::current(),
         }
     }
@@ -434,6 +474,36 @@ struct VolumeAnswer {
     unpriced_assets: Vec<String>,
 }
 
+/// A plugin asking what many accounts settled, in one call. The batched form
+/// of [`VolumeRequest`]: a list of accounts in place of one, everything else
+/// the same.
+#[derive(Debug, Deserialize)]
+struct BulkVolumeRequest {
+    account_ids: Vec<String>,
+    /// See [`VolumeRequest::window_days`].
+    window_days: u32,
+    #[serde(default)]
+    currency: String,
+}
+
+/// The batched answer: one entry per requested account.
+#[derive(Debug, Serialize)]
+struct BulkVolumeAnswer {
+    accounts: Vec<AccountVolumeAnswer>,
+}
+
+/// One account's entry in a [`BulkVolumeAnswer`]. Same shape as
+/// [`VolumeAnswer`] with the account it belongs to named alongside it, since
+/// the answer is a list rather than one value the caller already knows the
+/// subject of.
+#[derive(Debug, Serialize)]
+struct AccountVolumeAnswer {
+    account_id: String,
+    volume: String,
+    currency: String,
+    unpriced_assets: Vec<String>,
+}
+
 impl PluginCalls {
     /// Point this plugin's host calls at the instance's capabilities, which
     /// may not have been published yet.
@@ -441,6 +511,7 @@ impl PluginCalls {
     pub fn with_capabilities(mut self, capabilities: &DeferredCapabilities) -> Self {
         self.issuer = capabilities.issuer.clone();
         self.volume = capabilities.volume.clone();
+        self.bulk_volume = capabilities.bulk_volume.clone();
         self
     }
 
@@ -474,6 +545,49 @@ impl PluginCalls {
             volume: volume.volume,
             currency: volume.currency,
             unpriced_assets: volume.unpriced_assets,
+        })
+    }
+
+    fn read_volumes(&self, request: &BulkVolumeRequest) -> Result<BulkVolumeAnswer, String> {
+        let Some(reader) = self.bulk_volume.get().cloned() else {
+            return Err("this host does not report merchant volume".to_string());
+        };
+
+        // Same rule as `read_volume`: every id is parsed before any of them
+        // reaches a query, so a batch with one made-up account refuses the
+        // whole call rather than silently answering for the rest.
+        let account_ids = request
+            .account_ids
+            .iter()
+            .map(|id| {
+                uuid::Uuid::parse_str(id)
+                    .map(types::UserId)
+                    .map_err(|_| format!("{id} is not an account id"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let currency = if request.currency.trim().is_empty() {
+            DEFAULT_VOLUME_CURRENCY
+        } else {
+            request.currency.trim()
+        };
+
+        let volumes = self.handle.block_on(reader.merchant_volumes(
+            &account_ids,
+            request.window_days,
+            currency,
+        ))?;
+
+        Ok(BulkVolumeAnswer {
+            accounts: volumes
+                .into_iter()
+                .map(|account| AccountVolumeAnswer {
+                    account_id: account.account_id.0.to_string(),
+                    volume: account.volume.volume,
+                    currency: account.volume.currency,
+                    unpriced_assets: account.volume.unpriced_assets,
+                })
+                .collect(),
         })
     }
 
@@ -527,6 +641,15 @@ impl PluginHostCalls for PluginCalls {
             .map_err(|e| format!("could not read the volume request: {e}"))?;
 
         let answer = self.read_volume(&parsed)?;
+        serde_json::to_vec(&answer)
+            .map_err(|e| format!("could not serialise the volume answer: {e}"))
+    }
+
+    fn merchant_volumes(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        let parsed: BulkVolumeRequest = serde_json::from_slice(request)
+            .map_err(|e| format!("could not read the volume request: {e}"))?;
+
+        let answer = self.read_volumes(&parsed)?;
         serde_json::to_vec(&answer)
             .map_err(|e| format!("could not serialise the volume answer: {e}"))
     }
@@ -693,6 +816,18 @@ mod tests {
             &DeferredCapabilities {
                 issuer: DeferredIssuer::default(),
                 volume: volume.clone(),
+                bulk_volume: DeferredBulkVolume::default(),
+            },
+        )
+    }
+
+    fn bulk_volume_calls(bulk_volume: &DeferredBulkVolume) -> PluginCalls {
+        let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
+        PluginCalls::new(PluginId::new("cash.random.bulkvolume").unwrap(), pools).with_capabilities(
+            &DeferredCapabilities {
+                issuer: DeferredIssuer::default(),
+                volume: DeferredVolume::default(),
+                bulk_volume: bulk_volume.clone(),
             },
         )
     }
@@ -812,6 +947,131 @@ mod tests {
         .unwrap();
 
         assert_eq!(reader.asked.lock().unwrap()[0].2, DEFAULT_VOLUME_CURRENCY);
+    }
+
+    /// A double that answers a fixed volume for every account it is asked
+    /// about, and records the batch it was asked for.
+    struct FixedBulkVolume {
+        asked: std::sync::Mutex<Vec<(Vec<types::UserId>, u32, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::BulkMerchantVolumeReader for FixedBulkVolume {
+        async fn merchant_volumes(
+            &self,
+            account_ids: &[types::UserId],
+            window_days: u32,
+            currency: &str,
+        ) -> Result<Vec<super::super::AccountVolume>, String> {
+            self.asked.lock().unwrap().push((
+                account_ids.to_vec(),
+                window_days,
+                currency.to_string(),
+            ));
+            Ok(account_ids
+                .iter()
+                .map(|&account_id| super::super::AccountVolume {
+                    account_id,
+                    volume: super::super::MerchantVolume {
+                        volume: "12345.67".to_string(),
+                        currency: currency.to_string(),
+                        unpriced_assets: vec!["FOO".to_string()],
+                    },
+                })
+                .collect())
+        }
+    }
+
+    /// The batched form, through the same boundary: JSON in, JSON out, one
+    /// entry per requested account.
+    #[test]
+    fn a_published_bulk_volume_reader_answers_a_plugin_in_its_own_units() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let reader = Arc::new(FixedBulkVolume {
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let bulk_volume = DeferredBulkVolume::new();
+        assert!(bulk_volume.publish(reader.clone()));
+        let calls = bulk_volume_calls(&bulk_volume);
+
+        let accounts = [types::UserId::new(), types::UserId::new()];
+        let answer = PluginHostCalls::merchant_volumes(
+            &calls,
+            format!(
+                r#"{{"account_ids":["{}","{}"],"window_days":30,"currency":"USD"}}"#,
+                accounts[0].0, accounts[1].0
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+        let entries = parsed["accounts"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["volume"], "12345.67");
+        assert_eq!(entries[0]["currency"], "USD");
+        assert_eq!(entries[0]["unpriced_assets"][0], "FOO");
+
+        let asked = reader.asked.lock().unwrap();
+        assert_eq!(
+            asked[0],
+            (accounts.to_vec(), 30, "USD".to_string()),
+            "the reader must see the whole batch the plugin asked for"
+        );
+    }
+
+    /// Unpublished must fail the same way the single-account form does: an
+    /// error, not an empty list that would read as "nobody sold anything".
+    #[test]
+    fn an_unpublished_bulk_volume_reader_is_an_error_and_never_empty() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let calls = bulk_volume_calls(&DeferredBulkVolume::new());
+        let err = PluginHostCalls::merchant_volumes(
+            &calls,
+            format!(
+                r#"{{"account_ids":["{}"],"window_days":30}}"#,
+                types::UserId::new().0
+            )
+            .as_bytes(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("does not report merchant volume"), "{err}");
+    }
+
+    /// Same rule as the single-account form: every id is parsed before any
+    /// of them reaches a query, so one made-up id refuses the whole batch.
+    #[test]
+    fn a_bulk_request_with_one_bad_account_id_is_refused_entirely() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let reader = Arc::new(FixedBulkVolume {
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let bulk_volume = DeferredBulkVolume::new();
+        bulk_volume.publish(reader.clone());
+        let calls = bulk_volume_calls(&bulk_volume);
+
+        let err = PluginHostCalls::merchant_volumes(
+            &calls,
+            format!(
+                r#"{{"account_ids":["{}","not-an-id"],"window_days":30}}"#,
+                types::UserId::new().0
+            )
+            .as_bytes(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("is not an account id"), "{err}");
+        assert!(
+            reader.asked.lock().unwrap().is_empty(),
+            "a batch naming one made-up account must not reach the reader at all"
+        );
     }
 
     #[test]

@@ -441,14 +441,19 @@ async fn main() -> Result<()> {
         ),
     }
 
-    // Capability 6, published unconditionally. Unlike capability 3 it needs
-    // no own store: an instance that sells nothing still has merchants with
-    // volume, and a plugin asking what one settled deserves the real answer
-    // rather than silence that reads as zero.
-    if plugin_capabilities.volume.publish(Arc::new(
-        server::services::plugins::PluginMerchantVolume::new(state.clone()),
-    )) {
+    // Capability 6, published unconditionally, batched form included. Unlike
+    // capability 3 it needs no own store: an instance that sells nothing
+    // still has merchants with volume, and a plugin asking what one settled
+    // deserves the real answer rather than silence that reads as zero. One
+    // reader answers both forms, published under each capability's own cell.
+    let volume_reader = Arc::new(server::services::plugins::PluginMerchantVolume::new(
+        state.clone(),
+    ));
+    if plugin_capabilities.volume.publish(volume_reader.clone()) {
         tracing::info!("plugins may read what an account settled over a window");
+    }
+    if plugin_capabilities.bulk_volume.publish(volume_reader) {
+        tracing::info!("plugins may read what many accounts settled in one call");
     }
 
     // Capability 5. `PageHost` is built empty by `AppState::new` and has
