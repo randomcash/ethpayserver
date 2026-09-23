@@ -686,7 +686,9 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let _dispatcher = tracing_subscriber::registry()
-            .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)))
+            .with(
+                sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)),
+            )
             .set_default();
 
         let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
@@ -725,7 +727,10 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let _dispatcher = tracing_subscriber::registry()
-            .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::ERROR)))
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(sentry_log_event_filter(tracing::Level::ERROR)),
+            )
             .set_default();
 
         let envelopes = sentry::test::with_captured_envelopes_options(
