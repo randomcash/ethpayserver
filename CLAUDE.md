@@ -98,7 +98,7 @@ that are not in CI's path. Several people have lost an hour to this.
   CI does. See `e2e/README.md`.
 - Integration tests are `#[ignore]` by convention and need `DATABASE_URL`. CI
   *does* run them — the `test` job migrates a real Postgres service and runs
-  `cargo nextest run -p data-service --no-fail-fast --run-ignored only -j 1` —
+  `cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1` —
   so a failure there gates merges same as any other test. The `-j 1` is not
   cosmetic: these tests share one real Postgres instance, so run them locally
   with the same flag rather than nextest's default concurrency, or you can get
