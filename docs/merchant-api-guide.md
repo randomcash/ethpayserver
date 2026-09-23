@@ -70,8 +70,9 @@ places a plausible-looking guess is wrong.
     get a display value, using integer or bignum arithmetic. Never parse
     either kind as a float: float rounding on a value that settles a payment
     is a bug, not a rounding error.
-- **The server never sends funds.** `POST /invoices/{id}/refund` and
-  `POST /stores/{id}/payouts` create ledger records only. See
+- **The server never sends funds.** `POST /invoices/{id}/refund` always
+  refuses (501) and creates nothing; `POST /stores/{id}/payouts` creates a
+  ledger record only. See
   [What ETHPayServer does not do](#10-what-ethpayserver-does-not-do).
 - **Chain IDs are [CAIP-2](https://standards.chainagnostic.org/CAIPs/caip-2)
   strings** (`"eip155:1"`), not bare integers. See
@@ -908,12 +909,14 @@ a plausible-sounding answer:
 
 - **No custody, ever.** The server never holds a spending key for any
   merchant funds. See [What this is](#what-this-is).
-- **No refunds are sent.** `POST /invoices/{invoice_id}/refund` validates the
-  request (invoice is paid, amount doesn't exceed what's left after prior
-  refunds, a destination address is known) and writes a `Refund` record with
-  status `Pending`. **That is all it does.** No transaction is signed or
-  broadcast — the server holds no spending key to sign one with. The record
-  exists so you have somewhere to track a refund you send yourself, from
+- **No refunds are sent, and none are recorded either.** `POST
+  /invoices/{invoice_id}/refund` always returns `501 Not Implemented` and
+  writes nothing. An earlier version wrote a `Refund` record with status
+  `Pending` that nothing downstream ever moved past that status — worse than
+  refusing, since it told you a refund was in flight when none was and never
+  would be. `GET /invoices/{invoice_id}/refunds` still lists any refund
+  records left over from that era; going forward none will be created
+  through this API. To refund a customer, send funds back yourself, from
   whatever wallet actually holds the funds. Refunds are the merchant's job.
 - **No payouts are sent.** `POST /stores/{store_id}/payouts` is the same
   shape: it validates which confirmed, unclaimed invoice payments the

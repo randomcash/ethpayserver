@@ -91,8 +91,8 @@ that are not in CI's path. Several people have lost an hour to this.
   half no longer labels that way — and whoever bumps the pin next inherits
   failures they did not cause.
 - **Rate limits will fail the suite for the wrong reason.** Defaults
-  (`server/src/api/rate_limit.rs`) are `auth_rpm: 10`, `write_rpm: 20`. A full
-  run makes far more than twenty writes a minute, and the limiter returns 429
+  (`server/src/api/rate_limit.rs`) are `auth_rpm: 30`, `write_rpm: 120`. A full
+  run makes far more than 120 writes a minute, and the limiter returns 429
   **without logging anything** — so the server looks healthy while tests fail
   in no pattern. Run a local server with every `RATE_LIMIT_*` at `10000`, as
   CI does. See `e2e/README.md`.

@@ -38,6 +38,10 @@ stores, rotating one store onto a new key moves only that store's payment
 methods; the other stores stay on the old wallet. To move an entire account,
 rotate each store, or point the stores at a new wallet and make it primary.
 
+**Rotation is scoped to one chain family.** A key belongs to one family
+(`eip155` or `tron`), so rotating an Ethereum xpub never touches a store's
+Tron payment methods, and vice versa — see `namespace` below.
+
 ## API
 
 ```
@@ -47,7 +51,8 @@ Content-Type: application/json
 
 {
   "xpub": "<new-xpub>",
-  "reason": "key compromise"   // optional
+  "reason": "key compromise",   // optional
+  "namespace": "eip155"         // optional, CAIP-2 namespace; defaults to "eip155"
 }
 ```
 
@@ -76,9 +81,11 @@ Content-Type: application/json
 
 | Code | Meaning |
 |------|---------|
-| 400  | Invalid xpub, or all methods already use the provided xpub |
+| 400  | Invalid xpub, unsupported `namespace`, or all methods on that family already use the provided xpub |
+| 401  | Unauthenticated |
 | 403  | User lacks `canmodifystoresettings` permission |
 | 404  | Store not found or no payment methods configured |
+| 409  | That xpub is already registered to another account |
 
 ## Procedure
 
