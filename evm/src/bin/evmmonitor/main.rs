@@ -96,9 +96,12 @@ async fn main() -> anyhow::Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();
 
-    // Initialize Sentry (no-op when SENTRY_DSN is unset)
+    // Initialize Sentry (no-op when SENTRY_DSN is unset). SENTRY_RELEASE is
+    // set by the CI build step from GITHUB_SHA — option_env! reads it at
+    // compile time, so it must be a real env var at `cargo build`, not
+    // something exported at deploy/run time.
     let (_sentry_guard, sentry_dsn_configured, sentry_environment) =
-        evm::telemetry::init_sentry(option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from));
+        evm::telemetry::init_sentry(option_env!("SENTRY_RELEASE").map(Cow::from));
 
     // Parse CLI args
     let args = Args::parse();
