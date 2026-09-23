@@ -64,6 +64,7 @@ export const SECOND_PLUGIN_SLUG = 'e2elate';
 export const SECOND_MANIFEST_TOML = [
   `id = "${SECOND_PLUGIN_ID}"`,
   'version = "0.1.0"',
+  'dependencies = ["ethpayserver:^0.1.0"]',
   'kind = "action"',
   `slug = "${SECOND_PLUGIN_SLUG}"`,
   '',
