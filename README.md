@@ -343,7 +343,8 @@ Groups not broken out below: `/wallets` (top-level wallet CRUD, xpub export),
 `/dashboard` (stats, analytics), `/users` (account, API keys, sessions),
 `/admin` (users, settings, safe mode, plugin management), `/checkout`
 (public invoice view + WebSocket, no auth), `/plugins` (installed-plugin
-pages and routes — see [Plugins](#plugins)).
+pages; a `routes` segment is reserved but not mounted — see
+[Plugins](#plugins)).
 
 ### Health
 
@@ -642,8 +643,10 @@ handled by `server/src/api/admin/plugins.rs`.
       PII/secret scrubbing (see [Telemetry](#telemetry))
 
 #### Plugins
-- [x] Wasmtime plugin host loads and mounts installed plugins' pages and
-      routes under `/plugins/{id}` (see [Plugins](#plugins))
+- [x] Wasmtime plugin host loads installed plugins and mounts their declared
+      pages under `/plugins/{id}/pages/{path}`
+- [ ] Plugin-declared routes are reserved a URL segment but not mounted — the
+      router that would serve them is never called (see [Plugins](#plugins))
 
 #### Load Testing
 - [x] Goose-based load test scenarios (invoice create, list, webhook burst)
