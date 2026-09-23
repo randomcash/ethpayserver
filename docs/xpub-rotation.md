@@ -9,6 +9,11 @@ developer machine is breached, or as part of a scheduled key rotation policy.
 - **Personnel change**: developer who had access leaves the team.
 - **Scheduled rotation**: periodic rotation as part of security hygiene.
 
+Rotate from the dashboard: a store's **Wallet** tab has a rotate action that
+calls the same endpoint below, walks through the warnings in "What happens
+during rotation," and shows the audit trail the response carries. The `curl`
+form below remains the way to script it.
+
 ## What happens during rotation
 
 1. **All payment methods** for the store are repointed at the account wallet
