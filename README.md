@@ -38,11 +38,14 @@ cd ethpayserver
 ### 2. Start Services
 
 ```bash
+# Copy and configure environment (see "Docker" below for details)
+cp docker/.env.example docker/.env
+
 # Start PostgreSQL and Redis with docker-compose
-docker compose -f docker-compose.local.yml up -d
+docker compose -f docker/docker-compose.local.yml up -d
 
 # Verify services are running
-docker compose -f docker-compose.local.yml ps
+docker compose -f docker/docker-compose.local.yml ps
 ```
 
 ### 3. Database Setup
@@ -161,18 +164,24 @@ rpc_ws = "wss://polygon-mainnet.g.alchemy.com/v2/KEY"
 |---------|----------|--------------|
 | Sepolia | 11155111 | ETH |
 | Holesky | 17000 | ETH |
+| Hoodi | 560048 | ETH |
 | Polygon Amoy | 80002 | POL |
 | Arbitrum Sepolia | 421614 | ETH |
 | Optimism Sepolia | 11155420 | ETH |
 | Base Sepolia | 84532 | ETH |
 | Avalanche Fuji | 43113 | AVAX |
-| BSC Testnet | 97 | BNB |
+| BSC Testnet | 97 | tBNB |
 
 ### Supported Tokens
 
-- Native tokens (ETH, MATIC, AVAX, BNB, etc.)
-- USDC, USDT, DAI, WBTC
-- Custom whitelisted ERC20 tokens
+Native tokens on every chain above, plus per-chain ERC20 tokens seeded into the
+`tokens` table by migration (`data-service/migrations/postgres/`) — stablecoins
+and, where unambiguous, WETH/WBTC, each address checked against the issuer's
+or chain operator's own published list rather than a block explorer search.
+Query `GET /evm/tokens` for the current list on a running instance, or read
+the seed migrations for the addresses and their sourcing. A store can further
+restrict which of those tokens it accepts with an allowlist or blocklist
+(`PUT /stores/{id}/token-policy`).
 
 ## Architecture
 
@@ -243,6 +252,8 @@ central-infrastructure, so the two can drift.
 | `server` | `ethpayserver` | Main API server with REST endpoints, Swagger UI, background services | [server/README.md](./server/README.md) |
 | `evm` | `evmmonitor` | Chain abstraction, payment monitoring, HD wallet derivation | [evm/README.md](./evm/README.md) |
 | `data-service` | - | PostgreSQL repositories, Redis persistence | [data-service/README.md](./data-service/README.md) |
+| `mcp-server` | `ethpay-mcp` | Exposes invoice/payment operations as MCP tools for AI agents | - |
+| `loadtest` | `loadtest`, `loadtest-ws` | Goose-based load test scenarios against a running server | - |
 
 ### External Dependencies (payserver-commons)
 
@@ -319,6 +330,20 @@ that just builds the pinned revision needs nothing special — plain
 `git worktree add` works now that nothing depends on directory layout.
 
 ## API Endpoints
+
+A representative sample, not the full surface — the tables below predate
+several route groups and stores has grown sub-resources (members, wallet,
+settings, webhook, payment-methods, token-policy, payouts) not listed
+individually. `/swagger-ui` on a running instance is the current, generated
+source of truth; `server/src/api/mod.rs` is the router if you want it without
+running anything.
+
+Groups not broken out below: `/wallets` (top-level wallet CRUD, xpub export),
+`/payments` (list/export detected payments), `/rates` (fiat/crypto quote),
+`/dashboard` (stats, analytics), `/users` (account, API keys, sessions),
+`/admin` (users, settings, safe mode, plugin management), `/checkout`
+(public invoice view + WebSocket, no auth), `/plugins` (installed-plugin
+pages and routes — see [Plugins](#plugins)).
 
 ### Health
 
@@ -460,15 +485,24 @@ sqlx migrate revert --source data-service/migrations/postgres
 
 ### Tables
 
+Not exhaustive — WebAuthn ceremony-state tables (`passkey_*_challenges`,
+`discoverable_authentication_challenges`, `wallet_challenges`,
+`wallet_reauth_challenges`) and other bookkeeping tables are omitted below;
+`data-service/migrations/postgres/` is the source of truth.
+
 **Auth Tables:**
 - `users` - User accounts
 - `sessions` - Active sessions
 - `devices` - Registered devices/passkeys
 - `wallet_credentials` - Ethereum wallets linked for login
+- `passkey_credentials` - Registered passkey public keys
+- `api_keys` - Long-lived keys for programmatic access (e.g. `mcp-server`)
+- `email_change_requests` - Pending email-change confirmations
 
 **Wallet Tables:**
 - `wallets` - Account receiving wallets: one xpub and its single
   derivation counter
+- `wallet_rotations` - History of xpub rotations (see `docs/xpub-rotation.md`)
 
 **Store Tables:**
 - `stores` - Merchant stores
@@ -476,13 +510,66 @@ sqlx migrate revert --source data-service/migrations/postgres
 - `user_stores` - User-store membership
 - `store_wallets` - Per-store wallet override (absent = account primary)
 - `store_webhooks` - Webhook configuration
+- `store_settings`, `server_settings` - Per-store and instance-wide settings
+- `store_payment_methods` - Enabled payment methods per store
+- `store_token_policies`, `store_token_policy_entries` - Per-store token
+  allowlist/blocklist (see [Supported Tokens](#supported-tokens))
 
 **Payment Tables:**
 - `invoices` - Payment invoices
 - `payments` - Detected payments
+- `payment_options` - Chain/token options presented for an invoice
 - `payment_events` - Audit log
 - `watched_addresses` - PostgreSQL persistence for watched addresses
 - `tokens` - Configured ERC20 tokens
+- `payouts` - Merchant payout records
+- `refunds` - Historical refund records (see [Refunds](#refunds) — no longer written by this API)
+- `webhook_deliveries` - Webhook delivery attempts and payloads
+
+**Plugin Tables:**
+- `installed_plugins` - Plugins installed per store (see [Plugins](#plugins))
+- `plugin_events` - Audit log of plugin lifecycle events
+
+**Chain Tables:**
+- `chain_configs` - Per-chain configuration overrides
+
+## Telemetry
+
+Both binaries can forward panics, errors, structured logs and Prometheus
+metrics to a Sentry-protocol backend, in addition to the `/metrics` endpoint
+above:
+
+- `SENTRY_DSN` — collector endpoint. Unset disables reporting entirely (the
+  local/dev default). `SENTRY_ENVIRONMENT=testnet` or `dev` may run without a
+  DSN; anything else, including unset, refuses to start without one.
+- `SENTRY_LOG_LEVEL` — minimum level forwarded as a structured log event
+  (default `WARN`); independent of `RUST_LOG`, which only controls what is
+  printed locally.
+- `SENTRY_RELEASE` — set at build time from the commit SHA; used to associate
+  errors with the build that produced them.
+
+Every event and log line passes through `evm::telemetry` first, which redacts
+wallet/private keys, mnemonics, JWTs, bearer tokens, emails, on-chain
+addresses/hashes and RPC provider URLs (the API key embedded in an
+Alchemy/Infura/QuickNode path) before anything leaves the process. The same
+rules exist a second time, hand-written with no dependencies, in
+`payserver-commons`' `scrub` crate for the browser client — a test in
+`evm::telemetry` asserts the two agree.
+
+The Leptos/WASM client reports to the same backend independently, via the
+`telemetry-dsn` / `telemetry-environment` meta tags in payserver-client's
+`index.html` — it is not configured from this repo.
+
+## Plugins
+
+A plugin host (`payserver-plugin-host`, in payserver-commons) loads and runs
+merchant-installed plugins as wasmtime modules, each declaring pages and
+routes that are mounted under `/plugins/{id}`. The host's own auth wraps a
+plugin's entire mount before any plugin code runs, and a plugin's `pages` and
+`routes` segments are kept structurally separate so one plugin can never
+shadow another's page. Installed plugins are tracked in the `installed_plugins`
+table; `server/src/api/plugins.rs` and `server/src/api/admin/plugins.rs` are
+the mounting and management code respectively.
 
 ## Development Status
 
@@ -541,6 +628,12 @@ sqlx migrate revert --source data-service/migrations/postgres
 - [x] Prometheus metrics endpoint (/metrics)
 - [x] HTTP request counters and latency histograms
 - [x] Payment, webhook, invoice, and DB pool metrics
+- [x] Sentry-protocol error reporting and structured logs, with mandatory
+      PII/secret scrubbing (see [Telemetry](#telemetry))
+
+#### Plugins
+- [x] Wasmtime plugin host loads and mounts installed plugins' pages and
+      routes under `/plugins/{id}` (see [Plugins](#plugins))
 
 #### Load Testing
 - [x] Goose-based load test scenarios (invoice create, list, webhook burst)
