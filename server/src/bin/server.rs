@@ -13,7 +13,7 @@ use anyhow::Result;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::{AuthConfig, AuthService, captcha::CloudflareTurnstile};
 use data_service::PgDataService;
@@ -555,17 +555,41 @@ fn init_tracing(log_level: &str, log_format: &str) {
     // other value keeps the human-readable format for local/dev use.
     let (json, warning) = resolve_log_format(log_format);
 
+    // Gates which levels become Sentry *structured logs* specifically, so
+    // testnet can ship INFO there while mainnet ships WARN and above. Applied
+    // as the Sentry layer's own per-layer filter (below) rather than folded
+    // into `filter`, because a bare `.with(filter)` layer sits in the same
+    // `Layered` stack as every other layer and `Layered::enabled` ANDs across
+    // all of them — an event `filter` (LOG_LEVEL) rejects never reaches the
+    // Sentry layer's `on_event` at all, so `SENTRY_LOG_LEVEL` could only ever
+    // be a *further* restriction on top of LOG_LEVEL, never independent of
+    // it. Per-layer filtering (`.with_filter` on each layer instead of a
+    // shared `.with(filter)`) is what actually decouples them.
+    let sentry_log_level = evm::telemetry::resolve_sentry_log_level();
+    // Floor for the Sentry layer's own callsite interest, independent of
+    // LOG_LEVEL. Fixed at INFO because `sentry_tracing`'s event/span
+    // classification never does anything below INFO regardless of
+    // `sentry_log_level` (DEBUG/TRACE are always `EventFilter::Ignore`), so
+    // this can't suppress anything `sentry_log_event_filter` would keep.
+    let sentry_filter = tracing_subscriber::filter::LevelFilter::INFO;
+
     if json {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(sentry_tracing::layer())
-            .with(tracing_subscriber::fmt::layer().json())
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .with_filter(sentry_filter),
+            )
+            .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
             .init();
     } else {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(sentry_tracing::layer())
-            .with(tracing_subscriber::fmt::layer())
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .with_filter(sentry_filter),
+            )
+            .with(tracing_subscriber::fmt::layer().with_filter(filter))
             .init();
     }
 
