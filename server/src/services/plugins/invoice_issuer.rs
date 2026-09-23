@@ -147,6 +147,23 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// `host_calls.rs` publishes a hand-built `FixedVolume`, never `main`'s real
 /// one. Neither capability's `server.rs` wiring runs under a test that boots
 /// the actual binary, because none of this repo's tests do that.
+///
+/// Plans' half of this slice - "an admin creates a plan, and it persists
+/// across a restart" - rests on a second pre-existing host capability that
+/// this ticket did not have to add either: [`super::storage::PluginSchema`]
+/// hands a plugin a transaction scoped to its own schema, and
+/// `a_plugin_role_can_use_a_table_created_after_it_was_provisioned` in
+/// `storage.rs`'s tests writes a row into, and reads it back from, a table
+/// literally named `subscriptions` through that scoped connection.
+/// `uninstall_without_drop_schema_keeps_the_data` and
+/// `dropping_the_role_leaves_the_plugins_data_intact` cover the durability
+/// half: a plugin's committed rows outlive an uninstall and a role drop, and
+/// so trivially outlive a server process restart, since nothing on that path
+/// touches Postgres. Between that and capability 3 above, both of slice 1's
+/// `Verify` properties have a proven host-side path already in this repo -
+/// what is missing is the plan itself, which is billing-plugin business
+/// logic and, per this ticket, belongs in the private `payserver-billing`
+/// repository this worker does not have a checkout of.
 pub struct PluginHostApi<A> {
     state: PgAppState<A>,
     own_store_id: StoreId,
