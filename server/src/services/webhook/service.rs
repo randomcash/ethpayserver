@@ -74,15 +74,32 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         })
     }
 
+    /// Open a Redis connection, bounded by `config.connect_timeout`.
+    ///
+    /// An unreachable Redis must fail in seconds with a message naming what
+    /// was unreachable, not hang until some ambient OS or network timeout
+    /// makes "Redis is absent", "Redis is broken" and "this process is
+    /// wedged" indistinguishable from the outside.
+    async fn connection(&self) -> Result<redis::aio::MultiplexedConnection, WebhookError> {
+        match tokio::time::timeout(
+            self.config.connect_timeout,
+            self.redis_client.get_multiplexed_async_connection(),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|e| WebhookError::Redis(e.to_string())),
+            Err(_) => Err(WebhookError::Redis(format!(
+                "timed out connecting to Redis after {:?}",
+                self.config.connect_timeout
+            ))),
+        }
+    }
+
     /// Queue a webhook for delivery.
     ///
     /// This adds the job to a Redis sorted set keyed by `scheduled_at` timestamp.
     pub async fn queue_webhook(&self, job: WebhookJob) -> Result<(), WebhookError> {
-        let mut conn = self
-            .redis_client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+        let mut conn = self.connection().await?;
 
         let job_json =
             serde_json::to_string(&job).map_err(|e| WebhookError::Serialization(e.to_string()))?;
@@ -143,11 +160,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// or no jobs are ready yet.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // Redis dequeue + HTTP delivery + retry logic
     async fn process_next_job(&self) -> Result<bool, WebhookError> {
-        let mut conn = self
-            .redis_client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+        let mut conn = self.connection().await?;
 
         let now = Utc::now().timestamp() as f64;
 
