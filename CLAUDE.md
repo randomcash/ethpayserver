@@ -75,6 +75,17 @@ cargo nextest run --workspace --no-fail-fast -j 2
 so they could sit red indefinitely while the gate reported green. Five of them
 were, on 2026-09-16.
 
+`evm/tests/payment_flow.rs` imports mock helpers (`MockBlockSource`,
+`make_block`, …) that only exist behind `evm`'s `test-utils` feature, which
+`evm/Cargo.toml` does not enable by default and `evm/dev-dependencies` does not
+turn on for its own tests either — `cargo clippy -p evm --all-targets` or
+`cargo test -p evm` alone fails to compile that file. It compiles here only
+because `server/Cargo.toml` depends on `evm` with `test-utils` on, and a
+`--workspace` build unifies features across every target compiled in the same
+invocation. Move that dependency, or drop the feature from it, and this file
+goes dark again with clippy still green on anything scoped narrower than the
+full workspace.
+
 **Do not add `--all-features`.** It surfaces pre-existing errors in `evmmonitor`
 that are not in CI's path. Several people have lost an hour to this.
 
@@ -109,6 +120,10 @@ that are not in CI's path. Several people have lost an hour to this.
   tests are still not in it and need running locally. The gate above does not touch any of them either way, so run
   the `data-service` ones locally too when you touch that layer — CI will
   catch a failure regardless, but locally you see it sooner.
+- **The `test` job has no Redis service, only Postgres.** No current
+  `server` `#[ignore]`'d test needs one, so this is not a live gap - but if
+  you write one that does, it has nowhere to run in CI and you will only find
+  out locally.
 
 ## Sensitive paths
 
