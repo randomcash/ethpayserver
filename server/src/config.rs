@@ -51,6 +51,9 @@
 //!   instance issues and settles its own invoices, if it issues any to
 //!   itself at all. Unset on any instance that does not; a plugin is told
 //!   about payments on this store and no other. (default: ./plugins)
+//!   `ETHPAY_BILLING_STORE_ID` is read as a deprecated fallback when this is
+//!   unset, so an instance still running the old variable name keeps
+//!   working until its deploy config catches up.
 //! - `ETHPAY_OPERATOR_ACCOUNT_ID` - The account that may own
 //!   `ETHPAY_OPERATOR_STORE_ID`. Unset refuses every nomination of an
 //!   operator store, since an unowned nomination is exactly the thing that
@@ -286,7 +289,16 @@ where
         .map_or_else(|| PathBuf::from(DEFAULT_PLUGIN_DIR), PathBuf::from)
 }
 
-/// The operator's own store, from `ETHPAY_OPERATOR_STORE_ID`.
+/// The operator's own store, from `ETHPAY_OPERATOR_STORE_ID`, falling back to
+/// the deprecated `ETHPAY_BILLING_STORE_ID` when the new name is unset.
+///
+/// The fallback exists because a rename of this variable is not something a
+/// running instance's deploy config picks up on its own: an instance still
+/// injecting the old name would otherwise silently lose its own-store
+/// reporting on next restart, with no error and no way to tell "never
+/// configured" apart from "config went stale under a rename". Once every
+/// deployment's config carries the new name, the fallback and this comment
+/// can go.
 ///
 /// Absent, blank and unparseable all yield `None`, and all three are logged as
 /// nothing rather than guessed at. This id decides which payments a plugin is
@@ -297,7 +309,16 @@ pub fn operator_store_id_from<F>(lookup: F) -> Option<types::StoreId>
 where
     F: Fn(&str) -> Option<String>,
 {
-    let raw = lookup("ETHPAY_OPERATOR_STORE_ID")?;
+    let raw = match lookup("ETHPAY_OPERATOR_STORE_ID") {
+        Some(raw) => raw,
+        None => {
+            let raw = lookup("ETHPAY_BILLING_STORE_ID")?;
+            tracing::warn!(
+                "ETHPAY_BILLING_STORE_ID is deprecated; rename it to ETHPAY_OPERATOR_STORE_ID"
+            );
+            raw
+        }
+    };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -592,6 +613,46 @@ mod tests {
     fn safe_mode_via_cli_flag() {
         let args = vec!["ethpayserver".to_string(), "--disable-plugins".to_string()];
         assert!(safe_mode_requested(lookup(&[]), &args));
+    }
+
+    // ========================================================================
+    // Operator store resolution
+    // ========================================================================
+
+    #[test]
+    fn operator_store_id_unset_is_none() {
+        assert_eq!(operator_store_id_from(lookup(&[])), None);
+    }
+
+    #[test]
+    fn operator_store_id_valid_uuid_is_parsed() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            operator_store_id_from(lookup(&[("ETHPAY_OPERATOR_STORE_ID", &id.to_string())])),
+            Some(types::StoreId(id))
+        );
+    }
+
+    #[test]
+    fn operator_store_id_falls_back_to_deprecated_billing_var() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            operator_store_id_from(lookup(&[("ETHPAY_BILLING_STORE_ID", &id.to_string())])),
+            Some(types::StoreId(id))
+        );
+    }
+
+    #[test]
+    fn operator_store_id_prefers_new_var_over_deprecated_one() {
+        let new_id = uuid::Uuid::new_v4();
+        let old_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            operator_store_id_from(lookup(&[
+                ("ETHPAY_OPERATOR_STORE_ID", &new_id.to_string()),
+                ("ETHPAY_BILLING_STORE_ID", &old_id.to_string()),
+            ])),
+            Some(types::StoreId(new_id))
+        );
     }
 
     // ========================================================================
