@@ -379,13 +379,13 @@ where
         && billing_store_id != current.billing_store_id
     {
         validate_billing_store(&state, store_id).await?;
-        // `error`, not `info`: this is the one setting on this page that can
-        // hand a plugin a merchant's payments or redirect the operator's own
-        // revenue (see `Config::billing_store_id`), so a change to it must
-        // reach Sentry as an event - which is what turns into a ticket - and
-        // not sit as a log line nobody was looking at. Only reachable on an
-        // actual value change, same as the validation above, so re-saving an
-        // unchanged settings form stays silent.
+        // `error`, not `info`: this field is `Config::billing_store_id`, and
+        // that doc comment already explains why no value here is safely
+        // wrong. A change to it must reach Sentry as an event - which is
+        // what turns into a ticket - and not sit as a log line nobody was
+        // looking at. Only reachable on an actual value change, same as the
+        // validation above, so re-saving an unchanged settings form stays
+        // silent.
         tracing::error!(
             actor = %admin.id,
             store_id = %store_id,
@@ -971,6 +971,43 @@ mod tests {
         )
         .await
         .expect_err("a billable store owned by someone else must still be refused");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        sqlx::query("DELETE FROM server_settings WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("clean up settings");
+    }
+
+    /// Ownership does not stand in for billability - the check this file adds
+    /// runs ahead of the existing one, not instead of it. A store the
+    /// operator owns but that resolves to no wallet must still be refused,
+    /// the same property `a_store_that_cannot_be_invoiced_on_is_refused`
+    /// proves in isolation, here proven through the real endpoint.
+    #[tokio::test]
+    #[ignore]
+    async fn an_owned_store_that_cannot_be_invoiced_on_is_still_refused() {
+        let Some(service) = settings_test_service().await else {
+            return;
+        };
+        let pool = service.pool().clone();
+        sqlx::query("DELETE FROM server_settings WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("reset settings");
+
+        let operator = settings_test_user(&pool).await;
+        let operators_store = settings_test_store(&pool, operator).await;
+
+        let state = settings_test_state(service, Some(UserId(operator)));
+
+        let status = update_settings(
+            settings_admin(operator),
+            State(state),
+            Json(settings_body(Some(Some(types::StoreId(operators_store))))),
+        )
+        .await
+        .expect_err("an owned store with no usable payment method must still be refused");
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
         sqlx::query("DELETE FROM server_settings WHERE id = 1")
