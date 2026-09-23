@@ -488,6 +488,8 @@ fn truncate_error(error: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -504,5 +506,85 @@ mod tests {
         assert!(truncated.ends_with("..."));
 
         assert_eq!(truncate_error("", 500), "");
+    }
+
+    /// A TCP listener that accepts connections but never writes a byte back,
+    /// the same shape as a Redis that is up but wedged (or a firewall
+    /// dropping packets silently): the client gets a connection, then
+    /// nothing. This is what `connect_timeout` exists to bound.
+    async fn spawn_unresponsive_server() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            // Held for the task's lifetime so the sockets stay open without
+            // ever being read from or written to.
+            let mut held = Vec::new();
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                held.push(socket);
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn connection_times_out_against_an_unresponsive_redis() {
+        let addr = spawn_unresponsive_server().await;
+        let config = WebhookConfig {
+            connect_timeout: Duration::from_millis(200),
+            ..WebhookConfig::default()
+        };
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            &format!("redis://{addr}"),
+            config,
+        )
+        .expect("construct service against unresponsive listener");
+
+        let start = std::time::Instant::now();
+        let err = service
+            .connection()
+            .await
+            .expect_err("connection to an unresponsive Redis must fail, not hang");
+        let elapsed = start.elapsed();
+
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected a named timeout, got: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "connect_timeout did not bound the connection attempt: took {elapsed:?}"
+        );
+    }
+
+    /// Needs a real Redis and is `#[ignore]`d, matching the convention used
+    /// for tests that need a real Postgres elsewhere in this crate. Reads
+    /// `TEST_REDIS_URL`, the same variable CI's `test` job sets to point at
+    /// the `redis` service it provisions alongside Postgres.
+    #[tokio::test]
+    #[ignore]
+    async fn connection_succeeds_and_is_reusable_against_a_real_redis() {
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            &redis_url,
+            WebhookConfig::default(),
+        )
+        .expect("construct service against TEST_REDIS_URL");
+
+        service
+            .connection()
+            .await
+            .expect("first connection to a reachable Redis must succeed");
+        service
+            .connection()
+            .await
+            .expect("multiplexed connection must be reusable for a second call");
     }
 }
