@@ -40,7 +40,11 @@ rotate each store, or point the stores at a new wallet and make it primary.
 
 **Rotation is scoped to one chain family.** A key belongs to one family
 (`eip155` or `tron`), so rotating an Ethereum xpub never touches a store's
-Tron payment methods, and vice versa — see `namespace` below.
+Tron payment methods, and vice versa — see `namespace` below. In practice
+this only ever means `eip155` today: no Tron chain is enabled or monitored,
+so a store cannot have a Tron payment method to rotate in the first place.
+The family split exists at the derivation and storage layer regardless, and
+this doc describes that layer.
 
 ## API
 

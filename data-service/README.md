@@ -90,7 +90,10 @@ root README has a fuller (still partial) table-by-table breakdown.
 - `sessions` - Active sessions
 - `devices` - Registered devices/passkeys
 - `wallets` - Account receiving wallets, one per chain family (`eip155`,
-  `tron`) a store has funded — not Ethereum-only
+  `tron`) a store has funded — not Ethereum-only. The `tron` family is
+  derivation/storage plumbing only: no Tron chain is enabled or monitored
+  today, so the API refuses to create a `tron:` payment method until an
+  adapter exists (`server/src/api/stores/payment_methods.rs`)
 
 ### Store Tables (Multi-Tenant)
 - `stores` - Merchant stores

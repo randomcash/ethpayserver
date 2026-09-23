@@ -205,6 +205,12 @@ A wallet belongs to one **chain family**, named by its CAIP-2 namespace -
 defaults to `eip155`, so a request that does not mention it means what it
 always meant.
 
+**`tron` is derivation and storage plumbing only.** No Tron chain is enabled
+or monitored today, so a `tron` wallet can be created but no store can add a
+`tron:` payment method against it - the API refuses those until a Tron chain
+adapter exists. Everything below that mentions `tron` describes the shape of
+that future support, not something reachable yet.
+
 ```bash
 curl -X POST https://your-instance.example.com/wallets \
   -H "Authorization: Bearer <token>" \
