@@ -432,6 +432,56 @@ mod tests {
         );
     }
 
+    /// `from_seed` got the identical one-line `Hint::Legacy` fix as
+    /// `from_mnemonic`, at a second, independent call site. Nothing calls
+    /// `from_seed` today, so nothing else would notice if that call site's
+    /// fix were ever reverted on its own - this exists so that regression is
+    /// caught here rather than never.
+    #[test]
+    fn from_seed_also_exports_the_legacy_prefixed_xpub() {
+        let mnemonic = Mnemonic::<English>::new_from_phrase(TEST_MNEMONIC).unwrap();
+        let seed = mnemonic.to_seed(Some("")).unwrap();
+
+        let wallet = HdWallet::from_seed(&seed).unwrap();
+        assert_eq!(
+            wallet.account_xpub_string_for(ChainFamily::Evm).unwrap(),
+            EVM_ACCOUNT_XPUB
+        );
+        assert_eq!(
+            wallet.account_xpub_string_for(ChainFamily::Tron).unwrap(),
+            TRON_ACCOUNT_XPUB
+        );
+    }
+
+    /// The claim the `Hint::Legacy` fix rests on - that the encoding hint
+    /// changes only the base58 version bytes and nothing about which key,
+    /// and therefore which address, a path derives to - checked directly
+    /// instead of trusted from a comment. Reconstructs the pre-fix root key
+    /// (the implicit `Hint::SegWit` `root_from_seed(seed, None)` produced)
+    /// and the post-fix one side by side, and derives the same paths from
+    /// both.
+    #[test]
+    fn the_encoding_hint_does_not_change_which_addresses_are_derived() {
+        let mnemonic = Mnemonic::<English>::new_from_phrase(TEST_MNEMONIC).unwrap();
+        let seed = mnemonic.to_seed(Some("")).unwrap();
+
+        let pre_fix_root = XPriv::root_from_seed(&seed[..], None).unwrap();
+        let post_fix_root = XPriv::root_from_seed(&seed[..], Some(Hint::Legacy)).unwrap();
+
+        for family in [ChainFamily::Evm, ChainFamily::Tron] {
+            for index in 0..3u32 {
+                let path = DerivationPath::from_str(&family.derivation_path(index)).unwrap();
+                let pre_fix_key = pre_fix_root.derive_path(&path).unwrap();
+                let post_fix_key = post_fix_root.derive_path(&path).unwrap();
+                assert_eq!(
+                    public_key_to_address(&pre_fix_key.verify_key()),
+                    public_key_to_address(&post_fix_key.verify_key()),
+                    "hint changed the address derived for {family:?} index {index}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_wallet_from_mnemonic() {
         let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();

@@ -205,7 +205,14 @@ one key; MetaMask shows you a single address per account instead. Hardware
 wallets are no different for the same reason - neither Trezor Suite nor
 Ledger Live has an "export xpub" control for an Ethereum account. Look at
 either one's advanced account view and you will find that control for
-Bitcoin, and nothing for Ethereum.
+Bitcoin, and nothing for Ethereum. Checked against both vendors' own support
+documentation (2026-09-23), not assumed: Ledger's ["Extended public key
+(xPub)"](https://support.ledger.com/article/360011069619-zd) article scopes
+the feature to "your Bitcoin account(s)"; Trezor's [own xpub
+explainer](https://trezor.io/learn/supported-assets/bitcoin/what-is-a-public-key-xpub)
+scopes it to "Bitcoin & other coins that use Bitcoin's UTXO-based model" -
+Ethereum's account model isn't one of them. If either vendor adds Ethereum
+xpub export later, this paragraph is what needs updating.
 
 Two ways to actually get one, in the order worth trying:
 
