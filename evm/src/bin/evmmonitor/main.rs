@@ -255,6 +255,14 @@ async fn main() -> anyhow::Result<()> {
     }
     health_handle.abort();
 
+    // No equivalent handle exists here for the *events* subscription
+    // (`redis.rs`'s `subscribe`, as opposed to `subscribe_commands` above):
+    // evmmonitor never consumes that stream, only publishes to it via
+    // `BridgeHandler`. Its one consumer is the server's `EventConsumer`,
+    // which gets this same begin_shutdown-then-bounded-wait-then-abort
+    // treatment for its own handle in `server/src/bin/server.rs` before that
+    // process exits.
+
     // Graceful shutdown
     coordinator.stop().await?;
     info!("evmmonitor stopped");
