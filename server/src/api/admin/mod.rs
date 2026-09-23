@@ -424,9 +424,9 @@ where
 /// Every one of these failures is silent otherwise: the setting saves, the
 /// server restarts, and the first sign of trouble is a merchant clicking Pay
 /// and getting nothing - by which point nobody connects it to a settings
-/// change made days earlier. Worse for ownership than for billability: a
-/// store nominated by mistake or by an attacker is fully billable by
-/// definition, so nothing about the merchant using it would ever look wrong.
+/// change made days earlier. Ownership and billability are independent
+/// properties of the nominated store, checked one after the other, and
+/// neither stands in for the other.
 ///
 /// Not a foreign key, for the reason the migration gives: a settings row must
 /// not be what stops a store being deleted.
@@ -668,9 +668,8 @@ mod tests {
         assert!(billable(&[method(None), method(Some(uuid::Uuid::new_v4()))]).is_ok());
     }
 
-    /// Who may be nominated matters as much as whether the store can be
-    /// billed on - every real merchant store passes `billable` by
-    /// definition, so that check alone accepts any store at all.
+    /// Ownership is its own property, independent of whether the store can
+    /// be billed on.
     #[test]
     fn a_store_not_owned_by_the_operator_is_refused() {
         let operator = UserId::new();
@@ -818,6 +817,9 @@ mod tests {
         }
     }
 
+    /// Matches on the event's own message, not just its level - an
+    /// unrelated `error!` elsewhere in the call path must not make this
+    /// pass for the wrong reason.
     struct CapturesError(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturesError {
@@ -826,7 +828,26 @@ mod tests {
             event: &tracing::Event<'_>,
             _ctx: tracing_subscriber::layer::Context<'_, S>,
         ) {
-            if *event.metadata().level() == tracing::Level::ERROR {
+            if *event.metadata().level() != tracing::Level::ERROR {
+                return;
+            }
+            struct FindsBillingStoreChanged(bool);
+            impl tracing::field::Visit for FindsBillingStoreChanged {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message"
+                        && format!("{value:?}").contains("billing store changed")
+                    {
+                        self.0 = true;
+                    }
+                }
+            }
+            let mut visitor = FindsBillingStoreChanged(false);
+            event.record(&mut visitor);
+            if visitor.0 {
                 self.0.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         }

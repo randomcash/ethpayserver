@@ -593,4 +593,38 @@ mod tests {
         let args = vec!["ethpayserver".to_string(), "--disable-plugins".to_string()];
         assert!(safe_mode_requested(lookup(&[]), &args));
     }
+
+    // ========================================================================
+    // Operator account resolution
+    // ========================================================================
+
+    #[test]
+    fn operator_account_id_unset_is_none() {
+        assert_eq!(operator_account_id_from(lookup(&[])), None);
+    }
+
+    #[test]
+    fn operator_account_id_blank_is_none() {
+        assert_eq!(
+            operator_account_id_from(lookup(&[("ETHPAY_OPERATOR_ACCOUNT_ID", "   ")])),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_account_id_unparseable_is_none() {
+        assert_eq!(
+            operator_account_id_from(lookup(&[("ETHPAY_OPERATOR_ACCOUNT_ID", "not-a-uuid")])),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_account_id_valid_uuid_is_parsed() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            operator_account_id_from(lookup(&[("ETHPAY_OPERATOR_ACCOUNT_ID", &id.to_string())])),
+            Some(types::UserId(id))
+        );
+    }
 }
