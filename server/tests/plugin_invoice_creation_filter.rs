@@ -12,7 +12,7 @@
 //! than being indistinguishable from an auth rejection.
 //!
 //! Calls the handler function directly against a real database rather than
-//! through the router: `AuthenticatedUser` and `State` are plain data the
+//! through the router: `AuthenticatedCaller` and `State` are plain data the
 //! extractors produce, so nothing about this assertion depends on routing or
 //! middleware, only on `create_invoice`'s own body.
 //!
@@ -38,7 +38,7 @@ use auth::{
 use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
-use server::api::AuthenticatedUser;
+use server::api::AuthenticatedCaller;
 use server::api::invoices::{CreateInvoiceRequest, create_invoice};
 use server::services::RedisEVMMonitor;
 use server::services::plugins::{
@@ -106,13 +106,25 @@ async fn seed_user(pool: &PgPool) -> Uuid {
 }
 
 fn user_info(id: Uuid) -> UserInfo {
+    user_info_with_role(id, Role::User)
+}
+
+fn user_info_with_role(id: Uuid, role: Role) -> UserInfo {
     UserInfo {
         id: UserId(id),
         email: None,
         primary_wallet_address: None,
         created_at: chrono::Utc::now(),
         last_login_at: None,
-        role: Role::User,
+        role,
+    }
+}
+
+/// The caller most tests want: an ordinary, non-operator credential.
+fn caller(id: Uuid) -> AuthenticatedCaller {
+    AuthenticatedCaller {
+        user: user_info(id),
+        is_operator: false,
     }
 }
 
@@ -133,14 +145,6 @@ fn app_state(
     data_service: Arc<PgDataService>,
     filters: Vec<Arc<dyn InvoiceCreationFilter>>,
 ) -> PgAppState<UnusedSessionService> {
-    app_state_billing(data_service, filters, None)
-}
-
-fn app_state_billing(
-    data_service: Arc<PgDataService>,
-    filters: Vec<Arc<dyn InvoiceCreationFilter>>,
-    billing_store_id: Option<types::StoreId>,
-) -> PgAppState<UnusedSessionService> {
     let mut state = PgAppState::new(
         data_service,
         Arc::new(UnusedSessionService),
@@ -149,7 +153,6 @@ fn app_state_billing(
         Arc::new(server::services::email::NoopEmailSender),
     );
     state.invoice_creation_filters = filters;
-    state.billing_store_id = billing_store_id;
     state
 }
 
@@ -169,7 +172,7 @@ async fn a_denying_filter_blocks_the_real_endpoint_with_the_reason() {
     let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        caller(owner),
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -208,7 +211,7 @@ async fn permission_denies_before_the_filter_is_ever_consulted() {
     let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(stranger)),
+        caller(stranger),
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -243,7 +246,7 @@ async fn no_filters_reaches_past_the_filter_stage() {
     let state = app_state(Arc::new(pg), Vec::new());
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        caller(owner),
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -256,20 +259,21 @@ async fn no_filters_reaches_past_the_filter_stage() {
     assert_eq!(body["error"], "no_payment_methods");
 }
 
-/// The deadlock the billing-store exemption exists to prevent.
+/// The deadlock the operator exemption exists to prevent.
 ///
-/// A billing plugin refuses invoice creation for a merchant in arrears. The
-/// invoice that *renews* a subscription is itself created on the instance's
-/// own store - so without the exemption, a plugin that refuses (a bug, or
+/// A plugin refuses invoice creation for a merchant in arrears. The invoice
+/// that *renews* a subscription is itself created with the operator's own
+/// credential - so without the exemption, a plugin that refuses (a bug, or
 /// simply being down while its manifest fails closed) refuses the renewal
 /// that would have cleared the refusal, and the only way out is editing the
 /// database by hand.
 ///
-/// Uses the same `AlwaysDeny` filter as the test above, which proves the
-/// difference is the exemption and not the filter.
+/// Uses the same `AlwaysDeny` filter as the tests above and the same store
+/// an ordinary credential gets blocked on, which proves the difference is
+/// the credential's `is_operator` property and not the filter or the store.
 #[tokio::test]
 #[ignore]
-async fn our_own_billing_store_is_never_filtered() {
+async fn operator_credential_is_never_filtered() {
     let Some(pg) = service().await else {
         return;
     };
@@ -279,14 +283,13 @@ async fn our_own_billing_store_is_never_filtered() {
         .await
         .expect("seed store owned by user");
 
-    let state = app_state_billing(
-        Arc::new(pg),
-        vec![Arc::new(AlwaysDeny)],
-        Some(types::StoreId(store.id.0)),
-    );
+    let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        AuthenticatedCaller {
+            user: user_info(owner),
+            is_operator: true,
+        },
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -296,45 +299,40 @@ async fn our_own_billing_store_is_never_filtered() {
         assert_ne!(
             body["error"].as_str(),
             Some("invoice_creation_blocked"),
-            "the billing store was filtered; a plugin can now deadlock its own renewals (status {status})"
+            "the operator credential was filtered; a plugin can now deadlock its own renewals (status {status})"
         );
     }
 }
 
-/// The exemption must be exactly one store wide. A second store on the same
-/// instance is still filtered, or the exemption has become a way to bypass
-/// billing entirely.
+/// The specific widening the exemption must not become: `ServerAdmin` alone
+/// is not enough. An admin session without the explicitly-granted operator
+/// property is filtered exactly like any other credential.
 #[tokio::test]
 #[ignore]
-async fn the_exemption_covers_only_the_billing_store() {
+async fn admin_without_the_operator_property_is_still_filtered() {
     let Some(pg) = service().await else {
         return;
     };
-    let owner = seed_user(pg.pool()).await;
-    let billing = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
-    let merchant = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
-    pg.create_store_owned_by(&billing, UserId(owner))
+    let admin = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(admin));
+    pg.create_store_owned_by(&store, UserId(admin))
         .await
-        .expect("seed billing store");
-    pg.create_store_owned_by(&merchant, UserId(owner))
-        .await
-        .expect("seed merchant store");
+        .expect("seed store owned by user");
 
-    let state = app_state_billing(
-        Arc::new(pg),
-        vec![Arc::new(AlwaysDeny)],
-        Some(types::StoreId(billing.id.0)),
-    );
+    let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
 
     let result = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        AuthenticatedCaller {
+            user: user_info_with_role(admin, Role::ServerAdmin),
+            is_operator: false,
+        },
         State(state),
-        Json(invoice_request(merchant.id.0)),
+        Json(invoice_request(store.id.0)),
     )
     .await;
 
     let Err((_, Json(body))) = result else {
-        panic!("a merchant store must still be filtered when a billing store is configured");
+        panic!("an admin credential without is_operator must still be filtered");
     };
     assert_eq!(body["error"].as_str(), Some("invoice_creation_blocked"));
 }
@@ -376,7 +374,7 @@ async fn the_filter_is_told_which_account_owns_the_store() {
     let state = app_state(Arc::new(pg), vec![Arc::new(Recording(seen.clone()))]);
 
     let _ = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        caller(owner),
         State(state),
         Json(invoice_request(store.id.0)),
     )
