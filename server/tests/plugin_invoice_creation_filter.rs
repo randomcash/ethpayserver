@@ -22,13 +22,27 @@
 //! Both rejections actually share HTTP 403 - `permission_denies_before_the_filter_is_ever_consulted`
 //! below is the ordering test, and it distinguishes them by the `error` code
 //! in the body (`forbidden` vs `invoice_creation_blocked`), not by status.
+//!
+//! Review finding, fixed: every test above builds an `AuthenticatedCaller`
+//! struct literal by hand, so none of them exercise the path an actual
+//! request takes - a header, a database row, `validate_api_key`, and the
+//! `AuthenticatedCaller` extractor's own `FromRequestParts` impl. A bug that
+//! drops the column on the way from the row to the struct (wrong bind order,
+//! a branch that forgets to forward it) would pass every test above while
+//! leaving the deadlock this file exists to guard completely unprotected.
+//! `operator_flag_on_a_real_api_key_row_reaches_the_extractor_and_exempts_the_request`
+//! and `non_operator_api_key_row_is_still_filtered_through_the_real_extractor`
+//! insert a real `api_keys` row, run the actual header through
+//! `AuthenticatedCaller::from_request_parts`, and only then hand the result
+//! to `create_invoice`.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::Json;
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{FromRequestParts, State};
+use axum::http::{Request, StatusCode};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -93,10 +107,18 @@ async fn service() -> Option<PgDataService> {
 
 async fn seed_user(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
+    // `kdf_params`/`encrypted_symmetric_key` must deserialize into their real
+    // structs, not just be valid JSON - the new extractor-level tests below
+    // are the first ones in this file to read the row back through
+    // `UserRepository::get_user` rather than only ever constructing a
+    // `UserInfo` by hand, and a bare `{}` fails that deserialization.
     sqlx::query(
         "INSERT INTO users (id, kdf_params, encrypted_symmetric_key, \
          recovery_verification_hash, kdf_salt_identifier) \
-         VALUES ($1, '{}'::jsonb, '{}'::jsonb, 'h', 'passkey:' || $1::text)",
+         VALUES ($1, \
+             '{\"algorithm\":\"argon2id\",\"memory_kb\":65536,\"iterations\":3,\"parallelism\":4,\"salt\":\"\"}'::jsonb, \
+             '{\"ciphertext\":\"\",\"iv\":\"\",\"mac\":\"\"}'::jsonb, \
+             'h', 'passkey:' || $1::text)",
     )
     .bind(id)
     .execute(pool)
@@ -126,6 +148,41 @@ fn caller(id: Uuid) -> AuthenticatedCaller {
         user: user_info(id),
         is_operator: false,
     }
+}
+
+/// Inserts a real, active `api_keys` row and returns the raw key a request
+/// would present as `Authorization: Bearer <raw>`. Hashes with the same
+/// SHA-256-hex scheme `validate_api_key` looks the row up by, independently
+/// of that function, so this test proves the two agree rather than assuming it.
+async fn seed_api_key(pool: &PgPool, user_id: Uuid, is_operator: bool) -> String {
+    let raw_key = format!("ak_test_{}", Uuid::new_v4());
+    let key_hash = hex::encode(Sha256::digest(raw_key.as_bytes()));
+    sqlx::query(
+        "INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, is_operator) \
+         VALUES ($1, $2, 'test key', $3, 'ak_test', $4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(&key_hash)
+    .bind(is_operator)
+    .execute(pool)
+    .await
+    .expect("seed api key");
+    raw_key
+}
+
+/// Runs the real `AuthenticatedCaller` extractor against a request carrying
+/// `raw_key`, the same way axum would for an incoming `/invoices` request.
+async fn authenticate_with_api_key(
+    raw_key: &str,
+    state: &PgAppState<UnusedSessionService>,
+) -> Result<AuthenticatedCaller, (StatusCode, &'static str)> {
+    let request = Request::builder()
+        .header("authorization", format!("Bearer {raw_key}"))
+        .body(())
+        .expect("build request");
+    let (mut parts, ()) = request.into_parts();
+    AuthenticatedCaller::from_request_parts(&mut parts, state).await
 }
 
 fn invoice_request(store_id: Uuid) -> CreateInvoiceRequest {
@@ -391,4 +448,75 @@ async fn the_filter_is_told_which_account_owns_the_store() {
         UserId(owner),
         "the filter was told about the wrong account; billing would act on the wrong merchant"
     );
+}
+
+/// The deadlock case again, but through the wiring the tests above skip:
+/// a real `api_keys` row with `is_operator` set, a real bearer header, and
+/// the actual `AuthenticatedCaller` extractor - not a hand-built struct
+/// literal. If the column were dropped anywhere between the database row and
+/// the extractor's output, this is the test that would notice.
+#[tokio::test]
+#[ignore]
+async fn operator_flag_on_a_real_api_key_row_reaches_the_extractor_and_exempts_the_request() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    let raw_key = seed_api_key(pg.pool(), owner, true).await;
+
+    let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
+
+    let caller = authenticate_with_api_key(&raw_key, &state)
+        .await
+        .expect("a real, active, operator-flagged api key must authenticate");
+    assert!(
+        caller.is_operator,
+        "the extractor lost is_operator between the database row and AuthenticatedCaller"
+    );
+
+    let result = create_invoice(caller, State(state), Json(invoice_request(store.id.0))).await;
+
+    if let Err((status, Json(body))) = &result {
+        assert_ne!(
+            body["error"].as_str(),
+            Some("invoice_creation_blocked"),
+            "an operator key authenticated through the real extractor was filtered anyway (status {status})"
+        );
+    }
+}
+
+/// The companion negative case: an ordinary `api_keys` row (`is_operator`
+/// false, the column's default) authenticated through the same real
+/// extractor path is filtered exactly like the hand-built caller in
+/// `a_denying_filter_blocks_the_real_endpoint_with_the_reason` above.
+#[tokio::test]
+#[ignore]
+async fn non_operator_api_key_row_is_still_filtered_through_the_real_extractor() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    let raw_key = seed_api_key(pg.pool(), owner, false).await;
+
+    let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
+
+    let caller = authenticate_with_api_key(&raw_key, &state)
+        .await
+        .expect("a real, active api key must authenticate");
+    assert!(!caller.is_operator);
+
+    let result = create_invoice(caller, State(state), Json(invoice_request(store.id.0))).await;
+
+    let Err((_, Json(body))) = result else {
+        panic!("an ordinary api key credential must still be filtered");
+    };
+    assert_eq!(body["error"].as_str(), Some("invoice_creation_blocked"));
 }
