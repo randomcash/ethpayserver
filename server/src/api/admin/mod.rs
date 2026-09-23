@@ -379,7 +379,14 @@ where
         && billing_store_id != current.billing_store_id
     {
         validate_billing_store(&state, store_id).await?;
-        tracing::info!(
+        // `error`, not `info`: this is the one setting on this page that can
+        // hand a plugin a merchant's payments or redirect the operator's own
+        // revenue (see `Config::billing_store_id`), so a change to it must
+        // reach Sentry as an event - which is what turns into a ticket - and
+        // not sit as a log line nobody was looking at. Only reachable on an
+        // actual value change, same as the validation above, so re-saving an
+        // unchanged settings form stays silent.
+        tracing::error!(
             actor = %admin.id,
             store_id = %store_id,
             "billing store changed; it takes effect on the next restart"
@@ -410,13 +417,16 @@ where
     Ok(StatusCode::OK)
 }
 
-/// Refuse a billing store that could not actually be billed on.
+/// Refuse a billing store that is not the operator's own, or that could not
+/// actually be billed on.
 ///
 /// Checked here rather than at boot because here there is a human to tell.
 /// Every one of these failures is silent otherwise: the setting saves, the
 /// server restarts, and the first sign of trouble is a merchant clicking Pay
 /// and getting nothing - by which point nobody connects it to a settings
-/// change made days earlier.
+/// change made days earlier. Worse for ownership than for billability: a
+/// store nominated by mistake or by an attacker is fully billable by
+/// definition, so nothing about the merchant using it would ever look wrong.
 ///
 /// Not a foreign key, for the reason the migration gives: a settings row must
 /// not be what stops a store being deleted.
@@ -427,6 +437,15 @@ async fn validate_billing_store<A>(
 where
     A: SessionService + 'static,
 {
+    let store = auth::StoreRepository::get_store(&*state.data_service, store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Err(reason) = owned_by_operator(store.as_ref(), state.operator_account_id) {
+        tracing::warn!(%store_id, reason, "refused a billing store nomination");
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     let methods = data_service::StorePaymentMethodReader::get_enabled_payment_methods(
         &*state.data_service,
         store_id.0,
@@ -440,6 +459,27 @@ where
     }
 
     Ok(())
+}
+
+/// Who may be nominated as the store this instance bills itself through.
+///
+/// Its own function so the rule is testable without a database, the same
+/// reason `billable` below is split out. `operator_account_id` absent refuses
+/// every store rather than none of them: a missing operator account and one
+/// an attacker cleared are indistinguishable from inside this function, so
+/// both have to fail closed.
+fn owned_by_operator(
+    store: Option<&types::Store>,
+    operator_account_id: Option<types::UserId>,
+) -> Result<(), &'static str> {
+    let Some(store) = store else {
+        return Err("the store does not exist");
+    };
+    match operator_account_id {
+        Some(id) if store.owner_id == id => Ok(()),
+        Some(_) => Err("the store does not belong to the operator's designated account"),
+        None => Err("no operator account is configured"),
+    }
 }
 
 /// Whether an invoice could actually be issued and paid on these methods.
@@ -626,5 +666,295 @@ mod tests {
         // one, and refusing the whole store because a second is unconfigured
         // would block a working setup.
         assert!(billable(&[method(None), method(Some(uuid::Uuid::new_v4()))]).is_ok());
+    }
+
+    /// Who may be nominated matters as much as whether the store can be
+    /// billed on - every real merchant store passes `billable` by
+    /// definition, so that check alone accepts any store at all.
+    #[test]
+    fn a_store_not_owned_by_the_operator_is_refused() {
+        let operator = UserId::new();
+        let someone_else = types::Store::new("someone else's store", UserId::new());
+
+        assert_eq!(
+            owned_by_operator(Some(&someone_else), Some(operator)),
+            Err("the store does not belong to the operator's designated account")
+        );
+    }
+
+    /// The other direction: a check that refuses everything is not a fix.
+    #[test]
+    fn the_operators_own_store_is_accepted() {
+        let operator = UserId::new();
+        let own_store = types::Store::new("the operator's own store", operator);
+
+        assert!(owned_by_operator(Some(&own_store), Some(operator)).is_ok());
+    }
+
+    /// No configured operator account must refuse every nomination, not let
+    /// every store through - the same "no value is safely wrong" reasoning
+    /// as `Config::billing_store_id` itself.
+    #[test]
+    fn no_operator_account_configured_refuses_every_store() {
+        let any_store = types::Store::new("any store", UserId::new());
+
+        assert_eq!(
+            owned_by_operator(Some(&any_store), None),
+            Err("no operator account is configured")
+        );
+    }
+
+    #[test]
+    fn a_nonexistent_store_is_refused() {
+        assert_eq!(
+            owned_by_operator(None, Some(UserId::new())),
+            Err("the store does not exist")
+        );
+    }
+
+    // ========================================================================
+    // `update_settings` against a real database.
+    //
+    // `#[ignore]`d and skipped with no `DATABASE_URL`, the same convention as
+    // every other database-backed test in this codebase (see
+    // `server/src/api/stores/tests.rs`'s handler tests, or
+    // `data-service/src/postgres/integration_tests/*`).
+    // ========================================================================
+
+    /// Exists only to give `PgAppState<A>` a concrete auth-service type;
+    /// never called because `AdminAuth` below is constructed directly.
+    struct NoAuthSessionService;
+
+    #[async_trait::async_trait]
+    impl SessionService for NoAuthSessionService {
+        async fn validate_session(
+            &self,
+            _session_id: auth::SessionId,
+        ) -> auth::Result<(auth::UserInfo, auth::Session)> {
+            Err(auth::AuthError::InvalidCredentials)
+        }
+
+        async fn logout(&self, _session_id: auth::SessionId) -> auth::Result<()> {
+            Err(auth::AuthError::InvalidCredentials)
+        }
+
+        async fn logout_all(&self, _session_id: auth::SessionId) -> auth::Result<()> {
+            Err(auth::AuthError::InvalidCredentials)
+        }
+
+        async fn cleanup_stale_sessions(&self) -> auth::Result<u64> {
+            Err(auth::AuthError::InvalidCredentials)
+        }
+    }
+
+    async fn settings_test_service() -> Option<data_service::PgDataService> {
+        let database_url = std::env::var("DATABASE_URL").ok()?;
+        data_service::PgDataService::connect(&database_url)
+            .await
+            .ok()
+    }
+
+    async fn settings_test_user(pool: &sqlx::PgPool) -> uuid::Uuid {
+        let user_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, kdf_params, encrypted_symmetric_key, \
+             recovery_verification_hash, kdf_salt_identifier) \
+             VALUES ($1, '{}'::jsonb, '{}'::jsonb, 'h', 'passkey:' || $1::text)",
+        )
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        user_id
+    }
+
+    async fn settings_test_store(pool: &sqlx::PgPool, owner: uuid::Uuid) -> uuid::Uuid {
+        let store_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO stores (id, name, owner_id) VALUES ($1, $2, $3)")
+            .bind(store_id)
+            .bind(format!("store-{store_id}"))
+            .bind(owner)
+            .execute(pool)
+            .await
+            .expect("seed store");
+        store_id
+    }
+
+    fn settings_admin(user_id: uuid::Uuid) -> AdminAuth {
+        AdminAuth(auth::UserInfo {
+            id: UserId(user_id),
+            email: None,
+            primary_wallet_address: None,
+            created_at: Utc::now(),
+            last_login_at: None,
+            role: Role::ServerAdmin,
+        })
+    }
+
+    fn settings_test_state(
+        service: data_service::PgDataService,
+        operator_account_id: Option<UserId>,
+    ) -> PgAppState<NoAuthSessionService> {
+        let mut state = PgAppState::new(
+            std::sync::Arc::new(service),
+            std::sync::Arc::new(NoAuthSessionService),
+            None,
+            std::sync::Arc::new(rates::NoOpRateProvider),
+            std::sync::Arc::new(crate::services::email::NoopEmailSender),
+        );
+        state.operator_account_id = operator_account_id;
+        state
+    }
+
+    fn settings_body(
+        billing_store_id: Option<Option<types::StoreId>>,
+    ) -> UpdateServerSettingsRequest {
+        UpdateServerSettingsRequest {
+            default_confirmations: 3,
+            invoice_expiry_minutes: 60,
+            rate_limit_rpm: 100,
+            enabled_chain_ids: None,
+            billing_store_id,
+        }
+    }
+
+    struct CapturesError(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturesError {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// The alarm (`tracing::error!`, which Sentry turns into an event and
+    /// this deployment's pipeline turns into a ticket) must fire exactly when
+    /// the billing store actually changes, not on every settings save - or it
+    /// becomes noise nobody reads. The `Some(None)` versus absent distinction
+    /// on `UpdateServerSettingsRequest::billing_store_id` is what makes a
+    /// resave of the same value distinguishable from a real change at all.
+    #[tokio::test]
+    #[ignore]
+    async fn the_billing_store_alarm_fires_only_on_an_actual_change() {
+        use tracing_subscriber::prelude::*;
+
+        let Some(service) = settings_test_service().await else {
+            return;
+        };
+        let pool = service.pool().clone();
+        sqlx::query("DELETE FROM server_settings WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("reset settings");
+
+        let owner = settings_test_user(&pool).await;
+        let store_id = settings_test_store(&pool, owner).await;
+        let xpub = format!("xpub-test-{}", uuid::Uuid::new_v4());
+        data_service::StorePaymentMethodWriter::create_payment_method(
+            &service,
+            store_id,
+            &ChainId::evm(11155111),
+            None,
+            "ETH",
+            18,
+            Some(&xpub),
+        )
+        .await
+        .expect("seed a resolving payment method");
+
+        let state = settings_test_state(service, Some(UserId(owner)));
+
+        let saw_error = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _dispatcher = tracing_subscriber::registry()
+            .with(CapturesError(std::sync::Arc::clone(&saw_error)))
+            .set_default();
+
+        let status = update_settings(
+            settings_admin(owner),
+            State(state.clone()),
+            Json(settings_body(Some(Some(types::StoreId(store_id))))),
+        )
+        .await
+        .expect("the operator's own, billable store must be accepted");
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            saw_error.load(std::sync::atomic::Ordering::SeqCst),
+            "an actual billing store change must raise the alarm"
+        );
+
+        saw_error.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let status = update_settings(
+            settings_admin(owner),
+            State(state.clone()),
+            Json(settings_body(Some(Some(types::StoreId(store_id))))),
+        )
+        .await
+        .expect("resaving the same store must still succeed");
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !saw_error.load(std::sync::atomic::Ordering::SeqCst),
+            "resaving the same value must not raise the alarm again - it would stop being read"
+        );
+
+        sqlx::query("DELETE FROM server_settings WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("clean up settings");
+    }
+
+    /// The negative half of the same property this file's other tests cover
+    /// in isolation (`owned_by_operator`) - here proven through the real
+    /// endpoint, against a real database, the same way
+    /// `server/src/api/stores/tests.rs` proves its chain gate through
+    /// `create_payment_method` rather than trusting the pure predicate alone.
+    #[tokio::test]
+    #[ignore]
+    async fn the_endpoint_refuses_a_store_the_operator_does_not_own() {
+        let Some(service) = settings_test_service().await else {
+            return;
+        };
+        let pool = service.pool().clone();
+        sqlx::query("DELETE FROM server_settings WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("reset settings");
+
+        let operator = settings_test_user(&pool).await;
+        let merchant = settings_test_user(&pool).await;
+        let merchants_store = settings_test_store(&pool, merchant).await;
+        let xpub = format!("xpub-test-{}", uuid::Uuid::new_v4());
+        data_service::StorePaymentMethodWriter::create_payment_method(
+            &service,
+            merchants_store,
+            &ChainId::evm(11155111),
+            None,
+            "ETH",
+            18,
+            Some(&xpub),
+        )
+        .await
+        .expect("seed a resolving payment method - fully billable, not the failure under test");
+
+        let state = settings_test_state(service, Some(UserId(operator)));
+
+        let status = update_settings(
+            settings_admin(operator),
+            State(state),
+            Json(settings_body(Some(Some(types::StoreId(merchants_store))))),
+        )
+        .await
+        .expect_err("a billable store owned by someone else must still be refused");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        sqlx::query("DELETE FROM server_settings WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("clean up settings");
     }
 }
