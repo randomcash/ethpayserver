@@ -21,6 +21,11 @@ use super::{WebhookConfig, WebhookError, WebhookJob};
 /// error means a job already sitting in the queue no longer deserializes —
 /// a real bug, not a network teardown artifact — and must not go quiet just
 /// because it happened to surface in the same window as a shutdown signal.
+/// `Http` is listed here as always-a-fault for the same reason, though in
+/// practice `process_next_job` never returns it: a delivery failure is
+/// handled inline (logged via "Webhook delivery failed" or "...permanently
+/// failed", never propagated with `?`), so this match arm exists to keep
+/// the decision total rather than to gate a reachable path.
 ///
 /// Split out from `log_process_error` so the shutdown/fault decision itself
 /// is unit-testable without a live Redis connection.
