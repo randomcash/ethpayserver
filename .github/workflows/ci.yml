@@ -244,6 +244,20 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # Backs the webhook service's `TEST_REDIS_URL`-gated regression tests.
+      # Without this, those tests skip in seconds rather than fail - which
+      # looks identical to green whether or not the code they cover still
+      # works. `-p server` picking up `--run-ignored only` means they're
+      # already selected here; they just had nothing to connect to.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -291,6 +305,7 @@ jobs:
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
             cargo run --release --bin migrate_postgres
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
+          TEST_REDIS_URL="redis://127.0.0.1:6379" \
             cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1
 
   # Runs on pull requests too, deliberately. This used to be branch-only, so a

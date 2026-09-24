@@ -549,15 +549,15 @@ mod tests {
     /// `#[ignore]`d like this crate's other tests that need real
     /// infrastructure. Point `TEST_REDIS_URL` at one to run it.
     ///
-    /// Unlike this crate's Postgres-backed `#[ignore]`d tests, `TEST_REDIS_URL`
-    /// is not guaranteed to be set wherever `--run-ignored only` runs: the
-    /// `test` CI job declares a Postgres service but no Redis one, so on that
-    /// runner this variable is simply absent, not misconfigured. Falling back
-    /// to a default address there used to mean spending a full
-    /// `ConnectionManager` reconnect-retry cycle (minutes) discovering that
-    /// the default doesn't exist either, hanging the job instead of failing
-    /// it. Skip immediately when the variable isn't set; a missing dependency
-    /// should be silent in seconds, not a slow, unexplained timeout.
+    /// The `test` CI job sets `TEST_REDIS_URL` alongside `DATABASE_URL`, the
+    /// same way this crate's Postgres-backed `#[ignore]`d tests expect
+    /// `DATABASE_URL` to be there for `--run-ignored only` runs. A developer
+    /// running this locally without Redis won't have it set, though - and a
+    /// missing address there used to mean spending a full `ConnectionManager`
+    /// reconnect-retry cycle (minutes) discovering that the default doesn't
+    /// exist either, hanging the run instead of failing it. Skip immediately
+    /// when the variable isn't set; a missing dependency should be silent in
+    /// seconds, not a slow, unexplained timeout.
     #[tokio::test]
     #[ignore = "requires a local Redis instance; set TEST_REDIS_URL, e.g. redis://127.0.0.1:6379"]
     async fn test_redis_connection_is_reused_across_queue_calls() {
