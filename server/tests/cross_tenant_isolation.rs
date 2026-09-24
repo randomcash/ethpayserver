@@ -1276,6 +1276,165 @@ async fn list_deliveries_for_store_across_tenants_is_refused() {
     assert!(own.deliveries.iter().any(|d| d.id == a_delivery));
 }
 
+/// The nil-`store_id` bug shape, for the two endpoints in this section keyed
+/// directly by a `store_id` path segment. `list_refunds` and
+/// `list_deliveries_for_invoice` are keyed by invoice id (a string, not a
+/// UUID) instead, so there is no nil-`store_id` case to construct for them -
+/// the admin-bypass tests below cover those two.
+#[tokio::test]
+#[ignore]
+async fn payout_endpoints_with_a_nil_store_id_is_refused_like_any_foreign_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let a_payout = seed_payout(&pg, &a.store).await;
+    let state = app_state(Arc::new(pg));
+
+    let get_result = server::api::payouts::get_payout(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path((Uuid::nil(), a_payout)),
+    )
+    .await;
+    assert_eq!(
+        get_result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "a nil store_id must not be treated as 'every store'"
+    );
+
+    let list_result = server::api::payouts::list_payouts(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(Uuid::nil()),
+    )
+    .await;
+    assert_eq!(
+        list_result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "a nil store_id must not be treated as 'every store'"
+    );
+}
+
+/// The admin-bypass side of the same shape: a `ServerAdmin` is not a member
+/// of either tenant's store, yet must still reach both - the RCS-222
+/// direction, where an over-narrow membership check would wrongly refuse the
+/// one role that is supposed to see everything.
+#[tokio::test]
+#[ignore]
+async fn payout_endpoints_as_server_admin_reach_every_tenants_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let b_payout = seed_payout(&pg, &b.store).await;
+    let state = app_state(Arc::new(pg));
+
+    let get_result = server::api::payouts::get_payout(
+        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        State(state.clone()),
+        Path((b.store.id.0, b_payout)),
+    )
+    .await
+    .expect("a server admin must be able to fetch another tenant's payout");
+    assert_eq!(get_result.id, b_payout);
+
+    let list_result = server::api::payouts::list_payouts(
+        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        State(state),
+        Path(b.store.id.0),
+    )
+    .await
+    .expect("a server admin must be able to list another tenant's payouts");
+    assert!(list_result.payouts.iter().any(|p| p.id == b_payout));
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_refunds_as_server_admin_reaches_another_tenants_invoice() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let b_refund = seed_refund(&pg, &b).await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::refunds::list_refunds(
+        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        State(state),
+        Path(b.invoice.id.0.clone()),
+    )
+    .await
+    .expect("a server admin must be able to list another tenant's refunds");
+    assert!(result.iter().any(|r| r.id == b_refund));
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_deliveries_for_invoice_as_server_admin_reaches_another_tenants_invoice() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let b_delivery = seed_webhook_delivery(&pg, &b).await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::webhook_deliveries::list_deliveries_for_invoice(
+        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        State(state),
+        Path(b.invoice.id.0.clone()),
+    )
+    .await
+    .expect("a server admin must be able to list another tenant's webhook deliveries");
+    assert!(result.deliveries.iter().any(|d| d.id == b_delivery));
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_deliveries_for_store_with_a_nil_store_id_is_refused_like_any_foreign_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::webhook_deliveries::list_deliveries_for_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(Uuid::nil()),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "a nil store_id must not be treated as 'every store'"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_deliveries_for_store_as_server_admin_reaches_every_tenants_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let b_delivery = seed_webhook_delivery(&pg, &b).await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::webhook_deliveries::list_deliveries_for_store(
+        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        State(state),
+        Path(b.store.id.0),
+    )
+    .await
+    .expect("a server admin must be able to list another tenant's webhook deliveries by store");
+    assert!(result.deliveries.iter().any(|d| d.id == b_delivery));
+}
+
 // ============================================================================
 // API keys: the same tenancy boundary, reached through the other auth path
 // ============================================================================
