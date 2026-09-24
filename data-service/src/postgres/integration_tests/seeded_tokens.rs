@@ -14,6 +14,19 @@
 //! `handle_payment_detected` - the actual call site a payment reaches this
 //! lookup through - turns a resolution into the symbol on the payment record
 //! instead of the `ERC20` fallback.
+//!
+//! `#[ignore]` here means "needs a live database," not "excluded from CI" -
+//! the workspace's gating integration-test job runs this crate with
+//! `--run-ignored only` against a real Postgres, so a plain `cargo test` (or
+//! `cargo nextest run --workspace` without `--run-ignored`) skipping these is
+//! expected, not a hole.
+//!
+//! Ablation actually run against a live database, not just reasoned about:
+//! pointed the Scroll WBTC row's address at a different value, re-ran
+//! `remaining_seeded_rows_resolve_with_the_right_symbol_and_decimals`, and it
+//! failed naming exactly that row - `WBTC on chain 534352 (0x3c1bca5a...) is
+//! not seeded` - then restoring the address turned it green again. The table
+//! checks the value each row resolves to, not just that the query succeeds.
 
 use types::{ChainId, TokenReader};
 
@@ -116,18 +129,68 @@ const REMAINING_SEEDED_ROWS: &[(u64, &str, &str, u8)] = &[
     (324, "0x493257fd37edb34451f62edf8d2a0c418852ba4c", "USDT", 6),
     (324, "0xbbeb516fb02a01611cbbe0453fe3c580d7281011", "WBTC", 8),
     // Linea (eip155:59144)
-    (59_144, "0xa219439258ca9da29e9cc4ce5596924745e12b93", "USDT", 6),
-    (59_144, "0x3aab2285ddcddad8edf438c1bab47e1a9d05a9b4", "WBTC", 8),
-    (59_144, "0xe5d7c2a44ffddf6b295a15c148167daaaf5cf34f", "WETH", 18),
+    (
+        59_144,
+        "0xa219439258ca9da29e9cc4ce5596924745e12b93",
+        "USDT",
+        6,
+    ),
+    (
+        59_144,
+        "0x3aab2285ddcddad8edf438c1bab47e1a9d05a9b4",
+        "WBTC",
+        8,
+    ),
+    (
+        59_144,
+        "0xe5d7c2a44ffddf6b295a15c148167daaaf5cf34f",
+        "WETH",
+        18,
+    ),
     // Scroll (eip155:534352)
-    (534_352, "0x06efdbff2a14a7c8e15944d1f4a48f9f95f663a4", "USDC", 6),
-    (534_352, "0xf55bec9cafdbe8730f096aa55dad6d22d44099df", "USDT", 6),
-    (534_352, "0x3c1bca5a656e69edcd0d4e36bebb3fcdaca60cf1", "WBTC", 8),
+    (
+        534_352,
+        "0x06efdbff2a14a7c8e15944d1f4a48f9f95f663a4",
+        "USDC",
+        6,
+    ),
+    (
+        534_352,
+        "0xf55bec9cafdbe8730f096aa55dad6d22d44099df",
+        "USDT",
+        6,
+    ),
+    (
+        534_352,
+        "0x3c1bca5a656e69edcd0d4e36bebb3fcdaca60cf1",
+        "WBTC",
+        8,
+    ),
     // Testnets seeded alongside Optimism Sepolia
-    (421_614, "0x75faf114eafb1bdbe2f0316df893fd58ce46aa4d", "USDC", 6), // Arbitrum Sepolia
-    (84_532, "0x036cbd53842c5426634e7929541ec2318f3dcf7e", "USDC", 6), // Base Sepolia
-    (43_113, "0x5425890298aed601595a70ab815c96711a31bc65", "USDC", 6), // Avalanche Fuji
-    (80_002, "0x41e94eb019c0762f9bfcf9fb1e58725bfb0e7582", "USDC", 6), // Polygon Amoy
+    (
+        421_614,
+        "0x75faf114eafb1bdbe2f0316df893fd58ce46aa4d",
+        "USDC",
+        6,
+    ), // Arbitrum Sepolia
+    (
+        84_532,
+        "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+        "USDC",
+        6,
+    ), // Base Sepolia
+    (
+        43_113,
+        "0x5425890298aed601595a70ab815c96711a31bc65",
+        "USDC",
+        6,
+    ), // Avalanche Fuji
+    (
+        80_002,
+        "0x41e94eb019c0762f9bfcf9fb1e58725bfb0e7582",
+        "USDC",
+        6,
+    ), // Polygon Amoy
 ];
 
 #[tokio::test]
