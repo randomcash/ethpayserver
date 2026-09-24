@@ -107,7 +107,9 @@ async fn a_key_scoped_to_modify_settings_can_read_store_settings() {
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
         .await
-        .expect("seed store owned by user, with the Owner role's canmodifystoresettings permission");
+        .expect(
+            "seed store owned by user, with the Owner role's canmodifystoresettings permission",
+        );
 
     let state = app_state(Arc::new(pg));
 
