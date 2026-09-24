@@ -112,10 +112,17 @@ export async function createUserWithApiKey(
     );
     const userId = rows[0].id as string;
 
+    // `id` is supplied, unlike for `users` above. The two tables differ:
+    // `users.id` is `UUID PRIMARY KEY DEFAULT uuid_generate_v4()`, while
+    // `api_keys.id` is `UUID PRIMARY KEY` with no default, so omitting it is
+    // `null value in column "id" violates not-null constraint` rather than a
+    // generated key. Production never hits this because the server generates
+    // the id in `auth::api::api_keys`; only a fixture writing the row directly
+    // has to know.
     await client.query(
-      `INSERT INTO api_keys (user_id, name, key_hash, key_prefix, is_active)
-       VALUES ($1, 'e2e', $2, $3, true)`,
-      [userId, keyHash, apiKey.slice(0, 12)],
+      `INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, is_active)
+       VALUES ($1, $2, 'e2e', $3, $4, true)`,
+      [crypto.randomUUID(), userId, keyHash, apiKey.slice(0, 12)],
     );
     return { userId, apiKey };
   } finally {
