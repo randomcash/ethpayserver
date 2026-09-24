@@ -126,14 +126,18 @@ fn extract_bearer_token(parts: &Parts) -> Result<String, (StatusCode, &'static s
     Ok(token.to_string())
 }
 
-/// Validate session and return user info.
+/// Validate session and return user info, plus whether the credential used
+/// has been explicitly granted the operator property (see
+/// `AuthenticatedCaller`). A session login never carries it - only an API key
+/// row can, and only when set directly on that row - so this is `false` on
+/// every path except a successful API-key lookup.
 ///
 /// Takes `&mut Parts` so the API-key branch can stamp `ApiKeyDeprecationInfo`
 /// into request extensions when a deprecated-but-still-valid key is used.
 async fn validate_session<A>(
     parts: &mut Parts,
     state: &PgAppState<A>,
-) -> Result<UserInfo, (StatusCode, &'static str)>
+) -> Result<(UserInfo, bool), (StatusCode, &'static str)>
 where
     A: SessionService + 'static,
 {
@@ -156,10 +160,11 @@ where
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
 
-    Ok(user_info)
+    Ok((user_info, false))
 }
 
-/// Validate an API key and return the associated user info.
+/// Validate an API key and return the associated user info, plus the key's
+/// own `is_operator` flag.
 ///
 /// When the key is deprecated but within its grace window, stamps an
 /// `ApiKeyDeprecationInfo` into `parts.extensions` so the response-header
@@ -168,7 +173,7 @@ async fn validate_api_key<A>(
     raw_key: &str,
     parts: &mut Parts,
     state: &PgAppState<A>,
-) -> Result<UserInfo, (StatusCode, &'static str)>
+) -> Result<(UserInfo, bool), (StatusCode, &'static str)>
 where
     A: SessionService + 'static,
 {
@@ -241,7 +246,7 @@ where
             .await;
     });
 
-    Ok(user)
+    Ok((user, key_info.is_operator))
 }
 
 /// Get the deprecation grace period in seconds (default: 48 hours).
@@ -267,8 +272,37 @@ where
         parts: &mut Parts,
         state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
-        let user_info = validate_session(parts, state).await?;
+        let (user_info, _is_operator) = validate_session(parts, state).await?;
         Ok(AuthenticatedUser(user_info))
+    }
+}
+
+/// Like `AuthenticatedUser`, but also carries whether the credential used to
+/// authenticate this request has been explicitly granted the operator
+/// property.
+///
+/// The property lives on the credential (today, only an API key's
+/// `is_operator` column), not on the requesting user's role or on any store
+/// the request names - it is decided once, at authentication time, and
+/// nothing downstream can derive it from *what* is being asked for. Use this
+/// instead of `AuthenticatedUser` only where that distinction matters.
+pub struct AuthenticatedCaller {
+    pub user: UserInfo,
+    pub is_operator: bool,
+}
+
+impl<A> FromRequestParts<PgAppState<A>> for AuthenticatedCaller
+where
+    A: SessionService + 'static,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &PgAppState<A>,
+    ) -> Result<Self, Self::Rejection> {
+        let (user, is_operator) = validate_session(parts, state).await?;
+        Ok(AuthenticatedCaller { user, is_operator })
     }
 }
 
@@ -299,7 +333,7 @@ where
         // caller is the expected case on a public route.
         let is_admin = validate_session(parts, state)
             .await
-            .is_ok_and(|user| user.role == Role::ServerAdmin);
+            .is_ok_and(|(user, _is_operator)| user.role == Role::ServerAdmin);
         Ok(MaybeAdmin(is_admin))
     }
 }
@@ -314,7 +348,7 @@ where
         parts: &mut Parts,
         state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
-        let user_info = validate_session(parts, state).await?;
+        let (user_info, _is_operator) = validate_session(parts, state).await?;
 
         // Check for ServerAdmin role
         if user_info.role != Role::ServerAdmin {
