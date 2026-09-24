@@ -84,5 +84,26 @@ check "a brand new file over the limit is refused" 1
 git reset -q --hard HEAD~1
 check "green again once the new file is gone" 0
 
+# A BASE_REF that exists but shares no history with HEAD (e.g. a shallow
+# checkout that never fetched a common ancestor) makes the triple-dot diff
+# itself fail, not just return empty. That must surface as a visible warning
+# and a skip, not a silent "nothing grew" - the same failure mode CLAUDE.md
+# warns about for a query that can't run.
+main_branch="$(git branch --show-current)"
+git checkout -q --orphan disjoint
+git commit -q --allow-empty -m "unrelated root, no shared history with main"
+git checkout -q "$main_branch"
+git branch -f disjoint_base disjoint
+out="$(cd "$TMP" && LINE_LIMIT=5 BASE_REF=disjoint_base "$GUARD" 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '::warning::git diff against disjoint_base failed'; then
+  echo "ok: a BASE_REF with no shared history warns and skips instead of silently passing"
+else
+  echo "FAIL: a failed base-ref diff should warn and skip, not silently claim clean"
+  printf '%s\n' "$out"
+  fail=1
+fi
+git branch -D disjoint disjoint_base >/dev/null
+
 [ "$fail" -eq 0 ] && echo "check-file-size.sh behaves as documented"
 exit "$fail"

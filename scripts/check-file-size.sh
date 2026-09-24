@@ -59,7 +59,10 @@ if ! git rev-parse --verify --quiet "$BASE_REF" >/dev/null; then
   exit "$status"
 fi
 
-changed="$(git diff --name-only --diff-filter=ACMR "${BASE_REF}...HEAD" -- '*.rs' 2>/dev/null)"
+if ! changed="$(git diff --name-only --diff-filter=ACMR "${BASE_REF}...HEAD" -- '*.rs' 2>&1)"; then
+  echo "::warning::git diff against $BASE_REF failed; skipping the growth check ($changed)" >&2
+  exit "$status"
+fi
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   [ -f "$f" ] || continue
