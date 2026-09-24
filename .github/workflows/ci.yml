@@ -252,6 +252,20 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # `-p server` below runs that package's `#[ignore]`d integration tests,
+      # and some need a real Redis the same way the rest need the Postgres
+      # above - without this, the first such test can only fail, and it does
+      # so by hanging until some ambient timeout fires rather than with a
+      # message saying Redis was never there.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -299,6 +313,7 @@ jobs:
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
             cargo run --release --bin migrate_postgres
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
+          TEST_REDIS_URL="redis://127.0.0.1:6379" \
             cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1
 
   # Runs on pull requests too, deliberately. This used to be branch-only, so a
