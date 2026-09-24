@@ -126,6 +126,20 @@ jobs:
       - name: Session URL guard self-test
         run: ./scripts/check-no-session-urls.test.sh
 
+      # A 2026-09-14 audit found 26 files over 400 lines; nine days later, with
+      # no check in between, that was 47 - despite split tickets landing in the
+      # same window. The existing backlog doesn't fail the build (that would
+      # fail on all 47 the day this lands and get switched off in a week); what
+      # fails is a file getting worse in this change, which is exactly the
+      # pattern that let the backlog double. Reuses the base-ref fetch above.
+      - name: No file grows past the line limit
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'testnet' }}
+        run: ./scripts/check-file-size.sh
+
+      - name: File size guard self-test
+        run: ./scripts/check-file-size.test.sh
+
       - name: Migration versions are distinct
         run: ./scripts/check-migrations.sh
 
