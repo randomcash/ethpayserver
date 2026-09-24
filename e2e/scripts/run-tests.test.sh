@@ -7,7 +7,16 @@
 # handed, then blocks so the harness can interrupt it like a real Ctrl-C
 # would. If the trap didn't fire on a signal - only on a clean exit - this
 # would catch it.
+#
+# `set -m` and signaling the process group (`-"$pid"`), not just the wrapper's
+# own pid, both matter: bash ignores SIGINT for an async (`&`) job in a
+# non-interactive script unless job control is on, and a real terminal Ctrl-C
+# hits the whole foreground process group at once, not the parent alone. Get
+# either wrong and `kill -INT` is a no-op - the fake npx runs its full 60s
+# sleep and the script exits cleanly regardless of whether the trap works,
+# which passed here once before catching nothing.
 set -uo pipefail
+set -m
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER="$E2E_DIR/scripts/run-tests.sh"
@@ -44,7 +53,7 @@ else
   fail=1
 fi
 
-kill -INT "$pid" 2>/dev/null
+kill -INT -"$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 
 if [ -n "$scratch" ] && [ ! -d "$scratch" ]; then
