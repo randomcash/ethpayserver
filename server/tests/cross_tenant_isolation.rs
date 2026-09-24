@@ -1,9 +1,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Two merchants, A and B, each with their own store, invoice, payment,
-//! wallet and API key. Every read endpoint is asked for the other tenant's
-//! data - by id, by store filter, by the "all stores" path, and
-//! authenticated with an API key instead of a session - and must refuse.
+//! wallet and API key. Every store-scoped read endpoint this file enumerates
+//! (invoices and payments including list, by id and CSV export; stores
+//! including by id, list, members, webhook config and token policy; wallets;
+//! dashboard aggregates; payouts, refunds and webhook deliveries) is asked
+//! for the other tenant's data, by id, by store filter, by the "all stores"
+//! path, and authenticated with an API key instead of a session where that
+//! axis applies, and must refuse. This is not a claim that literally every
+//! handler under `server/src/api` is covered; it is the enumeration of the
+//! store/tenant-scoped ones, grown each time a gap was found.
 //!
 //! This has shipped broken in both directions before: a nil-UUID `store_id`
 //! that meant "every store" leaked one merchant's invoices and payments to
@@ -40,7 +46,7 @@ use uuid::Uuid;
 
 use auth::{
     ApiKey, ApiKeyId, ApiKeyRepository, Result as AuthResult, Session, SessionId, SessionService,
-    Store, UserId, UserInfo,
+    Store, StoreRole, StoreRoleRepository, UserId, UserInfo, UserStore, UserStoreRepository,
 };
 use data_service::store_creation::StoreCreationWriter;
 use data_service::{
@@ -248,6 +254,33 @@ async fn seed_tenant(pg: &PgDataService, label: &str) -> Tenant {
         wallet,
         api_key_raw,
     }
+}
+
+/// Switches a tenant's role on their own store to a one-off role carrying
+/// exactly `permission`, for the one endpoint (`list_store_members`) whose
+/// permission string none of the seeded default roles - Owner included -
+/// actually grant. Without this, a positive control against that endpoint
+/// would fail for every caller, not just a foreign one, which is a real gap
+/// in this repo's default roles but not what this suite exists to prove.
+async fn grant_store_permission(pg: &PgDataService, tenant: &Tenant, permission: &str) {
+    let role = StoreRole::new(
+        auth::StoreId(tenant.store.id.0),
+        "cross-tenant-test-role",
+        vec![permission.to_string()],
+    );
+    StoreRoleRepository::create_store_role(pg, &role)
+        .await
+        .expect("create a role carrying the permission under test");
+    UserStoreRepository::update_user_store(
+        pg,
+        &UserStore::new(
+            UserId(tenant.user_id),
+            auth::StoreId(tenant.store.id.0),
+            role.id,
+        ),
+    )
+    .await
+    .expect("assign the test role to the tenant's own store membership");
 }
 
 /// A payout on `store`, unrelated to any real invoice - the payout endpoints
@@ -1803,10 +1836,12 @@ async fn an_api_keys_own_payouts_refunds_and_deliveries_remain_reachable() {
     )
     .await
     .expect("an API key must be able to list its owner's own invoice's webhook deliveries");
-    assert!(own_invoice_deliveries
-        .deliveries
-        .iter()
-        .any(|d| d.id == a_delivery));
+    assert!(
+        own_invoice_deliveries
+            .deliveries
+            .iter()
+            .any(|d| d.id == a_delivery)
+    );
 
     let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
     let own_store_deliveries = server::api::webhook_deliveries::list_deliveries_for_store(
@@ -1816,10 +1851,346 @@ async fn an_api_keys_own_payouts_refunds_and_deliveries_remain_reachable() {
     )
     .await
     .expect("an API key must be able to list its owner's own store's webhook deliveries");
-    assert!(own_store_deliveries
-        .deliveries
-        .iter()
-        .any(|d| d.id == a_delivery));
+    assert!(
+        own_store_deliveries
+            .deliveries
+            .iter()
+            .any(|d| d.id == a_delivery)
+    );
+}
+
+// ============================================================================
+// CSV export: builds its filter through the same `verify_store_access_for_query`
+// guard as `list_invoices`/`list_payments`, but is a separate handler and a
+// separate response path (a streamed file, not JSON), so the guard being
+// wired to the list endpoint proves nothing about the export one.
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn export_invoices_csv_with_another_tenants_store_id_is_refused() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::invoices::export_invoices_csv(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Query(server::api::invoices::ListInvoicesQuery {
+            store_id: Some(b.store.id.0),
+            status: None,
+            currency: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status_of(result),
+        StatusCode::FORBIDDEN,
+        "A must not be able to export B's store's invoices by naming its id directly"
+    );
+
+    // Positive control: without this, an endpoint that refuses every explicit
+    // store_id, including the caller's own, would pass the assertion above
+    // for the wrong reason.
+    let own = server::api::invoices::export_invoices_csv(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Query(server::api::invoices::ListInvoicesQuery {
+            store_id: Some(a.store.id.0),
+            status: None,
+            currency: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await
+    .expect("A must be able to export A's own store's invoices by naming its id directly");
+    assert_eq!(own.status(), StatusCode::OK);
+}
+
+/// The same nil-UUID regression `list_invoices` guards against (see above),
+/// but for the export handler's own copy of the store-access check.
+#[tokio::test]
+#[ignore]
+async fn export_invoices_csv_with_a_nil_store_id_is_refused_like_any_foreign_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let _b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::invoices::export_invoices_csv(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Query(server::api::invoices::ListInvoicesQuery {
+            store_id: Some(Uuid::nil()),
+            status: None,
+            currency: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status_of(result),
+        StatusCode::FORBIDDEN,
+        "a nil store_id must not be treated as 'every store'"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn export_payments_csv_with_another_tenants_store_id_is_refused() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::invoices::export_payments_csv(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Query(server::api::invoices::ListPaymentsQuery {
+            store_id: Some(b.store.id.0),
+            status: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status_of(result),
+        StatusCode::FORBIDDEN,
+        "A must not be able to export B's store's payments by naming its id directly"
+    );
+
+    // Positive control, same reasoning as the invoice export above.
+    let own = server::api::invoices::export_payments_csv(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Query(server::api::invoices::ListPaymentsQuery {
+            store_id: Some(a.store.id.0),
+            status: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await
+    .expect("A must be able to export A's own store's payments by naming its id directly");
+    assert_eq!(own.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore]
+async fn export_payments_csv_with_a_nil_store_id_is_refused_like_any_foreign_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let _b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::invoices::export_payments_csv(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Query(server::api::invoices::ListPaymentsQuery {
+            store_id: Some(Uuid::nil()),
+            status: None,
+            search: None,
+            limit: None,
+            offset: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status_of(result),
+        StatusCode::FORBIDDEN,
+        "a nil store_id must not be treated as 'every store'"
+    );
+}
+
+// ============================================================================
+// Dashboard: aggregate counters and volume, scoped by `get_stores_for_user`
+// rather than a client-supplied `store_id` - the leak to guard against here
+// is another tenant's rows folding into the caller's own totals.
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn get_stats_never_counts_another_tenants_data() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let _b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let stats =
+        server::api::dashboard::get_stats(AuthenticatedUser(user_info(a.user_id)), State(state))
+            .await
+            .expect("a merchant must be able to read their own dashboard stats");
+
+    assert_eq!(
+        stats.total_stores, 1,
+        "A's store count must not include B's store"
+    );
+    assert_eq!(
+        stats.total_invoices, 1,
+        "A's invoice count must not include B's invoice"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn get_analytics_never_counts_another_tenants_data() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let _b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let analytics = server::api::dashboard::get_analytics(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Query(server::api::dashboard::AnalyticsQuery { days: None }),
+    )
+    .await
+    .expect("a merchant must be able to read their own dashboard analytics");
+
+    assert_eq!(
+        analytics.total_payments, 1,
+        "A's payment volume must not include B's payment"
+    );
+}
+
+// ============================================================================
+// Store members, webhook config and token policy: the same
+// `require_store_settings_permission`/permission-gated `Path<Uuid>` shape as
+// the store wallet endpoints above, tested separately because each is its
+// own handler with its own copy of the guard.
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn list_store_members_refuses_a_non_members_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    // None of the seeded default roles grant `canviewstoreusers`, including
+    // Owner, so a caller needs a role built for it before a positive control
+    // against A's own store means anything.
+    grant_store_permission(&pg, &a, "ethpay.store.canviewstoreusers").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::stores::list_store_members(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.store.id.0),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::FORBIDDEN,
+        "A must not be able to list B's store's members"
+    );
+
+    // Positive control: without this, an endpoint that refuses every caller
+    // would pass the assertion above for the wrong reason.
+    let _ = server::api::stores::list_store_members(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.store.id.0),
+    )
+    .await
+    .expect("A must be able to list A's own store's members");
+}
+
+#[tokio::test]
+#[ignore]
+async fn get_store_webhook_refuses_a_non_members_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    // Both tenants need a webhook actually configured, or the positive
+    // control would fail with NOT_FOUND for a reason unrelated to tenancy.
+    let _a_delivery = seed_webhook_delivery(&pg, &a).await;
+    let _b_delivery = seed_webhook_delivery(&pg, &b).await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::stores::get_store_webhook(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.store.id.0),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::FORBIDDEN,
+        "A must not be able to read B's store's webhook configuration"
+    );
+
+    // Positive control, same reasoning as above.
+    let own = server::api::stores::get_store_webhook(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.store.id.0),
+    )
+    .await
+    .expect("A must be able to read A's own store's webhook configuration");
+    assert_eq!(own.store_id, a.store.id.0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn get_token_policy_refuses_a_non_members_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::stores::get_token_policy(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.store.id.0),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::FORBIDDEN,
+        "A must not be able to read B's store's token policy"
+    );
+
+    // Positive control: without this, an endpoint that refuses every caller
+    // would pass the assertion above for the wrong reason. No policy is
+    // configured, so success here is `Ok(None)`, not an error.
+    let _ = server::api::stores::get_token_policy(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.store.id.0),
+    )
+    .await
+    .expect("A must be able to read A's own store's token policy");
 }
 
 // ============================================================================
