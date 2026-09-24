@@ -101,7 +101,19 @@ check "a build_sha/sentry-release mismatch is refused" 1
 echo '' > "$HEADER_FILE"
 check "a missing x-sentry-release header is refused" 1
 
+# The vacuous pass this comparison could produce: a malformed response with no
+# build_sha at all, paired with a missing header, satisfies "" == "" unless
+# the empty header is rejected outright regardless of what build_sha says.
+cat > "$BODY_FILE" <<'JSON'
+{"postgres":{"status":"ok"},"redis":{"status":"ok"},
+ "monitor":{"status":"ok","data_fresh":true},
+ "rpcs":{"eip155:11155111":{"status":"ok","last_block":100}}}
+JSON
+echo '' > "$HEADER_FILE"
+check "a missing build_sha and a missing header is refused, not passed vacuously" 1
+
 # Restore before the remaining cases, which are not testing this header.
+healthy
 echo 'abc1234' > "$HEADER_FILE"
 
 # ... and the same shape with a missing monitor key entirely, which is what an

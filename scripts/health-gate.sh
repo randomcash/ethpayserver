@@ -83,7 +83,10 @@ print(','.join(bad) if bad else '')
   # rebuild stage that drops the env var) without either build step failing.
   # Comparing them on the running process is what actually proves the fix
   # reached the deployed binary rather than just the build that produced it.
-  if [[ "$SENTRY_RELEASE_HDR" != "$BUILD_SHA" ]]; then
+  # The explicit empty check matters: without it, a malformed response with
+  # no build_sha and a missing header would satisfy "" == "" and pass
+  # vacuously - reporting a match when nothing was actually verified.
+  if [[ -z "$SENTRY_RELEASE_HDR" || "$SENTRY_RELEASE_HDR" != "$BUILD_SHA" ]]; then
     log "x-sentry-release mismatch: got='$SENTRY_RELEASE_HDR' build_sha='$BUILD_SHA' (elapsed ${ELAPSED}s)"
     sleep $INTERVAL
     ELAPSED=$((ELAPSED + INTERVAL))

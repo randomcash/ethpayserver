@@ -146,6 +146,14 @@ jobs:
       - name: Deploy health gate self-test
         run: ./scripts/health-gate.test.sh
 
+      # The build steps below refuse to compile with an empty SENTRY_RELEASE,
+      # but github.sha is never empty in normal operation - so nothing
+      # organically exercises the failing branch. Proves the guard itself
+      # goes red and green on the cases it claims to, rather than shipping a
+      # check nobody ever saw refuse anything.
+      - name: Sentry release guard self-test
+        run: ./scripts/check-sentry-release.test.sh
+
       - name: Format check
         run: cargo fmt --all -- --check
 
@@ -363,11 +371,7 @@ jobs:
           SENTRY_RELEASE: ${{ github.sha }}
         run: |
           export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
-          # option_env!("SENTRY_RELEASE") reads this at compile time and
-          # resolves to a silent `None` if it's ever empty - a rename, a typo,
-          # or a step reordering that clobbers it all compile clean and look
-          # identical to success. Refuse to build rather than ship that.
-          [ -n "$SENTRY_RELEASE" ] || { echo "::error::SENTRY_RELEASE is empty; refusing to build a binary with no Sentry release"; exit 1; }
+          ./scripts/check-sentry-release.sh "$SENTRY_RELEASE"
           cargo build --release --bin ethpayserver
           cargo build --release --bin migrate_postgres
 
@@ -376,7 +380,7 @@ jobs:
           SENTRY_RELEASE: ${{ github.sha }}
         run: |
           export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
-          [ -n "$SENTRY_RELEASE" ] || { echo "::error::SENTRY_RELEASE is empty; refusing to build a binary with no Sentry release"; exit 1; }
+          ./scripts/check-sentry-release.sh "$SENTRY_RELEASE"
           cargo build --release --bin evmmonitor --features monitor-bin
 
       # upload-artifact@v4 roots the archive at the least common ancestor of the
