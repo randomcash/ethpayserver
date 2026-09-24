@@ -30,7 +30,17 @@ status=0
 # Report: every .rs file over the limit right now, worst first, independent of
 # the ratchet below. This is what a human audit reads instead of hand-running
 # `wc -l` over the tree again.
-report="$(git ls-files '*.rs' | while read -r f; do
+#
+# A failed listing is not the same thing as "nothing is over the limit" - the
+# exact conflation this script exists to catch - so it fails the build rather
+# than reporting a clean zero.
+if ! files="$(git ls-files '*.rs')"; then
+  echo "::error::git ls-files failed - cannot measure current file sizes" >&2
+  exit 1
+fi
+
+report="$(printf '%s\n' "$files" | while read -r f; do
+  [ -z "$f" ] && continue
   n="$(wc -l < "$f")"
   if [ "$n" -gt "$LINE_LIMIT" ]; then
     printf '%d %s\n' "$n" "$f"

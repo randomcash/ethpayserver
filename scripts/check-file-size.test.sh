@@ -49,6 +49,21 @@ else
   printf '%s\n' "$report"
   fail=1
 fi
+# A broken listing (e.g. an unreadable index) is not "nothing is over the
+# limit" - it must fail the build rather than report a false-clean zero, the
+# same conflation the ratchet below is built to refuse.
+chmod 000 "$TMP/.git/index"
+out="$(cd "$TMP" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"
+rc=$?
+chmod 644 "$TMP/.git/index"
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '::error::git ls-files failed'; then
+  echo "ok: a broken git ls-files fails the build instead of reporting a false-clean zero"
+else
+  echo "FAIL: a broken git ls-files should fail closed, not report zero files over the limit"
+  printf '%s\n' "$out"
+  fail=1
+fi
+
 check "an untouched change (nothing over the limit grew) passes" 0
 
 lines 4 > short.rs
@@ -120,6 +135,53 @@ else
   fail=1
 fi
 git branch -D disjoint disjoint_base >/dev/null
+
+# The disjoint-history retry above only proved it can pass (nothing had grown
+# at that point) - it has to actually catch growth too, or "warns and
+# retries" could retry into a check that never fires.
+lines 8 > short.rs
+git add -A && git commit -qm "grows past the limit again, to be seen via the disjoint-diff retry"
+git checkout -q --orphan disjoint2
+git commit -q --allow-empty -m "another unrelated root, no shared history with main"
+git checkout -q "$main_branch"
+git branch -f disjoint2_base disjoint2
+out="$(cd "$TMP" && LINE_LIMIT=5 BASE_REF=disjoint2_base "$GUARD" 2>&1)"
+rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '::warning::git diff against disjoint2_base failed' \
+   && printf '%s\n' "$out" | grep -q 'short.rs grew from 4 to 8'; then
+  echo "ok: the disjoint-history retry against HEAD~1 still catches real growth, not just a pass"
+else
+  echo "FAIL: the disjoint-history retry should still enforce growth, not just prove it can pass"
+  printf '%s\n' "$out"
+  fail=1
+fi
+git reset -q --hard HEAD~1
+git branch -D disjoint2 disjoint2_base >/dev/null
+
+# A failed diff with no HEAD~1 to retry against either (a repo's first commit,
+# but this time BASE_REF resolves to something with no shared history rather
+# than failing to resolve at all) has no fallback left - it must fail closed,
+# not skip.
+NOHEAD1="$(mktemp -d)"
+(
+  cd "$NOHEAD1" && git init -q . && git config user.email t@t && git config user.name t
+  lines 8 > only.rs && git add -A && git commit -qm "first commit, nothing to diff against"
+  first_branch="$(git branch --show-current)"
+  git checkout -q --orphan unrelated
+  git commit -q --allow-empty -m "unrelated root, no shared history"
+  git branch -f unrelated_base unrelated
+  git checkout -q "$first_branch"
+)
+out="$(cd "$NOHEAD1" && LINE_LIMIT=5 BASE_REF=unrelated_base "$GUARD" 2>&1)"
+rc=$?
+rm -rf "$NOHEAD1"
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '::error::git diff against unrelated_base failed'; then
+  echo "ok: a failed diff with no HEAD~1 to retry against fails the build"
+else
+  echo "FAIL: a failed diff with no HEAD~1 should fail closed, not skip"
+  printf '%s\n' "$out"
+  fail=1
+fi
 
 # When there is truly nothing to compare against - no BASE_REF and no
 # HEAD~1 either, e.g. a repo's first commit - the guard has no way to know
