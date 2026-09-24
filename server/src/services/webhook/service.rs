@@ -89,12 +89,26 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         })
     }
 
+    /// A cap on how long establishing the shared connection may take.
+    ///
+    /// `ConnectionManager::new`'s default config has no connection timeout at
+    /// all, so a Redis that accepts the TCP handshake but never completes it
+    /// (a partially up container, a black-holed route) can leave a caller
+    /// waiting indefinitely rather than failing. `get_or_try_init` below
+    /// doesn't cache that failure, so a bounded timeout here is what actually
+    /// turns a bad first attempt into "try again next call" instead of "hang
+    /// this call forever".
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
     /// Get the shared connection, establishing it on first use.
     async fn connection(&self) -> Result<redis::aio::ConnectionManager, WebhookError> {
         let conn = self
             .redis_conn
             .get_or_try_init(|| async {
-                redis::aio::ConnectionManager::new(self.redis_client.clone())
+                let config = redis::aio::ConnectionManagerConfig::new()
+                    .set_connection_timeout(Self::CONNECT_TIMEOUT)
+                    .set_number_of_retries(1);
+                redis::aio::ConnectionManager::new_with_config(self.redis_client.clone(), config)
                     .await
                     .map_err(|e| WebhookError::Redis(e.to_string()))
             })
@@ -189,7 +203,12 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             return Ok(false);
         };
 
-        // Atomically remove the job we just read
+        // Atomically remove the job we just read. Safe to read `removed == 0`
+        // as "another worker claimed it" rather than "our own ZREM got
+        // replayed": `ConnectionManager` reconnects in the background on a
+        // dropped connection, but it returns that error to the caller rather
+        // than silently retrying the in-flight command, so this ZREM cannot
+        // execute twice for one call.
         let removed: i64 = redis::cmd("ZREM")
             .arg(&self.config.queue_key)
             .arg(&json)
@@ -623,6 +642,99 @@ mod tests {
             connection_count.load(Ordering::SeqCst),
             1,
             "expected one persistent Redis connection reused across queue_webhook calls, not one opened per call"
+        );
+    }
+
+    /// A defect this regresses: `get_or_try_init` only caches a *successful*
+    /// connection attempt. If `connection()` instead cached the failure too
+    /// (e.g. by using `get_or_init` with a panicking initializer, or storing
+    /// the error alongside the cell), a transient failure on the very first
+    /// call — the exact class of event the ticket describes — would wedge
+    /// webhook delivery for the rest of the process's life instead of
+    /// healing itself on the next call. The reuse test above never exercises
+    /// this because its backend is healthy from the start.
+    ///
+    /// This proxies to a real Redis but drops the first connection attempt
+    /// outright (accepts the TCP connection, then closes it), so the first
+    /// `queue_webhook` call must fail. It only starts forwarding to the real
+    /// backend after that, so the second call proves recovery rather than
+    /// coincidence. `CONNECT_TIMEOUT` is what keeps the failing attempt from
+    /// stalling the test for minutes instead of failing outright — a
+    /// connection that never completes its handshake has no other bound on
+    /// how long a caller waits for it.
+    #[tokio::test]
+    #[ignore = "requires a local Redis instance; set TEST_REDIS_URL, e.g. redis://127.0.0.1:6379"]
+    async fn test_connection_recovers_after_a_failed_first_attempt() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use tokio::net::{TcpListener, TcpStream};
+
+        let Ok(backend_addr) = std::env::var("TEST_REDIS_URL") else {
+            eprintln!(
+                "skipping test_connection_recovers_after_a_failed_first_attempt: TEST_REDIS_URL not set"
+            );
+            return;
+        };
+        let backend_addr = backend_addr.trim_start_matches("redis://").to_string();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let forwarding = Arc::new(AtomicBool::new(false));
+
+        {
+            let forwarding = Arc::clone(&forwarding);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut inbound, _)) = listener.accept().await else {
+                        break;
+                    };
+                    if !forwarding.load(Ordering::SeqCst) {
+                        // Simulate a connection attempt that never completes:
+                        // accept, then hang up immediately.
+                        drop(inbound);
+                        continue;
+                    }
+                    let backend_addr = backend_addr.clone();
+                    tokio::spawn(async move {
+                        if let Ok(mut outbound) = TcpStream::connect(&backend_addr).await {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                    });
+                }
+            });
+        }
+
+        let data_service = Arc::new(data_service::InMemoryDataService::new());
+        let config = WebhookConfig {
+            queue_key: format!("test:webhook-conn-recovery:{}", uuid::Uuid::new_v4()),
+            ..WebhookConfig::default()
+        };
+        let service = WebhookService::new(data_service, &format!("redis://{proxy_addr}"), config)
+            .expect("service should be constructed");
+
+        let new_job = || {
+            WebhookJob::new(
+                uuid::Uuid::new_v4(),
+                "https://example.com/webhook".to_string(),
+                "secret".to_string(),
+                test_payload(),
+            )
+        };
+
+        let first = service.queue_webhook(new_job()).await;
+        assert!(
+            first.is_err(),
+            "the first call, against a backend that drops the connection, must fail"
+        );
+
+        forwarding.store(true, Ordering::SeqCst);
+
+        let second = service.queue_webhook(new_job()).await;
+        assert!(
+            second.is_ok(),
+            "a later call must recover once the backend is reachable, not replay the earlier failure forever: {:?}",
+            second.err()
         );
     }
 
