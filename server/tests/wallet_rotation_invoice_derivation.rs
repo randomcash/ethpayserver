@@ -26,10 +26,12 @@ use uuid::Uuid;
 use auth::{
     Result as AuthResult, Role, Session, SessionId, SessionService, Store, UserId, UserInfo,
 };
+use axum::response::IntoResponse;
 use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use evm::XpubDeriver;
 use rates::NoOpRateProvider;
+use server::api::ApiErr;
 use server::api::AuthenticatedUser;
 use server::api::invoices::{CreateInvoiceRequest, create_invoice};
 use server::api::stores::{RotateWalletRequest, rotate_store_wallet};
@@ -222,5 +224,97 @@ async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
     assert_eq!(
         refetched[0].payment_address, expected_old_address,
         "an existing pending invoice must keep resolving on its old-xpub address after rotation"
+    );
+}
+
+async fn error_status_and_message(err: ApiErr) -> (StatusCode, String) {
+    let response = err.into_response();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("read error body");
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("utf8 error body"),
+    )
+}
+
+/// Ticket's Verify criterion 3: a malformed xpub is refused with a message
+/// that says so, not the bare 400 a UI can only ever show as a generic
+/// failure.
+#[tokio::test]
+#[ignore]
+async fn rotation_refuses_a_malformed_xpub_with_a_specific_message() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    let ds = Arc::new(pg);
+
+    let err = rotate_store_wallet(
+        AuthenticatedUser(user_info(owner)),
+        State(app_state(Arc::clone(&ds))),
+        Path(store.id.0),
+        Json(RotateWalletRequest {
+            xpub: "not-a-real-extended-key".to_string(),
+            reason: None,
+            namespace: "eip155".to_string(),
+        }),
+    )
+    .await
+    .expect_err("a malformed xpub must be refused");
+
+    let (status, body) = error_status_and_message(err).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("extended public key"),
+        "message should say what was wrong, not stay a bare 400: {body}"
+    );
+}
+
+/// Same criterion, the other named case: an `xprv` is refused on the same
+/// version byte as any other malformed key, but the message has to say it
+/// looks like a private key - the mistake someone rotating after a
+/// compromise is most likely to make, and the one this product must never
+/// silently accept.
+#[tokio::test]
+#[ignore]
+async fn rotation_refuses_an_xprv_with_a_message_naming_it_a_private_key() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    let ds = Arc::new(pg);
+
+    // BIP-32 test vector 1's master private key - a real xprv, same key pair
+    // OLD_XPUB above is the public half of.
+    const XPRV: &str = "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi";
+
+    let err = rotate_store_wallet(
+        AuthenticatedUser(user_info(owner)),
+        State(app_state(Arc::clone(&ds))),
+        Path(store.id.0),
+        Json(RotateWalletRequest {
+            xpub: XPRV.to_string(),
+            reason: None,
+            namespace: "eip155".to_string(),
+        }),
+    )
+    .await
+    .expect_err("an xprv must never be accepted as an xpub");
+
+    let (status, body) = error_status_and_message(err).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("private key"),
+        "message should distinguish a pasted private key from a mere typo: {body}"
     );
 }
