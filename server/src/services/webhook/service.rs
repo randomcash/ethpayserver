@@ -665,12 +665,12 @@ mod tests {
 
         use tokio::net::{TcpListener, TcpStream};
 
-        let Ok(backend_addr) = std::env::var("TEST_REDIS_URL") else {
-            eprintln!(
-                "skipping test_redis_connection_is_reused_across_queue_calls: TEST_REDIS_URL not set"
-            );
-            return;
-        };
+        // A missing var must fail this test, not quietly no-op it: an
+        // `#[ignore]`d test that returns early on a missing env var reports as
+        // a pass, so a CI wiring regression that drops `TEST_REDIS_URL` would
+        // go green while proving nothing about connection reuse.
+        let backend_addr = std::env::var("TEST_REDIS_URL")
+            .expect("set TEST_REDIS_URL to run this test, e.g. redis://127.0.0.1:6379");
         let backend_addr = backend_addr.trim_start_matches("redis://").to_string();
 
         // A transparent proxy in front of the real Redis instance that counts
@@ -749,12 +749,11 @@ mod tests {
 
         use tokio::net::{TcpListener, TcpStream};
 
-        let Ok(backend_addr) = std::env::var("TEST_REDIS_URL") else {
-            eprintln!(
-                "skipping test_connection_recovers_after_a_failed_first_attempt: TEST_REDIS_URL not set"
-            );
-            return;
-        };
+        // See the sibling reuse test above: an early return on a missing env
+        // var reports as a pass for an `#[ignore]`d test, so this must fail
+        // loudly instead.
+        let backend_addr = std::env::var("TEST_REDIS_URL")
+            .expect("set TEST_REDIS_URL to run this test, e.g. redis://127.0.0.1:6379");
         let backend_addr = backend_addr.trim_start_matches("redis://").to_string();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
