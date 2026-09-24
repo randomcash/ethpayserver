@@ -2,10 +2,14 @@
 //!
 //! Wallets belong to the account, not to a store. A store derives
 //! from its own override if it has been given one, and from the account
-//! primary otherwise. That resolution is not cosmetic: it is the same
-//! expression address allocation evaluates, spelled once in the repository, so
-//! what these endpoints report is by construction where the next payment will
-//! actually be collected.
+//! primary otherwise, and that walk is spelled once in the repository so
+//! reads, allocation and rotation all use it.
+//!
+//! `GET /stores/{id}/wallet` reports that store-level walk by default, which
+//! is only ever an approximation of where a given method's next invoice lands:
+//! a method may be pinned to a wallet of its own, and address allocation
+//! resolves through the *method* first, the store second. Pass
+//! `payment_method_id` to ask the question allocation actually answers.
 
 use std::collections::HashMap;
 
@@ -60,7 +64,21 @@ pub struct WalletAddressesQuery {
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct StoreWalletQuery {
     /// CAIP-2 namespace: `eip155`, `tron`, ... . Defaults to `eip155`.
+    /// Ignored when `payment_method_id` is given - the method's own chain
+    /// says which family that is.
     pub namespace: Option<String>,
+    /// Resolve through this payment method instead of the store's bare
+    /// fallback.
+    ///
+    /// A method may be pinned to a wallet of its own - `pm.wallet_id`,
+    /// `method_wallet()` in the repository - which the plain store-level
+    /// walk (`namespace` alone) never looks at. Address allocation always
+    /// resolves through the method, so a caller asking "where will this
+    /// method's next invoice actually be collected" needs the method-scoped
+    /// answer, not the store's: the two can name different wallets the
+    /// moment a method is pinned and the account's primary or override moves
+    /// out from under it.
+    pub payment_method_id: Option<Uuid>,
 }
 
 impl StoreWalletQuery {
@@ -422,12 +440,22 @@ where
     }))
 }
 
-/// Get the wallet a store derives from, for one chain family.
+/// Get the wallet a store derives from, for one chain family - or, given
+/// `payment_method_id`, the wallet that specific method derives from.
 ///
 /// Per family, because that is what resolution is. A store with an Ethereum
 /// key and no Tron one has an answer for `eip155` and none for `tron`, and
 /// collapsing the two would report a key that Tron payments will never be
 /// collected on.
+///
+/// The bare (no `payment_method_id`) form answers for the store's own
+/// override and the account primary - it does not see a method's own pin.
+/// That is a real gap for a caller who needs to know where a *specific*
+/// method's next invoice lands: `derive_payment_address` resolves through
+/// the method (its pin first, the store second), so a pinned method can
+/// derive from a wallet this endpoint never mentions the moment the account's
+/// primary or override moves elsewhere. Passing `payment_method_id` asks the
+/// same question `allocate_derivation` answers instead.
 #[utoipa::path(
     get,
     path = "/stores/{store_id}/wallet",
@@ -439,7 +467,9 @@ where
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "No wallet for this family: the store has no \
-                                      override for it and the account no primary"),
+                                      override for it and the account no primary. Or, \
+                                      with `payment_method_id`, no such method on this \
+                                      store, or one with nothing to derive from."),
     )
 )]
 pub async fn get_store_wallet<A>(
@@ -465,6 +495,10 @@ where
         return Err(StatusCode::FORBIDDEN);
     }
 
+    if let Some(method_id) = query.payment_method_id {
+        return get_payment_method_wallet(&state, store_id, method_id).await;
+    }
+
     let namespace = query.namespace();
 
     let wallet = WalletReader::resolve_store_wallet(&*state.data_service, store_id, namespace)
@@ -477,6 +511,50 @@ where
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .is_some();
+
+    Ok(Json(StoreWalletResponse {
+        store_id,
+        wallet: wallet.into(),
+        is_override,
+    }))
+}
+
+/// The wallet one payment method actually derives from - its own pin if it
+/// has one, else whatever the store resolves to.
+///
+/// Reads `StorePaymentMethod::wallet_id`, which is already the resolved
+/// answer (see `method_wallet()` in the repository): the same walk
+/// `allocate_derivation` uses to pick the wallet whose counter it advances.
+/// Reporting anything else here would be a second, independent spelling of
+/// that walk - exactly the drift this endpoint exists to rule out.
+async fn get_payment_method_wallet<A>(
+    state: &PgAppState<A>,
+    store_id: Uuid,
+    method_id: Uuid,
+) -> Result<Json<StoreWalletResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let method = StorePaymentMethodReader::get_payment_method(&*state.data_service, method_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter(|m| m.store_id == store_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let wallet_id = method.wallet_id.ok_or(StatusCode::NOT_FOUND)?;
+    let wallet = WalletReader::get_wallet(&*state.data_service, wallet_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Whether this method's own resolution differs from the store's bare
+    // fallback - the exact condition under which the two forms of this
+    // endpoint can name different wallets for the same store.
+    let namespace = method.chain_id.namespace();
+    let is_override = WalletReader::resolve_store_wallet(&*state.data_service, store_id, namespace)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none_or(|store_wallet| store_wallet.id != wallet_id);
 
     Ok(Json(StoreWalletResponse {
         store_id,
