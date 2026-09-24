@@ -2,3 +2,7 @@ node_modules/
 playwright-report/
 test-results/
 perf-results.json
+
+# TMPDIR for local runs, see scripts/run-tests.sh — keeps browser profiles
+# and Playwright's internal temp files off a RAM-backed /tmp.
+.tmp/
