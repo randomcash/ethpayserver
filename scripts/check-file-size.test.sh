@@ -201,5 +201,53 @@ else
   fail=1
 fi
 
+# A pure rename of an already-oversized file has no content at its new path
+# at base, so a naive lookup there fails and used to be read as "the file is
+# new" (before=0) - reporting an unchanged file as having grown from 0 lines
+# and refusing it for the exact split work this guard is meant to protect.
+RENAME="$(mktemp -d)"
+(
+  cd "$RENAME" && git init -q . && git config user.email t@t && git config user.name t
+  lines 8 > old_name.rs
+  git add -A && git commit -qm "base commit, already over the limit"
+  git branch base
+  git mv old_name.rs new_name.rs
+  git commit -qm "pure rename, no content change"
+)
+out="$(cd "$RENAME" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"
+rc=$?
+rm -rf "$RENAME"
+if [ "$rc" -eq 0 ] && ! printf '%s\n' "$out" | grep -q 'grew from'; then
+  echo "ok: renaming an already-oversized file with no content change passes"
+else
+  echo "FAIL: a pure rename of an oversized file must not read as growing from 0"
+  printf '%s\n' "$out"
+  fail=1
+fi
+
+# The rename fix must still catch real growth - looked up against the file's
+# actual size at its old path, not against a 0 that would mask growth that
+# should be refused.
+RENAME2="$(mktemp -d)"
+(
+  cd "$RENAME2" && git init -q . && git config user.email t@t && git config user.name t
+  lines 8 > old_name.rs
+  git add -A && git commit -qm "base commit, already over the limit"
+  git branch base
+  git mv old_name.rs new_name.rs
+  lines 4 >> new_name.rs
+  git commit -qm "rename and grow further while already over"
+)
+out="$(cd "$RENAME2" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"
+rc=$?
+rm -rf "$RENAME2"
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'new_name.rs grew from 8 to 12'; then
+  echo "ok: a rename that also grows the file further is still refused, against its real size at base"
+else
+  echo "FAIL: a rename that grows further should be refused against its real prior size, not 0"
+  printf '%s\n' "$out"
+  fail=1
+fi
+
 [ "$fail" -eq 0 ] && echo "check-file-size.sh behaves as documented"
 exit "$fail"

@@ -82,11 +82,11 @@ if ! git rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! changed="$(git diff --name-only --diff-filter=ACMR "${base}...HEAD" -- '*.rs' 2>&1)"; then
+if ! changed="$(git diff --name-status -M --diff-filter=ACMR "${base}...HEAD" -- '*.rs' 2>&1)"; then
   if [ "$base" != "HEAD~1" ] && git rev-parse --verify --quiet "HEAD~1" >/dev/null 2>&1; then
     echo "::warning::git diff against $base failed ($changed); retrying against the previous commit only" >&2
     base="HEAD~1"
-    changed="$(git diff --name-only --diff-filter=ACMR "${base}...HEAD" -- '*.rs' 2>&1)" || {
+    changed="$(git diff --name-status -M --diff-filter=ACMR "${base}...HEAD" -- '*.rs' 2>&1)" || {
       echo "::error::git diff against $base failed too ($changed) - failing rather than skipping the growth check" >&2
       exit 1
     }
@@ -95,11 +95,36 @@ if ! changed="$(git diff --name-only --diff-filter=ACMR "${base}...HEAD" -- '*.r
     exit 1
   fi
 fi
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
+# --name-status (not --name-only) so a rename or copy carries its source path
+# alongside its destination. --diff-filter=ACMR includes renames, and
+# --name-only alone would give only the new path - so "before" was being
+# looked up at a path that never existed there, git show failed, and that
+# failure was read as "the file is new" (before=0). Renaming an
+# already-oversized file - exactly the "split, worst first" work this script
+# exists to make safe - would then read as growing from 0 lines and fail the
+# build for a file that never changed.
+while IFS=$'\t' read -r dstatus path1 path2; do
+  [ -z "$dstatus" ] && continue
+  case "$dstatus" in
+    R*|C*) old="$path1"; f="$path2" ;;
+    *) old="$path1"; f="$path1" ;;
+  esac
   [ -f "$f" ] || continue
   after="$(wc -l < "$f")"
-  before="$(git show "${base}:${f}" 2>/dev/null | wc -l)"
+  case "$dstatus" in
+    A*)
+      # A genuinely new path has nothing to look up at base - 0 is the
+      # correct answer here, not a swallowed failure standing in for one.
+      before=0
+      ;;
+    *)
+      before="$(git show "${base}:${old}" 2>/dev/null | wc -l)"
+      if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+        echo "::error::git show ${base}:${old} failed - cannot determine $f's size before this change" >&2
+        exit 1
+      fi
+      ;;
+  esac
   over_after=$(( after > LINE_LIMIT ? after - LINE_LIMIT : 0 ))
   over_before=$(( before > LINE_LIMIT ? before - LINE_LIMIT : 0 ))
   if [ "$over_after" -gt "$over_before" ]; then
