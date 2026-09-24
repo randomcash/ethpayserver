@@ -10,7 +10,10 @@ ETHPayServer is a self-hosted Ethereum and EVM-chain payment processor. It is
 **non-custodial**: a merchant registers an extended public key (an **xpub**,
 never a private key), and every payment address is derived from it. The
 server can compute addresses and watch the chain for payments to them, but it
-holds no spending key for any of them.
+holds no spending key for any of them. (The `evm` crate carries a
+signing/broadcasting module behind a `hot-wallet` Cargo feature, reserved for
+a possible future opt-in mode; it is off by default and no binary in this
+repository turns it on — see `evm/README.md`'s crate table.)
 
 Two consequences that follow directly from that, not incidentally:
 
@@ -913,8 +916,9 @@ reproduce it: address, amount, asset, chain.
 Restated plainly, because a model asked to fill a gap will otherwise invent
 a plausible-sounding answer:
 
-- **No custody, ever.** The server never holds a spending key for any
-  merchant funds. See [What this is](#what-this-is).
+- **No custody in the shipped build.** The server never holds a spending key
+  for any merchant funds. See [What this is](#what-this-is) for the one
+  reserved, off-by-default exception and why it doesn't change this.
 - **No refunds are sent, and none are recorded either.** `POST
   /invoices/{invoice_id}/refund` always returns `501 Not Implemented` and
   writes nothing. An earlier version wrote a `Refund` record with status

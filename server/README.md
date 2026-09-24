@@ -85,7 +85,7 @@ for the generated and current one, or `server/src/api/mod.rs` for the router.
 | `POST /invoices` | Create a new invoice |
 | `GET /invoices/{id}` | Get invoice details |
 | `POST /invoices/{id}/cancel` | Cancel a pending invoice |
-| `POST /invoices/{id}/refund` | Always refuses (501) — refunds are the merchant's job, this server never holds a spending key |
+| `POST /invoices/{id}/refund` | Always refuses (501) — refunds are the merchant's job; this server holds no spending key in the shipped build (see `evm/README.md`'s `hot-wallet` feature entry) |
 
 Invoice expiration is not an endpoint — the background `ExpirationSvc`
 (see the root README's Architecture diagram) expires pending invoices on its

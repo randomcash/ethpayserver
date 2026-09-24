@@ -540,9 +540,12 @@ Both binaries can forward panics, errors, structured logs and Prometheus
 metrics to a Sentry-protocol backend, in addition to the `/metrics` endpoint
 above:
 
-- `SENTRY_DSN` — collector endpoint. Unset disables reporting entirely (the
-  local/dev default). `SENTRY_ENVIRONMENT=testnet` or `dev` may run without a
-  DSN; anything else, including unset, refuses to start without one.
+- `SENTRY_DSN` — collector endpoint. Leaving it unset disables reporting, but
+  only boots that way when `SENTRY_ENVIRONMENT` is exactly `testnet` or
+  `dev`; any other value, including an unset `SENTRY_ENVIRONMENT`, refuses to
+  start without a DSN. `docker/.env.example` ships `SENTRY_ENVIRONMENT=dev`
+  uncommented for exactly this reason — remove it and a DSN-less `cargo run`
+  will not start.
 - `SENTRY_LOG_LEVEL` — minimum level forwarded as a structured log event
   (default `WARN`); independent of `RUST_LOG`, which only controls what is
   printed locally.
@@ -554,8 +557,9 @@ wallet/private keys, mnemonics, JWTs, bearer tokens, emails, on-chain
 addresses/hashes and RPC provider URLs (the API key embedded in an
 Alchemy/Infura/QuickNode path) before anything leaves the process. The same
 rules exist a second time, hand-written with no dependencies, in
-`payserver-commons`' `scrub` crate for the browser client — a test in
-`evm::telemetry` asserts the two agree.
+`payserver-commons`' `scrub` crate for the browser client —
+`evm::telemetry::tests::parity_with_shared_scrubber` runs both over the same
+corpus and asserts byte-identical output.
 
 The Leptos/WASM client reports to the same backend independently, via the
 `telemetry-dsn` / `telemetry-environment` meta tags in payserver-client's
@@ -762,7 +766,8 @@ docker run \
 ETHPayServer implements several security measures:
 
 - Non-custodial by design: derives payment addresses from a merchant's xpub
-  and never holds a spending key (see [Refunds](#refunds))
+  and holds no spending key in the shipped build (see [Refunds](#refunds) for
+  the reserved, off-by-default exception)
 - Address validation (checksum verification)
 - Whitelisted token contracts only
 - Confirmation requirements per chain
