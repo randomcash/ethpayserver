@@ -33,16 +33,4 @@ jobs:
         env:
           E2E_TEST_MNEMONIC: ${{ secrets.E2E_TEST_MNEMONIC }}
         run: |
-          node -e '
-            const { HDKey, mnemonicToAccount } = require("viem/accounts");
-            const { mnemonicToSeedSync } = require("@scure/bip39");
-            const m = process.env.E2E_TEST_MNEMONIC;
-            if (!m) { console.error("E2E_TEST_MNEMONIC is not set"); process.exit(1); }
-            const xpub = HDKey.fromMasterSeed(mnemonicToSeedSync(m)).derive('m/44\'/60\'/0\'').publicExtendedKey;
-            const spender = mnemonicToAccount(m, { accountIndex: 9 }).address;
-            console.log("");
-            console.log("receive xpub (registered by the spec):", xpub);
-            console.log("FUND THIS ADDRESS with SepoliaETH   :", spender);
-            console.log("");
-            console.log("about 0.002 per nightly run; send a few weeks worth.");
-          '
+          node wallet-address.mjs
