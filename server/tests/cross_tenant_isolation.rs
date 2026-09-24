@@ -43,7 +43,11 @@ use auth::{
     Store, UserId, UserInfo,
 };
 use data_service::store_creation::StoreCreationWriter;
-use data_service::{PgDataService, WalletWriter};
+use data_service::{
+    PayoutData, PayoutStatus, PayoutWriter, PgDataService, RefundData, RefundStatus, RefundWriter,
+    StoreWebhookWriter, UpsertDeliveryParams, WalletWriter, WebhookDeliveryStatus,
+    WebhookDeliveryWriter,
+};
 use payserver_plugin_api::PluginId;
 use payserver_plugin_host::{PageHost, PageRenderError, PageRenderer};
 use rates::NoOpRateProvider;
@@ -244,6 +248,93 @@ async fn seed_tenant(pg: &PgDataService, label: &str) -> Tenant {
         wallet,
         api_key_raw,
     }
+}
+
+/// A payout on `store`, unrelated to any real invoice - the payout endpoints
+/// under test only ever check the payout's own `store_id`, never its
+/// `invoice_ids`.
+async fn seed_payout(pg: &PgDataService, store: &Store) -> Uuid {
+    let payout = PayoutData {
+        id: Uuid::new_v4(),
+        store_id: types::StoreId(store.id.0),
+        invoice_ids: vec![],
+        destination_address: format!("0x{:040x}", Uuid::new_v4().as_u128()),
+        chain_id: ChainId::evm(11155111),
+        asset_type: "native".to_string(),
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        amount: "1000000000000000000".to_string(),
+        tx_hash: None,
+        status: PayoutStatus::Pending,
+        fee_amount: None,
+        error_message: None,
+        created_at: Utc::now(),
+        confirmed_at: None,
+    };
+    PayoutWriter::create_payout(pg, &payout)
+        .await
+        .expect("seed payout");
+    payout.id
+}
+
+/// A refund on the tenant's own invoice and payment.
+async fn seed_refund(pg: &PgDataService, tenant: &Tenant) -> Uuid {
+    let refund = RefundData {
+        id: Uuid::new_v4(),
+        invoice_id: tenant.invoice.id.clone(),
+        payment_id: tenant.payment_id,
+        store_id: types::StoreId(tenant.store.id.0),
+        to_address: format!("0x{:040x}", Uuid::new_v4().as_u128()),
+        chain_id: ChainId::evm(11155111),
+        asset_type: "native".to_string(),
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        amount: "500000000000000000".to_string(),
+        tx_hash: None,
+        status: RefundStatus::Pending,
+        fee_amount: None,
+        reason: None,
+        error_message: None,
+        created_at: Utc::now(),
+        confirmed_at: None,
+    };
+    RefundWriter::create_refund(pg, &refund)
+        .await
+        .expect("seed refund");
+    refund.id
+}
+
+/// A delivered webhook delivery against the tenant's own invoice, behind a
+/// webhook configured for the tenant's store.
+async fn seed_webhook_delivery(pg: &PgDataService, tenant: &Tenant) -> Uuid {
+    let webhook = StoreWebhookWriter::upsert_webhook(
+        pg,
+        tenant.store.id.0,
+        "https://example.com/webhook",
+        "secret",
+        true,
+    )
+    .await
+    .expect("seed store webhook");
+
+    let delivery_id = Uuid::new_v4();
+    WebhookDeliveryWriter::upsert_delivery(
+        pg,
+        UpsertDeliveryParams {
+            id: delivery_id,
+            store_webhook_id: webhook.id,
+            invoice_id: tenant.invoice.id.0.clone(),
+            event_type: "invoice_expired".to_string(),
+            status: WebhookDeliveryStatus::Delivered,
+            attempts: 1,
+            max_attempts: 7,
+            last_error: None,
+            payload: serde_json::json!({"event_type": "invoice_expired"}),
+        },
+    )
+    .await
+    .expect("seed webhook delivery");
+    delivery_id
 }
 
 /// Runs a raw bearer token through the same extractor a real request would,
@@ -454,7 +545,7 @@ async fn get_invoice_by_id_across_tenants_is_refused() {
 
     let result = server::api::invoices::get_invoice(
         AuthenticatedUser(user_info(a.user_id)),
-        State(state),
+        State(state.clone()),
         Path(b.invoice.id.0.clone()),
     )
     .await;
@@ -464,6 +555,20 @@ async fn get_invoice_by_id_across_tenants_is_refused() {
         StatusCode::FORBIDDEN,
         "A must not be able to fetch B's invoice by id"
     );
+
+    // Positive control: the admin test below proves the admin bypass works,
+    // but says nothing about the ownership branch a regular merchant goes
+    // through. Without this, an endpoint that refused every non-admin caller
+    // regardless of ownership would still pass the assertion above for the
+    // wrong reason.
+    let own = server::api::invoices::get_invoice(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("A must be able to fetch A's own invoice by id");
+    assert_eq!(own.id, a.invoice.id.0);
 }
 
 /// The positive control for the test above: the same cross-tenant request,
@@ -966,6 +1071,209 @@ async fn store_wallet_override_refuses_a_wallet_from_another_account() {
     .await
     .expect("A must be able to pin A's own store to A's own wallet");
     assert_eq!(own.wallet.id, a.wallet.id);
+}
+
+// ============================================================================
+// Payouts, refunds, and webhook deliveries: the same store-membership shape
+// as invoices and payments (a path id checked with `get_user_store`, then the
+// row itself matched to that store), so the same nil/foreign/admin questions
+// apply and had no coverage at all before this test.
+// ============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn payout_endpoints_refuse_a_non_members_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let a_payout = seed_payout(&pg, &a.store).await;
+    let b_payout = seed_payout(&pg, &b.store).await;
+    let state = app_state(Arc::new(pg));
+
+    let get_result = server::api::payouts::get_payout(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path((b.store.id.0, b_payout)),
+    )
+    .await;
+    assert_eq!(
+        get_result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "A must not be able to fetch a payout on B's store"
+    );
+
+    let list_result = server::api::payouts::list_payouts(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.store.id.0),
+    )
+    .await;
+    assert_eq!(
+        list_result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "A must not be able to list payouts on B's store"
+    );
+
+    // Positive control: without this, both endpoints refusing every caller,
+    // including one asking about their own store, would pass the assertions
+    // above for the wrong reason.
+    let own = server::api::payouts::get_payout(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path((a.store.id.0, a_payout)),
+    )
+    .await
+    .expect("A must be able to fetch a payout on A's own store");
+    assert_eq!(own.id, a_payout);
+
+    let own_list = server::api::payouts::list_payouts(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.store.id.0),
+    )
+    .await
+    .expect("A must be able to list payouts on A's own store");
+    assert!(own_list.payouts.iter().any(|p| p.id == a_payout));
+}
+
+/// The "id from B passed directly to a detail endpoint" case: A names A's own
+/// store, so the membership gate passes, but supplies B's payout id. The
+/// membership check alone must not be enough - the payout itself has to be
+/// matched to the store named in the path, the same as every other
+/// `*_for_store` lookup in this file.
+#[tokio::test]
+#[ignore]
+async fn get_payout_refuses_another_tenants_payout_even_via_the_callers_own_store() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let b_payout = seed_payout(&pg, &b.store).await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::payouts::get_payout(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path((a.store.id.0, b_payout)),
+    )
+    .await;
+
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "A must not be able to fetch B's payout by naming A's own store and B's payout id"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_refunds_across_tenants_is_refused() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let a_refund = seed_refund(&pg, &a).await;
+    let _b_refund = seed_refund(&pg, &b).await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::refunds::list_refunds(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.invoice.id.0.clone()),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "A must not be able to list refunds on B's invoice"
+    );
+
+    // Positive control: without this, an endpoint that 404s regardless of
+    // caller would pass the assertion above for the wrong reason.
+    let own = server::api::refunds::list_refunds(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("A must be able to list refunds on A's own invoice");
+    assert!(own.iter().any(|r| r.id == a_refund));
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_deliveries_for_invoice_across_tenants_is_refused() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let a_delivery = seed_webhook_delivery(&pg, &a).await;
+    let _b_delivery = seed_webhook_delivery(&pg, &b).await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::webhook_deliveries::list_deliveries_for_invoice(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.invoice.id.0.clone()),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "A must not be able to list webhook deliveries on B's invoice"
+    );
+
+    // Positive control: without this, an endpoint that 404s regardless of
+    // caller would pass the assertion above for the wrong reason.
+    let own = server::api::webhook_deliveries::list_deliveries_for_invoice(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("A must be able to list webhook deliveries on A's own invoice");
+    assert!(own.deliveries.iter().any(|d| d.id == a_delivery));
+}
+
+#[tokio::test]
+#[ignore]
+async fn list_deliveries_for_store_across_tenants_is_refused() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let a_delivery = seed_webhook_delivery(&pg, &a).await;
+    let _b_delivery = seed_webhook_delivery(&pg, &b).await;
+    let state = app_state(Arc::new(pg));
+
+    let result = server::api::webhook_deliveries::list_deliveries_for_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.store.id.0),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "A must not be able to list webhook deliveries on B's store"
+    );
+
+    // Positive control: without this, an endpoint that 404s regardless of
+    // caller would pass the assertion above for the wrong reason.
+    let own = server::api::webhook_deliveries::list_deliveries_for_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Path(a.store.id.0),
+    )
+    .await
+    .expect("A must be able to list webhook deliveries on A's own store");
+    assert!(own.deliveries.iter().any(|d| d.id == a_delivery));
 }
 
 // ============================================================================
