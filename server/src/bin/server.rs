@@ -302,10 +302,10 @@ async fn main() -> Result<()> {
     let mut webhook_handle = tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
 
-    // Cloned here rather than where they're used below (wired into axum's
-    // graceful shutdown, near the bottom of `main`) because `webhook_service`
-    // is moved into `state.webhook_sink` in the meantime and `bridge` would
-    // otherwise need a clone at that call site anyway.
+    // Cloned here rather than where they're used below (the shutdown-signal
+    // race near the bottom of `main`) because `webhook_service` is moved
+    // into `state.webhook_sink` in the meantime and `bridge` would otherwise
+    // need a clone at that call site anyway.
     let bridge_for_shutdown = Arc::clone(&bridge);
     let webhook_service_for_shutdown = Arc::clone(&webhook_service);
 
@@ -530,21 +530,32 @@ async fn main() -> Result<()> {
     }
 
     let listener = TcpListener::bind(&bind_addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(
-            bridge_for_shutdown,
-            webhook_service_for_shutdown,
-        ))
-        .await?;
+
+    // Races the server against the stop signal rather than wrapping it in
+    // axum's `with_graceful_shutdown`: that drains in-flight HTTP requests
+    // for as long as they take, and `shutting_down` would have to flip before
+    // the drain starts to cover the redis/webhook paths below — leaving it
+    // true for that whole open-ended window, during which an unrelated real
+    // fault would also log as shutdown noise. Racing keeps the flag's "we
+    // asked to stop" window bounded to the same order as evmmonitor's below.
+    tokio::select! {
+        result = axum::serve(listener, app) => {
+            result?;
+        }
+        () = shutdown_signal() => {
+            tracing::info!("shutdown signal received");
+            bridge_for_shutdown.begin_shutdown();
+            webhook_service_for_shutdown.begin_shutdown();
+        }
+    }
 
     // Give the events subscription the same chance evmmonitor's command
     // subscription gets: a moment to notice its own connection ending and
     // log itself as a shutdown (see redis.rs's `subscribe` tail) before the
-    // process exits out from under it. Without this wait, axum's graceful
-    // drain can finish and `main` return well before the compose network
-    // teardown actually breaks the redis connection, so the task is simply
-    // dropped mid-poll and its tail — the info/error decision this whole
-    // change is about — never runs at all.
+    // process exits out from under it. Without this wait, `main` could
+    // return before the compose network teardown actually breaks the redis
+    // connection, so the task is simply dropped mid-poll and its tail — the
+    // info/error decision this whole change is about — never runs at all.
     match tokio::time::timeout(
         std::time::Duration::from_secs(1),
         &mut event_consumer_handle,
@@ -579,17 +590,11 @@ async fn main() -> Result<()> {
 
 /// Resolves once the process receives a stop signal (Ctrl+C or SIGTERM).
 ///
-/// Passed to `axum::serve(...).with_graceful_shutdown(...)`, which is what
-/// actually makes the signal stop the process — this process has no other
-/// way to learn its container was asked to stop. Marks the redis bridge and
-/// webhook worker as shutting down first, so a subscription or job-loop
-/// error caused by the container's own network dropping out during the
-/// drain that follows logs as expected shutdown noise rather than as a
-/// fault.
-async fn shutdown_signal(
-    bridge: Arc<RedisBridge>,
-    webhook_service: Arc<WebhookService<PgDataService>>,
-) {
+/// Raced against `axum::serve(...)` — this process has no other way to learn
+/// its container was asked to stop, and installing these handlers replaces
+/// the OS's default terminate-on-SIGTERM action, so something has to make
+/// the process actually exit afterward.
+async fn shutdown_signal() {
     // Installing these handlers only fails if the OS refuses to let the
     // process register a signal handler at all, which would mean nothing
     // else in this process can be trusted to work either.
@@ -622,10 +627,6 @@ async fn shutdown_signal(
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-
-    tracing::info!("shutdown signal received");
-    bridge.begin_shutdown();
-    webhook_service.begin_shutdown();
 }
 
 /// Whether `log_format` selects JSON output, and a warning to log for a value
