@@ -1317,9 +1317,9 @@ async fn payout_endpoints_with_a_nil_store_id_is_refused_like_any_foreign_store(
 }
 
 /// The admin-bypass side of the same shape: a `ServerAdmin` is not a member
-/// of either tenant's store, yet must still reach both - the RCS-222
-/// direction, where an over-narrow membership check would wrongly refuse the
-/// one role that is supposed to see everything.
+/// of either tenant's store, yet must still reach both - the direction where
+/// an over-narrow membership check would wrongly refuse the one role that is
+/// supposed to see everything.
 #[tokio::test]
 #[ignore]
 async fn payout_endpoints_as_server_admin_reach_every_tenants_store() {
@@ -1670,6 +1670,156 @@ async fn an_api_key_cannot_reach_another_tenants_stores() {
         !ids.contains(&b.store.id.0),
         "B's store leaked into A's api-key-authenticated store list"
     );
+}
+
+/// The payout/refund/webhook-delivery side of the same boundary: an API key
+/// resolves to its owner, and the owner's store-membership scoping applies
+/// exactly as it does to a session.
+#[tokio::test]
+#[ignore]
+async fn an_api_key_cannot_reach_another_tenants_payouts_refunds_or_deliveries() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let b = seed_tenant(&pg, "b").await;
+    let b_payout = seed_payout(&pg, &b.store).await;
+    let _a_refund = seed_refund(&pg, &a).await;
+    let _b_refund = seed_refund(&pg, &b).await;
+    let _a_delivery = seed_webhook_delivery(&pg, &a).await;
+    let _b_delivery = seed_webhook_delivery(&pg, &b).await;
+    let state = app_state(Arc::new(pg));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result = server::api::payouts::get_payout(
+        a_via_key,
+        State(state.clone()),
+        Path((b.store.id.0, b_payout)),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "an API key must not fetch a payout on another tenant's store"
+    );
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result =
+        server::api::payouts::list_payouts(a_via_key, State(state.clone()), Path(b.store.id.0))
+            .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "an API key must not list payouts on another tenant's store"
+    );
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result = server::api::refunds::list_refunds(
+        a_via_key,
+        State(state.clone()),
+        Path(b.invoice.id.0.clone()),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "an API key must not list refunds on another tenant's invoice"
+    );
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result = server::api::webhook_deliveries::list_deliveries_for_invoice(
+        a_via_key,
+        State(state.clone()),
+        Path(b.invoice.id.0.clone()),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "an API key must not list webhook deliveries on another tenant's invoice"
+    );
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let result = server::api::webhook_deliveries::list_deliveries_for_store(
+        a_via_key,
+        State(state),
+        Path(b.store.id.0),
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "an API key must not list webhook deliveries on another tenant's store"
+    );
+}
+
+/// Positive controls for the test above: without these, any of its five
+/// endpoints refusing every caller, API-key included, would pass its
+/// negative assertion for the wrong reason.
+#[tokio::test]
+#[ignore]
+async fn an_api_keys_own_payouts_refunds_and_deliveries_remain_reachable() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let a_payout = seed_payout(&pg, &a.store).await;
+    let a_refund = seed_refund(&pg, &a).await;
+    let a_delivery = seed_webhook_delivery(&pg, &a).await;
+    let state = app_state(Arc::new(pg));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own_payout = server::api::payouts::get_payout(
+        a_via_key,
+        State(state.clone()),
+        Path((a.store.id.0, a_payout)),
+    )
+    .await
+    .expect("an API key must be able to fetch its owner's own payout");
+    assert_eq!(own_payout.id, a_payout);
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own_payouts =
+        server::api::payouts::list_payouts(a_via_key, State(state.clone()), Path(a.store.id.0))
+            .await
+            .expect("an API key must be able to list its owner's own payouts");
+    assert!(own_payouts.payouts.iter().any(|p| p.id == a_payout));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own_refunds = server::api::refunds::list_refunds(
+        a_via_key,
+        State(state.clone()),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("an API key must be able to list its owner's own refunds");
+    assert!(own_refunds.iter().any(|r| r.id == a_refund));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own_invoice_deliveries = server::api::webhook_deliveries::list_deliveries_for_invoice(
+        a_via_key,
+        State(state.clone()),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("an API key must be able to list its owner's own invoice's webhook deliveries");
+    assert!(own_invoice_deliveries
+        .deliveries
+        .iter()
+        .any(|d| d.id == a_delivery));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own_store_deliveries = server::api::webhook_deliveries::list_deliveries_for_store(
+        a_via_key,
+        State(state),
+        Path(a.store.id.0),
+    )
+    .await
+    .expect("an API key must be able to list its owner's own store's webhook deliveries");
+    assert!(own_store_deliveries
+        .deliveries
+        .iter()
+        .any(|d| d.id == a_delivery));
 }
 
 // ============================================================================
