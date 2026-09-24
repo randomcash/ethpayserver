@@ -545,7 +545,11 @@ async fn main() -> Result<()> {
     // teardown actually breaks the redis connection, so the task is simply
     // dropped mid-poll and its tail — the info/error decision this whole
     // change is about — never runs at all.
-    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut event_consumer_handle).await
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        &mut event_consumer_handle,
+    )
+    .await
     {
         Err(_) => event_consumer_handle.abort(),
         Ok(Err(join_error)) => {
