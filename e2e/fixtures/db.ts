@@ -95,9 +95,18 @@ export async function createUserWithApiKey(
   await client.connect();
   try {
     const { rows } = await client.query(
+      // Both JSONB columns get '{}' and the VARCHAR one gets a string. That
+      // is not cosmetic: `encrypted_symmetric_key` is JSONB NOT NULL, so a
+      // bare word here is `invalid input syntax for type json` - thrown from
+      // this helper, which every plugin test calls in `beforeAll`. The whole
+      // file then reports one failure at 0ms and eight skips, which reads as a
+      // broken test rather than a broken fixture.
+      //
+      // The values are never decrypted. Nothing in these tests logs in with a
+      // password; they authenticate with the API key created below.
       `INSERT INTO users (email, kdf_params, encrypted_symmetric_key,
                           recovery_verification_hash, role)
-       VALUES ($1, '{}', 'e2e-placeholder', 'e2e-placeholder', $2)
+       VALUES ($1, '{}', '{}', 'e2e-placeholder', $2)
        RETURNING id`,
       [`e2e-${crypto.randomBytes(6).toString('hex')}@example.test`, role],
     );
