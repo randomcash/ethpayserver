@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "scripts/run-tests.sh",
-    "test:ui": "scripts/run-tests.sh --ui",
-    "test:debug": "scripts/run-tests.sh --debug",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
     "test:report": "playwright show-report",
     "perf:update-baselines": "node update-baselines.js"
   },
