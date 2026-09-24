@@ -16,7 +16,12 @@ a possible future opt-in mode; it is off by default, and no `Cargo.toml`,
 Dockerfile or CI workflow anywhere in this repository enables it, so no
 binary built from this repository turns it on — see `evm/README.md`'s crate
 table. That gating predates this documentation pass: it shipped, reviewed,
-in the same change that removed the module's last callers.)
+in the same change that removed the module's last callers. Confirm it
+yourself rather than trusting this paragraph: `git grep -n hot-wallet` across
+every `Cargo.toml` and `.github/workflows/*.yml` in this repository turns up
+only the feature's own off-by-default declaration, the `#[cfg(...)]` gate on
+`evm::transaction`, and this paragraph — no crate depends on `evm` with that
+feature enabled, and no CI job passes it.)
 
 Two consequences that follow directly from that, not incidentally:
 
