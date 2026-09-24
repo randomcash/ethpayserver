@@ -547,19 +547,31 @@ mod tests {
     /// This proxies real Redis traffic through a listener that counts
     /// accepted connections, so it needs a real Redis instance and is
     /// `#[ignore]`d like this crate's other tests that need real
-    /// infrastructure. Point `TEST_REDIS_URL` at one to run it; it defaults to
-    /// `redis://127.0.0.1:6379`, the same port CI's `e2e` job uses.
+    /// infrastructure. Point `TEST_REDIS_URL` at one to run it.
+    ///
+    /// Unlike this crate's Postgres-backed `#[ignore]`d tests, `TEST_REDIS_URL`
+    /// is not guaranteed to be set wherever `--run-ignored only` runs: the
+    /// `test` CI job declares a Postgres service but no Redis one, so on that
+    /// runner this variable is simply absent, not misconfigured. Falling back
+    /// to a default address there used to mean spending a full
+    /// `ConnectionManager` reconnect-retry cycle (minutes) discovering that
+    /// the default doesn't exist either, hanging the job instead of failing
+    /// it. Skip immediately when the variable isn't set; a missing dependency
+    /// should be silent in seconds, not a slow, unexplained timeout.
     #[tokio::test]
-    #[ignore = "requires a local Redis instance; set TEST_REDIS_URL (default redis://127.0.0.1:6379)"]
+    #[ignore = "requires a local Redis instance; set TEST_REDIS_URL, e.g. redis://127.0.0.1:6379"]
     async fn test_redis_connection_is_reused_across_queue_calls() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         use tokio::net::{TcpListener, TcpStream};
 
-        let backend_addr = std::env::var("TEST_REDIS_URL")
-            .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
-            .trim_start_matches("redis://")
-            .to_string();
+        let Ok(backend_addr) = std::env::var("TEST_REDIS_URL") else {
+            eprintln!(
+                "skipping test_redis_connection_is_reused_across_queue_calls: TEST_REDIS_URL not set"
+            );
+            return;
+        };
+        let backend_addr = backend_addr.trim_start_matches("redis://").to_string();
 
         // A transparent proxy in front of the real Redis instance that counts
         // how many separate TCP connections the service opens through it.
