@@ -198,6 +198,14 @@ release are set by separate CI steps from the same commit sha and can drift
 apart without either step failing, so the health gate compares them on the
 running process rather than trusting that the build succeeded.
 
+evmmonitor is a second binary that tags its own Sentry events from the same
+`SENTRY_RELEASE`, compiled in its own CI step, and has no HTTP endpoint of
+its own to check directly. When it's configured, the response carries its
+compiled release too, relayed through the same Redis channel evmmonitor
+already reports chain health over, as `x-evmmonitor-sentry-release`. The
+health gate compares that against `build_sha` the same way, so a drift in
+evmmonitor's build step is caught on the deployed process as well.
+
 ```json
 {
   "build_sha": "abc1234",

@@ -9,6 +9,8 @@
 #   4. Postgres and Redis report "ok"
 #   5. All RPC chains report "ok" (no chain in error/disconnected state)
 #   6. monitor.data_fresh is true
+#   7. When monitor.data_fresh is true (evmmonitor is up and reporting), the
+#      x-evmmonitor-sentry-release response header also matches build_sha
 #
 # (5) does not imply (6): an empty `rpcs` map — evmmonitor unreachable, or the
 # chain-health fetch itself erroring — has no chain to name as bad, so it
@@ -22,6 +24,15 @@
 # release tag on the errors it sends. Comparing the two on the *running*
 # process, not the build log, is the only way to catch that on the deployed
 # artefact rather than the build that produced it.
+#
+# (7) is the same drift, for evmmonitor: a second binary, built in a separate
+# CI step from the same commit sha, that tags its own Sentry events from its
+# own compiled SENTRY_RELEASE. It has no HTTP endpoint of its own, so its
+# release is relayed onto this response rather than checked directly. Gated
+# on data_fresh rather than checked unconditionally: when evmmonitor isn't
+# reporting at all, (6) already fails the gate, and a stale or absent header
+# from an unreachable monitor shouldn't be reported as its own distinct
+# failure.
 #
 # If the gate does not pass within the timeout, exit 1 — the previous
 # container image stays live (Docker Compose health-check prevents cutover).
@@ -58,6 +69,7 @@ while [[ $ELAPSED -lt $HEALTH_TIMEOUT ]]; do
   # Parse response fields
   BUILD_SHA=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('build_sha',''))" 2>/dev/null || echo "")
   SENTRY_RELEASE_HDR=$(tr -d '\r' < "$HEADERS_FILE" | awk -F': ' 'tolower($1) == "x-sentry-release" { print $2 }')
+  EVMMONITOR_SENTRY_RELEASE_HDR=$(tr -d '\r' < "$HEADERS_FILE" | awk -F': ' 'tolower($1) == "x-evmmonitor-sentry-release" { print $2 }')
   PG_STATUS=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['postgres']['status'])" 2>/dev/null || echo "error")
   REDIS_STATUS=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['redis']['status'])" 2>/dev/null || echo "error")
   MONITOR_FRESH=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['monitor']['data_fresh'])" 2>/dev/null || echo "False")
@@ -122,11 +134,25 @@ print(','.join(bad) if bad else '')
     continue
   fi
 
+  # evmmonitor is a second binary, built from the same commit sha in its own
+  # CI step, that tags its own Sentry events from its own compiled
+  # SENTRY_RELEASE - the same drift the (3) check above catches for
+  # ethpayserver is just as possible here, and evmmonitor has no HTTP
+  # endpoint of its own to check directly. Gated on data_fresh (already
+  # confirmed true above): an unreachable evmmonitor already fails the gate
+  # on that check, so a missing header here would only restate it.
+  if [[ -z "$EVMMONITOR_SENTRY_RELEASE_HDR" || "$EVMMONITOR_SENTRY_RELEASE_HDR" != "$BUILD_SHA" ]]; then
+    log "x-evmmonitor-sentry-release mismatch: got='$EVMMONITOR_SENTRY_RELEASE_HDR' build_sha='$BUILD_SHA' (elapsed ${ELAPSED}s)"
+    sleep $INTERVAL
+    ELAPSED=$((ELAPSED + INTERVAL))
+    continue
+  fi
+
   # All checks passed
-  log "HEALTHY — sha=$BUILD_SHA sentry_release=$SENTRY_RELEASE_HDR pg=ok redis=ok rpcs=all_ok monitor.data_fresh=true (${ELAPSED}s)"
+  log "HEALTHY — sha=$BUILD_SHA sentry_release=$SENTRY_RELEASE_HDR evmmonitor_sentry_release=$EVMMONITOR_SENTRY_RELEASE_HDR pg=ok redis=ok rpcs=all_ok monitor.data_fresh=true (${ELAPSED}s)"
   exit 0
 done
 
 log "TIMEOUT after ${HEALTH_TIMEOUT}s — deploy health gate FAILED"
-log "Last response: pg=$PG_STATUS redis=$REDIS_STATUS rpc_bad=$RPC_BAD monitor_fresh=$MONITOR_FRESH sha=$BUILD_SHA sentry_release=$SENTRY_RELEASE_HDR"
+log "Last response: pg=$PG_STATUS redis=$REDIS_STATUS rpc_bad=$RPC_BAD monitor_fresh=$MONITOR_FRESH sha=$BUILD_SHA sentry_release=$SENTRY_RELEASE_HDR evmmonitor_sentry_release=$EVMMONITOR_SENTRY_RELEASE_HDR"
 exit 1

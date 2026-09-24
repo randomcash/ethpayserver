@@ -10,7 +10,7 @@ use types::ChainId;
 
 use evm::monitor::{ChainHealth, SourceStatus};
 
-use super::deep::{build_rpc_map, chains_are_fresh, sentry_release_header};
+use super::deep::{build_rpc_map, chains_are_fresh, sentry_release_header, sentry_release_headers};
 use super::{
     ChainHealthInfo, DeepHealthResponse, DependencyHealth, MonitorHealth, ReadinessResponse,
     RpcHealth,
@@ -174,6 +174,34 @@ fn sentry_release_header_is_empty_not_a_placeholder_when_uncompiled() {
     // against `build_sha`, and a placeholder that happened to match a real sha
     // would defeat the whole point of the comparison.
     assert_eq!(sentry_release_header(None), "");
+}
+
+// -- x-evmmonitor-sentry-release header --
+//
+// evmmonitor is a second binary with the same drift risk as the one above,
+// and no HTTP endpoint of its own - its release only reaches this response
+// when something upstream actually observed it, so absence has to mean
+// "nothing to check" rather than silently comparing against an empty string.
+
+#[test]
+fn evmmonitor_header_is_present_when_a_release_was_observed() {
+    let headers = sentry_release_headers(Some("abc1234"), Some("def5678".to_string()));
+    assert_eq!(headers.get("x-sentry-release").unwrap(), "abc1234");
+    assert_eq!(
+        headers.get("x-evmmonitor-sentry-release").unwrap(),
+        "def5678"
+    );
+}
+
+#[test]
+fn evmmonitor_header_is_absent_not_empty_when_nothing_was_observed() {
+    // Not configured, or the Redis-relayed value never arrived: either way,
+    // a deploy check has to be able to tell "no evmmonitor to verify" apart
+    // from "evmmonitor reported an empty release", which an empty-string
+    // header would collapse into the same thing.
+    let headers = sentry_release_headers(Some("abc1234"), None);
+    assert_eq!(headers.get("x-sentry-release").unwrap(), "abc1234");
+    assert!(headers.get("x-evmmonitor-sentry-release").is_none());
 }
 
 // -- ChainHealthInfo conversion tests --
