@@ -140,8 +140,21 @@ test.describe('what is refused', () => {
     }
   };
 
-  test('an unknown page, plugin or malformed slug is a 404', async () => {
-    expect(await refused(`/plugins/${FIXTURE_PLUGIN_SLUG}/pages/nosuchpage`)).toBe(404);
+  test('an unknown plugin or malformed slug is a 404', async () => {
+    // An unknown PAGE on a known plugin is deliberately not asserted here.
+    //
+    // The fixture module answers every path with the same page and reads
+    // nothing - see `fixtures/plugin/README.md`, which makes that a design
+    // decision rather than an omission: "a fixture that computed its answer
+    // would be a second implementation to debug whenever a test failed". So it
+    // cannot say "no page here", and a request for `nosuchpage` correctly
+    // returns 200. Asserting 404 tested the fixture's imagination, not the
+    // server.
+    //
+    // The behaviour itself is not left uncovered. A renderer answering `None`
+    // becomes `PageError::PageNotFound` in the plugin host, and that mapping
+    // has its own unit test there; the line below covers the host's own 404
+    // for a plugin it has never heard of.
     expect(await refused(`/plugins/nosuchplugin/pages/${FIXTURE_PAGE_PATH}`)).toBe(404);
     // Uppercase is not the same slug: two that differ only by case would be
     // indistinguishable wherever something compares them case-insensitively.
