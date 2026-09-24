@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::TcpListener;
+use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
@@ -301,8 +302,15 @@ async fn main() -> Result<()> {
         redis_url,
         webhook_config,
     )?);
-    tokio::spawn(Arc::clone(&webhook_service).run());
+    let mut webhook_handle = tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
+
+    // Cloned here rather than where they're used below (the shutdown-signal
+    // race near the bottom of `main`) because `webhook_service` is moved
+    // into `state.webhook_sink` in the meantime and `bridge` would otherwise
+    // need a clone at that call site anyway.
+    let bridge_for_shutdown = Arc::clone(&bridge);
+    let webhook_service_for_shutdown = Arc::clone(&webhook_service);
 
     // 2. Invoice cleanup service - expires invoices and unwatches addresses
     //    Also queues webhook notifications when invoices expire
@@ -336,7 +344,7 @@ async fn main() -> Result<()> {
         Some((store_id, observers)) => event_consumer.with_own_store_payments(store_id, observers),
         None => event_consumer,
     };
-    tokio::spawn(event_consumer.run());
+    let mut event_consumer_handle = tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
 
     // 4. Watch retry service - retries failed WatchAddress commands
@@ -528,9 +536,103 @@ async fn main() -> Result<()> {
     }
 
     let listener = TcpListener::bind(&bind_addr).await?;
-    axum::serve(listener, app).await?;
+
+    // Races the server against the stop signal rather than wrapping it in
+    // axum's `with_graceful_shutdown`: that drains in-flight HTTP requests
+    // for as long as they take, and `shutting_down` would have to flip before
+    // the drain starts to cover the redis/webhook paths below — leaving it
+    // true for that whole open-ended window, during which an unrelated real
+    // fault would also log as shutdown noise. Racing keeps the flag's "we
+    // asked to stop" window bounded to the same order as evmmonitor's below.
+    tokio::select! {
+        result = axum::serve(listener, app) => {
+            result?;
+        }
+        () = shutdown_signal() => {
+            tracing::info!("shutdown signal received");
+            bridge_for_shutdown.begin_shutdown();
+            webhook_service_for_shutdown.begin_shutdown();
+        }
+    }
+
+    // Give the events subscription the same chance evmmonitor's command
+    // subscription gets: a moment to notice its own connection ending and
+    // log itself as a shutdown (see redis.rs's `subscribe` tail) before the
+    // process exits out from under it. Without this wait, `main` could
+    // return before the compose network teardown actually breaks the redis
+    // connection, so the task is simply dropped mid-poll and its tail — the
+    // info/error decision this whole change is about — never runs at all.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        &mut event_consumer_handle,
+    )
+    .await
+    {
+        Err(_) => event_consumer_handle.abort(),
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "event consumer task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
+
+    // The webhook worker's loop never returns on its own (see `run()` in
+    // service.rs) — it keeps draining the queue for as long as it's alive,
+    // which is the point, so this wait always ends in the timeout branch.
+    // What it buys is the same thing as the event consumer's wait: a moment
+    // for `process_next_job`'s in-flight call to finish and log itself as
+    // shutdown noise (via `begin_shutdown()`, set above) before the task is
+    // torn down, rather than being dropped mid-poll by process exit with no
+    // handle ever joined on it at all.
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut webhook_handle).await {
+        Err(_) => webhook_handle.abort(),
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "webhook worker task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
 
     Ok(())
+}
+
+/// Resolves once the process receives a stop signal (Ctrl+C or SIGTERM).
+///
+/// Raced against `axum::serve(...)` — this process has no other way to learn
+/// its container was asked to stop, and installing these handlers replaces
+/// the OS's default terminate-on-SIGTERM action, so something has to make
+/// the process actually exit afterward.
+async fn shutdown_signal() {
+    // Installing these handlers only fails if the OS refuses to let the
+    // process register a signal handler at all, which would mean nothing
+    // else in this process can be trusted to work either.
+    #[allow(
+        clippy::expect_used,
+        reason = "handler registration failure is unrecoverable at startup"
+    )]
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    #[allow(
+        clippy::expect_used,
+        reason = "handler registration failure is unrecoverable at startup"
+    )]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 /// Whether `log_format` selects JSON output, and a warning to log for a value

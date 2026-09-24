@@ -15,8 +15,18 @@ use crate::monitor::events::{MonitorCommand, MonitorEvent};
 use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_stream::StreamExt;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
+
+/// Whether a subscription stream ending is a fault worth reporting.
+///
+/// Split out from the two stream tails below so the shutdown/fault decision
+/// itself is unit-testable without a live redis connection.
+fn subscription_end_is_fault(shutting_down: bool) -> bool {
+    !shutting_down
+}
 
 /// Redis pub/sub event bridge.
 pub struct RedisBridge {
@@ -28,6 +38,12 @@ pub struct RedisBridge {
     events_channel: String,
     /// Channel name for commands (API server -> monitor).
     commands_channel: String,
+    /// Set once the owning process has asked to stop.
+    ///
+    /// A subscription stream ending is only a fault when nobody asked it to;
+    /// during a normal shutdown the surrounding container's network can drop
+    /// out from under it, which looks identical at the redis client level.
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl RedisBridge {
@@ -51,7 +67,18 @@ impl RedisBridge {
             publisher,
             events_channel: events_channel.to_string(),
             commands_channel: commands_channel.to_string(),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Mark this bridge as shutting down intentionally.
+    ///
+    /// Call this from the process's own shutdown handler, before tearing
+    /// anything else down. A subscription stream that ends afterwards logs
+    /// at `info` instead of `error` — it ended because we asked it to, not
+    /// because something broke.
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Relaxed);
     }
 
     /// Get the events channel name.
@@ -107,6 +134,7 @@ impl EventBridge for RedisBridge {
             .map_err(|e| EvmError::Monitor(format!("redis subscribe failed: {}", e)))?;
 
         let channel = self.events_channel.clone();
+        let shutting_down = Arc::clone(&self.shutting_down);
         let stream = async_stream::stream! {
             let mut msg_stream = pubsub.on_message();
             while let Some(msg) = msg_stream.next().await {
@@ -125,7 +153,11 @@ impl EventBridge for RedisBridge {
                     }
                 }
             }
-            error!(channel = %channel, "redis events subscription ended unexpectedly");
+            if subscription_end_is_fault(shutting_down.load(Ordering::Relaxed)) {
+                error!(channel = %channel, "redis events subscription ended unexpectedly");
+            } else {
+                info!(channel = %channel, "redis events subscription ended: shutdown in progress");
+            }
         };
 
         Ok(Box::pin(stream))
@@ -161,6 +193,7 @@ impl EventBridge for RedisBridge {
             .map_err(|e| EvmError::Monitor(format!("redis subscribe commands failed: {}", e)))?;
 
         let channel = self.commands_channel.clone();
+        let shutting_down = Arc::clone(&self.shutting_down);
         let stream = async_stream::stream! {
             let mut msg_stream = pubsub.on_message();
             while let Some(msg) = msg_stream.next().await {
@@ -182,7 +215,11 @@ impl EventBridge for RedisBridge {
                     }
                 }
             }
-            error!(channel = %channel, "redis commands subscription ended unexpectedly");
+            if subscription_end_is_fault(shutting_down.load(Ordering::Relaxed)) {
+                error!(channel = %channel, "redis commands subscription ended unexpectedly");
+            } else {
+                info!(channel = %channel, "redis commands subscription ended: shutdown in progress");
+            }
         };
 
         Ok(Box::pin(stream))
@@ -224,5 +261,15 @@ mod tests {
         // Just verify URL parsing works
         let result = Client::open("redis://localhost:6379");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn subscription_end_during_shutdown_is_not_a_fault() {
+        assert!(!subscription_end_is_fault(true));
+    }
+
+    #[test]
+    fn subscription_end_without_shutdown_is_a_fault() {
+        assert!(subscription_end_is_fault(false));
     }
 }

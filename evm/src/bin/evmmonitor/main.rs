@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
     let command_coordinator = coordinator.clone();
     let command_bridge = bridge.clone();
     let command_persistence = persistence.clone();
-    let command_handle = tokio::spawn(async move {
+    let mut command_handle = tokio::spawn(async move {
         handle_commands(
             commands_stream,
             command_coordinator,
@@ -242,9 +242,34 @@ async fn main() -> anyhow::Result<()> {
     shutdown_signal().await;
     info!("shutdown signal received");
 
-    // Abort background tasks
-    command_handle.abort();
+    // Mark the bridge as shutting down before anything else, so a
+    // subscription that ends while we tear down (the compose network can
+    // drop out from under a still-running container) logs as expected
+    // rather than as a fault.
+    bridge.begin_shutdown();
+
+    // Give the command subscription a moment to notice its connection ending
+    // on its own and log itself as a shutdown before we forcibly cancel it.
+    // Aborting immediately would race the stream's own end-of-stream tail:
+    // `abort()` only takes effect on the task's next poll, so if the task
+    // isn't already mid-poll when we call it, the task is dropped before
+    // that tail (and its shutdown-vs-fault log line) ever runs.
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut command_handle).await {
+        Err(_) => command_handle.abort(),
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "command handler task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
     health_handle.abort();
+
+    // No equivalent handle exists here for the *events* subscription
+    // (`redis.rs`'s `subscribe`, as opposed to `subscribe_commands` above):
+    // evmmonitor never consumes that stream, only publishes to it via
+    // `BridgeHandler`. Its one consumer is the server's `EventConsumer`,
+    // which gets this same begin_shutdown-then-bounded-wait-then-abort
+    // treatment for its own handle in `server/src/bin/server.rs` before that
+    // process exits.
 
     // Graceful shutdown
     coordinator.stop().await?;

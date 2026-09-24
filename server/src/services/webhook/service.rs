@@ -1,6 +1,7 @@
 //! Webhook delivery service: queue, delivery loop, signing, and retry handling.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -11,6 +12,14 @@ use data_service::{
 use crate::metrics;
 
 use super::{WebhookConfig, WebhookError, WebhookJob};
+
+/// Whether a `process_next_job` failure is a fault worth reporting.
+///
+/// Split out from `log_process_error` so the shutdown/fault decision itself
+/// is unit-testable without a live Redis connection.
+fn process_error_is_fault(shutting_down: bool) -> bool {
+    !shutting_down
+}
 
 /// Trait for data service requirements in WebhookService.
 pub trait WebhookDataService: PaymentEventWriter + WebhookDeliveryWriter + Send + Sync {}
@@ -49,6 +58,12 @@ pub struct WebhookService<D: WebhookDataService> {
     redis_client: redis::Client,
     http_client: reqwest::Client,
     config: WebhookConfig,
+    /// Set once the owning process has asked to stop.
+    ///
+    /// The job loop keeps polling regardless of errors, so a Redis failure
+    /// caused by the container's network dropping out during shutdown reads
+    /// identically to a real fault unless we know shutdown was asked for.
+    shutting_down: AtomicBool,
 }
 
 impl<D: WebhookDataService + 'static> WebhookService<D> {
@@ -71,7 +86,17 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             redis_client,
             http_client,
             config,
+            shutting_down: AtomicBool::new(false),
         })
+    }
+
+    /// Mark this service as shutting down intentionally.
+    ///
+    /// Call this from the process's own shutdown handler. A job-loop error
+    /// logged afterwards is downgraded from `error` to `info` — it is the
+    /// expected shape of a container being torn down, not a fault.
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Relaxed);
     }
 
     /// Queue a webhook for delivery.
@@ -130,10 +155,23 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     tokio::time::sleep(self.config.poll_interval).await;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "Error processing webhook job");
+                    self.log_process_error(&e);
                     tokio::time::sleep(self.config.poll_interval).await;
                 }
             }
+        }
+    }
+
+    /// Log a `process_next_job` failure at the level its cause deserves.
+    ///
+    /// During an intentional shutdown, the container's network can drop out
+    /// from under this loop's Redis connection, which fails identically to a
+    /// real fault. Only the unrequested case should reach Sentry.
+    fn log_process_error(&self, e: &WebhookError) {
+        if process_error_is_fault(self.shutting_down.load(Ordering::Relaxed)) {
+            tracing::error!(error = %e, "Error processing webhook job");
+        } else {
+            tracing::info!(error = %e, "Webhook job processing failed during shutdown");
         }
     }
 
@@ -491,5 +529,108 @@ mod tests {
         assert!(truncated.ends_with("..."));
 
         assert_eq!(truncate_error("", 500), "");
+    }
+
+    #[test]
+    fn process_error_during_shutdown_is_not_a_fault() {
+        assert!(!process_error_is_fault(true));
+    }
+
+    #[test]
+    fn process_error_without_shutdown_is_a_fault() {
+        assert!(process_error_is_fault(false));
+    }
+
+    /// Runs `log_process_error` under a subscriber that captures its output,
+    /// so the test below exercises the real `Ordering::Relaxed` load and
+    /// `tracing::error!`/`tracing::info!` call sites — not just the extracted
+    /// `process_error_is_fault` boolean.
+    fn capture_log_process_error(shutting_down: bool) -> String {
+        use std::io;
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for Buf {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::default()),
+            "redis://127.0.0.1:1",
+            WebhookConfig::default(),
+        )
+        .expect("valid redis URL");
+        if shutting_down {
+            service.begin_shutdown();
+        }
+
+        tracing::subscriber::with_default(subscriber, || {
+            service.log_process_error(&WebhookError::Redis("boom".to_string()));
+        });
+
+        String::from_utf8(buf.0.lock().unwrap().clone()).expect("utf8 log output")
+    }
+
+    #[test]
+    fn log_process_error_reports_error_when_not_shutting_down() {
+        let output = capture_log_process_error(false);
+        assert!(output.contains("ERROR"), "expected ERROR, got: {output}");
+    }
+
+    #[test]
+    fn log_process_error_reports_info_when_shutting_down() {
+        let output = capture_log_process_error(true);
+        assert!(output.contains("INFO"), "expected INFO, got: {output}");
+        assert!(
+            !output.contains("ERROR"),
+            "shutdown noise must not reach error level: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_keeps_draining_the_queue_after_shutdown_is_requested() {
+        // Shutdown only changes the log level `process_next_job` errors are
+        // reported at (see `log_process_error`); it must not stop the loop
+        // from picking up whatever jobs are still queued, or a container
+        // that takes a moment to actually exit would stop delivering
+        // webhooks the instant the stop signal arrived rather than at exit.
+        let service = Arc::new(
+            WebhookService::new(
+                Arc::new(data_service::InMemoryDataService::default()),
+                "redis://127.0.0.1:1",
+                WebhookConfig::default(),
+            )
+            .expect("valid redis URL"),
+        );
+        service.begin_shutdown();
+
+        let handle = tokio::spawn(Arc::clone(&service).run());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !handle.is_finished(),
+            "run() must keep looping after shutdown was requested, not return early"
+        );
+        handle.abort();
     }
 }
