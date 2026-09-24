@@ -545,7 +545,8 @@ above:
   `dev`; any other value, including an unset `SENTRY_ENVIRONMENT`, refuses to
   start without a DSN. `docker/.env.example` ships `SENTRY_ENVIRONMENT=dev`
   uncommented for exactly this reason — remove it and a DSN-less `cargo run`
-  will not start.
+  will not start. Confirmed: copying `docker/.env.example` to `docker/.env`
+  verbatim still resolves cleanly under `docker compose config`.
 - `SENTRY_LOG_LEVEL` — minimum level forwarded as a structured log event
   (default `WARN`); independent of `RUST_LOG`, which only controls what is
   printed locally.

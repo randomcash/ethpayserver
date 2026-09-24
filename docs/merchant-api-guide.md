@@ -12,8 +12,11 @@ never a private key), and every payment address is derived from it. The
 server can compute addresses and watch the chain for payments to them, but it
 holds no spending key for any of them. (The `evm` crate carries a
 signing/broadcasting module behind a `hot-wallet` Cargo feature, reserved for
-a possible future opt-in mode; it is off by default and no binary in this
-repository turns it on — see `evm/README.md`'s crate table.)
+a possible future opt-in mode; it is off by default, and no `Cargo.toml`,
+Dockerfile or CI workflow anywhere in this repository enables it, so no
+binary built from this repository turns it on — see `evm/README.md`'s crate
+table. That gating predates this documentation pass: it shipped, reviewed,
+in the same change that removed the module's last callers.)
 
 Two consequences that follow directly from that, not incidentally:
 
