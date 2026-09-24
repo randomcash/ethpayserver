@@ -95,20 +95,42 @@ export async function createUserWithApiKey(
   await client.connect();
   try {
     const { rows } = await client.query(
-      // Both JSONB columns get '{}' and the VARCHAR one gets a string. That
-      // is not cosmetic: `encrypted_symmetric_key` is JSONB NOT NULL, so a
-      // bare word here is `invalid input syntax for type json` - thrown from
-      // this helper, which every plugin test calls in `beforeAll`. The whole
-      // file then reports one failure at 0ms and eight skips, which reads as a
-      // broken test rather than a broken fixture.
+      // These two columns are JSONB, and every value in them has to DESERIALISE,
+      // not merely parse. `row_to_user` (data-service/src/postgres/auth/user.rs)
+      // does `serde_json::from_value` into `KdfParams` and `EncryptedBlob`, so
+      // `{}` is accepted by Postgres and then fails in the server as
+      // `500: Failed to resolve user` on every authenticated request - which
+      // reads as a broken endpoint rather than a broken fixture.
       //
-      // The values are never decrypted. Nothing in these tests logs in with a
-      // password; they authenticate with the API key created below.
+      // Shapes are taken from payserver-commons `crypto/src/types.rs`, not from
+      // the column COMMENTs in the migration: those say `memory_mib` and
+      // `{ciphertext_base64, nonce_base64, tag_base64}`, and the actual fields
+      // are `memory_kb` and `{ciphertext, iv, mac}`. The comments are stale.
+      //
+      // Byte fields go through `base64_bytes`, which is STANDARD base64 with
+      // padding. The values are never decrypted - these tests authenticate with
+      // the API key created below, never with a password - so any well-formed
+      // blob does; they are zeroed rather than random to read as obviously inert.
       `INSERT INTO users (email, kdf_params, encrypted_symmetric_key,
                           recovery_verification_hash, role)
-       VALUES ($1, '{}', '{}', 'e2e-placeholder', $2)
+       VALUES ($1, $2, $3, 'e2e-placeholder', $4)
        RETURNING id`,
-      [`e2e-${crypto.randomBytes(6).toString('hex')}@example.test`, role],
+      [
+        `e2e-${crypto.randomBytes(6).toString('hex')}@example.test`,
+        JSON.stringify({
+          algorithm: 'argon2id',
+          memory_kb: 65536,
+          iterations: 3,
+          parallelism: 4,
+          salt: Buffer.alloc(16).toString('base64'),
+        }),
+        JSON.stringify({
+          ciphertext: Buffer.alloc(32).toString('base64'),
+          iv: Buffer.alloc(16).toString('base64'),
+          mac: Buffer.alloc(32).toString('base64'),
+        }),
+        role,
+      ],
     );
     const userId = rows[0].id as string;
 
