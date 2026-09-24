@@ -146,6 +146,14 @@ jobs:
       - name: Deploy health gate self-test
         run: ./scripts/health-gate.test.sh
 
+      # The claim this exists to back up is that an interrupted local e2e
+      # run (Ctrl-C, a killed job) doesn't strand its browser-profile scratch
+      # dir on the RAM-backed /tmp this box mounts. Same reasoning as the
+      # other guard self-tests: prove the trap fires on a signal, don't just
+      # assert someone watched it once.
+      - name: e2e run-tests.sh self-test
+        run: ./e2e/scripts/run-tests.test.sh
+
       - name: Format check
         run: cargo fmt --all -- --check
 
