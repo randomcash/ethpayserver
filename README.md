@@ -380,12 +380,13 @@ that just builds the pinned revision needs nothing special — plain
 
 ## Refunds
 
-**Refunds are the merchant's job, not this server's.** ETHPayServer is
-non-custodial by design: a merchant hands over an xpub, this server derives
-payment addresses from it, and it never holds the matching private key (see
-`evm::wallet::validate_xpub`, which rejects an xprv pasted in by mistake). No
-amount of implementation changes that — a server with no spending key cannot
-sign or broadcast a transaction, refund included.
+**Refunds are the merchant's job, not this server's, in this release.**
+ETHPayServer is non-custodial today: a merchant hands over an xpub, this
+server derives payment addresses from it, and it never holds the matching
+private key (see `evm::wallet::validate_xpub`, which rejects an xprv pasted
+in by mistake). A server with no spending key cannot sign or broadcast a
+transaction, refund included — that is expected to change when custody
+support lands.
 
 `POST /invoices/{id}/refund` reflects that: it always returns `501 Not
 Implemented` and creates nothing. It used to write a `Pending` refund row that
@@ -655,8 +656,8 @@ docker run \
 
 ETHPayServer implements several security measures:
 
-- Non-custodial by design: derives payment addresses from a merchant's xpub
-  and never holds a spending key (see [Refunds](#refunds))
+- Non-custodial in this release: derives payment addresses from a merchant's
+  xpub and never holds a spending key (see [Refunds](#refunds))
 - Address validation (checksum verification)
 - Whitelisted token contracts only
 - Confirmation requirements per chain
