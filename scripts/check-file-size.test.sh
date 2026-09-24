@@ -84,11 +84,27 @@ check "a brand new file over the limit is refused" 1
 git reset -q --hard HEAD~1
 check "green again once the new file is gone" 0
 
+# A BASE_REF that doesn't resolve at all (e.g. a fetch step upstream failed)
+# must not be treated as "nothing grew" - it narrows to HEAD~1 instead and
+# still has to catch real growth there, or the fallback would just be a
+# quieter version of the same silent-pass bug.
+lines 8 > short.rs
+git add -A && git commit -qm "grows past the limit, to be seen via the HEAD~1 fallback"
+out="$(cd "$TMP" && LINE_LIMIT=5 BASE_REF=does-not-exist "$GUARD" 2>&1)"
+rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '::warning::does-not-exist not available; checking the previous commit only'; then
+  echo "ok: an unresolvable BASE_REF falls back to HEAD~1 and still catches real growth"
+else
+  echo "FAIL: an unresolvable BASE_REF should fall back and still enforce, not silently pass"
+  printf '%s\n' "$out"
+  fail=1
+fi
+git reset -q --hard HEAD~1
+
 # A BASE_REF that exists but shares no history with HEAD (e.g. a shallow
 # checkout that never fetched a common ancestor) makes the triple-dot diff
 # itself fail, not just return empty. That must surface as a visible warning
-# and a skip, not a silent "nothing grew" - the same failure mode CLAUDE.md
-# warns about for a query that can't run.
+# and retry against HEAD~1 - a real, narrower check - not a silent skip.
 main_branch="$(git branch --show-current)"
 git checkout -q --orphan disjoint
 git commit -q --allow-empty -m "unrelated root, no shared history with main"
@@ -97,13 +113,31 @@ git branch -f disjoint_base disjoint
 out="$(cd "$TMP" && LINE_LIMIT=5 BASE_REF=disjoint_base "$GUARD" 2>&1)"
 rc=$?
 if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '::warning::git diff against disjoint_base failed'; then
-  echo "ok: a BASE_REF with no shared history warns and skips instead of silently passing"
+  echo "ok: a BASE_REF with no shared history warns and retries against HEAD~1 instead of silently passing"
 else
-  echo "FAIL: a failed base-ref diff should warn and skip, not silently claim clean"
+  echo "FAIL: a failed base-ref diff should warn and retry, not silently claim clean"
   printf '%s\n' "$out"
   fail=1
 fi
 git branch -D disjoint disjoint_base >/dev/null
+
+# When there is truly nothing to compare against - no BASE_REF and no
+# HEAD~1 either, e.g. a repo's first commit - the guard has no way to know
+# whether anything grew. Passing here would be the exact bug this script
+# exists to catch; it fails the build instead.
+FIRST="$(mktemp -d)"
+( cd "$FIRST" && git init -q . && git config user.email t@t && git config user.name t \
+  && lines 8 > only.rs && git add -A && git commit -qm "first commit, nothing to diff against" )
+out="$(cd "$FIRST" && LINE_LIMIT=5 BASE_REF=does-not-exist "$GUARD" 2>&1)"
+rc=$?
+rm -rf "$FIRST"
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '::error::no base commit to diff against'; then
+  echo "ok: no base at all fails the build instead of passing it"
+else
+  echo "FAIL: a guard with nothing to diff against should fail closed, not pass"
+  printf '%s\n' "$out"
+  fail=1
+fi
 
 [ "$fail" -eq 0 ] && echo "check-file-size.sh behaves as documented"
 exit "$fail"

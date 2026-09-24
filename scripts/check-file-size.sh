@@ -54,20 +54,42 @@ fi
 # Ratchet: only files this change actually touches can have "grown in this
 # change", so a file the diff never mentions is never a candidate here no
 # matter how far over the limit it already sits.
-if ! git rev-parse --verify --quiet "$BASE_REF" >/dev/null; then
-  echo "::warning::$BASE_REF not available; skipping the growth check" >&2
-  exit "$status"
+#
+# A base that can't be resolved or diffed is not the same thing as "nothing
+# grew" - that conflation is the exact bug this script exists to catch, so it
+# does not skip on either failure. It narrows to HEAD~1 instead (same move
+# check-no-session-urls.sh makes for the same reason), and only gives up - by
+# failing the build, not passing it - once there is truly nothing left to
+# compare against.
+base="$BASE_REF"
+if ! git rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+  echo "::warning::$BASE_REF not available; checking the previous commit only" >&2
+  base="HEAD~1"
 fi
 
-if ! changed="$(git diff --name-only --diff-filter=ACMR "${BASE_REF}...HEAD" -- '*.rs' 2>&1)"; then
-  echo "::warning::git diff against $BASE_REF failed; skipping the growth check ($changed)" >&2
-  exit "$status"
+if ! git rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+  echo "::error::no base commit to diff against ($BASE_REF and HEAD~1 both unavailable) - failing rather than skipping the growth check" >&2
+  exit 1
+fi
+
+if ! changed="$(git diff --name-only --diff-filter=ACMR "${base}...HEAD" -- '*.rs' 2>&1)"; then
+  if [ "$base" != "HEAD~1" ] && git rev-parse --verify --quiet "HEAD~1" >/dev/null 2>&1; then
+    echo "::warning::git diff against $base failed ($changed); retrying against the previous commit only" >&2
+    base="HEAD~1"
+    changed="$(git diff --name-only --diff-filter=ACMR "${base}...HEAD" -- '*.rs' 2>&1)" || {
+      echo "::error::git diff against $base failed too ($changed) - failing rather than skipping the growth check" >&2
+      exit 1
+    }
+  else
+    echo "::error::git diff against $base failed ($changed) - failing rather than skipping the growth check" >&2
+    exit 1
+  fi
 fi
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   [ -f "$f" ] || continue
   after="$(wc -l < "$f")"
-  before="$(git show "${BASE_REF}:${f}" 2>/dev/null | wc -l)"
+  before="$(git show "${base}:${f}" 2>/dev/null | wc -l)"
   over_after=$(( after > LINE_LIMIT ? after - LINE_LIMIT : 0 ))
   over_before=$(( before > LINE_LIMIT ? before - LINE_LIMIT : 0 ))
   if [ "$over_after" -gt "$over_before" ]; then
