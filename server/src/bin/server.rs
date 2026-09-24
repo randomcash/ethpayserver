@@ -562,7 +562,12 @@ async fn main() -> Result<()> {
     )
     .await
     {
-        Err(_) => event_consumer_handle.abort(),
+        Err(_) => {
+            tracing::debug!(
+                "event consumer task did not exit within the shutdown grace period, aborting"
+            );
+            event_consumer_handle.abort();
+        }
         Ok(Err(join_error)) => {
             tracing::error!(error = %join_error, "event consumer task ended unexpectedly during shutdown");
         }
@@ -578,7 +583,12 @@ async fn main() -> Result<()> {
     // torn down, rather than being dropped mid-poll by process exit with no
     // handle ever joined on it at all.
     match tokio::time::timeout(std::time::Duration::from_secs(1), &mut webhook_handle).await {
-        Err(_) => webhook_handle.abort(),
+        Err(_) => {
+            tracing::debug!(
+                "webhook worker task did not exit within the shutdown grace period, aborting"
+            );
+            webhook_handle.abort();
+        }
         Ok(Err(join_error)) => {
             tracing::error!(error = %join_error, "webhook worker task ended unexpectedly during shutdown");
         }

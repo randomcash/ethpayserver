@@ -247,7 +247,12 @@ async fn main() -> anyhow::Result<()> {
     // isn't already mid-poll when we call it, the task is dropped before
     // that tail (and its shutdown-vs-fault log line) ever runs.
     match tokio::time::timeout(std::time::Duration::from_secs(1), &mut command_handle).await {
-        Err(_) => command_handle.abort(),
+        Err(_) => {
+            tracing::debug!(
+                "command handler task did not exit within the shutdown grace period, aborting"
+            );
+            command_handle.abort();
+        }
         Ok(Err(join_error)) => {
             tracing::error!(error = %join_error, "command handler task ended unexpectedly during shutdown");
         }
