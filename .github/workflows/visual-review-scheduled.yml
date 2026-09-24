@@ -38,13 +38,6 @@ name: Nightly visual review (testnet)
 # into a void: it would report success and do nothing, the same failure
 # shape as an unpolled queue. So this stays a central-infrastructure change
 # with its own review, not unfinished work this workflow can close alone.
-#
-# This exact point has now been raised BLOCKING in three review rounds in a
-# row with the same answer each time. It is not being re-litigated in a
-# fourth: the redacted-issue-plus-artifact behavior below is this ticket's
-# accepted interim, and building the receiver above is a
-# central-infrastructure-scoped follow-up for a human to pick up, not
-# something another pass here can produce.
 
 on:
   schedule:

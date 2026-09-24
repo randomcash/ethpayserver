@@ -122,8 +122,8 @@ test.describe('Authenticated routes', () => {
   test('register once, then capture the sidebar routes', async () => {
     test.skip(!RUN, SKIP_REASON);
 
-    await setupVirtualAuthenticator(sharedPage);
     try {
+      await setupVirtualAuthenticator(sharedPage);
       await register(sharedPage);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -169,6 +169,14 @@ test.describe('Authenticated routes', () => {
 test('scout.spec.ts route coverage stays in sync with this file', () => {
   const scoutSrc = fs.readFileSync(path.join('tests', 'scout.spec.ts'), 'utf8');
   const reached = new Set([...scoutSrc.matchAll(/goto(?:Authed)?\('([^']+)'\)/g)].map((m) => m[1]));
+
+  // A regex that matches nothing (formatter switches quote style, a route
+  // becomes a template literal, scout.spec.ts gets renamed) makes `reached`
+  // empty and `missing` trivially [] — the same "0 missing" result as
+  // actually being in sync. Assert the parse actually found routes before
+  // trusting its diff, so a broken extractor fails loudly instead of
+  // reading as nothing-to-add.
+  expect(reached.size, 'route extraction from scout.spec.ts found nothing — the regex no longer matches').toBeGreaterThan(0);
 
   // Not nav routes: /checkout/:id is a per-invoice page (there is no generic
   // "the" checkout page to screenshot), and /evm/nonexistent is scout's
