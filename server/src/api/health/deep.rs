@@ -31,7 +31,11 @@ use super::models::{DeepHealthResponse, DependencyHealth, MonitorHealth, RpcHeal
 )]
 pub async fn deep_health<A>(
     State(state): State<PgAppState<A>>,
-) -> (StatusCode, Json<DeepHealthResponse>)
+) -> (
+    StatusCode,
+    [(&'static str, &'static str); 1],
+    Json<DeepHealthResponse>,
+)
 where
     A: Send + Sync + 'static,
 {
@@ -55,6 +59,18 @@ where
 
     (
         StatusCode::OK,
+        // `SENTRY_RELEASE` and `ETHPAYSERVER_BUILD_SHA` are set by two
+        // separate CI steps from the same commit sha, so they can drift
+        // apart without either build step failing - a later stage that
+        // rebuilds from source without re-exporting `SENTRY_RELEASE` would
+        // ship a binary with a correct `build_sha` and an empty Sentry
+        // release, silently. Putting the compiled value on the response as a
+        // header (rather than trusting the build log) lets a deploy check
+        // compare it against `build_sha` from the same running process.
+        [(
+            "x-sentry-release",
+            sentry_release_header(option_env!("SENTRY_RELEASE")),
+        )],
         Json(DeepHealthResponse {
             build_sha: env!("ETHPAYSERVER_BUILD_SHA").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -67,6 +83,14 @@ where
             webauthn: state.webauthn.clone(),
         }),
     )
+}
+
+/// Value for the `x-sentry-release` header. Split out from [`deep_health`]
+/// so the empty-vs-present behaviour is unit-testable without booting a
+/// server - `option_env!` itself resolves at compile time and can't be
+/// varied from a test.
+pub(super) fn sentry_release_header(compiled: Option<&'static str>) -> &'static str {
+    compiled.unwrap_or_default()
 }
 
 /// Timeout a health-check future and convert the outcome into `DependencyHealth`.

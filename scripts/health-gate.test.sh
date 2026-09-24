@@ -22,27 +22,31 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"; kill "${SRV:-}" 2>/dev/null' EXIT
 
 BODY_FILE="$TMP/body.json"
+HEADER_FILE="$TMP/sentry_release"
 PORT=$((9000 + RANDOM % 900))
 
 cat > "$TMP/server.py" <<'PY'
 import http.server, sys
-body_file = sys.argv[2]
+body_file, header_file = sys.argv[2], sys.argv[3]
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(s):
         body = open(body_file, "rb").read()
+        release = open(header_file).read().strip()
         s.send_response(200)
         s.send_header("Content-Type", "application/json")
         s.send_header("Content-Length", str(len(body)))
+        s.send_header("X-Sentry-Release", release)
         s.end_headers()
         s.wfile.write(body)
     def log_message(s, *a): pass
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
 
-python3 "$TMP/server.py" "$PORT" "$BODY_FILE" &
+python3 "$TMP/server.py" "$PORT" "$BODY_FILE" "$HEADER_FILE" &
 SRV=$!
 for _ in $(seq 1 50); do
   echo '{}' > "$BODY_FILE"
+  echo 'abc1234' > "$HEADER_FILE"
   curl -fsS -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null && break
   sleep 0.1
 done
@@ -85,6 +89,20 @@ cat > "$BODY_FILE" <<'JSON'
  "rpcs":{}}
 JSON
 check "an empty rpcs map with data_fresh false is refused, not passed vacuously" 1
+
+# build_sha and the Sentry release are set by two separate CI steps from the
+# same commit sha, so a rename, typo, or a rebuild stage that drops
+# SENTRY_RELEASE lets them drift apart silently - a healthy body with a
+# build_sha that matches EXPECTED_SHA is not enough on its own.
+healthy
+echo '9999999' > "$HEADER_FILE"
+check "a build_sha/sentry-release mismatch is refused" 1
+
+echo '' > "$HEADER_FILE"
+check "a missing x-sentry-release header is refused" 1
+
+# Restore before the remaining cases, which are not testing this header.
+echo 'abc1234' > "$HEADER_FILE"
 
 # ... and the same shape with a missing monitor key entirely, which is what an
 # older server or a partial response looks like. The extractor defaults to

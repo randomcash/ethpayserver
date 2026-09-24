@@ -363,6 +363,11 @@ jobs:
           SENTRY_RELEASE: ${{ github.sha }}
         run: |
           export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
+          # option_env!("SENTRY_RELEASE") reads this at compile time and
+          # resolves to a silent `None` if it's ever empty - a rename, a typo,
+          # or a step reordering that clobbers it all compile clean and look
+          # identical to success. Refuse to build rather than ship that.
+          [ -n "$SENTRY_RELEASE" ] || { echo "::error::SENTRY_RELEASE is empty; refusing to build a binary with no Sentry release"; exit 1; }
           cargo build --release --bin ethpayserver
           cargo build --release --bin migrate_postgres
 
@@ -371,6 +376,7 @@ jobs:
           SENTRY_RELEASE: ${{ github.sha }}
         run: |
           export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
+          [ -n "$SENTRY_RELEASE" ] || { echo "::error::SENTRY_RELEASE is empty; refusing to build a binary with no Sentry release"; exit 1; }
           cargo build --release --bin evmmonitor --features monitor-bin
 
       # upload-artifact@v4 roots the archive at the least common ancestor of the

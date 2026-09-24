@@ -10,7 +10,7 @@ use types::ChainId;
 
 use evm::monitor::{ChainHealth, SourceStatus};
 
-use super::deep::{build_rpc_map, chains_are_fresh};
+use super::deep::{build_rpc_map, chains_are_fresh, sentry_release_header};
 use super::{
     ChainHealthInfo, DeepHealthResponse, DependencyHealth, MonitorHealth, ReadinessResponse,
     RpcHealth,
@@ -153,6 +153,27 @@ fn deep_health_no_monitor_configured() {
     assert_eq!(json["redis"]["error"], "not configured");
     assert!(json["rpcs"].as_object().unwrap().is_empty());
     assert_eq!(json["monitor"]["data_fresh"], false);
+}
+
+// -- x-sentry-release header --
+//
+// `SENTRY_RELEASE` and `ETHPAYSERVER_BUILD_SHA` are set by two separate CI
+// steps from the same commit sha, so a rename, typo or a later rebuild that
+// drops the former would still produce a binary with a correct `build_sha`
+// and a compile-time `None` here - which compiles fine and looks identical
+// to success. These pin what the header carries in both cases.
+
+#[test]
+fn sentry_release_header_passes_through_a_compiled_value() {
+    assert_eq!(sentry_release_header(Some("abc1234")), "abc1234");
+}
+
+#[test]
+fn sentry_release_header_is_empty_not_a_placeholder_when_uncompiled() {
+    // Empty, not "unknown" or "dev": a deploy check compares this byte-for-byte
+    // against `build_sha`, and a placeholder that happened to match a real sha
+    // would defeat the whole point of the comparison.
+    assert_eq!(sentry_release_header(None), "");
 }
 
 // -- ChainHealthInfo conversion tests --
