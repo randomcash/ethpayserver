@@ -34,7 +34,7 @@ use rates::NoOpRateProvider;
 use server::api::ApiErr;
 use server::api::AuthenticatedUser;
 use server::api::invoices::{CreateInvoiceRequest, create_invoice};
-use server::api::stores::{RotateWalletRequest, rotate_store_wallet};
+use server::api::stores::{RotateWalletRequest, RotateWalletResponse, rotate_store_wallet};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 use types::{ChainId, InvoiceId, PaymentOptionReader, StorePaymentMethodWriter};
@@ -176,7 +176,6 @@ async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
         "the pending invoice must derive from the old key at its first index"
     );
 
-    // Rotate the store onto a new key.
     let rotated = rotate_store_wallet(
         AuthenticatedUser(user_info(owner)),
         State(app_state(Arc::clone(&ds))),
@@ -190,8 +189,9 @@ async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
     .await
     .expect("rotate the store's wallet");
     assert_eq!(rotated.methods_rotated, 1);
+    assert_rotation_audit_trail(&rotated, OLD_XPUB, 1);
 
-    // A new invoice, created after the rotation, must derive from the new key.
+    // A new invoice after rotation must derive from the new key.
     let (status, Json(new_invoice)) = create_invoice(
         AuthenticatedUser(user_info(owner)),
         State(app_state(Arc::clone(&ds))),
@@ -225,6 +225,19 @@ async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
         refetched[0].payment_address, expected_old_address,
         "an existing pending invoice must keep resolving on its old-xpub address after rotation"
     );
+}
+
+/// The audit trail is the point of the rotation response: a rotation that
+/// reports success but names the wrong previous key or index is worse than
+/// one that fails outright. Checked against the real key just rotated away
+/// from, not against a value the handler could echo back unexamined.
+fn assert_rotation_audit_trail(rotated: &RotateWalletResponse, old_xpub: &str, old_index: i32) {
+    assert_eq!(rotated.rotations.len(), 1);
+    assert_eq!(
+        rotated.rotations[0].previous_xpub_masked,
+        api_types::mask_xpub(old_xpub)
+    );
+    assert_eq!(rotated.rotations[0].previous_derivation_index, old_index);
 }
 
 async fn error_status_and_message(err: ApiErr) -> (StatusCode, String) {
