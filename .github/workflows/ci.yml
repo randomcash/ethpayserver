@@ -349,8 +349,13 @@ jobs:
     # `test` included: without it a push whose tests fail still builds, pushes
     # an image and deploys. Tests gate merging a PR, but nothing gated the
     # branch itself.
+    #
+    # Also runs on pull_request: e2e (below) needs these binaries, and e2e now
+    # runs on pull requests too so a PR that breaks it is red before merge
+    # rather than after. `docker`, further down, keeps its branch/tag-only
+    # `if:` unchanged - building on a PR must not push or sign anything.
     needs: [lint, audit, test]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
@@ -425,16 +430,27 @@ jobs:
   # passed / 1 skipped in 2.1 minutes, against 30-minute cap timeouts before.
   #
   # Removing the flag blocks nothing: the deploy dispatch needs [docker], not
-  # this job, and this job is skipped on pull_request (it is gated on
-  # refs/heads/*), so a red E2E cannot hold up a deploy or a merge. What it does
-  # is make a regression show as a red run instead of a green one - which is
-  # the whole point, and was impossible while the flag was set.
+  # this job, so a red E2E cannot hold up a deploy. What it does is make a
+  # regression show as a red run instead of a green one - which is the whole
+  # point, and was impossible while the flag was set.
   #
   # The skip is the synthetic payment spec, which needs a funded wallet.
   #
   # The synthetic payment spec stays out of this job regardless: it needs a
   # funded wallet and a live chain, so it only runs where
   # `E2E_SYNTHETIC_PAYMENT=true` is set (see e2e-scheduled.yml).
+  #
+  # Also runs on pull_request, deliberately. It used to be branch-only, so a
+  # change that broke every test in a file (a fixture inserting a value a
+  # JSONB column rejects outright, so `beforeAll` throws before a single test
+  # runs) was invisible until after it merged: CI was green on the PR because
+  # this job never ran, and the branch it landed on stayed red for days
+  # because nothing about a red e2e job on a branch push stops anything either
+  # (see `e2e-status` below). Running it here costs a build plus the suite on
+  # every PR, which is not free - if that cost turns out to dominate on a
+  # contended runner, narrowing this back to changes under `e2e/` would cover
+  # the case above for a fraction of it, at the price of missing a
+  # server-side change that breaks e2e without touching `e2e/` itself.
   e2e:
     name: E2E
     runs-on: ubuntu-latest
@@ -448,7 +464,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request'
     services:
       postgres:
         image: postgres:16-alpine
