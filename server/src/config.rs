@@ -51,6 +51,10 @@
 //!   subscriptions through. Unset on any instance that sells nothing to
 //!   itself; a plugin is told about payments on this store and no other.
 //!   (default: ./plugins)
+//! - `ETHPAY_OPERATOR_ACCOUNT_ID` - The account that may own
+//!   `ETHPAY_BILLING_STORE_ID`. Unset refuses every nomination of a billing
+//!   store, since an unowned nomination is exactly the thing that must never
+//!   pass by default.
 
 use secrecy::{ExposeSecret, SecretString};
 use std::env;
@@ -105,6 +109,16 @@ pub struct Config {
     /// defaulting to anything: a wrong value here would hand a plugin a
     /// merchant's payments, and there is no value that is safely wrong.
     pub billing_store_id: Option<types::StoreId>,
+
+    /// The account `billing_store_id` must be owned by.
+    ///
+    /// Set once, outside the admin settings API, so that nominating a
+    /// billing store answers "does this belong to the operator" against a
+    /// value nobody can move by saving a settings form. `None` refuses every
+    /// nomination - the same "no value is safely wrong" reasoning as
+    /// `billing_store_id` above, since a missing operator account is
+    /// indistinguishable from one an attacker chose not to set.
+    pub operator_account_id: Option<types::UserId>,
 }
 
 /// Valid log levels.
@@ -161,6 +175,7 @@ impl Config {
             safe_mode,
             plugin_dir,
             billing_store_id: billing_store_id_from(|key| env::var(key).ok()),
+            operator_account_id: operator_account_id_from(|key| env::var(key).ok()),
         };
 
         config.validate()?;
@@ -299,6 +314,34 @@ where
     }
 }
 
+/// The account that may own the billing store, from
+/// `ETHPAY_OPERATOR_ACCOUNT_ID`.
+///
+/// Absent, blank and unparseable all yield `None`, the same treatment
+/// [`billing_store_id_from`] gives its variable and for the same reason: a
+/// typo here must fail closed (every nomination refused) rather than fail
+/// open (nobody's account required).
+pub fn operator_account_id_from<F>(lookup: F) -> Option<types::UserId>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let raw = lookup("ETHPAY_OPERATOR_ACCOUNT_ID")?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match uuid::Uuid::parse_str(trimmed) {
+        Ok(id) => Some(types::UserId(id)),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "ETHPAY_OPERATOR_ACCOUNT_ID is not a UUID; this instance will refuse every billing store nomination"
+            );
+            None
+        }
+    }
+}
+
 /// Relative on purpose: a development run and a test need no privileged
 /// directory to exist. A container image sets `ETHPAY_PLUGIN_DIR` explicitly
 /// to a volume that survives a redeploy.
@@ -341,6 +384,7 @@ mod tests {
             safe_mode: false,
             plugin_dir: PathBuf::from(DEFAULT_PLUGIN_DIR),
             billing_store_id: None,
+            operator_account_id: None,
         };
         let rendered = format!("{config:?}");
         assert!(
@@ -548,5 +592,39 @@ mod tests {
     fn safe_mode_via_cli_flag() {
         let args = vec!["ethpayserver".to_string(), "--disable-plugins".to_string()];
         assert!(safe_mode_requested(lookup(&[]), &args));
+    }
+
+    // ========================================================================
+    // Operator account resolution
+    // ========================================================================
+
+    #[test]
+    fn operator_account_id_unset_is_none() {
+        assert_eq!(operator_account_id_from(lookup(&[])), None);
+    }
+
+    #[test]
+    fn operator_account_id_blank_is_none() {
+        assert_eq!(
+            operator_account_id_from(lookup(&[("ETHPAY_OPERATOR_ACCOUNT_ID", "   ")])),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_account_id_unparseable_is_none() {
+        assert_eq!(
+            operator_account_id_from(lookup(&[("ETHPAY_OPERATOR_ACCOUNT_ID", "not-a-uuid")])),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_account_id_valid_uuid_is_parsed() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            operator_account_id_from(lookup(&[("ETHPAY_OPERATOR_ACCOUNT_ID", &id.to_string())])),
+            Some(types::UserId(id))
+        );
     }
 }

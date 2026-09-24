@@ -56,8 +56,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error monitoring
-sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls"] }
-sentry-tracing = "0.47"
+sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "logs"] }
+sentry-tracing = { version = "0.47", features = ["logs"] }
 
 # Metrics
 metrics = "0.24"

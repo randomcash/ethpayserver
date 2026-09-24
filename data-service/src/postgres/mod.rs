@@ -177,6 +177,9 @@ pub struct ApiKeyAuthInfo {
     pub is_active: bool,
     pub deprecated_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Explicitly granted, never inherited from role or owner. See the
+    /// `is_operator` column comment on `api_keys`.
+    pub is_operator: bool,
 }
 
 /// Full API key info for listing.
@@ -201,7 +204,8 @@ impl PgDataService {
         key_hash: &str,
     ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyAuthInfo>(
-            "SELECT id, user_id, is_active, deprecated_at, expires_at FROM api_keys WHERE key_hash = $1",
+            "SELECT id, user_id, is_active, deprecated_at, expires_at, is_operator \
+             FROM api_keys WHERE key_hash = $1",
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -302,7 +306,8 @@ impl PgDataService {
         id: Uuid,
     ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyAuthInfo>(
-            "SELECT id, user_id, is_active, deprecated_at, expires_at FROM api_keys WHERE id = $1",
+            "SELECT id, user_id, is_active, deprecated_at, expires_at, is_operator \
+             FROM api_keys WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)

@@ -25,6 +25,8 @@ import {
   FIXTURE_PLUGIN_ID,
   FIXTURE_PLUGIN_SLUG,
   FIXTURE_PLUGIN_WASM_BASE64,
+  INCOMPATIBLE_MANIFEST_TOML,
+  INCOMPATIBLE_PLUGIN_ID,
   SECOND_MANIFEST_TOML,
   SECOND_PLUGIN_ID,
   SECOND_PLUGIN_SLUG,
@@ -181,5 +183,31 @@ test.describe('installing one while the server runs', () => {
       listing.plugins.map((p) => p.slug),
       'an unloaded plugin must not be offered — its page would 404 on arrival',
     ).not.toContain(SECOND_PLUGIN_SLUG);
+  });
+
+  /**
+   * The other half of the same gate: an admin cannot install past it either.
+   * `com.example.e2efixture` and `e2elate` above only prove the gate accepts
+   * a *compatible* manifest — this proves it still refuses one that is not,
+   * so the check stays load-bearing rather than turning into "accepts
+   * anything" without any test here going red.
+   */
+  test('an incompatible ethpayserver dependency is refused, not installed', async () => {
+    await expect(
+      api('/admin/plugins', {
+        method: 'POST',
+        token: admin.apiKey,
+        body: {
+          manifest_toml: INCOMPATIBLE_MANIFEST_TOML,
+          wasm_base64: FIXTURE_PLUGIN_WASM_BASE64,
+          migrations: {},
+        },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+
+    const installed = await api<{ plugins: { id: string }[] }>('/admin/plugins', {
+      token: admin.apiKey,
+    });
+    expect(installed.plugins.map((p) => p.id)).not.toContain(INCOMPATIBLE_PLUGIN_ID);
   });
 });
