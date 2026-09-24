@@ -15,10 +15,20 @@ use super::{WebhookConfig, WebhookError, WebhookJob};
 
 /// Whether a `process_next_job` failure is a fault worth reporting.
 ///
+/// Only `WebhookError::Redis` is downgraded during shutdown: it's the shape
+/// a connection failing because the container's network dropped out takes,
+/// same as the redis-bridge subscriptions this mirrors. A `Serialization`
+/// error means a job already sitting in the queue no longer deserializes —
+/// a real bug, not a network teardown artifact — and must not go quiet just
+/// because it happened to surface in the same window as a shutdown signal.
+///
 /// Split out from `log_process_error` so the shutdown/fault decision itself
 /// is unit-testable without a live Redis connection.
-fn process_error_is_fault(shutting_down: bool) -> bool {
-    !shutting_down
+fn process_error_is_fault(error: &WebhookError, shutting_down: bool) -> bool {
+    match error {
+        WebhookError::Redis(_) => !shutting_down,
+        WebhookError::Http(_) | WebhookError::Serialization(_) | WebhookError::Database(_) => true,
+    }
 }
 
 /// Trait for data service requirements in WebhookService.
@@ -168,7 +178,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// from under this loop's Redis connection, which fails identically to a
     /// real fault. Only the unrequested case should reach Sentry.
     fn log_process_error(&self, e: &WebhookError) {
-        if process_error_is_fault(self.shutting_down.load(Ordering::Relaxed)) {
+        if process_error_is_fault(e, self.shutting_down.load(Ordering::Relaxed)) {
             tracing::error!(error = %e, "Error processing webhook job");
         } else {
             tracing::info!(error = %e, "Webhook job processing failed during shutdown");
@@ -532,13 +542,30 @@ mod tests {
     }
 
     #[test]
-    fn process_error_during_shutdown_is_not_a_fault() {
-        assert!(!process_error_is_fault(true));
+    fn redis_error_during_shutdown_is_not_a_fault() {
+        assert!(!process_error_is_fault(
+            &WebhookError::Redis("boom".to_string()),
+            true
+        ));
     }
 
     #[test]
-    fn process_error_without_shutdown_is_a_fault() {
-        assert!(process_error_is_fault(false));
+    fn redis_error_without_shutdown_is_a_fault() {
+        assert!(process_error_is_fault(
+            &WebhookError::Redis("boom".to_string()),
+            false
+        ));
+    }
+
+    #[test]
+    fn serialization_error_during_shutdown_is_still_a_fault() {
+        // A malformed job already in the queue isn't a network-teardown
+        // artifact, so it must not go quiet just because a shutdown signal
+        // happened to arrive in the same window.
+        assert!(process_error_is_fault(
+            &WebhookError::Serialization("bad json".to_string()),
+            true
+        ));
     }
 
     /// Runs `log_process_error` under a subscriber that captures its output,
@@ -615,6 +642,12 @@ mod tests {
         // from picking up whatever jobs are still queued, or a container
         // that takes a moment to actually exit would stop delivering
         // webhooks the instant the stop signal arrived rather than at exit.
+        //
+        // Nothing in `run()` branches on `shutting_down` for loop control
+        // today, so this can't fail differently with `begin_shutdown()`
+        // removed — it guards against a *future* regression that adds such
+        // a branch (an early `break`/`return` on shutdown), which is the
+        // actual risk this test exists to catch.
         let service = Arc::new(
             WebhookService::new(
                 Arc::new(data_service::InMemoryDataService::default()),

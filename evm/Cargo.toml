@@ -112,3 +112,6 @@ cognitive_complexity = "deny"
 # below. Test-only: the binaries run the regex implementation.
 scrub = { workspace = true }
 tokio = { version = "1.42", features = ["full", "test-util"] }
+# Test-only capture of what the redis-bridge shutdown log tails actually
+# emit; the production `monitor-bin` feature depends on this separately.
+tracing-subscriber = "0.3"

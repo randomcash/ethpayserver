@@ -28,6 +28,23 @@ fn subscription_end_is_fault(shutting_down: bool) -> bool {
     !shutting_down
 }
 
+/// Log a subscription stream ending at the level its cause deserves.
+///
+/// `kind` names the stream ("events" or "commands") for the log message.
+/// Factored out of the two stream tails below so it's directly testable
+/// under a captured subscriber, rather than only through the extracted
+/// `subscription_end_is_fault` boolean.
+fn log_subscription_end(kind: &str, channel: &str, shutting_down: bool) {
+    if subscription_end_is_fault(shutting_down) {
+        error!(channel = %channel, "redis {} subscription ended unexpectedly", kind);
+    } else {
+        info!(
+            channel = %channel,
+            "redis {} subscription ended: shutdown in progress", kind
+        );
+    }
+}
+
 /// Redis pub/sub event bridge.
 pub struct RedisBridge {
     /// Redis client for creating connections.
@@ -153,11 +170,7 @@ impl EventBridge for RedisBridge {
                     }
                 }
             }
-            if subscription_end_is_fault(shutting_down.load(Ordering::Relaxed)) {
-                error!(channel = %channel, "redis events subscription ended unexpectedly");
-            } else {
-                info!(channel = %channel, "redis events subscription ended: shutdown in progress");
-            }
+            log_subscription_end("events", &channel, shutting_down.load(Ordering::Relaxed));
         };
 
         Ok(Box::pin(stream))
@@ -215,11 +228,7 @@ impl EventBridge for RedisBridge {
                     }
                 }
             }
-            if subscription_end_is_fault(shutting_down.load(Ordering::Relaxed)) {
-                error!(channel = %channel, "redis commands subscription ended unexpectedly");
-            } else {
-                info!(channel = %channel, "redis commands subscription ended: shutdown in progress");
-            }
+            log_subscription_end("commands", &channel, shutting_down.load(Ordering::Relaxed));
         };
 
         Ok(Box::pin(stream))
@@ -271,5 +280,62 @@ mod tests {
     #[test]
     fn subscription_end_without_shutdown_is_a_fault() {
         assert!(subscription_end_is_fault(false));
+    }
+
+    /// Runs `log_subscription_end` under a subscriber that captures its
+    /// output, so the tests below exercise the real `error!`/`info!` call
+    /// sites the stream tails use — not just the extracted
+    /// `subscription_end_is_fault` boolean.
+    fn capture_log_subscription_end(shutting_down: bool) -> String {
+        use std::io;
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for Buf {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_subscription_end("events", "test-channel", shutting_down);
+        });
+
+        String::from_utf8(buf.0.lock().unwrap().clone()).expect("utf8 log output")
+    }
+
+    #[test]
+    fn log_subscription_end_reports_error_when_not_shutting_down() {
+        let output = capture_log_subscription_end(false);
+        assert!(output.contains("ERROR"), "expected ERROR, got: {output}");
+    }
+
+    #[test]
+    fn log_subscription_end_reports_info_when_shutting_down() {
+        let output = capture_log_subscription_end(true);
+        assert!(output.contains("INFO"), "expected INFO, got: {output}");
+        assert!(
+            !output.contains("ERROR"),
+            "shutdown noise must not reach error level: {output}"
+        );
     }
 }
