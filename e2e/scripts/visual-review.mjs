@@ -179,7 +179,11 @@ function writeOutputs(findings, errors) {
   fs.writeFileSync(path.join(VISUAL_DIR, 'findings.json'), JSON.stringify({ findings, errors }, null, 2));
   const report = renderReport(findings, errors);
   fs.writeFileSync(path.join(VISUAL_DIR, 'report.md'), report);
-  console.log(report);
+  // Not the full report: on the scheduled run this log is a public repo's
+  // job log, exactly as downloadable as the issue findings.json feeds — see
+  // .github/workflows/visual-review-scheduled.yml's header comment. Counts
+  // only; report.md on disk (not uploaded anywhere) carries the rest.
+  console.log(`${findings.length} finding(s), ${errors.length} error(s) — see report.md`);
 }
 
 async function main() {

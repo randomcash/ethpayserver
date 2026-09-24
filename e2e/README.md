@@ -291,8 +291,15 @@ report; it never fails the build.
 
 This repo is public, so the issue carries counts and affected routes only —
 never the per-finding "what is wrong" text, which describes live defects in a
-production payment processor's UI. The full report, findings.json and the
-screenshots themselves are the `visual-review-report` artifact on the run.
+production payment processor's UI. That text and the screenshots are not
+published anywhere from the scheduled run: a build artifact or a job log on a
+public repo is exactly as downloadable as the issue itself, so report.md,
+findings.json and the screenshots stay in the job's own ephemeral workspace
+and are discarded when it ends. Only a `visual-review-manifest` artifact
+(which routes/viewports captured, no defect text) is uploaded, for debugging
+the capture pipeline. See the scheduled workflow's header comment for what
+would need to change (a private receiver in central-infrastructure) before
+the full report can go anywhere durable.
 
 A route that could not be captured (a broken passkey registration, a
 navigation timeout) or reviewed (an Anthropic API error) is not silently
