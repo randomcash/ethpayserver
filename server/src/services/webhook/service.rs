@@ -541,6 +541,73 @@ mod tests {
         assert!(process_error_is_fault(false));
     }
 
+    /// Runs `log_process_error` under a subscriber that captures its output,
+    /// so the test below exercises the real `Ordering::Relaxed` load and
+    /// `tracing::error!`/`tracing::info!` call sites — not just the extracted
+    /// `process_error_is_fault` boolean.
+    fn capture_log_process_error(shutting_down: bool) -> String {
+        use std::io;
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for Buf {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::default()),
+            "redis://127.0.0.1:1",
+            WebhookConfig::default(),
+        )
+        .expect("valid redis URL");
+        if shutting_down {
+            service.begin_shutdown();
+        }
+
+        tracing::subscriber::with_default(subscriber, || {
+            service.log_process_error(&WebhookError::Redis("boom".to_string()));
+        });
+
+        String::from_utf8(buf.0.lock().unwrap().clone()).expect("utf8 log output")
+    }
+
+    #[test]
+    fn log_process_error_reports_error_when_not_shutting_down() {
+        let output = capture_log_process_error(false);
+        assert!(output.contains("ERROR"), "expected ERROR, got: {output}");
+    }
+
+    #[test]
+    fn log_process_error_reports_info_when_shutting_down() {
+        let output = capture_log_process_error(true);
+        assert!(output.contains("INFO"), "expected INFO, got: {output}");
+        assert!(
+            !output.contains("ERROR"),
+            "shutdown noise must not reach error level: {output}"
+        );
+    }
+
     #[tokio::test]
     async fn run_keeps_draining_the_queue_after_shutdown_is_requested() {
         // Shutdown only changes the log level `process_next_job` errors are
