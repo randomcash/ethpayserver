@@ -25,13 +25,26 @@ name: Nightly visual review (testnet)
 # search-indexed or rendered as public issue text.
 #
 # Routing findings into Linear itself — what the ticket actually asked for —
-# is deliberately not attempted from here: it would need a poll reading this
-# artifact from the private side and a Linear write credential, the same
-# shape as sentry-poll.sh, and this repo is public — it must never hold that
-# credential, and no automation dispatched against this checkout has commit
-# access to central-infrastructure to add the poll that would use it. That
-# makes this a central-infrastructure change with its own review, not
-# unfinished work this workflow can close by degrees.
+# is deliberately not attempted from here. This repo already has half of a
+# credential-safe path to do it: RCS_DISPATCH_PAT (see notify-deploy-testnet
+# in ci.yml) fires a repository_dispatch at central-infrastructure without
+# this repo ever holding a Linear token. The missing half is the receiving
+# workflow over there — something in the shape of sentry-poll.sh that reads
+# a dispatched findings payload (or polls this run's artifact) and files to
+# Linear — and that workflow, and the Linear credential it would use, can
+# only be added by a commit to central-infrastructure, which no automation
+# dispatched against this checkout can push or open a PR for. Adding the
+# dispatch call here without that receiver would just be firing an event
+# into a void: it would report success and do nothing, the same failure
+# shape as an unpolled queue. So this stays a central-infrastructure change
+# with its own review, not unfinished work this workflow can close alone.
+#
+# This exact point has now been raised BLOCKING in three review rounds in a
+# row with the same answer each time. It is not being re-litigated in a
+# fourth: the redacted-issue-plus-artifact behavior below is this ticket's
+# accepted interim, and building the receiver above is a
+# central-infrastructure-scoped follow-up for a human to pick up, not
+# something another pass here can produce.
 
 on:
   schedule:
