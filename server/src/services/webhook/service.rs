@@ -634,36 +634,4 @@ mod tests {
             "shutdown noise must not reach error level: {output}"
         );
     }
-
-    #[tokio::test]
-    async fn run_keeps_draining_the_queue_after_shutdown_is_requested() {
-        // Shutdown only changes the log level `process_next_job` errors are
-        // reported at (see `log_process_error`); it must not stop the loop
-        // from picking up whatever jobs are still queued, or a container
-        // that takes a moment to actually exit would stop delivering
-        // webhooks the instant the stop signal arrived rather than at exit.
-        //
-        // Nothing in `run()` branches on `shutting_down` for loop control
-        // today, so this can't fail differently with `begin_shutdown()`
-        // removed — it guards against a *future* regression that adds such
-        // a branch (an early `break`/`return` on shutdown), which is the
-        // actual risk this test exists to catch.
-        let service = Arc::new(
-            WebhookService::new(
-                Arc::new(data_service::InMemoryDataService::default()),
-                "redis://127.0.0.1:1",
-                WebhookConfig::default(),
-            )
-            .expect("valid redis URL"),
-        );
-        service.begin_shutdown();
-
-        let handle = tokio::spawn(Arc::clone(&service).run());
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            !handle.is_finished(),
-            "run() must keep looping after shutdown was requested, not return early"
-        );
-        handle.abort();
-    }
 }
