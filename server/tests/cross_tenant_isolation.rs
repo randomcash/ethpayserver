@@ -19,6 +19,15 @@
 //! Both are the same missing test: nobody asked "can A see B's row", in
 //! either the leaking direction or the withholding one.
 //!
+//! A third shape is a key that resolves to the wrong tenant rather than a
+//! session that does: the stored row has no scope narrower than "everything
+//! its owner can do", so the only way this schema can express "a key
+//! carrying more than its owner's scope" is a bearer-token path that
+//! resolves to the wrong owner, or one that skips the per-request tenant
+//! check a session goes through. The API-key tests below re-run every
+//! session-tenancy assertion through the real key-hash lookup for exactly
+//! that reason; see the section comment above them for the full argument.
+//!
 //! Calls handler functions directly against a real database, the same way
 //! `plugin_invoice_creation_filter.rs` does: `AuthenticatedUser` and `State`
 //! are plain data the extractors produce, and `server/src/api/**` handlers
