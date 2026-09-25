@@ -6,6 +6,8 @@
  */
 import { test as base, expect, type Page, type ConsoleMessage } from '@playwright/test';
 import { setupVirtualAuthenticator, isClientPanic } from '../fixtures/auth';
+import { createInvoice } from '../fixtures/invoices';
+import { createStoreReadyForInvoices } from '../fixtures/payment-methods';
 
 let scoutPage: Page;
 const issues: string[] = [];
@@ -67,9 +69,9 @@ test.beforeAll(async ({ browser }) => {
     const req = resp.request();
 
     // A 404 is the expected shape of "not found", but only for the
-    // placeholder-id routes below - every one of them calls an API path that
-    // embeds PLACEHOLDER_ID literally (e.g. `/api/invoices/{id}`), the same
-    // way the nonexistent-invoice checkout test already relied on before this
+    // placeholder-id routes below - each one calls an API path that embeds
+    // PLACEHOLDER_ID literally (e.g. `/api/payments/{id}`), the same way the
+    // nonexistent-invoice checkout test already relied on before this
     // listener existed. Scoped to that id rather than excluding 404 for every
     // call: an authenticated page whose own query 404s (a broken join, a
     // dangling foreign key) is exactly the class of bug this listener exists
@@ -280,23 +282,24 @@ async function discoverPluginRoutes(): Promise<string[]> {
   return routes;
 }
 
-// A route reachable only through a real record's id - invoice, payment,
-// store, wallet detail, checkout - is invisible to any DOM scan: a freshly
-// registered scout account has none of those records, so the app never
-// renders a link to one. That is not a defect in how discovery reads the
-// DOM; it is true of the DOM itself, and no amount of scanning more of it
-// fixes that. This is the one part of route coverage that has to stay a
-// hand list, for the same reason a 404 from these same routes is expected
-// rather than collected above. (Plugin detail pages don't need the same
-// treatment - see discoverPluginRoutes.)
-const PLACEHOLDER_ROUTES = [
-  `/evm/invoices/${PLACEHOLDER_ID}`,
-  `/evm/payments/${PLACEHOLDER_ID}`,
-  `/evm/stores/${PLACEHOLDER_ID}`,
-  `/evm/wallets/${PLACEHOLDER_ID}`,
-  `/checkout/${PLACEHOLDER_ID}`,
-  '/evm/nonexistent',
-];
+// A route reachable only through a real record's id is invisible to any DOM
+// scan: a freshly registered scout account starts with none of those
+// records, so the app never renders a link to one. Store, wallet and invoice
+// detail (and, through the invoice, checkout) are no longer on this list -
+// `route coverage: desktop` below seeds one real record of each before
+// crawling, so discoverLinkedRoutes finds the resulting store-card/
+// wallet-card/invoice-row links itself, the same "read what the app actually
+// rendered" approach discoverPluginRoutes already uses for plugin pages.
+// Visiting only the not-found branch of those routes would have proven
+// nothing about the page a merchant or customer actually sees.
+//
+// Payment detail has no such seed available: a payment record only exists
+// after a real on-chain settlement, which this route-coverage walk has no
+// way to produce (synthetic-payment.spec.ts exists precisely because
+// simulating one needs its own chain fixture and funded test wallet). Its
+// detail page therefore stays a hand-listed 404 visit - true coverage of it
+// would need that heavier suite, not this one.
+const PLACEHOLDER_ROUTES = [`/evm/payments/${PLACEHOLDER_ID}`, '/evm/nonexistent'];
 
 // Safety valve, not an expected ceiling: this app has nowhere near this many
 // distinct routes, so hitting it means link discovery found something
@@ -938,16 +941,34 @@ test.describe('Auth & Authenticated', () => {
     // slower than clicking through the sidebar, hence the wider budget.
     test.setTimeout(90_000);
 
+    // Store, wallet and invoice detail pages need a real record to land on -
+    // see the comment above PLACEHOLDER_ROUTES. Creating this invoice also
+    // creates the account wallet backing its store's payment method
+    // (`store_payment_method.rs`'s `wallet_for_store_xpub`), so one seed
+    // covers all three detail pages plus checkout below.
+    const seedName = `scout-${Date.now().toString(36)}`;
+    await createStoreReadyForInvoices(scoutPage, seedName);
+    await createInvoice(scoutPage, '0.01');
+    // createInvoice already waited for the URL to match /evm/invoices/.+, so
+    // the last path segment is guaranteed non-empty here.
+    const invoiceId = new URL(scoutPage.url()).pathname.split('/').pop()!;
+
     await gotoAuthed('/evm');
     // '/evm' itself has to be seeded explicitly: discoverLinkedRoutes only
     // returns links found ON this page, not the path of the page itself, and
     // nothing guarantees the dashboard renders a self-referential <a
     // href="/evm">. Without this, the busiest page in the app - the one every
     // session lands on - would only reach the mobile pass by accident.
+    //
+    // checkout_url() in the client's invoice detail page renders the
+    // customer-facing link as an absolute URL behind a "Copy link" button,
+    // not an <a href>, so it can never turn up in discoverLinkedRoutes -
+    // reaching it needs the real id captured above.
     discoveredRoutes = await walkRoutes([
       '/evm',
       ...(await discoverLinkedRoutes()),
       ...(await discoverPluginRoutes()),
+      `/checkout/${invoiceId}`,
       ...PLACEHOLDER_ROUTES,
     ]);
   });
