@@ -159,6 +159,7 @@ impl From<(StatusCode, String)> for ApiErr {
         admin::list_users,
         admin::list_user_stores,
         admin::delete_user_account,
+        admin::hard_delete_store,
         admin::update_user_role,
         admin::lock_user,
         admin::unlock_user,
@@ -474,6 +475,7 @@ where
         .route("/users", get(admin::list_users::<A>))
         .route("/users/{id}", delete(admin::delete_user_account::<A>))
         .route("/users/{id}/stores", get(admin::list_user_stores::<A>))
+        .route("/stores/{id}", delete(admin::hard_delete_store::<A>))
         .route(
             "/users/{id}/role",
             axum::routing::patch(admin::update_user_role::<A>),

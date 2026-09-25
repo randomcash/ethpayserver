@@ -28,7 +28,7 @@ use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
 use server::api::AdminAuth;
-use server::api::admin::{delete_user_account, list_user_stores};
+use server::api::admin::{delete_user_account, hard_delete_store, list_user_stores};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 
@@ -54,11 +54,17 @@ impl SessionService for UnusedSessionService {
 
 async fn service() -> Option<PgDataService> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
+    // `?` here would collapse "not configured" and "configured but
+    // unreachable" into the same skip, and a skipped test reports the same
+    // green result as a passing one. These four tests are the only
+    // verification that the server-admin refusal, the financial-history
+    // refusal and the delete cascade actually hold - a DB that is set but
+    // briefly unreachable must fail loudly, not silently report success.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
-        .ok()?;
+        .unwrap_or_else(|e| panic!("DATABASE_URL is set but connecting failed: {e}"));
     Some(PgDataService::new(pool))
 }
 
@@ -112,6 +118,18 @@ async fn seed_payment(pool: &PgPool, invoice: &str) {
     .expect("seed payment");
 }
 
+async fn seed_payout(pool: &PgPool, store: Uuid) {
+    sqlx::query(
+        "INSERT INTO payouts (id, store_id, destination_address, chain_id, asset_symbol, amount) \
+         VALUES ($1, $2, '0x0000000000000000000000000000000000000000', 'eip155:11155111', 'ETH', '1')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(store)
+    .execute(pool)
+    .await
+    .expect("seed payout");
+}
+
 async fn cleanup(pool: &PgPool, users: &[Uuid]) {
     for user in users {
         let _ = sqlx::query("DELETE FROM users WHERE id = $1")
@@ -119,6 +137,17 @@ async fn cleanup(pool: &PgPool, users: &[Uuid]) {
             .execute(pool)
             .await;
     }
+}
+
+/// A payout blocks a user's own cascading delete (`stores -> payouts` is not
+/// `ON DELETE CASCADE`, see `data_service::account_deletion`), so a leftover
+/// payout from a test that failed partway must be cleared before `cleanup`
+/// can remove the user underneath it.
+async fn clear_payouts_for_store(pool: &PgPool, store: Uuid) {
+    let _ = sqlx::query("DELETE FROM payouts WHERE store_id = $1")
+        .bind(store)
+        .execute(pool)
+        .await;
 }
 
 fn admin_auth(id: Uuid) -> AdminAuth {
@@ -305,4 +334,156 @@ async fn list_user_stores_is_scoped_to_the_requested_user() {
     assert_eq!(stores[0].name, target_store.name);
 
     cleanup(state.data_service.pool(), &[caller, target, other]).await;
+}
+
+/// The whole safety property of `hard_delete_store`: it hard-deletes on a
+/// live server and cannot lean on "no financial history" the way
+/// `delete_user_account` does, since removing a paid synthetic invoice is the
+/// point. The name check is what stands between it and a real merchant's
+/// store.
+#[tokio::test]
+#[ignore]
+async fn hard_delete_store_refuses_a_name_that_is_not_the_synthetic_shape() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let caller = seed_user(pg.pool(), "server_admin").await;
+    let target = seed_user(pg.pool(), "user").await;
+    let store = Store::new(format!("A Real Merchant's Shop {target}"), UserId(target));
+    pg.create_store_owned_by(&store, UserId(target))
+        .await
+        .expect("seed store");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = hard_delete_store(
+        admin_auth(caller),
+        Path(store.id.0.to_string()),
+        State(state.clone()),
+    )
+    .await;
+
+    let Err((status, _)) = result else {
+        panic!("a non-synthetic store name must be refused");
+    };
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let still_there: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stores WHERE id = $1")
+        .bind(store.id.0)
+        .fetch_one(state.data_service.pool())
+        .await
+        .expect("count store");
+    assert_eq!(still_there, 1, "the refusal must not have deleted anything");
+
+    cleanup(state.data_service.pool(), &[caller, target]).await;
+}
+
+/// The success path the synthetic-payment job's own cleanup and the store
+/// backfill sweep both depend on: a matching-name store, along with the
+/// invoice and payment it carries, is actually gone afterward - not merely
+/// archived.
+#[tokio::test]
+#[ignore]
+async fn hard_delete_store_removes_a_synthetic_store_with_its_invoice_and_payment() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let caller = seed_user(pg.pool(), "server_admin").await;
+    let target = seed_user(pg.pool(), "user").await;
+    let store = Store::new(
+        "e2e-synthetic-2026-01-01T00-00-00-000Z".to_string(),
+        UserId(target),
+    );
+    pg.create_store_owned_by(&store, UserId(target))
+        .await
+        .expect("seed store");
+    let invoice = seed_invoice(pg.pool(), store.id.0).await;
+    seed_payment(pg.pool(), &invoice).await;
+
+    let state = app_state(Arc::new(pg));
+
+    let result = hard_delete_store(
+        admin_auth(caller),
+        Path(store.id.0.to_string()),
+        State(state.clone()),
+    )
+    .await;
+
+    assert_eq!(result, Ok(StatusCode::NO_CONTENT));
+
+    let stores: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stores WHERE id = $1")
+        .bind(store.id.0)
+        .fetch_one(state.data_service.pool())
+        .await
+        .expect("count stores");
+    assert_eq!(stores, 0);
+
+    let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE id = $1")
+        .bind(&invoice)
+        .fetch_one(state.data_service.pool())
+        .await
+        .expect("count invoices");
+    assert_eq!(
+        invoices, 0,
+        "the invoice should have gone with the store, not been left behind"
+    );
+
+    let payments: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payments WHERE invoice_id = $1")
+        .bind(&invoice)
+        .fetch_one(state.data_service.pool())
+        .await
+        .expect("count payments");
+    assert_eq!(payments, 0, "the payment should have cascaded away too");
+
+    cleanup(state.data_service.pool(), &[caller, target]).await;
+}
+
+/// `ON DELETE CASCADE` does not reach `payouts` (see
+/// `data_service::account_deletion`), so a store that somehow holds one -
+/// which a synthetic E2E store never should - must be refused rather than
+/// silently destroying it or failing halfway through the cascade.
+#[tokio::test]
+#[ignore]
+async fn hard_delete_store_refuses_when_a_payout_exists() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let caller = seed_user(pg.pool(), "server_admin").await;
+    let target = seed_user(pg.pool(), "user").await;
+    let store = Store::new(
+        "e2e-synthetic-2026-01-02T00-00-00-000Z".to_string(),
+        UserId(target),
+    );
+    pg.create_store_owned_by(&store, UserId(target))
+        .await
+        .expect("seed store");
+    seed_payout(pg.pool(), store.id.0).await;
+
+    let state = app_state(Arc::new(pg));
+
+    let result = hard_delete_store(
+        admin_auth(caller),
+        Path(store.id.0.to_string()),
+        State(state.clone()),
+    )
+    .await;
+
+    let Err((status, message)) = result else {
+        panic!("a store holding a payout must be refused");
+    };
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        message.contains("payout"),
+        "the operator must see why, got: {message}"
+    );
+
+    let still_there: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stores WHERE id = $1")
+        .bind(store.id.0)
+        .fetch_one(state.data_service.pool())
+        .await
+        .expect("count store");
+    assert_eq!(still_there, 1, "the refusal must not have deleted anything");
+
+    clear_payouts_for_store(state.data_service.pool(), store.id.0).await;
+    cleanup(state.data_service.pool(), &[caller, target]).await;
 }

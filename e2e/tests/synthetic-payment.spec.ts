@@ -280,9 +280,15 @@ test.describe('Synthetic payment (live testnet)', () => {
    * original bug in a form nobody can see, which is the whole point of this
    * ticket.
    *
-   * `DELETE /stores/{id}` archives rather than deletes (`archive_store` in
-   * `server/src/api/stores/crud.rs`), so a failed run's invoices and payments
-   * stay readable for the post-mortem; the store only leaves the store list.
+   * `DELETE /admin/stores/{id}` (`hard_delete_store` in
+   * `server/src/api/admin/mod.rs`), not `DELETE /stores/{id}` — that one only
+   * archives (`archive_store`), which leaves an archived row behind forever
+   * rather than actually removing it. Reachable here because `apiToken` is
+   * the E2E account's key and that account is the deployment's
+   * `server_admin`. Admin-only *and* name-gated to the exact
+   * `e2e-synthetic-<ISO timestamp>` shape this run gives its own store, so a
+   * bug here can hard-delete this run's own store and nothing else on the
+   * server.
    */
   test.afterEach(async ({}, testInfo) => {
     // First, because it holds a port and a tunnel process. Only reached when a
@@ -303,8 +309,8 @@ test.describe('Synthetic payment (live testnet)', () => {
     if (!storeId || !apiToken) return;
 
     try {
-      await api(`/stores/${storeId}`, { method: 'DELETE', token: apiToken });
-      console.log(`cleaned up store ${storeId}`);
+      await api(`/admin/stores/${storeId}`, { method: 'DELETE', token: apiToken });
+      console.log(`deleted store ${storeId}`);
       return;
     } catch (err) {
       const msg =

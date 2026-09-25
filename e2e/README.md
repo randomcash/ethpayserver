@@ -186,12 +186,16 @@ It only ever touches names matching the exact stamp the spec generates
 token's own stores, so it cannot reach another account. Names that start with
 `e2e-synthetic-` but do not match the full shape are listed and left alone.
 
-Note that `DELETE /stores/{id}` **archives** — it is
-`UPDATE stores SET archived = true`, not a row delete. The store leaves the UI's
-store list (archived is hidden behind a checkbox) but `GET /stores` still
-returns it, its payment method, webhook and invoices all remain, and a second
-sweep reports it as already archived rather than deleting it again. Removing the
-rows themselves needs database access.
+This calls `DELETE /admin/stores/{id}` (`hard_delete_store` in
+`server/src/api/admin/mod.rs`), not the self-service `DELETE /stores/{id}` —
+that one only **archives** (`UPDATE stores SET archived = true`), which
+leaves a row `GET /stores` returns forever, with its payment method, webhook
+and invoices intact. The admin route actually deletes it, cascading to all of
+those, which is why `E2E_API_TOKEN` here must be a `server_admin` token and
+why the endpoint independently refuses any store whose name is not the exact
+synthetic shape - see `sweep-e2e-accounts.mjs`'s note below on why a
+hardcoded, redundant guard is worth it even when a check above it should
+already be enough.
 
 ## Leftover registrations (`scripts/sweep-e2e-accounts.mjs`)
 
@@ -202,7 +206,19 @@ created, the same way `synthetic-payment.spec.ts`'s `afterEach` removes the
 store it created — set `E2E_API_TOKEN` to a `server_admin` token in whatever
 job runs `scout.spec.ts` and cleanup happens there, next to creation, with no
 separate schedule to keep in sync. Without that variable set (e.g. running
-scout locally) it leaves the account in place rather than failing the run.
+scout locally, or CI's own non-remote `e2e` job, which resets its database
+every run and never sets it) it leaves the account in place rather than
+failing the run.
+
+**No scheduled job actually exercises this against testnet today.** The
+scheduled `browser` job runs `perf.spec.ts` only — `scout.spec.ts` is
+deliberately left out of it, per the comment in
+`.github/workflows/e2e-scheduled.yml`, because remote passkey registration
+does not yet establish a session (#56, open and unrelated to this cleanup
+hook). Re-add `scout.spec.ts` to that job, with `E2E_API_TOKEN` set on it,
+once #56 is fixed - until then this hook only ever runs locally or against a
+manual `E2E_REMOTE=true` invocation, which is real coverage of the cleanup
+logic but not of "testnet stops accumulating scout accounts on its own."
 
 `scripts/sweep-e2e-accounts.mjs` is the backfill for residue that predates
 that hook - every account this repo's E2E runs created before this shipped -
@@ -271,7 +287,7 @@ E2E_TEST_MNEMONIC="..." E2E_API_TOKEN=ak_... E2E_SEPOLIA_RPC_URL=https://... \
 |----------------------------|----------|--------------------------------------------------------------------|
 | `E2E_SYNTHETIC_PAYMENT`    | yes      | `true` to run the spec at all                                      |
 | `E2E_TEST_MNEMONIC`        | yes      | BIP39 phrase — merchant xpub **and** the spending wallet           |
-| `E2E_API_TOKEN`            | yes      | API key (`ak_...`) allowed to create stores and invoices           |
+| `E2E_API_TOKEN`            | yes      | `server_admin` API key (`ak_...`) — creates the store and hard-deletes it afterward |
 | `E2E_SEPOLIA_RPC_URL`      | yes      | Sepolia RPC endpoint used to broadcast                             |
 | `E2E_WEBHOOK_PUBLIC_URL`   | no       | Skip the cloudflared quick tunnel and use this base URL instead    |
 | `E2E_WEBHOOK_PORT`         | no       | Bind the sink to a fixed port (pairs with the above)               |

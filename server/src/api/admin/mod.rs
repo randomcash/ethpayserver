@@ -14,24 +14,65 @@ use axum::{
     http::StatusCode,
 };
 use chrono::Utc;
+use evm::Address;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use auth::{
-    Role, ServerSettings, ServerSettingsRepository, SessionService, UserId, UserRepository,
-    repository::StoreRepository,
+    Role, ServerSettings, ServerSettingsRepository, SessionService, StoreId, UserId,
+    UserRepository, repository::StoreRepository,
 };
-use data_service::AccountDeletionReader;
+use data_service::{AccountDeletionReader, PayoutReader, RefundReader, WatchedAddressWriter};
 
 pub mod plugins;
 
 use super::extractors::AdminAuth;
 use super::stores::store_response;
+use crate::services::evm_monitor::EVMMonitor;
 use crate::state::PgAppState;
 pub use api_types::{
     AdminUserInfo, ServerSettingsResponse, UpdateRoleRequest, UpdateServerSettingsRequest,
     UserListResponse,
 };
+
+/// The exact name shape the synthetic-payment E2E job gives the stores it
+/// creates (`e2e/tests/synthetic-payment.spec.ts`,
+/// `new Date().toISOString().replace(/[:.]/g, '-')`). Mirrors
+/// `SYNTHETIC_STORE_NAME` in `e2e/scripts/sweep-e2e-stores.mjs` - kept in
+/// sync by hand since one side is Rust and the other JavaScript.
+///
+/// This is the only thing standing between `hard_delete_store` and a real
+/// merchant's store: the endpoint hard-deletes on a live server, so unlike
+/// `delete_user_account` it cannot lean on "no financial history" as its
+/// safety property - the whole point is to remove stores that *do* have
+/// recorded payments. Scoping it to a name only this one CI job ever
+/// generates is what takes the place of that check.
+fn is_synthetic_e2e_store_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("e2e-synthetic-") else {
+        return false;
+    };
+    // 2026-08-27T17-29-33-596Z
+    let bytes = rest.as_bytes();
+    if bytes.len() != 24 {
+        return false;
+    }
+    let digit = |i: usize| bytes[i].is_ascii_digit();
+    let literal = |i: usize, c: u8| bytes[i] == c;
+    (0..4).all(digit)
+        && literal(4, b'-')
+        && (5..7).all(digit)
+        && literal(7, b'-')
+        && (8..10).all(digit)
+        && literal(10, b'T')
+        && (11..13).all(digit)
+        && literal(13, b'-')
+        && (14..16).all(digit)
+        && literal(16, b'-')
+        && (17..19).all(digit)
+        && literal(19, b'-')
+        && (20..23).all(digit)
+        && literal(23, b'Z')
+}
 
 // ============================================================================
 // Types
@@ -391,6 +432,17 @@ where
         ));
     }
 
+    let owned_stores = StoreRepository::get_stores_owned_by(ds, uid)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
+        })?;
+    let store_ids: Vec<uuid::Uuid> = owned_stores.iter().map(|s| s.id.0).collect();
+    unwatch_stores_before_delete(&state, &store_ids).await?;
+
     UserRepository::delete_user(ds, uid).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -399,6 +451,198 @@ where
     })?;
 
     tracing::info!(actor = %admin.id, user_id = %uid, "account deleted by admin");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Unwatch every still-active address for invoices under `store_ids`, before
+/// their stores are removed.
+///
+/// `account_deletion_blockers` (and, for `hard_delete_store`, the
+/// payout/refund check below) only count *recorded* financial history - an
+/// invoice with an address generated and watched, but no payment recorded
+/// yet, passes both untouched. Deleting straight through it would leave a
+/// no-TTL Redis key pointing at an invoice id that no longer exists; if a
+/// payment then lands on that address, the monitor resolves the stale id and
+/// the payment can never be recorded against it. Done here, before the
+/// delete, rather than left to the background cleanup service, which only
+/// ever unwatches expired, paid or cancelled invoices - never a still-pending
+/// one, which is exactly this case.
+async fn unwatch_stores_before_delete<A>(
+    state: &PgAppState<A>,
+    store_ids: &[uuid::Uuid],
+) -> Result<(), (StatusCode, String)>
+where
+    A: SessionService + 'static,
+{
+    let Some(monitor) = &state.evm_monitor else {
+        // No live monitor wired into this process, so nothing was ever
+        // watched through it and there is nothing to unwatch.
+        return Ok(());
+    };
+
+    let addresses = state
+        .data_service
+        .get_active_watched_addresses_for_stores(store_ids)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not look up watched addresses.".to_string(),
+            )
+        })?;
+
+    for info in addresses {
+        let addr: Address = info.address.parse().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Watched address {} is not a valid address.", info.address),
+            )
+        })?;
+        let token_contract: Option<Address> =
+            info.token_address.as_deref().and_then(|t| t.parse().ok());
+        let eip155 = info.chain_id.evm_chain_id().ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{} is not an EVM chain.", info.chain_id),
+            )
+        })?;
+
+        monitor
+            .unwatch_address_by_chain_id(eip155, addr, token_contract)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Could not unwatch {}: {e}", info.address),
+                )
+            })?;
+
+        WatchedAddressWriter::deactivate(
+            &*state.data_service,
+            &info.address,
+            &info.chain_id,
+            info.token_address.as_deref(),
+        )
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not deactivate a watched address.".to_string(),
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Hard-delete a store, cascading to its invoices, payments, wallets and
+/// payment methods.
+///
+/// This is not `DELETE /stores/{id}`: that endpoint archives, on purpose, so
+/// a merchant's invoices and payments stay readable for a post-mortem after
+/// the store leaves their store list. This endpoint actually removes the
+/// rows, which is why it is gated by name rather than by ownership or
+/// financial history:
+///
+/// - The name must match the exact `e2e-synthetic-<ISO timestamp>` shape
+///   `synthetic-payment.spec.ts` gives the store it creates on every
+///   scheduled run. Nothing else can ever be named this by construction, so
+///   this is what keeps the endpoint from ever reaching a real merchant's
+///   store - unlike `delete_user_account`, it cannot lean on "no financial
+///   history" for that, because removing a paid synthetic invoice is the
+///   entire point.
+/// - Payouts and refunds against the store are checked anyway and block the
+///   delete: `ON DELETE CASCADE` does not cover them (see
+///   `data_service::account_deletion` for why), so a raw delete would either
+///   silently destroy that history or fail on the foreign key. Neither the
+///   synthetic-payment job nor the backfill sweep should ever produce one,
+///   so seeing one here means the name matched something it should not have.
+#[utoipa::path(
+    delete,
+    path = "/admin/stores/{id}",
+    tag = "admin",
+    security(("bearer_auth" = [])),
+    params(("id" = String, Path, description = "Store ID")),
+    responses(
+        (status = 204, description = "Store deleted"),
+        (status = 400, description = "Invalid store ID, or the name does not match the synthetic E2E pattern"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access required"),
+        (status = 404, description = "Store not found"),
+        (status = 409, description = "Store holds a payout or refund and cannot be deleted"),
+    )
+)]
+pub async fn hard_delete_store<A>(
+    AdminAuth(admin): AdminAuth,
+    Path(store_id): Path<String>,
+    State(state): State<PgAppState<A>>,
+) -> Result<StatusCode, (StatusCode, String)>
+where
+    A: SessionService + 'static,
+{
+    let sid = uuid::Uuid::parse_str(&store_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid store ID".to_string()))?;
+    let sid = StoreId(sid);
+
+    let ds = &*state.data_service;
+
+    let store = ds
+        .get_store(sid)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "Store not found".to_string()))?;
+
+    if !is_synthetic_e2e_store_name(&store.name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Only a store named like the synthetic-payment E2E job's own \
+             stores can be hard-deleted through this endpoint."
+                .to_string(),
+        ));
+    }
+
+    let (payout_count, _) = PayoutReader::get_payouts_for_store(ds, sid, 1, 0)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not check payouts.".to_string(),
+            )
+        })?;
+    let (refund_count, _) = RefundReader::get_refunds_for_store(ds, sid, 1, 0)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not check refunds.".to_string(),
+            )
+        })?;
+    if payout_count > 0 || refund_count > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "This store holds {payout_count} payout(s) and {refund_count} refund(s), \
+                 which a synthetic E2E store should never have. Refusing rather than \
+                 destroying or orphaning them.",
+            ),
+        ));
+    }
+
+    unwatch_stores_before_delete(&state, std::slice::from_ref(&sid.0)).await?;
+
+    StoreRepository::delete_store(ds, sid).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not delete the store.".to_string(),
+        )
+    })?;
+
+    tracing::info!(actor = %admin.id, store_id = %sid, "synthetic E2E store hard-deleted by admin");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -588,6 +832,33 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use types::ChainId;
+
+    /// This regex is the entire safety property of `hard_delete_store` - it
+    /// can reach a real merchant's store the moment this accepts something it
+    /// should not.
+    #[test]
+    fn synthetic_e2e_store_name_matches_only_the_exact_shape() {
+        assert!(is_synthetic_e2e_store_name(
+            "e2e-synthetic-2026-08-27T17-29-33-596Z"
+        ));
+
+        // A human-named store that merely starts the same way.
+        assert!(!is_synthetic_e2e_store_name("e2e-synthetic-scratch"));
+        // Prefix only, no timestamp at all.
+        assert!(!is_synthetic_e2e_store_name("e2e-synthetic-"));
+        // A real merchant's store.
+        assert!(!is_synthetic_e2e_store_name("My Coffee Shop"));
+        // Close but wrong separators, wrong lengths, or trailing garbage.
+        assert!(!is_synthetic_e2e_store_name(
+            "e2e-synthetic-2026-08-27T17:29:33.596Z"
+        ));
+        assert!(!is_synthetic_e2e_store_name(
+            "e2e-synthetic-2026-08-27T17-29-33-596Zx"
+        ));
+        assert!(!is_synthetic_e2e_store_name(
+            "e2e-synthetic-2026-08-27T17-29-33-59Z"
+        ));
+    }
 
     #[test]
     fn test_user_list_response_serialization() {

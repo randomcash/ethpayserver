@@ -21,6 +21,14 @@ let authenticated = false;
  * that set it has already gone out of scope.
  */
 let createdUserId: string | null = null;
+/**
+ * Set when the recovery screen was shown - so an account genuinely exists -
+ * but reading `.ps-recovery-account-id-value` failed anyway. `createdUserId`
+ * alone cannot tell that apart from "no account was created", and the two
+ * need opposite handling: the first is a real leak with no other record of
+ * it (the screen shows exactly once), the second is a correct no-op.
+ */
+let idCaptureFailedAfterRegistration = false;
 
 function issue(label: string, detail: string) {
   issues.push(`[${label}] ${detail}`);
@@ -70,7 +78,27 @@ test.beforeAll(async ({ browser }) => {
  * treated as a failure.
  */
 async function cleanupCreatedAccount() {
-  if (!createdUserId) return;
+  if (!createdUserId) {
+    if (idCaptureFailedAfterRegistration) {
+      // A real account exists - the recovery screen was shown - but its id
+      // was never captured, so nothing below can reach it to delete it and
+      // no later run can recognize it either: `scout.spec.ts` never sets an
+      // email or a wallet, so this is indistinguishable from any other
+      // passkey-only signup. A leak with no other record of it has to
+      // surface the same way a cleanup failure does, not disappear before
+      // that path is even reached.
+      const msg =
+        'Registration completed and the recovery screen was shown, but reading the ' +
+        'account id from .ps-recovery-account-id-value failed - the account exists but ' +
+        'cannot be identified or cleaned up here or by sweep-e2e-accounts.mjs.';
+      console.log(`::error title=Scout account id capture failed::${msg}`);
+      if (process.env.GITHUB_STEP_SUMMARY) {
+        appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ❌ Account id capture failed\n\n${msg}\n`);
+      }
+      issue('CLEANUP', msg);
+    }
+    return;
+  }
   const token = process.env.E2E_API_TOKEN;
   if (!token) {
     console.log(`account ${createdUserId} left in place - set E2E_API_TOKEN to sweep it here`);
@@ -342,6 +370,7 @@ test.describe('Auth & Authenticated', () => {
             .textContent({ timeout: 2_000 })
             .catch(() => null)
         )?.trim() || null;
+      if (!createdUserId) idCaptureFailedAfterRegistration = true;
 
       await savedButton.click();
       await scoutPage.locator('.ps-checkbox').check();
