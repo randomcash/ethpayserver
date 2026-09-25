@@ -9,6 +9,7 @@ import { parseEther } from 'viem';
 import { setupVirtualAuthenticator, isClientPanic } from '../fixtures/auth';
 import { seedPaymentForInvoice } from '../fixtures/db';
 import { createInvoice } from '../fixtures/invoices';
+import { gatingIssues } from '../fixtures/issues';
 import { createStoreReadyForInvoices } from '../fixtures/payment-methods';
 
 // db.ts's own fixtures no-op under E2E_REMOTE (no DB reachable from a live
@@ -34,10 +35,11 @@ let sessionPresent = false;
 
 // Every issue() call - a panic, a network failure, an overflow, anything -
 // lands in this one array, and the `summary: all issues` test at the bottom
-// of the file asserts it empty (minus AUTH/REGISTER, a known test-infra
-// limitation). There is no separate "just print" path: calling issue() is
-// what fails the run, for every caller in this file, including the network
-// and responsive checks below.
+// of the file asserts it empty except for the declared non-gating labels in
+// gatingIssues() (fixtures/issues.ts) - AUTH/REGISTER and COVERAGE_GAP, each
+// a known test-infra limitation rather than a bug. There is no separate
+// "just print" path: calling issue() is what fails the run, for every caller
+// in this file, including the network and responsive checks below.
 function issue(label: string, detail: string) {
   issues.push(`[${label}] ${detail}`);
 }
@@ -1143,8 +1145,17 @@ test.describe('Auth & Authenticated', () => {
     if (!discoveredRoutes.includes(`/evm/invoices/${invoiceId}`)) {
       issue('ROUTE_DISCOVERY', `Invoice detail page /evm/invoices/${invoiceId} was never crawled - the invoice row's link may not be a plain <a href>`);
     }
-    if (paymentId && !discoveredRoutes.includes(`/evm/payments/${paymentId}`)) {
-      issue('ROUTE_DISCOVERY', `Payment detail page /evm/payments/${paymentId} was never crawled - the payment row's link may not be a plain <a href>`);
+    if (paymentId) {
+      if (!discoveredRoutes.includes(`/evm/payments/${paymentId}`)) {
+        issue('ROUTE_DISCOVERY', `Payment detail page /evm/payments/${paymentId} was never crawled - the payment row's link may not be a plain <a href>`);
+      }
+    } else {
+      // isRemote: no DB to seed a payment against, so there is no paymentId
+      // to check and the branch above silently never runs. Recorded so the
+      // gap is visible in every remote run's issue log rather than looking
+      // like a check that passed - see gatingIssues() for why this doesn't
+      // fail the run.
+      issue('COVERAGE_GAP', 'Payment detail page was not checked - E2E_REMOTE has no DB to seed a payment against');
     }
     // No id captured for the wallet the invoice's payment method implicitly
     // created (see the comment above), so this checks the shape of the route
@@ -1196,7 +1207,8 @@ test('summary: all issues', async () => {
     for (const i of issues) console.log(`    ${i}`);
   }
 
-  // Only fail on unexpected issues (not auth — that's a known test infra limitation)
-  const nonAuthIssues = issues.filter(i => !i.startsWith('[AUTH]') && !i.startsWith('[REGISTER]'));
-  expect(nonAuthIssues, `Non-auth issues:\n${nonAuthIssues.join('\n')}`).toHaveLength(0);
+  // Only fail on gating issues - see gatingIssues() for which labels are
+  // exempted and why. scout-filter.spec.ts tests this filter directly.
+  const gating = gatingIssues(issues);
+  expect(gating, `Gating issues:\n${gating.join('\n')}`).toHaveLength(0);
 });
