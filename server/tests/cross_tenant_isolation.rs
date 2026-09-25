@@ -1024,7 +1024,13 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
         AuthenticatedUser(user_info(a.user_id)),
         State(state.clone()),
         Path(b.store.id.0),
-        Query(server::api::stores::StoreWalletQuery { namespace: None }),
+        Query(server::api::stores::StoreWalletQuery {
+            namespace: None,
+            // The bare form: these tests are about who may read a store's
+            // wallet at all, not about which wallet a payment method
+            // resolves to. Method-scoped resolution has its own tests.
+            payment_method_id: None,
+        }),
     )
     .await;
     assert_eq!(
@@ -1055,7 +1061,13 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
         AuthenticatedUser(user_info(a.user_id)),
         State(state),
         Path(a.store.id.0),
-        Query(server::api::stores::StoreWalletQuery { namespace: None }),
+        Query(server::api::stores::StoreWalletQuery {
+            namespace: None,
+            // The bare form: these tests are about who may read a store's
+            // wallet at all, not about which wallet a payment method
+            // resolves to. Method-scoped resolution has its own tests.
+            payment_method_id: None,
+        }),
     )
     .await
     .expect("A must be able to read A's own store wallet");
@@ -1638,7 +1650,13 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
         a_via_key,
         State(state.clone()),
         Path(b.store.id.0),
-        Query(server::api::stores::StoreWalletQuery { namespace: None }),
+        Query(server::api::stores::StoreWalletQuery {
+            namespace: None,
+            // The bare form: these tests are about who may read a store's
+            // wallet at all, not about which wallet a payment method
+            // resolves to. Method-scoped resolution has its own tests.
+            payment_method_id: None,
+        }),
     )
     .await;
     assert_eq!(
@@ -1655,7 +1673,13 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
         a_via_key,
         State(state),
         Path(a.store.id.0),
-        Query(server::api::stores::StoreWalletQuery { namespace: None }),
+        Query(server::api::stores::StoreWalletQuery {
+            namespace: None,
+            // The bare form: these tests are about who may read a store's
+            // wallet at all, not about which wallet a payment method
+            // resolves to. Method-scoped resolution has its own tests.
+            payment_method_id: None,
+        }),
     )
     .await
     .expect("an API key must be able to read its owner's own store wallet");
