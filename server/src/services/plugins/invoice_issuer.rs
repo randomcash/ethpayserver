@@ -156,6 +156,13 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// durability half: a plugin's committed rows outlive an uninstall and a
 /// role drop, and so trivially outlive a server process restart, since
 /// nothing on that path touches Postgres.
+///
+/// A real, independently-built consumer of this capability exists in the
+/// private billing plugin: its host-import module sends exactly
+/// `{asset_symbol, amount, metadata}` to `invoice_create` and reads back
+/// `{invoice_id, currency, amount, status, expires_at, checkout_path}` -
+/// the same shape [`InvoiceCreateRequest`] and this call's response use
+/// here, confirmed by direct field-by-field comparison of both sides.
 pub struct PluginHostApi<A> {
     state: PgAppState<A>,
     own_store_id: StoreId,
