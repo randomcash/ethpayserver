@@ -325,9 +325,20 @@ async function discoverPluginRoutes(): Promise<string[]> {
   // `/billing/subscriptions`), never the id (`/cash.random.billing/...`);
   // `get_page` accepts either, but only the slug shape is what the client
   // actually requests, so that's the shape worth walking.
-  const routes = (body.plugins ?? []).flatMap((plugin) =>
-    (plugin.pages ?? []).map((page) => `/evm/plugins/${plugin.slug}/${page.path}`),
-  );
+  //
+  // A plugin missing its `pages` field entirely is a schema deviation, not
+  // the same thing as a plugin that legitimately declares `pages: []` - the
+  // aggregate `routes.length === 0` check below only catches every plugin
+  // losing the field at once, so one plugin (the billing one, say) silently
+  // dropping `pages` while another still reports some would otherwise pass
+  // clean having walked nothing for it. Each occurrence gets its own issue().
+  const routes = (body.plugins ?? []).flatMap((plugin) => {
+    if (plugin.pages === undefined) {
+      issue('ROUTE_DISCOVERY', `plugin "${plugin.slug}" has no "pages" field - response shape may have changed`);
+      return [];
+    }
+    return plugin.pages.map((page) => `/evm/plugins/${plugin.slug}/${page.path}`);
+  });
   if (routes.length === 0) {
     issue('ROUTE_DISCOVERY', 'GET /api/plugins listed zero pages for this account - the billing surface would go unwalked');
   }
@@ -442,14 +453,23 @@ async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise
       // /api/auth/me exclusion above needs to know that, not the suite-wide
       // `authenticated` flag, which stays true throughout.
       sessionPresent = false;
-      await goto(path);
-      await scoutPage.context().addCookies(cookies);
-      await scoutPage.evaluate((serialized) => {
-        for (const [key, value] of Object.entries(JSON.parse(serialized) as Record<string, string>)) {
-          localStorage.setItem(key, value);
-        }
-      }, storage);
-      sessionPresent = authenticated;
+      // scoutPage is shared, serial-mode state for the rest of the file - if
+      // goto() or either restore step below throws, an un-restored session
+      // would silently strip auth from every subsequent route (including the
+      // mobile pass, which reuses this same context), turning one checkout
+      // failure into a cascade of misleading "not authenticated" findings.
+      // The restore must run even when the navigation itself is what failed.
+      try {
+        await goto(path);
+      } finally {
+        await scoutPage.context().addCookies(cookies);
+        await scoutPage.evaluate((serialized) => {
+          for (const [key, value] of Object.entries(JSON.parse(serialized) as Record<string, string>)) {
+            localStorage.setItem(key, value);
+          }
+        }, storage);
+        sessionPresent = authenticated;
+      }
     } else {
       await gotoAuthed(path);
     }
