@@ -76,6 +76,15 @@ test.beforeAll(async ({ browser }) => {
  * locally and against `E2E_REMOTE=false` without one, where leaving a throwaway
  * local account behind costs nothing. Skipped silently in that case, not
  * treated as a failure.
+ *
+ * A genuine leak (the id-capture failure below, or the delete itself failing)
+ * throws rather than only pushing to `issues`. `issues` is what `summary: all
+ * issues` asserts against, but that test - like every other test in this file
+ * - runs *before* `afterAll`, which is the only place this function is called
+ * from. Recording a leak here without throwing would report it to nobody: the
+ * one test that reads `issues` has already passed by the time this runs,
+ * exactly the "logged but doesn't fail the build" gap `synthetic-payment.spec.ts`'s
+ * `afterEach` avoids by throwing for the same reason.
  */
 async function cleanupCreatedAccount() {
   if (!createdUserId) {
@@ -96,6 +105,7 @@ async function cleanupCreatedAccount() {
         appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ❌ Account id capture failed\n\n${msg}\n`);
       }
       issue('CLEANUP', msg);
+      throw new Error(msg);
     }
     return;
   }
@@ -116,6 +126,7 @@ async function cleanupCreatedAccount() {
       appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ❌ Account leaked\n\n${msg}\n`);
     }
     issue('CLEANUP', msg);
+    throw new Error(msg);
   }
 }
 
@@ -124,7 +135,16 @@ test.afterAll(async () => {
     console.log('\n=== JS CONSOLE ERRORS ===');
     for (const e of consoleErrors) console.log(`  ${e}`);
   }
-  await cleanupCreatedAccount();
+  // Captured rather than let propagate immediately: the issues log below and
+  // closing the browser context must still happen on a cleanup failure, and
+  // rethrowing after both is what actually fails this hook - which is what
+  // fails the run, since no test left running can see this happen otherwise.
+  let cleanupError: unknown;
+  try {
+    await cleanupCreatedAccount();
+  } catch (err) {
+    cleanupError = err;
+  }
   if (issues.length > 0) {
     console.log('\n=== ISSUES FOUND ===');
     for (const i of issues) console.log(`  ${i}`);
@@ -132,6 +152,7 @@ test.afterAll(async () => {
     console.log('\n=== NO ISSUES FOUND ===');
   }
   await scoutPage?.context().close();
+  if (cleanupError) throw cleanupError;
 });
 
 async function goto(path: string) {

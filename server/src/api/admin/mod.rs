@@ -22,7 +22,7 @@ use auth::{
     Role, ServerSettings, ServerSettingsRepository, SessionService, StoreId, UserId,
     UserRepository, repository::StoreRepository,
 };
-use data_service::{AccountDeletionReader, PayoutReader, RefundReader, WatchedAddressWriter};
+use data_service::{AccountDeletionReader, CleanupAddressInfo, PayoutReader, RefundReader};
 
 pub mod plugins;
 
@@ -352,10 +352,11 @@ where
 
 /// Refuse with a 409 if `uid`'s stores hold any payment, payout or refund.
 ///
-/// Called twice by `delete_user_account`: once before the (possibly slow)
-/// unwatch step, to fail fast on an obviously blocked account, and once
-/// immediately before the actual delete, because the state that first check
-/// saw can be stale by the time the delete runs.
+/// Called by `delete_user_account` immediately before the delete itself, not
+/// earlier - the only work between this check and the delete is two local DB
+/// reads, so there is no unbounded window (a network round-trip to the
+/// monitor, formerly done here) for the state this sees to go stale before
+/// the delete runs.
 async fn ensure_no_financial_blockers(
     ds: &data_service::PgDataService,
     uid: UserId,
@@ -445,8 +446,6 @@ where
         ));
     }
 
-    ensure_no_financial_blockers(ds, uid).await?;
-
     let owned_stores = StoreRepository::get_stores_owned_by(ds, uid)
         .await
         .map_err(|_| {
@@ -456,14 +455,12 @@ where
             )
         })?;
     let store_ids: Vec<uuid::Uuid> = owned_stores.iter().map(|s| s.id.0).collect();
-    unwatch_stores_before_delete(&state, &store_ids).await?;
 
-    // `unwatch_stores_before_delete` makes one network round-trip per
-    // watched address, which can take long enough for a payment to land
-    // against this account in the meantime. Trust the state right before
-    // the delete, not the state from before that async work - otherwise a
-    // clear check made before it would let the cascade below silently
-    // destroy financial history that did not exist yet at the first check.
+    // Read now, unwatched later: the cascade below removes these rows, and
+    // by the time it has run there is nothing left in Postgres to read them
+    // from.
+    let addresses = active_watched_addresses(&state, &store_ids).await?;
+
     ensure_no_financial_blockers(ds, uid).await?;
 
     UserRepository::delete_user(ds, uid).await.map_err(|_| {
@@ -473,37 +470,32 @@ where
         )
     })?;
 
+    // Only now, with the account actually gone - see `unwatch_after_delete`
+    // for why this cannot run any earlier.
+    unwatch_after_delete(&state, addresses).await;
+
     tracing::info!(actor = %admin.id, user_id = %uid, "account deleted by admin");
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Unwatch every still-active address for invoices under `store_ids`, before
-/// their stores are removed.
+/// Look up every still-active watched address for invoices under
+/// `store_ids`, before their stores are removed.
 ///
 /// `account_deletion_blockers` (and, for `hard_delete_store`, the
 /// payout/refund check below) only count *recorded* financial history - an
 /// invoice with an address generated and watched, but no payment recorded
-/// yet, passes both untouched. Deleting straight through it would leave a
-/// no-TTL Redis key pointing at an invoice id that no longer exists; if a
-/// payment then lands on that address, the monitor resolves the stale id and
-/// the payment can never be recorded against it. Done here, before the
-/// delete, rather than left to the background cleanup service, which only
-/// ever unwatches expired, paid or cancelled invoices - never a still-pending
-/// one, which is exactly this case.
-async fn unwatch_stores_before_delete<A>(
+/// yet, passes both untouched. Read here, before the delete, because the
+/// delete's cascade removes these very rows - by the time it has run there is
+/// nothing left to look up. What to do with the result is `unwatch_after_delete`'s
+/// job, not this function's: this only reads.
+async fn active_watched_addresses<A>(
     state: &PgAppState<A>,
     store_ids: &[uuid::Uuid],
-) -> Result<(), (StatusCode, String)>
+) -> Result<Vec<CleanupAddressInfo>, (StatusCode, String)>
 where
     A: SessionService + 'static,
 {
-    let Some(monitor) = &state.evm_monitor else {
-        // No live monitor wired into this process, so nothing was ever
-        // watched through it and there is nothing to unwatch.
-        return Ok(());
-    };
-
-    let addresses = state
+    state
         .data_service
         .get_active_watched_addresses_for_stores(store_ids)
         .await
@@ -512,70 +504,105 @@ where
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Could not look up watched addresses.".to_string(),
             )
-        })?;
+        })
+}
+
+/// Tell the monitor to stop watching `addresses`, once the delete that made
+/// them stale has already succeeded - never before.
+///
+/// An earlier version of this ran the unwatch step *before* the delete, to
+/// close the gap the ticket calls out by name: a no-TTL Redis key pointing at
+/// an invoice id that no longer exists, left behind because deleting straight
+/// through a still-pending, still-watched invoice never told the monitor to
+/// stop. That ordering opened a worse gap of its own: unwatching is an
+/// external side effect with no rollback, so a delete that was then refused
+/// (a payment landing in the window between the two steps, or any other
+/// failure) left a still-*live* invoice unwatched - the account survived, but
+/// the monitor had already been told to stop polling it. Run only after a
+/// delete that has already committed, the reverse is what happens instead: a
+/// failure here can at worst reproduce the original trap (the monitor keeps
+/// polling a now-deleted invoice a little longer), never destroy the watch on
+/// one that still exists. Best-effort and logged rather than propagated for
+/// that same reason - the delete this follows already succeeded, and a
+/// network error talking to the monitor must not turn that into a reported
+/// failure.
+async fn unwatch_after_delete<A>(state: &PgAppState<A>, addresses: Vec<CleanupAddressInfo>)
+where
+    A: SessionService + 'static,
+{
+    let Some(monitor) = &state.evm_monitor else {
+        // No live monitor wired into this process, so nothing was ever
+        // watched through it and there is nothing to unwatch.
+        return;
+    };
 
     for info in addresses {
-        let addr: Address = info.address.parse().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Watched address {} is not a valid address.", info.address),
-            )
-        })?;
-        // A malformed value here must not be treated as "no token" - that
-        // would silently unwatch the native-asset entry instead of the
-        // ERC20 one, deactivate the row anyway, and leave the real watch
-        // live with nothing to show for it. Fail closed, like `addr` above.
-        let token_contract: Option<Address> = info
-            .token_address
-            .as_deref()
-            .map(|t| {
-                t.parse().map_err(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Token address {t} is not a valid address."),
-                    )
-                })
-            })
-            .transpose()?;
-        let eip155 = info.chain_id.evm_chain_id().ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{} is not an EVM chain.", info.chain_id),
-            )
-        })?;
+        let Some((addr, token_contract, eip155)) = parse_watch_target(&info) else {
+            continue;
+        };
 
-        monitor
+        if let Err(e) = monitor
             .unwatch_address_by_chain_id(eip155, addr, token_contract)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Could not unwatch {}: {e}", info.address),
-                )
-            })?;
-
-        WatchedAddressWriter::deactivate(
-            &*state.data_service,
-            &info.address,
-            &info.chain_id,
-            info.token_address.as_deref(),
-        )
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not deactivate a watched address.".to_string(),
-            )
-        })?;
+        {
+            tracing::error!(
+                address = %info.address,
+                chain_id = eip155,
+                error = %e,
+                "could not unwatch address after delete - the monitor may keep \
+                 polling a deleted invoice",
+            );
+        }
     }
+}
 
-    Ok(())
+/// Parse a `CleanupAddressInfo` row into what `unwatch_after_delete` needs to
+/// call the monitor, logging and returning `None` on anything malformed
+/// rather than letting one bad row stop the rest of the batch.
+fn parse_watch_target(info: &CleanupAddressInfo) -> Option<(Address, Option<Address>, u64)> {
+    let Ok(addr) = info.address.parse::<Address>() else {
+        tracing::error!(
+            address = %info.address,
+            "watched address is not valid; could not unwatch it after delete - \
+             the monitor may keep polling a deleted invoice",
+        );
+        return None;
+    };
+    // A malformed value here must not be treated as "no token" - that would
+    // unwatch the native-asset entry instead of the ERC20 one, leaving the
+    // real watch live with nothing to show for it.
+    let token_contract: Option<Address> = match info.token_address.as_deref() {
+        Some(t) => match t.parse() {
+            Ok(a) => Some(a),
+            Err(_) => {
+                tracing::error!(
+                    token_address = t,
+                    address = %info.address,
+                    "token address is not valid; could not unwatch it after delete - \
+                     the monitor may keep polling a deleted invoice",
+                );
+                return None;
+            }
+        },
+        None => None,
+    };
+    let Some(eip155) = info.chain_id.evm_chain_id() else {
+        tracing::error!(
+            chain_id = %info.chain_id,
+            address = %info.address,
+            "not an EVM chain; could not unwatch after delete - the monitor may \
+             keep polling a deleted invoice",
+        );
+        return None;
+    };
+
+    Some((addr, token_contract, eip155))
 }
 
 /// Refuse with a 409 if `sid` holds any payout or refund.
 ///
-/// Called twice by `hard_delete_store`, for the same reason
-/// `ensure_no_financial_blockers` is called twice by `delete_user_account`.
+/// Called by `hard_delete_store` immediately before the delete itself, for
+/// the same reason `ensure_no_financial_blockers` is.
 async fn ensure_no_payout_or_refund(
     ds: &data_service::PgDataService,
     sid: StoreId,
@@ -681,14 +708,11 @@ where
         ));
     }
 
-    ensure_no_payout_or_refund(ds, sid).await?;
+    // Read now, unwatched later: the cascade below removes these rows, and
+    // by the time it has run there is nothing left in Postgres to read them
+    // from.
+    let addresses = active_watched_addresses(&state, std::slice::from_ref(&sid.0)).await?;
 
-    unwatch_stores_before_delete(&state, std::slice::from_ref(&sid.0)).await?;
-
-    // Same reasoning as `delete_user_account`'s second
-    // `ensure_no_financial_blockers` call: the unwatch step above is
-    // unbounded async work, so re-check right before the delete rather than
-    // trusting a check made before it.
     ensure_no_payout_or_refund(ds, sid).await?;
 
     StoreRepository::delete_store(ds, sid).await.map_err(|_| {
@@ -697,6 +721,10 @@ where
             "Could not delete the store.".to_string(),
         )
     })?;
+
+    // Only now, with the store actually gone - see `unwatch_after_delete`
+    // for why this cannot run any earlier.
+    unwatch_after_delete(&state, addresses).await;
 
     tracing::info!(actor = %admin.id, store_id = %sid, "synthetic E2E store hard-deleted by admin");
     Ok(StatusCode::NO_CONTENT)
