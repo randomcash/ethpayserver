@@ -18,7 +18,12 @@ use crate::support::{
 /// An API key that carried more than its owner's scope would be a distinct
 /// bug from session tenancy, so every payment-reading endpoint - not just
 /// invoices - needs its own API-key-authenticated check, not just the
-/// session-based ones.
+/// session-based ones. Positive controls for `get_payment`/
+/// `get_invoice_payments`/`get_invoice_status` live in
+/// `scope_parity::an_api_keys_own_payment_reads_remain_reachable`, for the
+/// same reason the payout/refund/delivery ones do: without them, all three
+/// 404ing regardless of whose data was asked for would still pass the
+/// assertions below.
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_payments() {

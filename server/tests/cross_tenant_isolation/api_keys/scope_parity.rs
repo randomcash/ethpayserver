@@ -42,6 +42,18 @@ async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
         "an API key must not reach another tenant's invoice any more than a session can"
     );
 
+    // Positive control: without this, `get_invoice` refusing every caller,
+    // API-key included, would pass the assertion above for the wrong reason.
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own = server::api::invoices::get_invoice(
+        a_via_key,
+        State(state.clone()),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("an API key must be able to fetch its owner's own invoice by id");
+    assert_eq!(own.id, a.invoice.id.0);
+
     let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
     let listed = server::api::invoices::list_invoices(
         a_via_key,
@@ -64,6 +76,47 @@ async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
         !ids.contains(&b.invoice.id.0),
         "an API key's unfiltered listing must not include another tenant's invoice"
     );
+}
+
+/// Positive controls for `cross_tenant_reads::an_api_key_cannot_reach_another_tenants_payments`'s
+/// `get_payment`/`get_invoice_payments`/`get_invoice_status` assertions:
+/// without these, all three 404ing regardless of whose data was asked for
+/// would still pass that test's negative assertions.
+#[tokio::test]
+#[ignore]
+async fn an_api_keys_own_payment_reads_remain_reachable() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let a = seed_tenant(&pg, "a").await;
+    let state = app_state(Arc::new(pg));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own =
+        server::api::invoices::get_payment(a_via_key, State(state.clone()), Path(a.payment_id))
+            .await
+            .expect("an API key must be able to fetch its owner's own payment by id");
+    assert_eq!(own.id, a.payment_id.to_string());
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own = server::api::invoices::get_invoice_payments(
+        a_via_key,
+        State(state.clone()),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("an API key must be able to list payments on its owner's own invoice");
+    assert!(own.iter().any(|p| p.id == a.payment_id.to_string()));
+
+    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let own = server::api::invoices::get_invoice_status(
+        a_via_key,
+        State(state),
+        Path(a.invoice.id.0.clone()),
+    )
+    .await
+    .expect("an API key must be able to read its owner's own invoice status");
+    assert_eq!(own.id, a.invoice.id.0);
 }
 
 /// Positive controls for `cross_tenant_reads::an_api_key_cannot_reach_another_tenants_payouts_refunds_or_deliveries`:

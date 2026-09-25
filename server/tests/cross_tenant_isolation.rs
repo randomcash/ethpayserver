@@ -6,10 +6,21 @@
 //! including by id, list, members, webhook config and token policy; wallets;
 //! dashboard aggregates; payouts, refunds and webhook deliveries) is asked
 //! for the other tenant's data, by id, by store filter, by the "all stores"
-//! path, and authenticated with an API key instead of a session where that
-//! axis applies, and must refuse. This is not a claim that literally every
-//! handler under `server/src/api` is covered; it is the enumeration of the
+//! path, and must refuse. This is not a claim that literally every handler
+//! under `server/src/api` is covered; it is the enumeration of the
 //! store/tenant-scoped ones, grown each time a gap was found.
+//!
+//! Every one of those handlers takes the same `AuthenticatedUser` extractor,
+//! which resolves a session or an API key identically, so each is also
+//! re-run authenticated with an API key instead of a session - either inline
+//! next to its session-based test (`csv_export`, `dashboard`,
+//! `store_settings`) or, for invoices/payments/wallets/stores/payouts/
+//! refunds/deliveries, in the dedicated `api_keys` module. The one exception
+//! is `plugin_pages`: `get_page` resolves `viewer` and `account_id` purely
+//! from the `UserInfo` the extractor already produced, never from which
+//! credential produced it, so a session and an API key for the same user
+//! are indistinguishable to the handler and re-running that test through a
+//! key would exercise nothing a session test doesn't already.
 //!
 //! This has shipped broken in both directions before: a nil-UUID `store_id`
 //! that meant "every store" leaked one merchant's invoices and payments to
