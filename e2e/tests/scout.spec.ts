@@ -6,13 +6,30 @@
  */
 import { test as base, expect, type Page, type ConsoleMessage } from '@playwright/test';
 import { setupVirtualAuthenticator, isClientPanic } from '../fixtures/auth';
+import { seedPaymentForInvoice } from '../fixtures/db';
 import { createInvoice } from '../fixtures/invoices';
 import { createStoreReadyForInvoices } from '../fixtures/payment-methods';
+
+// db.ts's own fixtures no-op under E2E_REMOTE (no DB reachable from a live
+// deployment) - scoutPage runs there too, so anything that needs a direct
+// insert has to check this itself rather than assume a DB connection exists.
+const isRemote = process.env.E2E_REMOTE === 'true';
 
 let scoutPage: Page;
 const issues: string[] = [];
 const consoleErrors: string[] = [];
 let authenticated = false;
+// `authenticated` above is sticky for the rest of the suite once registration
+// succeeds - every `test.skip(!authenticated, ...)` depends on that. The
+// response listener below needs a narrower, non-sticky signal instead: is
+// there a session on THIS browser context right now. Those two diverge
+// exactly during the checkout branch of walkRoutes, which clears cookies and
+// localStorage to simulate an anonymous visit while `authenticated` (correctly)
+// stays true for the rest of the suite - without a separate flag, the
+// /api/auth/me exclusion below reads the stale `authenticated`, the checkout
+// visit's genuine, expected 401 doesn't match it, and gets misreported as a
+// NETWORK issue on every run that reaches the checkout branch.
+let sessionPresent = false;
 
 // Every issue() call - a panic, a network failure, an overflow, anything -
 // lands in this one array, and the `summary: all issues` test at the bottom
@@ -87,14 +104,14 @@ test.beforeAll(async ({ browser }) => {
     // regression, not the expected probe, and a blanket exclusion would drop
     // it silently the same way a blanket 404 exclusion would.
     if (status === 404 && url.pathname.includes(PLACEHOLDER_ID)) return;
-    if ((status === 401 || status === 403) && !authenticated && url.pathname === '/api/auth/me') return;
+    if ((status === 401 || status === 403) && !sessionPresent && url.pathname === '/api/auth/me') return;
 
     if (status >= 500) {
       issue('NETWORK', `${req.method()} ${url.pathname} -> ${status}`);
     } else if (status === 429) {
       issue('NETWORK', `${req.method()} ${url.pathname} -> 429 (rate limited)`);
     } else if (status === 401 || status === 403) {
-      issue('NETWORK', `${req.method()} ${url.pathname} -> ${status} ${authenticated ? 'while authenticated' : 'before authentication'}`);
+      issue('NETWORK', `${req.method()} ${url.pathname} -> ${status} ${sessionPresent ? 'while authenticated' : 'before authentication'}`);
     } else if (status >= 400) {
       issue('NETWORK', `${req.method()} ${url.pathname} -> ${status}`);
     }
@@ -269,9 +286,24 @@ interface PluginPagesResponse {
  * server starts specifically so this account always has at least one to
  * find, so an empty result here means discovery broke, not that nothing was
  * installed.
+ *
+ * `list_plugin_pages` (server/src/api/plugins.rs) requires `AuthenticatedUser`,
+ * which reads only an `Authorization: Bearer` header - never a cookie, per the
+ * same extractor the checkout comment above cites. `scoutPage.request` shares
+ * the browser context's cookies but not its localStorage, so without this the
+ * token the real client reads from `ps_session` on every boot never reaches
+ * this call: it 401s every time, on every run, and the billing pages this
+ * function exists to find are never discovered - not an edge case, the normal
+ * case. Reading the session id back out of localStorage the same way the
+ * client's own `use_auth` hook does (`session_id.to_string()` as the token) is
+ * what makes this call actually authenticate as the real client would.
  */
 async function discoverPluginRoutes(): Promise<string[]> {
-  const resp = await scoutPage.request.get('/api/plugins').catch(() => null);
+  const sessionRaw = await scoutPage.evaluate(() => localStorage.getItem('ps_session'));
+  const sessionId = sessionRaw ? (JSON.parse(sessionRaw) as { session_id?: string }).session_id : undefined;
+  const resp = await scoutPage.request
+    .get('/api/plugins', sessionId ? { headers: { Authorization: `Bearer ${sessionId}` } } : {})
+    .catch(() => null);
   if (!resp) {
     issue('NETWORK', 'GET /api/plugins failed: no response');
     return [];
@@ -304,21 +336,22 @@ async function discoverPluginRoutes(): Promise<string[]> {
 
 // A route reachable only through a real record's id is invisible to any DOM
 // scan: a freshly registered scout account starts with none of those
-// records, so the app never renders a link to one. Store, wallet and invoice
-// detail (and, through the invoice, checkout) are no longer on this list -
-// `route coverage: desktop` below seeds one real record of each before
+// records, so the app never renders a link to one. Store, wallet, invoice and
+// payment detail (and, through the invoice, checkout) are no longer on this
+// list - `route coverage: desktop` below seeds one real record of each before
 // crawling, so discoverLinkedRoutes finds the resulting store-card/
-// wallet-card/invoice-row links itself, the same "read what the app actually
-// rendered" approach discoverPluginRoutes already uses for plugin pages.
-// Visiting only the not-found branch of those routes would have proven
-// nothing about the page a merchant or customer actually sees.
+// wallet-card/invoice-row/payment-row links itself, the same "read what the
+// app actually rendered" approach discoverPluginRoutes already uses for
+// plugin pages. Visiting only the not-found branch of those routes would have
+// proven nothing about the page a merchant or customer actually sees.
 //
-// Payment detail has no such seed available: a payment record only exists
-// after a real on-chain settlement, which this route-coverage walk has no
-// way to produce (synthetic-payment.spec.ts exists precisely because
-// simulating one needs its own chain fixture and funded test wallet). Its
-// detail page therefore stays a hand-listed 404 visit - true coverage of it
-// would need that heavier suite, not this one.
+// A real payment only exists after evmmonitor observes an on-chain
+// settlement, which needs a funded wallet and a live RPC endpoint this walk
+// has neither of - see `seedPaymentForInvoice`'s comment in fixtures/db.ts for
+// why a direct DB insert stands in for it instead, and only where a DB
+// connection actually exists (not under E2E_REMOTE). The placeholder-id
+// payment route below still runs everywhere: it is the not-found-branch
+// check, kept independently of whether a real payment gets seeded.
 const PLACEHOLDER_ROUTES = [`/evm/payments/${PLACEHOLDER_ID}`, '/evm/nonexistent'];
 
 // layout.rs renders these five links unconditionally in the sidebar for any
@@ -405,6 +438,10 @@ async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise
       const storage = await scoutPage.evaluate(() => JSON.stringify(localStorage));
       await scoutPage.context().clearCookies();
       await scoutPage.evaluate(() => localStorage.clear());
+      // Genuinely anonymous for the duration of this navigation - the
+      // /api/auth/me exclusion above needs to know that, not the suite-wide
+      // `authenticated` flag, which stays true throughout.
+      sessionPresent = false;
       await goto(path);
       await scoutPage.context().addCookies(cookies);
       await scoutPage.evaluate((serialized) => {
@@ -412,6 +449,7 @@ async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise
           localStorage.setItem(key, value);
         }
       }, storage);
+      sessionPresent = authenticated;
     } else {
       await gotoAuthed(path);
     }
@@ -669,6 +707,7 @@ test.describe('Auth & Authenticated', () => {
     try {
       await expect(scoutPage).toHaveURL(/\/(evm)?$/, { timeout: 10_000 });
       authenticated = true;
+      sessionPresent = true;
     } catch {
       issue('REGISTER', `Registration did not redirect to dashboard. Final URL: ${scoutPage.url()}`);
 
@@ -1017,6 +1056,11 @@ test.describe('Auth & Authenticated', () => {
     // createInvoice already waited for the URL to match /evm/invoices/.+, so
     // the last path segment is guaranteed non-empty here.
     const invoiceId = new URL(scoutPage.url()).pathname.split('/').pop()!;
+    // See seedPaymentForInvoice's comment in fixtures/db.ts: a real payment
+    // needs on-chain settlement this walk can't produce, so this inserts the
+    // row directly - only possible where a DB connection exists, which
+    // E2E_REMOTE's live-deployment runs do not have.
+    const paymentId = isRemote ? undefined : await seedPaymentForInvoice(invoiceId);
 
     await gotoAuthed('/evm');
     // '/evm' itself has to be seeded explicitly: discoverLinkedRoutes only
@@ -1058,6 +1102,9 @@ test.describe('Auth & Authenticated', () => {
     }
     if (!discoveredRoutes.includes(`/evm/invoices/${invoiceId}`)) {
       issue('ROUTE_DISCOVERY', `Invoice detail page /evm/invoices/${invoiceId} was never crawled - the invoice row's link may not be a plain <a href>`);
+    }
+    if (paymentId && !discoveredRoutes.includes(`/evm/payments/${paymentId}`)) {
+      issue('ROUTE_DISCOVERY', `Payment detail page /evm/payments/${paymentId} was never crawled - the payment row's link may not be a plain <a href>`);
     }
     // No id captured for the wallet the invoice's payment method implicitly
     // created (see the comment above), so this checks the shape of the route

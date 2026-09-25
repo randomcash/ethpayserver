@@ -113,3 +113,38 @@ export async function createUserWithApiKey(
     await client.end();
   }
 }
+
+/**
+ * A payment row inserted directly, tied to an existing invoice.
+ *
+ * A real payment only exists once evmmonitor observes an on-chain transfer,
+ * which needs a funded wallet and a live RPC endpoint - `synthetic-payment.ts`
+ * exists precisely because producing one honestly needs its own chain fixture,
+ * and that suite runs on its own schedule for that reason, not on every push.
+ * Payment detail is otherwise unreachable the way store/invoice/wallet detail
+ * are seeded: no scan of the DOM ever finds a route backed by a record this
+ * account doesn't have. Inserting the row `PgDataService::upsert` would have
+ * written skips the ceremony, not the schema - the same trade
+ * `createUserWithApiKey` above already makes for a credential.
+ */
+export async function seedPaymentForInvoice(invoiceId: string): Promise<string> {
+  const crypto = await import('node:crypto');
+  const txHash = `0x${crypto.randomBytes(32).toString('hex')}`;
+  const fromAddress = `0x${crypto.randomBytes(20).toString('hex')}`;
+
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rows } = await client.query(
+      `INSERT INTO payments (invoice_id, chain_id, asset_type, asset_symbol, amount,
+                              tx_hash, block_number, from_address, confirmed_at, tx_index)
+       VALUES ($1, 'eip155:11155111', 'native', 'ETH', '1000000000000000',
+               $2, 1, $3, NOW(), -1)
+       RETURNING id`,
+      [invoiceId, txHash, fromAddress],
+    );
+    return rows[0].id as string;
+  } finally {
+    await client.end();
+  }
+}
