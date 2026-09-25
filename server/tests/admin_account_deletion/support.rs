@@ -11,8 +11,8 @@ use uuid::Uuid;
 use auth::{Result as AuthResult, Role, Session, SessionId, SessionService, UserId, UserInfo};
 use data_service::PgDataService;
 use rates::NoOpRateProvider;
-use server::api::AdminAuth;
 use server::api::admin::E2E_STORE_OWNER_ID;
+use server::api::{AdminAuth, AuthenticatedUser};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 
@@ -222,6 +222,21 @@ pub(crate) fn admin_auth(id: Uuid) -> AdminAuth {
         created_at: chrono::Utc::now(),
         last_login_at: None,
         role: Role::ServerAdmin,
+    })
+}
+
+/// A non-admin caller acting on their own account, for `delete_account`
+/// (`DELETE /users/me`) rather than the admin routes. No email, matching
+/// `seed_user` - `deletion_confirmation_for` falls back to the id in that
+/// case, which is what these tests pass as `confirm`.
+pub(crate) fn self_auth(id: Uuid) -> AuthenticatedUser {
+    AuthenticatedUser(UserInfo {
+        id: UserId(id),
+        email: None,
+        primary_wallet_address: None,
+        created_at: chrono::Utc::now(),
+        last_login_at: None,
+        role: Role::User,
     })
 }
 

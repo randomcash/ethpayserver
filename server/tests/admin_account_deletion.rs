@@ -16,6 +16,8 @@
 
 #[path = "admin_account_deletion/account.rs"]
 mod account;
+#[path = "admin_account_deletion/self_service.rs"]
+mod self_service;
 #[path = "admin_account_deletion/store/mod.rs"]
 mod store;
 #[path = "admin_account_deletion/support.rs"]

@@ -849,6 +849,16 @@ fn deletion_confirmation_matches(expected: &str, typed: &str) -> bool {
 /// key and surface as a 500. `DELETE /stores/{id}` already archives rather than
 /// deletes for this reason; this endpoint declines rather than pretending.
 ///
+/// Also refuses while any owned store still has an actively watched address -
+/// the same guard `admin::deletion::delete_user_account` applies, for the same
+/// reason: `account_deletion_blockers` only sees *recorded* payments, so a
+/// `pending`, never-expired invoice whose customer has already broadcast a
+/// transaction that has not confirmed yet passes it untouched. Without this, a
+/// merchant could delete their own account out from under a payment in
+/// flight - the cascade removes the invoice while the monitor is still
+/// watching for it, and the payment that lands afterward has nothing left to
+/// credit.
+///
 /// What it is for is the case deletion is actually asked for: an abandoned
 /// signup, a test account, a merchant who never traded. Those cascade cleanly -
 /// devices, sessions, passkeys, api keys, wallets, empty stores - and leave
@@ -860,7 +870,7 @@ fn deletion_confirmation_matches(expected: &str, typed: &str) -> bool {
     responses(
         (status = 204, description = "Account deleted"),
         (status = 400, description = "Confirmation did not match"),
-        (status = 409, description = "Account holds financial records and cannot be deleted"),
+        (status = 409, description = "Account holds financial records, or a still-watched address, and cannot be deleted"),
     ),
     tag = "users"
 )]
@@ -877,6 +887,35 @@ where
         return Err((
             StatusCode::BAD_REQUEST,
             "Confirmation did not match this account.".to_string(),
+        ));
+    }
+
+    let owned_stores =
+        auth::repository::StoreRepository::get_stores_owned_by(&*state.data_service, user.id)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
+            })?;
+    let store_ids: Vec<uuid::Uuid> = owned_stores.iter().map(|s| s.id.0).collect();
+
+    // This refuses outright below rather than unwatching and proceeding (see
+    // the docstring above), so this read only ever needs to answer "any?" -
+    // same as `admin::deletion::delete_user_account`, which this mirrors.
+    let addresses = super::admin::deletion::active_watched_addresses(&state, &store_ids).await?;
+
+    if !addresses.is_empty() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "This account has {} still-watched address(es) for a pending invoice. \
+                 A payment broadcast to one of them may not have confirmed yet, and \
+                 deleting now would stop watching it with nothing left to credit it to. \
+                 Refused until the invoice resolves (paid, cancelled or expired).",
+                addresses.len()
+            ),
         ));
     }
 
@@ -914,6 +953,9 @@ where
             )
         })?;
 
+    // No `unwatch_after_delete` call here: this function already returned
+    // above if `addresses` was non-empty, so by construction there is
+    // nothing left to unwatch by the time the delete runs.
     tracing::info!(user_id = %user.id.0, "account deleted at its owner's request");
     Ok(StatusCode::NO_CONTENT)
 }

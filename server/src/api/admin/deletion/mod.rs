@@ -4,9 +4,11 @@
 //! limit) along the two endpoints it covers: `account` is
 //! `DELETE /admin/users/{id}`, `store` is `DELETE /admin/stores/{id}`. Both
 //! read a target's still-active watched addresses before their cascading
-//! delete removes the rows those addresses point at, and both hand the result
-//! to the same post-delete unwatch step - that shared read/unwatch machinery
-//! lives here rather than in either endpoint's own file.
+//! delete removes the rows those addresses point at - `account`'s read (and
+//! self-service `delete_account`'s, in `api::users`, which shares it) is only
+//! ever a refuse-if-nonempty gate, while `store`'s hands the result to a
+//! post-delete unwatch step, since unwatching a synthetic E2E store on
+//! purpose is the whole point there. That shared read is [`active_watched_addresses`].
 
 use evm::Address;
 
@@ -33,7 +35,14 @@ pub use store::{E2E_STORE_OWNER_ID, hard_delete_store};
 /// delete's cascade removes these very rows - by the time it has run there is
 /// nothing left to look up. What to do with the result is `unwatch_after_delete`'s
 /// job, not this function's: this only reads.
-async fn active_watched_addresses<A>(
+///
+/// `pub(crate)` rather than private: self-service `DELETE /users/me`
+/// (`api::users::delete_account`) cascades through the same owned stores and
+/// needs the identical guard - `account_deletion_blockers` only sees
+/// *recorded* payments there too, so without this check a merchant could
+/// delete their own account out from under a pending, unconfirmed payment
+/// exactly as an admin-driven delete could before this module existed.
+pub(crate) async fn active_watched_addresses<A>(
     state: &PgAppState<A>,
     store_ids: &[uuid::Uuid],
 ) -> Result<Vec<CleanupAddressInfo>, (StatusCode, String)>
@@ -71,6 +80,11 @@ where
 /// that same reason - the delete this follows already succeeded, and a
 /// network error talking to the monitor must not turn that into a reported
 /// failure.
+///
+/// Only `hard_delete_store` calls this: `delete_user_account` and self-service
+/// `delete_account` both refuse outright on a still-watched address rather
+/// than unwatching and proceeding, so `addresses` is never non-empty by the
+/// time either of them would reach a call here.
 async fn unwatch_after_delete<A>(state: &PgAppState<A>, addresses: Vec<CleanupAddressInfo>)
 where
     A: SessionService + 'static,

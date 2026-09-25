@@ -9,7 +9,7 @@ use axum::{
 use auth::{Role, SessionService, UserId, UserRepository, repository::StoreRepository};
 use data_service::AccountDeletionReader;
 
-use super::{active_watched_addresses, unwatch_after_delete};
+use super::active_watched_addresses;
 use crate::api::extractors::AdminAuth;
 use crate::api::stores::store_response;
 use crate::state::PgAppState;
@@ -170,9 +170,10 @@ where
         })?;
     let store_ids: Vec<uuid::Uuid> = owned_stores.iter().map(|s| s.id.0).collect();
 
-    // Read now, unwatched later: the cascade below removes these rows, and
-    // by the time it has run there is nothing left in Postgres to read them
-    // from.
+    // Unlike `hard_delete_store`, this function refuses outright rather than
+    // unwatching and proceeding - see the docstring above for why. So this
+    // read only ever needs to answer "any?", not preserve the rows for a
+    // later unwatch step.
     let addresses = active_watched_addresses(&state, &store_ids).await?;
 
     if !addresses.is_empty() {
@@ -197,10 +198,10 @@ where
         )
     })?;
 
-    // Only now, with the account actually gone - see `unwatch_after_delete`
-    // for why this cannot run any earlier.
-    unwatch_after_delete(&state, addresses).await;
-
+    // No `unwatch_after_delete` call here, unlike `hard_delete_store`: this
+    // function already returned above if `addresses` was non-empty, so by
+    // construction there is nothing left to unwatch by the time the delete
+    // runs. Calling it here would always iterate zero elements.
     tracing::info!(actor = %admin.id, user_id = %uid, "account deleted by admin");
     Ok(StatusCode::NO_CONTENT)
 }
