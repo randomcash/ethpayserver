@@ -1,0 +1,17 @@
+# Files enrolled in the size ratchet at a ceiling above LINE_LIMIT.
+#
+# An entry here does NOT exempt a file. It says: this file is already larger
+# than the limit and is allowed to stay that size, but it may not GROW - the
+# same treatment the 48 .rs files already over the limit get automatically,
+# because they existed before the gate did.
+#
+# It exists because a genuinely new file has nothing at the base to compare
+# against, so `before` is 0 and anything over the limit fails outright. That is
+# correct for new source, and wrong for a file arriving from a long-lived branch
+# that predates the gate.
+#
+# An entry is a debt, not a dispensation. Removing one is the goal; raising one
+# needs the same argument as any other change to the limit.
+#
+# Format: <path> <ceiling>
+server/tests/cross_tenant_isolation.rs 2326
