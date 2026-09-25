@@ -52,10 +52,18 @@ fi
 # A broken listing (e.g. an unreadable index) is not "nothing is over the
 # limit" - it must fail the build rather than report a false-clean zero, the
 # same conflation the ratchet below is built to refuse.
-chmod 000 "$TMP/.git/index"
+#
+# A directory in place of the index file, not chmod 000: permission bits are
+# bypassed when the runner is root (common on containerized/self-hosted CI),
+# which would make this fault injection a no-op there and turn a real failure
+# into a spurious pass. `git ls-files` can't read a directory as an index file
+# regardless of who is asking.
+mv "$TMP/.git/index" "$TMP/.git/index.bak"
+mkdir "$TMP/.git/index"
 out="$(cd "$TMP" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"
 rc=$?
-chmod 644 "$TMP/.git/index"
+rmdir "$TMP/.git/index"
+mv "$TMP/.git/index.bak" "$TMP/.git/index"
 if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '::error::git ls-files failed'; then
   echo "ok: a broken git ls-files fails the build instead of reporting a false-clean zero"
 else
@@ -245,6 +253,36 @@ if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'new_name.rs grew from 8 to
   echo "ok: a rename that also grows the file further is still refused, against its real size at base"
 else
   echo "FAIL: a rename that grows further should be refused against its real prior size, not 0"
+  printf '%s\n' "$out"
+  fail=1
+fi
+
+# An unreadable base blob for a modified (not renamed, not new) file must
+# fail the build with a clear error, not silently read as before=0 - the same
+# conflation already fixed above for renames, but here triggered by a missing
+# git object rather than a path that never existed at base. A file that
+# shrinks while staying over the limit would otherwise misread as "grew from
+# 0" and fail for the wrong reason instead of passing.
+GITSHOW="$(mktemp -d)"
+(
+  cd "$GITSHOW" && git init -q . && git config user.email t@t && git config user.name t
+  lines 8 > already_over.rs
+  git add -A && git commit -qm "base commit, already over the limit"
+  git branch base
+  lines 6 > already_over.rs
+  git commit -qam "shrinks while still over the limit"
+)
+base_blob="$(cd "$GITSHOW" && git rev-parse base:already_over.rs)"
+obj_path="$GITSHOW/.git/objects/${base_blob:0:2}/${base_blob:2}"
+mv "$obj_path" "$obj_path.bak"
+out="$(cd "$GITSHOW" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"
+rc=$?
+mv "$obj_path.bak" "$obj_path"
+rm -rf "$GITSHOW"
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '::error::git show base:already_over.rs failed'; then
+  echo "ok: an unreadable base blob fails the build instead of misreading it as a new file"
+else
+  echo "FAIL: a failed git show for a modified file should fail closed, not read as before=0"
   printf '%s\n' "$out"
   fail=1
 fi

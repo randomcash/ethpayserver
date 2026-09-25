@@ -39,13 +39,22 @@ if ! files="$(git ls-files '*.rs')"; then
   exit 1
 fi
 
-report="$(printf '%s\n' "$files" | while read -r f; do
+unsorted=""
+while IFS= read -r f; do
   [ -z "$f" ] && continue
-  n="$(wc -l < "$f")"
-  if [ "$n" -gt "$LINE_LIMIT" ]; then
-    printf '%d %s\n' "$n" "$f"
+  if ! n="$(wc -l < "$f")"; then
+    echo "::error::wc -l failed for $f - cannot measure its size" >&2
+    exit 1
   fi
-done | sort -rn)"
+  if [ "$n" -gt "$LINE_LIMIT" ]; then
+    unsorted="${unsorted}${n} ${f}"$'\n'
+  fi
+done <<< "$files"
+# <<< instead of a pipe: a `while` on the read end of a pipe runs in a
+# subshell, and `exit 1` above would only kill that subshell, leaving the
+# broken measurement to fail silently just like the git-ls-files case this
+# script already guards against.
+report="$(printf '%s' "$unsorted" | sort -rn)"
 
 count=0
 total=0
@@ -110,7 +119,10 @@ while IFS=$'\t' read -r dstatus path1 path2; do
     *) old="$path1"; f="$path1" ;;
   esac
   [ -f "$f" ] || continue
-  after="$(wc -l < "$f")"
+  if ! after="$(wc -l < "$f")"; then
+    echo "::error::wc -l failed for $f - cannot determine its size after this change" >&2
+    exit 1
+  fi
   case "$dstatus" in
     A*)
       # A genuinely new path has nothing to look up at base - 0 is the
@@ -118,8 +130,13 @@ while IFS=$'\t' read -r dstatus path1 path2; do
       before=0
       ;;
     *)
-      before="$(git show "${base}:${old}" 2>/dev/null | wc -l)"
-      if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+      # `$?` here, not PIPESTATUS: the pipe runs inside this command
+      # substitution's own subshell, so the parent's PIPESTATUS never sees it
+      # and stays stale from whatever pipeline last ran in this shell - it
+      # does not reflect git show's exit status at all. `pipefail` (set at
+      # the top of this script) makes the substitution's own $? carry the
+      # pipe's failure instead, which does survive past the subshell boundary.
+      if ! before="$(git show "${base}:${old}" 2>/dev/null | wc -l)"; then
         echo "::error::git show ${base}:${old} failed - cannot determine $f's size before this change" >&2
         exit 1
       fi
