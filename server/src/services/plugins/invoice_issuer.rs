@@ -117,10 +117,14 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// The host side of the plugin API's write capability, bound to one
 /// instance's own store.
 ///
-/// Wired to the plugin runtime: `host_calls::PluginCalls::invoice_create`
-/// reaches this through a [`super::host_calls::DeferredIssuer`] that
-/// `server.rs` publishes at boot once a billing store is configured, so a
-/// wasm plugin's `invoice_create` import lands here, not on a stub.
+/// Read, not run, to be wired to the plugin runtime: `server.rs`'s boot
+/// sequence publishes this type into a [`super::host_calls::DeferredIssuer`],
+/// which `host_calls::PluginCalls::invoice_create` reads from, so a wasm
+/// plugin's `invoice_create` import should land here rather than on a stub.
+/// No test in this repo boots the real binary and drives that path
+/// end to end - see the citations below for exactly how far each half of
+/// that claim is actually exercised, and where it is instead read from
+/// source and cited rather than run.
 ///
 /// That import binding itself - a compiled wasm guest actually reaching
 /// `PluginCalls::invoice_create` through wasmtime, not just a Rust-level call
