@@ -414,6 +414,18 @@ async fn ensure_no_financial_blockers(
 /// swept a batch of abandoned signups must not be able to reach the account
 /// that holds a production signing key just because it matched the same
 /// query.
+///
+/// Also refuses while any of the account's stores still has an actively
+/// watched address (see [`active_watched_addresses`]) - a `pending`,
+/// never-expired invoice whose customer may have already broadcast a
+/// transaction that has not confirmed yet. `account_deletion_blockers` only
+/// sees *recorded* payments, so it passes that case untouched; unwatching
+/// after the fact (as `hard_delete_store` does deliberately, for its own
+/// synthetic store) would tell the monitor to stop looking right as the
+/// invoice it was watching for is cascaded away, permanently unlinking a real
+/// payment from any merchant credit. An account this refuses on is not
+/// abandoned - a genuinely abandoned signup has no stores and so no watched
+/// addresses either.
 #[utoipa::path(
     delete,
     path = "/admin/users/{id}",
@@ -426,7 +438,7 @@ async fn ensure_no_financial_blockers(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin access required"),
         (status = 404, description = "User not found"),
-        (status = 409, description = "Account holds financial records and cannot be deleted"),
+        (status = 409, description = "Account holds financial records, or a still-watched address, and cannot be deleted"),
     )
 )]
 pub async fn delete_user_account<A>(
@@ -475,6 +487,19 @@ where
     // by the time it has run there is nothing left in Postgres to read them
     // from.
     let addresses = active_watched_addresses(&state, &store_ids).await?;
+
+    if !addresses.is_empty() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "This account has {} still-watched address(es) for a pending invoice. \
+                 A payment broadcast to one of them may not have confirmed yet, and \
+                 deleting now would stop watching it with nothing left to credit it to. \
+                 Refused until the invoice resolves (paid, cancelled or expired).",
+                addresses.len()
+            ),
+        ));
+    }
 
     ensure_no_financial_blockers(ds, uid).await?;
 

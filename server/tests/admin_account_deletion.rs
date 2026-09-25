@@ -125,16 +125,37 @@ async fn seed_invoice(pool: &PgPool, store: Uuid) -> String {
     id
 }
 
-async fn seed_payment(pool: &PgPool, invoice: &str) {
+async fn seed_payment(pool: &PgPool, invoice: &str) -> Uuid {
+    let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO payments (invoice_id, chain_id, asset_type, asset_symbol, amount, tx_hash) \
-         VALUES ($1, 'eip155:11155111', 'native', 'ETH', 1, $2)",
+        "INSERT INTO payments (id, invoice_id, chain_id, asset_type, asset_symbol, amount, tx_hash) \
+         VALUES ($1, $2, 'eip155:11155111', 'native', 'ETH', 1, $3)",
     )
+    .bind(id)
     .bind(invoice)
     .bind(format!("0x{}", Uuid::new_v4().simple()))
     .execute(pool)
     .await
     .expect("seed payment");
+    id
+}
+
+/// A refund against `store` - the other half of `ensure_no_payout_or_refund`,
+/// which ORs a payout check with this one. `seed_payout` alone only exercises
+/// the left side of that `||`; without this, a refund-only store never got
+/// a test.
+async fn seed_refund(pool: &PgPool, store: Uuid, invoice: &str, payment: Uuid) {
+    sqlx::query(
+        "INSERT INTO refunds (id, invoice_id, payment_id, store_id, to_address, chain_id, asset_symbol, amount) \
+         VALUES ($1, $2, $3, $4, '0x0000000000000000000000000000000000000000', 'eip155:11155111', 'ETH', '1')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(invoice)
+    .bind(payment)
+    .bind(store)
+    .execute(pool)
+    .await
+    .expect("seed refund");
 }
 
 /// A pending invoice's still-watched address - the case `get_active_watched_addresses_for_stores`
@@ -197,6 +218,13 @@ async fn cleanup(pool: &PgPool, users: &[Uuid]) {
 /// can remove the user underneath it.
 async fn clear_payouts_for_store(pool: &PgPool, store: Uuid) {
     let _ = sqlx::query("DELETE FROM payouts WHERE store_id = $1")
+        .bind(store)
+        .execute(pool)
+        .await;
+}
+
+async fn clear_refunds_for_store(pool: &PgPool, store: Uuid) {
+    let _ = sqlx::query("DELETE FROM refunds WHERE store_id = $1")
         .bind(store)
         .execute(pool)
         .await;
@@ -401,6 +429,11 @@ async fn list_user_stores_is_scoped_to_the_requested_user() {
 /// point. The name check is one of the two things that stand between it and a
 /// real merchant's store - the other is ownership, covered by
 /// `hard_delete_store_refuses_a_synthetic_name_owned_by_someone_else` below.
+///
+/// Owned by [`seed_e2e_owner`], not an arbitrary user: the handler's guard is
+/// an `||` of the name check and the owner check, so pairing a non-synthetic
+/// name with a non-E2E owner would pass on the owner check alone and prove
+/// nothing about the name check actually being consulted.
 #[tokio::test]
 #[ignore]
 async fn hard_delete_store_refuses_a_name_that_is_not_the_synthetic_shape() {
@@ -408,8 +441,8 @@ async fn hard_delete_store_refuses_a_name_that_is_not_the_synthetic_shape() {
         return;
     };
     let caller = seed_user(pg.pool(), "server_admin").await;
-    let target = seed_user(pg.pool(), "user").await;
-    let store = Store::new(format!("A Real Merchant's Shop {target}"), UserId(target));
+    let target = seed_e2e_owner(pg.pool()).await;
+    let store = Store::new("A Real Merchant's Shop".to_string(), UserId(target));
     pg.create_store_owned_by(&store, UserId(target))
         .await
         .expect("seed store");
@@ -602,6 +635,59 @@ async fn hard_delete_store_refuses_when_a_payout_exists() {
     cleanup(state.data_service.pool(), &[caller, target]).await;
 }
 
+/// The other half of `ensure_no_payout_or_refund`'s `||`: the payout-only
+/// seed above never exercises the `refund_count > 0` branch, so a typo'd
+/// `&&`, or a refund reader pointed at the wrong store, would pass every test
+/// in this file while a store holding a refund was still eligible for
+/// destruction.
+#[tokio::test]
+#[ignore]
+async fn hard_delete_store_refuses_when_a_refund_exists() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let caller = seed_user(pg.pool(), "server_admin").await;
+    let target = seed_e2e_owner(pg.pool()).await;
+    let store = Store::new(
+        "e2e-synthetic-2026-01-04T00-00-00-000Z".to_string(),
+        UserId(target),
+    );
+    pg.create_store_owned_by(&store, UserId(target))
+        .await
+        .expect("seed store");
+    let invoice = seed_invoice(pg.pool(), store.id.0).await;
+    let payment = seed_payment(pg.pool(), &invoice).await;
+    seed_refund(pg.pool(), store.id.0, &invoice, payment).await;
+
+    let state = app_state(Arc::new(pg));
+
+    let result = hard_delete_store(
+        admin_auth(caller),
+        Path(store.id.0.to_string()),
+        State(state.clone()),
+    )
+    .await;
+
+    let Err((status, message)) = result else {
+        panic!("a store holding a refund must be refused");
+    };
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        message.contains("refund"),
+        "the operator must see why, got: {message}"
+    );
+
+    let still_there: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stores WHERE id = $1")
+        .bind(store.id.0)
+        .fetch_one(state.data_service.pool())
+        .await
+        .expect("count store");
+    assert_eq!(still_there, 1, "the refusal must not have deleted anything");
+
+    clear_refunds_for_store(state.data_service.pool(), store.id.0).await;
+    cleanup(state.data_service.pool(), &[caller, target]).await;
+}
+
 /// Every test above builds `PgAppState` with `evm_monitor: None`, so
 /// `unwatch_after_delete` always takes its early return - the branch that
 /// actually talks to the monitor has never run in CI, and a regression that
@@ -754,22 +840,20 @@ async fn hard_delete_store_refused_by_a_payout_never_tells_the_monitor_to_unwatc
     cleanup(state.data_service.pool(), &[caller, target]).await;
 }
 
-/// The account-deletion mirror of `hard_delete_store_tells_a_live_monitor_to_unwatch_a_pending_invoices_address`.
-/// Every other `delete_user_account` test above builds `PgAppState` with
-/// `evm_monitor: None`, so `unwatch_after_delete` always takes its early
-/// return there too - and the one success test that does seed a store
-/// (`deleting_an_untraded_account_succeeds_and_takes_its_store`) seeds no
-/// invoice, so `active_watched_addresses` would run against an empty vec even
-/// with a monitor wired in. Neither proves `delete_user_account` reaches the
-/// monitor at all: the `store_ids` it computes from `owned_stores` could be
-/// wrong, or the read-before-delete-unwatch-after ordering could regress,
-/// and every existing test would still pass. This is the one test that wires
-/// in a real `RedisEVMMonitor` and a still-pending, still-watched invoice
-/// under the deleted account's own store, and listens on the commands
-/// channel to prove the delete actually tells the monitor to stop watching.
+/// A pending, still-watched invoice may have a real payment broadcast to it
+/// that just hasn't confirmed yet - `account_deletion_blockers` cannot see
+/// this because nothing about it is *recorded*. Deleting the account anyway
+/// and unwatching afterwards (which an earlier version of this handler did)
+/// would tell the monitor to stop looking right as the invoice it was
+/// watching for is cascaded away, permanently losing the ability to credit
+/// that payment. This must be refused instead - and, like
+/// `hard_delete_store_refused_by_a_payout_never_tells_the_monitor_to_unwatch`,
+/// a real monitor listening on the commands channel is the only way to prove
+/// the still-live address was never touched, not just that the account
+/// survives.
 #[tokio::test]
 #[ignore]
-async fn deleting_an_account_tells_a_live_monitor_to_unwatch_a_pending_invoices_address() {
+async fn deleting_an_account_with_a_still_watched_address_is_refused() {
     let Some(pg) = service().await else {
         return;
     };
@@ -809,22 +893,29 @@ async fn deleting_an_account_tells_a_live_monitor_to_unwatch_a_pending_invoices_
         State(state.clone()),
     )
     .await;
-    assert_eq!(result, Ok(StatusCode::NO_CONTENT));
+    let Err((status, message)) = result else {
+        panic!("an account with a still-watched address must be refused");
+    };
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        message.contains("watch"),
+        "the operator must see why, got: {message}"
+    );
 
-    let published = tokio::time::timeout(Duration::from_secs(5), commands.next())
+    let no_command_arrived = tokio::time::timeout(Duration::from_millis(500), commands.next())
         .await
-        .expect("an unwatch command should have been published once the delete completed")
-        .expect("the commands stream ended unexpectedly");
+        .is_err();
+    assert!(
+        no_command_arrived,
+        "a refused delete must not unwatch the account's still-live invoice"
+    );
 
-    match published {
-        MonitorCommand::UnwatchAddress(cmd) => {
-            assert_eq!(cmd.chain_id, 11155111);
-            let expected: evm::Address = address.parse().expect("valid test address");
-            assert_eq!(cmd.address, expected);
-            assert_eq!(cmd.token_contract, None);
-        }
-        other => panic!("expected an UnwatchAddress command, got {other:?}"),
-    }
+    let still_there: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = $1")
+        .bind(target)
+        .fetch_one(state.data_service.pool())
+        .await
+        .expect("count target");
+    assert_eq!(still_there, 1, "the refusal must not have deleted anything");
 
-    cleanup(state.data_service.pool(), &[caller]).await;
+    cleanup(state.data_service.pool(), &[caller, target]).await;
 }
