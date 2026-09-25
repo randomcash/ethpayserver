@@ -8,6 +8,16 @@ use tracing::{debug, error, info, warn};
 /// Redis key for publishing health information.
 const HEALTH_KEY: &str = "evmmonitor:health";
 
+/// Redis key for publishing the compiled `SENTRY_RELEASE`.
+///
+/// evmmonitor has no HTTP surface of its own, so this reuses the same
+/// Redis-relay channel as `HEALTH_KEY` to make its compiled release
+/// observable from the API server's `/health/deep`, the same way the
+/// server's own `SENTRY_RELEASE` is exposed as a response header - rather
+/// than trusting the CI build log for a binary evmmonitor also feeds Sentry
+/// from independently.
+const SENTRY_RELEASE_KEY: &str = "evmmonitor:sentry_release";
+
 /// Periodically publish health information to Redis.
 ///
 /// Health info is stored as JSON in the HEALTH_KEY with a 60-second TTL.
@@ -15,6 +25,7 @@ const HEALTH_KEY: &str = "evmmonitor:health";
 pub(crate) async fn publish_health_loop(
     coordinator: &Arc<MonitorCoordinator<RpcBlockSource>>,
     redis_url: &str,
+    sentry_release: &str,
 ) {
     let client = match redis::Client::open(redis_url) {
         Ok(c) => c,
@@ -50,13 +61,22 @@ pub(crate) async fn publish_health_loop(
         };
 
         // SET with 60 second expiry
-        if let Err(e) = redis::cmd("SETEX")
+        let published = redis::cmd("SETEX")
             .arg(HEALTH_KEY)
             .arg(60)
             .arg(&health_json)
             .query_async::<()>(&mut conn)
             .await
-        {
+            .and(
+                redis::cmd("SETEX")
+                    .arg(SENTRY_RELEASE_KEY)
+                    .arg(60)
+                    .arg(sentry_release)
+                    .query_async::<()>(&mut conn)
+                    .await,
+            );
+
+        if let Err(e) = published {
             warn!(error = %e, "failed to publish health to redis");
             // Try to reconnect on next iteration
             match client.get_multiplexed_async_connection().await {

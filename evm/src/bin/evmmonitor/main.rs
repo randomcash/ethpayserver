@@ -230,7 +230,12 @@ async fn main() -> anyhow::Result<()> {
     let health_coordinator = coordinator.clone();
     let health_redis_url = redis_url.clone();
     let health_handle = tokio::spawn(async move {
-        publish_health_loop(&health_coordinator, &health_redis_url).await;
+        publish_health_loop(
+            &health_coordinator,
+            &health_redis_url,
+            option_env!("SENTRY_RELEASE").unwrap_or_default(),
+        )
+        .await;
     });
 
     // Wait for shutdown signal

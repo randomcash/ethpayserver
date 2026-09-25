@@ -70,6 +70,16 @@ pub trait EVMMonitor: Send + Sync {
     ///
     /// Returns health info for all monitored chains.
     async fn get_chain_health(&self) -> Result<Vec<ChainHealth>, EVMMonitorError>;
+
+    /// Get the `SENTRY_RELEASE` evmmonitor was compiled with, observed live
+    /// from the running process rather than trusted from the build log.
+    ///
+    /// Defaults to `None`: evmmonitor is the only implementation that can
+    /// observe this at all, so every other implementation (test doubles)
+    /// stays unaffected by this method existing.
+    async fn get_sentry_release(&self) -> Result<Option<String>, EVMMonitorError> {
+        Ok(None)
+    }
 }
 
 /// Redis-based implementation of EVMMonitor.
@@ -205,5 +215,44 @@ impl EVMMonitor for RedisEVMMonitor {
             }),
             None => Ok(vec![]), // No health data yet
         }
+    }
+
+    async fn get_sentry_release(&self) -> Result<Option<String>, EVMMonitorError> {
+        const SENTRY_RELEASE_KEY: &str = "evmmonitor:sentry_release";
+
+        let release: Option<String> = self.bridge.get_key(SENTRY_RELEASE_KEY).await?;
+        Ok(observed_sentry_release(release))
+    }
+}
+
+/// An unset `SENTRY_RELEASE` is published as the empty string (see
+/// evmmonitor's health publisher), not omitted - treat it the same as "not
+/// observed" rather than as a release worth comparing against. Split out from
+/// [`RedisEVMMonitor::get_sentry_release`] so this is unit-testable without a
+/// live Redis.
+fn observed_sentry_release(published: Option<String>) -> Option<String> {
+    published.filter(|r| !r.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::observed_sentry_release;
+
+    #[test]
+    fn a_non_empty_published_release_is_observed() {
+        assert_eq!(
+            observed_sentry_release(Some("abc1234".to_string())),
+            Some("abc1234".to_string())
+        );
+    }
+
+    #[test]
+    fn an_empty_published_release_is_treated_as_not_observed() {
+        assert_eq!(observed_sentry_release(Some(String::new())), None);
+    }
+
+    #[test]
+    fn no_published_value_is_not_observed() {
+        assert_eq!(observed_sentry_release(None), None);
     }
 }
