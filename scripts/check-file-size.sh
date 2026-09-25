@@ -104,7 +104,7 @@ if ! changed="$(git diff --name-status -M --diff-filter=ACMR "${base}...HEAD" --
     exit 1
   fi
 fi
-# --name-status (not --name-only) so a rename or copy carries its source path
+# --name-status (not --name-only) so a rename carries its source path
 # alongside its destination. --diff-filter=ACMR includes renames, and
 # --name-only alone would give only the new path - so "before" was being
 # looked up at a path that never existed there, git show failed, and that
@@ -112,10 +112,15 @@ fi
 # already-oversized file - exactly the "split, worst first" work this script
 # exists to make safe - would then read as growing from 0 lines and fail the
 # build for a file that never changed.
+#
+# No C* arm: copy status only appears when -C/--find-copies is passed to
+# git diff, and it isn't here - only -M (rename detection) is. 'C' staying in
+# --diff-filter is inert (a filter narrows what git already detected, it
+# doesn't turn detection on), so a case arm for it would just be dead code.
 while IFS=$'\t' read -r dstatus path1 path2; do
   [ -z "$dstatus" ] && continue
   case "$dstatus" in
-    R*|C*) old="$path1"; f="$path2" ;;
+    R*) old="$path1"; f="$path2" ;;
     *) old="$path1"; f="$path1" ;;
   esac
   [ -f "$f" ] || continue

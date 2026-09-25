@@ -131,10 +131,20 @@ jobs:
       # same window. The existing backlog doesn't fail the build (that would
       # fail on all 47 the day this lands and get switched off in a week); what
       # fails is a file getting worse in this change, which is exactly the
-      # pattern that let the backlog double. Reuses the base-ref fetch above.
+      # pattern that let the backlog double.
+      #
+      # On push, github.base_ref is unset, so the naive fallback resolves to
+      # origin/testnet - and a push straight to testnet fetches the ref this
+      # job's own checkout just became, so that diff is empty by construction
+      # and the ratchet never fires on the trigger that matters most: a push
+      # landing right before it deploys. github.event.before is the sha the
+      # branch pointed at immediately before this push, which can never equal
+      # HEAD (there would be no push event to fire), and fetch-depth: 0 above
+      # already pulled it down as an ancestor - no extra fetch needed. Reuses
+      # the base-ref fetch above for the pull_request/merge_group case.
       - name: No file grows past the line limit
         env:
-          BASE_REF: origin/${{ github.base_ref || 'testnet' }}
+          BASE_REF: ${{ github.event_name == 'push' && github.event.before || format('origin/{0}', github.base_ref || 'testnet') }}
         run: ./scripts/check-file-size.sh
 
       - name: File size guard self-test
