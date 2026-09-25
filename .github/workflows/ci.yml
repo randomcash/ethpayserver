@@ -230,6 +230,13 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # For the `#[ignore]`d admin-deletion tests that exercise the unwatch
+      # step against a real `RedisEVMMonitor` rather than the `None` branch -
+      # without this, that code path only ever runs against nothing.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v4
 
@@ -277,6 +284,7 @@ jobs:
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
             cargo run --release --bin migrate_postgres
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
+          REDIS_URL="redis://127.0.0.1:6379" \
             cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1
 
   # Runs on pull requests too, deliberately. This used to be branch-only, so a

@@ -350,6 +350,39 @@ where
     Ok(Json(stores.into_iter().map(store_response).collect()))
 }
 
+/// Refuse with a 409 if `uid`'s stores hold any payment, payout or refund.
+///
+/// Called twice by `delete_user_account`: once before the (possibly slow)
+/// unwatch step, to fail fast on an obviously blocked account, and once
+/// immediately before the actual delete, because the state that first check
+/// saw can be stale by the time the delete runs.
+async fn ensure_no_financial_blockers(
+    ds: &data_service::PgDataService,
+    uid: UserId,
+) -> Result<(), (StatusCode, String)> {
+    let blockers = AccountDeletionReader::account_deletion_blockers(ds, uid)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not check the account.".to_string(),
+            )
+        })?;
+
+    if blockers.any() {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "This account's stores hold {}. Deleting it would destroy that \
+                 history, so it is refused.",
+                blockers.describe()
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Delete a user account.
 ///
 /// The same safeguard as self-service `DELETE /users/me`
@@ -412,25 +445,7 @@ where
         ));
     }
 
-    let blockers = AccountDeletionReader::account_deletion_blockers(ds, uid)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not check the account.".to_string(),
-            )
-        })?;
-
-    if blockers.any() {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "This account's stores hold {}. Deleting it would destroy that \
-                 history, so it is refused.",
-                blockers.describe()
-            ),
-        ));
-    }
+    ensure_no_financial_blockers(ds, uid).await?;
 
     let owned_stores = StoreRepository::get_stores_owned_by(ds, uid)
         .await
@@ -442,6 +457,14 @@ where
         })?;
     let store_ids: Vec<uuid::Uuid> = owned_stores.iter().map(|s| s.id.0).collect();
     unwatch_stores_before_delete(&state, &store_ids).await?;
+
+    // `unwatch_stores_before_delete` makes one network round-trip per
+    // watched address, which can take long enough for a payment to land
+    // against this account in the meantime. Trust the state right before
+    // the delete, not the state from before that async work - otherwise a
+    // clear check made before it would let the cascade below silently
+    // destroy financial history that did not exist yet at the first check.
+    ensure_no_financial_blockers(ds, uid).await?;
 
     UserRepository::delete_user(ds, uid).await.map_err(|_| {
         (
@@ -498,8 +521,22 @@ where
                 format!("Watched address {} is not a valid address.", info.address),
             )
         })?;
-        let token_contract: Option<Address> =
-            info.token_address.as_deref().and_then(|t| t.parse().ok());
+        // A malformed value here must not be treated as "no token" - that
+        // would silently unwatch the native-asset entry instead of the
+        // ERC20 one, deactivate the row anyway, and leave the real watch
+        // live with nothing to show for it. Fail closed, like `addr` above.
+        let token_contract: Option<Address> = info
+            .token_address
+            .as_deref()
+            .map(|t| {
+                t.parse().map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Token address {t} is not a valid address."),
+                    )
+                })
+            })
+            .transpose()?;
         let eip155 = info.chain_id.evm_chain_id().ok_or_else(|| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -530,6 +567,44 @@ where
                 "Could not deactivate a watched address.".to_string(),
             )
         })?;
+    }
+
+    Ok(())
+}
+
+/// Refuse with a 409 if `sid` holds any payout or refund.
+///
+/// Called twice by `hard_delete_store`, for the same reason
+/// `ensure_no_financial_blockers` is called twice by `delete_user_account`.
+async fn ensure_no_payout_or_refund(
+    ds: &data_service::PgDataService,
+    sid: StoreId,
+) -> Result<(), (StatusCode, String)> {
+    let (payout_count, _) = PayoutReader::get_payouts_for_store(ds, sid, 1, 0)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not check payouts.".to_string(),
+            )
+        })?;
+    let (refund_count, _) = RefundReader::get_refunds_for_store(ds, sid, 1, 0)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not check refunds.".to_string(),
+            )
+        })?;
+    if payout_count > 0 || refund_count > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "This store holds {payout_count} payout(s) and {refund_count} refund(s), \
+                 which a synthetic E2E store should never have. Refusing rather than \
+                 destroying or orphaning them.",
+            ),
+        ));
     }
 
     Ok(())
@@ -606,34 +681,15 @@ where
         ));
     }
 
-    let (payout_count, _) = PayoutReader::get_payouts_for_store(ds, sid, 1, 0)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not check payouts.".to_string(),
-            )
-        })?;
-    let (refund_count, _) = RefundReader::get_refunds_for_store(ds, sid, 1, 0)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not check refunds.".to_string(),
-            )
-        })?;
-    if payout_count > 0 || refund_count > 0 {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "This store holds {payout_count} payout(s) and {refund_count} refund(s), \
-                 which a synthetic E2E store should never have. Refusing rather than \
-                 destroying or orphaning them.",
-            ),
-        ));
-    }
+    ensure_no_payout_or_refund(ds, sid).await?;
 
     unwatch_stores_before_delete(&state, std::slice::from_ref(&sid.0)).await?;
+
+    // Same reasoning as `delete_user_account`'s second
+    // `ensure_no_financial_blockers` call: the unwatch step above is
+    // unbounded async work, so re-check right before the delete rather than
+    // trusting a check made before it.
+    ensure_no_payout_or_refund(ds, sid).await?;
 
     StoreRepository::delete_store(ds, sid).await.map_err(|_| {
         (

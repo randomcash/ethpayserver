@@ -13,12 +13,15 @@
 //! what widens its blast radius if either check silently stops firing.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use evm::monitor::{COMMANDS_CHANNEL, EVENTS_CHANNEL, EventBridge, MonitorCommand, RedisBridge};
 use sqlx::PgPool;
+use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use auth::{
@@ -118,6 +121,39 @@ async fn seed_payment(pool: &PgPool, invoice: &str) {
     .expect("seed payment");
 }
 
+/// A pending invoice's still-watched address - the case `get_active_watched_addresses_for_stores`
+/// exists for, since it has no payment and so trips none of the other
+/// cleanup queries (all scoped to expired/paid/cancelled invoices).
+async fn seed_payment_option(pool: &PgPool, invoice: &str, address: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO payment_options \
+         (id, invoice_id, payment_method_id, chain_id, asset_type, asset_symbol, payment_address, amount) \
+         VALUES ($1, $2, 'ETH-11155111', 'eip155:11155111', 'native', 'ETH', $3, 1)",
+    )
+    .bind(id)
+    .bind(invoice)
+    .bind(address)
+    .execute(pool)
+    .await
+    .expect("seed payment option");
+    id
+}
+
+async fn seed_watched_address(pool: &PgPool, invoice: &str, payment_option: Uuid, address: &str) {
+    sqlx::query(
+        "INSERT INTO watched_addresses \
+         (invoice_id, payment_option_id, address, chain_id, expires_at) \
+         VALUES ($1, $2, $3, 'eip155:11155111', now() + interval '1 hour')",
+    )
+    .bind(invoice)
+    .bind(payment_option)
+    .bind(address)
+    .execute(pool)
+    .await
+    .expect("seed watched address");
+}
+
 async fn seed_payout(pool: &PgPool, store: Uuid) {
     sqlx::query(
         "INSERT INTO payouts (id, store_id, destination_address, chain_id, asset_symbol, amount) \
@@ -162,10 +198,17 @@ fn admin_auth(id: Uuid) -> AdminAuth {
 }
 
 fn app_state(data_service: Arc<PgDataService>) -> PgAppState<UnusedSessionService> {
+    app_state_with_monitor(data_service, None)
+}
+
+fn app_state_with_monitor(
+    data_service: Arc<PgDataService>,
+    evm_monitor: Option<Arc<RedisEVMMonitor>>,
+) -> PgAppState<UnusedSessionService> {
     PgAppState::new(
         data_service,
         Arc::new(UnusedSessionService),
-        None::<Arc<RedisEVMMonitor>>,
+        evm_monitor,
         Arc::new(NoOpRateProvider),
         Arc::new(server::services::email::NoopEmailSender),
     )
@@ -485,5 +528,78 @@ async fn hard_delete_store_refuses_when_a_payout_exists() {
     assert_eq!(still_there, 1, "the refusal must not have deleted anything");
 
     clear_payouts_for_store(state.data_service.pool(), store.id.0).await;
+    cleanup(state.data_service.pool(), &[caller, target]).await;
+}
+
+/// Every test above builds `PgAppState` with `evm_monitor: None`, so
+/// `unwatch_stores_before_delete` always takes its early return - the branch
+/// that actually talks to the monitor has never run in CI, and a regression
+/// that broke, reordered or dropped that call would pass every test here.
+/// This is the one test that wires in a real `RedisEVMMonitor` and listens
+/// on the commands channel it publishes to, so the delete path is only
+/// allowed to succeed once the monitor was actually told to stop watching.
+#[tokio::test]
+#[ignore]
+async fn hard_delete_store_tells_a_live_monitor_to_unwatch_a_pending_invoices_address() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let Some(redis_url) = std::env::var("REDIS_URL").ok() else {
+        return;
+    };
+    let monitor = RedisEVMMonitor::connect(&redis_url)
+        .await
+        .unwrap_or_else(|e| panic!("REDIS_URL is set but connecting failed: {e}"));
+
+    let subscriber = RedisBridge::new(&redis_url, EVENTS_CHANNEL, COMMANDS_CHANNEL)
+        .await
+        .expect("connect a second bridge to observe published commands");
+    let mut commands = subscriber
+        .subscribe_commands()
+        .await
+        .expect("subscribe to the commands channel");
+
+    let caller = seed_user(pg.pool(), "server_admin").await;
+    let target = seed_user(pg.pool(), "user").await;
+    let store = Store::new(
+        "e2e-synthetic-2026-01-04T00-00-00-000Z".to_string(),
+        UserId(target),
+    );
+    pg.create_store_owned_by(&store, UserId(target))
+        .await
+        .expect("seed store");
+    let invoice = seed_invoice(pg.pool(), store.id.0).await;
+    // Never paid - the case `get_active_watched_addresses_for_stores` exists
+    // for, and the one every other query in this file's blocker checks would
+    // miss.
+    let address = format!("0x{:040x}", Uuid::new_v4().as_u128());
+    let payment_option = seed_payment_option(pg.pool(), &invoice, &address).await;
+    seed_watched_address(pg.pool(), &invoice, payment_option, &address).await;
+
+    let state = app_state_with_monitor(Arc::new(pg), Some(Arc::new(monitor)));
+
+    let result = hard_delete_store(
+        admin_auth(caller),
+        Path(store.id.0.to_string()),
+        State(state.clone()),
+    )
+    .await;
+    assert_eq!(result, Ok(StatusCode::NO_CONTENT));
+
+    let published = tokio::time::timeout(Duration::from_secs(5), commands.next())
+        .await
+        .expect("an unwatch command should have been published before the delete completed")
+        .expect("the commands stream ended unexpectedly");
+
+    match published {
+        MonitorCommand::UnwatchAddress(cmd) => {
+            assert_eq!(cmd.chain_id, 11155111);
+            let expected: evm::Address = address.parse().expect("valid test address");
+            assert_eq!(cmd.address, expected);
+            assert_eq!(cmd.token_contract, None);
+        }
+        other => panic!("expected an UnwatchAddress command, got {other:?}"),
+    }
+
     cleanup(state.data_service.pool(), &[caller, target]).await;
 }
