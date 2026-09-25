@@ -22,14 +22,13 @@ use async_trait::async_trait;
 use auth::{
     Result as AuthResult, Role, Session, SessionId, SessionService, Store, UserId, UserInfo,
 };
-use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use data_service::store_creation::StoreCreationWriter;
 use data_service::{PgDataService, StorePaymentMethodWriter, WalletWriter};
 use rates::NoOpRateProvider;
 use server::api::AuthenticatedUser;
-use server::api::stores::{StoreWalletQuery, get_store_wallet};
+use server::api::stores::{StoreWalletQuery, StoreWalletResult, get_store_wallet};
 use server::state::PgAppState;
 use sqlx::PgPool;
 use types::ChainId;
@@ -117,8 +116,8 @@ async fn wallet_for_method(
     owner: Uuid,
     store_id: Uuid,
     method_id: Uuid,
-) -> Result<api_types::StoreWalletResponse, StatusCode> {
-    get_store_wallet(
+) -> Result<server::api::stores::MethodWalletResponse, StatusCode> {
+    let result = get_store_wallet(
         AuthenticatedUser(user_info(owner)),
         State(state.clone()),
         Path(store_id),
@@ -127,14 +126,21 @@ async fn wallet_for_method(
             payment_method_id: Some(method_id),
         }),
     )
-    .await
-    .map(|Json(body)| body)
+    .await?;
+
+    match result {
+        StoreWalletResult::Method(body) => Ok(body),
+        StoreWalletResult::Bare(_) => {
+            panic!("payment_method_id was set - the handler must take the method branch")
+        }
+    }
 }
 
 /// The property the ticket exists for, reached through the endpoint rather
 /// than the repository: once a pinned method's wallet and the store's bare
 /// resolution diverge, `?payment_method_id=...` must report the pin, and
-/// `is_override` must say so.
+/// `differs_from_store_wallet` must say so - `is_override` must not, since no
+/// override is configured on the store at all.
 #[tokio::test]
 #[ignore]
 async fn a_pinned_methods_wallet_outlives_a_primary_change_through_the_endpoint() {
@@ -176,16 +182,22 @@ async fn a_pinned_methods_wallet_outlives_a_primary_change_through_the_endpoint(
         .await
         .expect("method-scoped read");
     assert_eq!(
-        scoped.wallet.id, pinned_wallet,
+        scoped.store_wallet.wallet.id, pinned_wallet,
         "the method-scoped endpoint must report the pin, not the new primary"
     );
     assert!(
-        scoped.is_override,
+        scoped.differs_from_store_wallet,
         "the method's resolution now diverges from the store's bare walk - \
-         is_override must say so"
+         differs_from_store_wallet must say so"
+    );
+    assert!(
+        !scoped.store_wallet.is_override,
+        "no override is configured on the store - only the account primary \
+         moved - so is_override must not claim one, even though the \
+         method-scoped wallet differs from the bare walk"
     );
 
-    let store_bare = get_store_wallet(
+    let store_bare = match get_store_wallet(
         AuthenticatedUser(user_info(owner)),
         State(state),
         Path(store.id.0),
@@ -196,12 +208,19 @@ async fn a_pinned_methods_wallet_outlives_a_primary_change_through_the_endpoint(
     )
     .await
     .expect("store-bare read")
-    .0;
+    {
+        StoreWalletResult::Bare(body) => body,
+        StoreWalletResult::Method(_) => panic!("no payment_method_id - must take the bare branch"),
+    };
     assert_eq!(
         store_bare.wallet.id, second.id,
         "the bare form is documented to follow the primary - confirming the \
          two forms actually disagree, which is the whole point of asking for \
          the method-scoped one"
+    );
+    assert!(
+        !store_bare.is_override,
+        "the bare form's is_override must also say no override is configured"
     );
 }
 
