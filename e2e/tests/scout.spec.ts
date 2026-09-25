@@ -316,7 +316,19 @@ interface PluginPagesResponse {
  */
 async function discoverPluginRoutes(): Promise<string[]> {
   const sessionRaw = await scoutPage.evaluate(() => localStorage.getItem('ps_session'));
-  const sessionId = sessionRaw ? (JSON.parse(sessionRaw) as { session_id?: string }).session_id : undefined;
+  // Every other exit path in this function turns a broken assumption into an
+  // issue() rather than a throw - this one shouldn't be the exception just
+  // because it runs first. An unparsable ps_session would otherwise crash the
+  // whole route-coverage test instead of just failing to authenticate this
+  // one request.
+  let sessionId: string | undefined;
+  if (sessionRaw) {
+    try {
+      sessionId = (JSON.parse(sessionRaw) as { session_id?: string }).session_id;
+    } catch {
+      issue('NETWORK', 'ps_session in localStorage was not valid JSON - could not authenticate the plugin discovery request');
+    }
+  }
   const resp = await scoutPage.request
     .get('/api/plugins', sessionId ? { headers: { Authorization: `Bearer ${sessionId}` } } : {})
     .catch(() => null);
@@ -356,7 +368,17 @@ async function discoverPluginRoutes(): Promise<string[]> {
     return plugin.pages.map((page) => `/evm/plugins/${plugin.slug}/${page.path}`);
   });
   if (routes.length === 0) {
-    issue('ROUTE_DISCOVERY', 'GET /api/plugins listed zero pages for this account - the billing surface would go unwalked');
+    if (isRemote) {
+      // The CI fixture plugin that guarantees this account has at least one
+      // page (see the comment above) is seeded by `.github/workflows/ci.yml`
+      // and is not something a live deployment is guaranteed to have - a
+      // remote run against a real merchant account with no plugins installed
+      // would otherwise fail here for a reason that has nothing to do with
+      // route discovery being broken.
+      issue('COVERAGE_GAP', 'GET /api/plugins listed zero pages for this account - E2E_REMOTE has no guarantee of a fixture plugin, so the billing surface was not checked');
+    } else {
+      issue('ROUTE_DISCOVERY', 'GET /api/plugins listed zero pages for this account - the billing surface would go unwalked');
+    }
   }
   return routes;
 }
@@ -1076,92 +1098,145 @@ test.describe('Auth & Authenticated', () => {
     // slower than clicking through the sidebar, hence the wider budget.
     test.setTimeout(90_000);
 
-    // Store, wallet and invoice detail pages need a real record to land on -
-    // see the comment above PLACEHOLDER_ROUTES. Creating this invoice also
-    // creates the account wallet backing its store's payment method
-    // (`store_payment_method.rs`'s `wallet_for_store_xpub`), so one seed
-    // covers all three detail pages plus checkout below.
-    const seedName = `scout-${Date.now().toString(36)}`;
-    await createStoreReadyForInvoices(scoutPage, seedName);
-    // createStoreAndOpen (inside createStoreReadyForInvoices) leaves scoutPage
-    // on the store's own detail page and nothing between here and the capture
-    // navigates away, so this is the store's real id - needed below to check
-    // the crawl actually reached this page, not just assumed it would.
-    const storeId = new URL(scoutPage.url()).pathname.split('/').pop()!;
-    // Shared with seedPaymentForInvoice below - the seeded payment has to pay
-    // this exact amount or the invoice stays "underpaid" and the crawl never
-    // renders the paid state, which is the one a merchant actually cares about.
-    const invoiceAmountEth = '0.01';
-    await createInvoice(scoutPage, invoiceAmountEth);
-    // createInvoice already waited for the URL to match /evm/invoices/.+, so
-    // the last path segment is guaranteed non-empty here.
-    const invoiceId = new URL(scoutPage.url()).pathname.split('/').pop()!;
-    // See seedPaymentForInvoice's comment in fixtures/db.ts: a real payment
-    // needs on-chain settlement this walk can't produce, so this inserts the
-    // row directly - only possible where a DB connection exists, which
-    // E2E_REMOTE's live-deployment runs do not have.
-    const paymentId = isRemote
-      ? undefined
-      : await seedPaymentForInvoice(invoiceId, parseEther(invoiceAmountEth));
+    // The whole body below is throw-prone (UI flow, a real DB insert) and
+    // this describe runs in serial mode, where an uncaught throw doesn't just
+    // fail this test - it skips `route coverage: mobile` AND `summary: all
+    // issues`, discarding every issue() already collected earlier in the run
+    // (a panic, a 500) with nothing to say why. That is the same
+    // collected-then-never-asserted failure the ticket exists to close, just
+    // moved from "printed instead of failed" to "thrown away by a sibling
+    // test's crash." Catching here keeps the rest of the suite - and its
+    // verdict - intact; the failure itself still fails the run via issue().
+    try {
+      // Store, wallet and invoice detail pages need a real record to land on
+      // - see the comment above PLACEHOLDER_ROUTES. Creating this invoice
+      // also creates the account wallet backing its store's payment method
+      // (`store_payment_method.rs`'s `wallet_for_store_xpub`), so one seed
+      // covers all three detail pages plus checkout below.
+      const seedName = `scout-${Date.now().toString(36)}`;
+      await createStoreReadyForInvoices(scoutPage, seedName);
+      // createStoreAndOpen (inside createStoreReadyForInvoices) leaves
+      // scoutPage on the store's own detail page and nothing between here and
+      // the capture navigates away, so this is the store's real id - needed
+      // below to check the crawl actually reached this page, not just
+      // assumed it would.
+      const storeId = new URL(scoutPage.url()).pathname.split('/').pop()!;
+      // Shared with seedPaymentForInvoice below - the seeded payment has to
+      // pay this exact amount or the invoice stays "underpaid" and the crawl
+      // never renders the paid state, which is the one a merchant actually
+      // cares about.
+      const invoiceAmountEth = '0.01';
+      await createInvoice(scoutPage, invoiceAmountEth);
+      // createInvoice already waited for the URL to match /evm/invoices/.+,
+      // so the last path segment is guaranteed non-empty here.
+      const invoiceId = new URL(scoutPage.url()).pathname.split('/').pop()!;
+      // See seedPaymentForInvoice's comment in fixtures/db.ts: a real payment
+      // needs on-chain settlement this walk can't produce, so this inserts
+      // the row directly - only possible where a DB connection exists, which
+      // E2E_REMOTE's live-deployment runs do not have.
+      const paymentId = isRemote
+        ? undefined
+        : await seedPaymentForInvoice(invoiceId, parseEther(invoiceAmountEth));
 
-    await gotoAuthed('/evm');
-    // '/evm' itself has to be seeded explicitly: discoverLinkedRoutes only
-    // returns links found ON this page, not the path of the page itself, and
-    // nothing guarantees the dashboard renders a self-referential <a
-    // href="/evm">. Without this, the busiest page in the app - the one every
-    // session lands on - would only reach the mobile pass by accident.
-    //
-    // checkout_url() in the client's invoice detail page renders the
-    // customer-facing link as an absolute URL behind a "Copy link" button,
-    // not an <a href>, so it can never turn up in discoverLinkedRoutes -
-    // reaching it needs the real id captured above.
-    const dashboardLinks = await discoverLinkedRoutes();
-    if (dashboardLinks.length < MIN_DASHBOARD_LINKS) {
-      issue(
-        'ROUTE_DISCOVERY',
-        `Dashboard sidebar rendered only ${dashboardLinks.length} route link(s), expected at least ${MIN_DASHBOARD_LINKS} - a route may have silently dropped out of the nav`,
-      );
-    }
-
-    discoveredRoutes = await walkRoutes([
-      '/evm',
-      ...dashboardLinks,
-      ...(await discoverPluginRoutes()),
-      `/checkout/${invoiceId}`,
-      ...PLACEHOLDER_ROUTES,
-    ]);
-
-    // The comment above PLACEHOLDER_ROUTES assumes the store/invoice list
-    // pages render a plain <a href> to the record just seeded, so the crawl
-    // finds it on its own - never actually checked. If either list renders its
-    // row via a click handler or a non-anchor element instead, the crawl
-    // silently never visits that detail page and the walk above still
-    // "succeeds" having covered neither. `discoveredRoutes` is every path the
-    // walk actually landed on, so checking it here is checking the real
-    // outcome instead of the assumption.
-    if (!discoveredRoutes.includes(`/evm/stores/${storeId}`)) {
-      issue('ROUTE_DISCOVERY', `Store detail page /evm/stores/${storeId} was never crawled - the store card's link may not be a plain <a href>`);
-    }
-    if (!discoveredRoutes.includes(`/evm/invoices/${invoiceId}`)) {
-      issue('ROUTE_DISCOVERY', `Invoice detail page /evm/invoices/${invoiceId} was never crawled - the invoice row's link may not be a plain <a href>`);
-    }
-    if (paymentId) {
-      if (!discoveredRoutes.includes(`/evm/payments/${paymentId}`)) {
-        issue('ROUTE_DISCOVERY', `Payment detail page /evm/payments/${paymentId} was never crawled - the payment row's link may not be a plain <a href>`);
+      await gotoAuthed('/evm');
+      // '/evm' itself has to be seeded explicitly: discoverLinkedRoutes only
+      // returns links found ON this page, not the path of the page itself,
+      // and nothing guarantees the dashboard renders a self-referential <a
+      // href="/evm">. Without this, the busiest page in the app - the one
+      // every session lands on - would only reach the mobile pass by
+      // accident.
+      //
+      // checkout_url() in the client's invoice detail page renders the
+      // customer-facing link as an absolute URL behind a "Copy link" button,
+      // not an <a href>, so it can never turn up in discoverLinkedRoutes -
+      // reaching it needs the real id captured above.
+      const dashboardLinks = await discoverLinkedRoutes();
+      if (dashboardLinks.length < MIN_DASHBOARD_LINKS) {
+        issue(
+          'ROUTE_DISCOVERY',
+          `Dashboard sidebar rendered only ${dashboardLinks.length} route link(s), expected at least ${MIN_DASHBOARD_LINKS} - a route may have silently dropped out of the nav`,
+        );
       }
-    } else {
-      // isRemote: no DB to seed a payment against, so there is no paymentId
-      // to check and the branch above silently never runs. Recorded so the
-      // gap is visible in every remote run's issue log rather than looking
-      // like a check that passed - see gatingIssues() for why this doesn't
-      // fail the run.
-      issue('COVERAGE_GAP', 'Payment detail page was not checked - E2E_REMOTE has no DB to seed a payment against');
-    }
-    // No id captured for the wallet the invoice's payment method implicitly
-    // created (see the comment above), so this checks the shape of the route
-    // rather than a specific one - a fresh scout account has exactly one.
-    if (!discoveredRoutes.some((route) => /^\/evm\/wallets\/[^/]+$/.test(route))) {
-      issue('ROUTE_DISCOVERY', 'No wallet detail page was crawled - the wallet card\'s link may not be a plain <a href>');
+
+      discoveredRoutes = await walkRoutes([
+        '/evm',
+        ...dashboardLinks,
+        ...(await discoverPluginRoutes()),
+        `/checkout/${invoiceId}`,
+        ...PLACEHOLDER_ROUTES,
+      ]);
+
+      // The comment above PLACEHOLDER_ROUTES assumes the store/invoice list
+      // pages render a plain <a href> to the record just seeded, so the
+      // crawl finds it on its own - never actually checked. If either list
+      // renders its row via a click handler or a non-anchor element instead,
+      // the crawl silently never visits that detail page and the walk above
+      // still "succeeds" having covered neither. `discoveredRoutes` is every
+      // path the walk actually landed on, so checking it here is checking
+      // the real outcome instead of the assumption.
+      if (!discoveredRoutes.includes(`/evm/stores/${storeId}`)) {
+        issue('ROUTE_DISCOVERY', `Store detail page /evm/stores/${storeId} was never crawled - the store card's link may not be a plain <a href>`);
+      }
+      if (!discoveredRoutes.includes(`/evm/invoices/${invoiceId}`)) {
+        issue('ROUTE_DISCOVERY', `Invoice detail page /evm/invoices/${invoiceId} was never crawled - the invoice row's link may not be a plain <a href>`);
+      }
+      if (paymentId) {
+        if (!discoveredRoutes.includes(`/evm/payments/${paymentId}`)) {
+          issue('ROUTE_DISCOVERY', `Payment detail page /evm/payments/${paymentId} was never crawled - the payment row's link may not be a plain <a href>`);
+        }
+        // Reaching the invoice detail URL proves nothing about what it
+        // showed - seedPaymentForInvoice exists specifically to make this
+        // invoice render as paid, and a page stuck on "Underpaid" (a
+        // parseEther-vs-server decimal drift, or paid-status derived from a
+        // field this raw INSERT doesn't populate) would still pass the
+        // route-reachability checks above. Reading the rendered status and
+        // amount is what actually exercises the path "the one that matters
+        // most to a merchant" - route coverage alone throws that signal away.
+        await gotoAuthed(`/evm/invoices/${invoiceId}`);
+        const statusText = await scoutPage
+          .locator('.invoice-detail-title-row .badge')
+          .textContent({ timeout: 5_000 })
+          .catch(() => null);
+        if (statusText?.trim() !== 'Paid') {
+          issue('PAYMENT', `Invoice ${invoiceId} shows status "${statusText?.trim() ?? '(not found)'}" after a full payment was seeded - expected "Paid"`);
+        }
+        const receivedText = await scoutPage
+          .locator('.detail-value-success')
+          .first()
+          .textContent({ timeout: 5_000 })
+          .catch(() => null);
+        if (!receivedText?.includes(invoiceAmountEth)) {
+          issue('PAYMENT', `Invoice ${invoiceId} shows amount received "${receivedText?.trim() ?? '(not found)'}" - expected it to include ${invoiceAmountEth}`);
+        }
+      } else {
+        // isRemote: no DB to seed a payment against, so there is no
+        // paymentId to check and the branch above silently never runs.
+        // Recorded so the gap is visible in every remote run's issue log
+        // rather than looking like a check that passed - see gatingIssues()
+        // for why this doesn't fail the run.
+        issue('COVERAGE_GAP', 'Payment detail page and paid status were not checked - E2E_REMOTE has no DB to seed a payment against');
+      }
+      // No id captured for the wallet the invoice's payment method implicitly
+      // created (see the comment above), so this checks the shape of the
+      // route rather than a specific one - a fresh scout account has exactly
+      // one.
+      if (!discoveredRoutes.some((route) => /^\/evm\/wallets\/[^/]+$/.test(route))) {
+        issue('ROUTE_DISCOVERY', 'No wallet detail page was crawled - the wallet card\'s link may not be a plain <a href>');
+      }
+    } catch (err) {
+      // gotoAuthed (called above, both for '/evm' and for the invoice detail
+      // page) throws its own SkipError via test.skip() when the session was
+      // lost - already recorded as a SESSION issue and meant to end this
+      // test as "skipped", not "failed". Swallowing that here instead of
+      // re-throwing would fight gotoAuthed's own doc comment, which exists
+      // specifically to make a lost session a clean skip rather than a
+      // cascading failure. Anything else - a UI flow that stalled, the raw
+      // DB insert - really is unhandled, and becomes a SETUP issue instead
+      // of taking the rest of this serial file down with it.
+      if (test.info().status === 'skipped') {
+        throw err;
+      }
+      issue('SETUP', `route coverage: desktop failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 
