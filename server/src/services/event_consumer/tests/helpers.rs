@@ -149,6 +149,14 @@ impl email::EmailSender for MockEmailSender {
         Ok(())
     }
 
+    async fn send_account_notice(
+        &self,
+        _to: &str,
+        _notice: &email::AccountNotice,
+    ) -> Result<(), email::EmailError> {
+        Ok(())
+    }
+
     fn is_configured(&self) -> bool {
         true
     }
