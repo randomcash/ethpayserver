@@ -94,7 +94,7 @@ test.beforeAll(async ({ browser }) => {
     } else if (status === 429) {
       issue('NETWORK', `${req.method()} ${url.pathname} -> 429 (rate limited)`);
     } else if (status === 401 || status === 403) {
-      issue('NETWORK', `${req.method()} ${url.pathname} -> ${status} while authenticated`);
+      issue('NETWORK', `${req.method()} ${url.pathname} -> ${status} ${authenticated ? 'while authenticated' : 'before authentication'}`);
     } else if (status >= 400) {
       issue('NETWORK', `${req.method()} ${url.pathname} -> ${status}`);
     }
@@ -179,6 +179,14 @@ const MOBILE_VIEWPORT = { width: 375, height: 812 };
  * data-dependent empty state that renders no link - stays invisible the same
  * way it did before this file existed. Give it its own data source, the way
  * `discoverPluginRoutes` does, rather than assuming a link will appear here.
+ *
+ * `MIN_DASHBOARD_LINKS` below narrows that gap for the one set of routes
+ * where "how many links should be there" is actually knowable without a
+ * router read: the sidebar's unconditional top-level pages. It cannot say
+ * anything about a route reachable only through some other page's
+ * conditionally-rendered link - that's still the open gap this comment
+ * describes - but it does mean the sidebar's own routes can no longer drop
+ * out silently.
  */
 const ROUTE_HREF_PATTERN = /^\/(evm(\/|$)|checkout\/)/;
 
@@ -300,6 +308,19 @@ async function discoverPluginRoutes(): Promise<string[]> {
 // detail page therefore stays a hand-listed 404 visit - true coverage of it
 // would need that heavier suite, not this one.
 const PLACEHOLDER_ROUTES = [`/evm/payments/${PLACEHOLDER_ID}`, '/evm/nonexistent'];
+
+// layout.rs renders these five links unconditionally in the sidebar for any
+// authenticated account - no role, plan or data-state gate around any of
+// them - so unlike a stores/invoices/wallets page's own link count (which
+// legitimately varies with what the account has), a dashboard crawl finding
+// fewer than this many is never "this account just doesn't have that yet."
+// It means one dropped out of the nav - a role gate or feature flag added
+// later - and a DOM crawl has no way to notice a link's *absence* on its own.
+// This is the bounded, cheap substitute for reading the router directly: it
+// can't tell you about a route with no rendered link anywhere (that still
+// needs a data source of its own, the way discoverPluginRoutes has), but it
+// does turn "the sidebar quietly lost a route" from nothing into an issue().
+const MIN_DASHBOARD_LINKS = 5;
 
 // Safety valve, not an expected ceiling: this app has nowhere near this many
 // distinct routes, so hitting it means link discovery found something
@@ -964,9 +985,17 @@ test.describe('Auth & Authenticated', () => {
     // customer-facing link as an absolute URL behind a "Copy link" button,
     // not an <a href>, so it can never turn up in discoverLinkedRoutes -
     // reaching it needs the real id captured above.
+    const dashboardLinks = await discoverLinkedRoutes();
+    if (dashboardLinks.length < MIN_DASHBOARD_LINKS) {
+      issue(
+        'ROUTE_DISCOVERY',
+        `Dashboard sidebar rendered only ${dashboardLinks.length} route link(s), expected at least ${MIN_DASHBOARD_LINKS} - a route may have silently dropped out of the nav`,
+      );
+    }
+
     discoveredRoutes = await walkRoutes([
       '/evm',
-      ...(await discoverLinkedRoutes()),
+      ...dashboardLinks,
       ...(await discoverPluginRoutes()),
       `/checkout/${invoiceId}`,
       ...PLACEHOLDER_ROUTES,
