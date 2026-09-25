@@ -1233,7 +1233,13 @@ test.describe('Auth & Authenticated', () => {
       // cascading failure. Anything else - a UI flow that stalled, the raw
       // DB insert - really is unhandled, and becomes a SETUP issue instead
       // of taking the rest of this serial file down with it.
-      if (test.info().status === 'skipped') {
+      //
+      // test.skip() sets `expectedStatus`, not `status` - `status` is only
+      // populated once the test has actually finished (see TestInfo's own
+      // docs), so it reads as undefined here, mid-test, no matter what threw.
+      // Checking it would make this branch dead code and swallow every
+      // SkipError into a SETUP issue instead of letting it skip.
+      if (test.info().expectedStatus === 'skipped') {
         throw err;
       }
       issue('SETUP', `route coverage: desktop failed: ${err instanceof Error ? err.message : String(err)}`);
