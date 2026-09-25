@@ -164,8 +164,17 @@ export async function createUserWithApiKey(
  * account doesn't have. Inserting the row `PgDataService::upsert` would have
  * written skips the ceremony, not the schema - the same trade
  * `createUserWithApiKey` above already makes for a credential.
+ *
+ * `amountWei` must equal the invoice's own amount in base units - a mismatch
+ * leaves the invoice permanently "underpaid" and the crawl this feeds never
+ * exercises the paid-invoice rendering path, which is the one that matters
+ * most to a merchant. Callers pass the same amount they gave `createInvoice`,
+ * converted the same way the app converts it, so the two stay in lockstep.
  */
-export async function seedPaymentForInvoice(invoiceId: string): Promise<string> {
+export async function seedPaymentForInvoice(
+  invoiceId: string,
+  amountWei: bigint,
+): Promise<string> {
   const crypto = await import('node:crypto');
   const txHash = `0x${crypto.randomBytes(32).toString('hex')}`;
   const fromAddress = `0x${crypto.randomBytes(20).toString('hex')}`;
@@ -176,10 +185,10 @@ export async function seedPaymentForInvoice(invoiceId: string): Promise<string> 
     const { rows } = await client.query(
       `INSERT INTO payments (invoice_id, chain_id, asset_type, asset_symbol, amount,
                               tx_hash, block_number, from_address, confirmed_at, tx_index)
-       VALUES ($1, 'eip155:11155111', 'native', 'ETH', '1000000000000000',
-               $2, 1, $3, NOW(), -1)
+       VALUES ($1, 'eip155:11155111', 'native', 'ETH', $2,
+               $3, 1, $4, NOW(), -1)
        RETURNING id`,
-      [invoiceId, txHash, fromAddress],
+      [invoiceId, amountWei.toString(), txHash, fromAddress],
     );
     return rows[0].id as string;
   } finally {

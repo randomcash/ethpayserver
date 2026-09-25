@@ -5,6 +5,7 @@
  * Run with:  E2E_REMOTE=true npx playwright test tests/scout.spec.ts
  */
 import { test as base, expect, type Page, type ConsoleMessage } from '@playwright/test';
+import { parseEther } from 'viem';
 import { setupVirtualAuthenticator, isClientPanic } from '../fixtures/auth';
 import { seedPaymentForInvoice } from '../fixtures/db';
 import { createInvoice } from '../fixtures/invoices';
@@ -1085,7 +1086,11 @@ test.describe('Auth & Authenticated', () => {
     // navigates away, so this is the store's real id - needed below to check
     // the crawl actually reached this page, not just assumed it would.
     const storeId = new URL(scoutPage.url()).pathname.split('/').pop()!;
-    await createInvoice(scoutPage, '0.01');
+    // Shared with seedPaymentForInvoice below - the seeded payment has to pay
+    // this exact amount or the invoice stays "underpaid" and the crawl never
+    // renders the paid state, which is the one a merchant actually cares about.
+    const invoiceAmountEth = '0.01';
+    await createInvoice(scoutPage, invoiceAmountEth);
     // createInvoice already waited for the URL to match /evm/invoices/.+, so
     // the last path segment is guaranteed non-empty here.
     const invoiceId = new URL(scoutPage.url()).pathname.split('/').pop()!;
@@ -1093,7 +1098,9 @@ test.describe('Auth & Authenticated', () => {
     // needs on-chain settlement this walk can't produce, so this inserts the
     // row directly - only possible where a DB connection exists, which
     // E2E_REMOTE's live-deployment runs do not have.
-    const paymentId = isRemote ? undefined : await seedPaymentForInvoice(invoiceId);
+    const paymentId = isRemote
+      ? undefined
+      : await seedPaymentForInvoice(invoiceId, parseEther(invoiceAmountEth));
 
     await gotoAuthed('/evm');
     // '/evm' itself has to be seeded explicitly: discoverLinkedRoutes only
