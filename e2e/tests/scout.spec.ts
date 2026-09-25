@@ -1205,8 +1205,13 @@ test.describe('Auth & Authenticated', () => {
           .first()
           .textContent({ timeout: 5_000 })
           .catch(() => null);
-        if (!receivedText?.includes(invoiceAmountEth)) {
-          issue('PAYMENT', `Invoice ${invoiceId} shows amount received "${receivedText?.trim() ?? '(not found)'}" - expected it to include ${invoiceAmountEth}`);
+        // A substring check here (`receivedText.includes(invoiceAmountEth)`)
+        // would pass on "10.01" or "0.010" ETH just as readily as on "0.01" -
+        // the exact wrong-decimal bug this assertion exists to catch. Extract
+        // the numeric token and compare it as a number instead.
+        const receivedAmount = Number(receivedText?.match(/-?\d+(\.\d+)?/)?.[0]);
+        if (receivedAmount !== Number(invoiceAmountEth)) {
+          issue('PAYMENT', `Invoice ${invoiceId} shows amount received "${receivedText?.trim() ?? '(not found)'}" - expected ${invoiceAmountEth}`);
         }
       } else {
         // isRemote: no DB to seed a payment against, so there is no
