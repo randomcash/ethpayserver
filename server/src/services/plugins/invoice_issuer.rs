@@ -137,8 +137,11 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// in `server/tests/plugin_invoice_issuer.rs`.
 ///
 /// The `server.rs` call site that does the publishing (`plugin_issuer.publish`,
-/// guarded on a configured billing store) has no test of its own, but that is
-/// this repository's existing convention, not a gap this capability
+/// guarded on a configured billing store, `server/src/bin/server.rs` around
+/// line 410) predates this capability's own PR - it landed in commit
+/// `bd78a98` - so it is pre-existing wiring, not something this change set
+/// introduces or needs to re-show. It also has no test of its own, but that
+/// is this repository's existing convention, not a gap this capability
 /// introduced: the identical boot-time call for the volume-reporting
 /// capability, `plugin_capabilities.volume.publish`, is exercised the same
 /// way - `a_published_volume_reader_answers_a_plugin_in_its_own_units` in
