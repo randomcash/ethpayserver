@@ -2224,7 +2224,12 @@ impl PageRenderer for RecordingRenderer {
 /// No real Postgres needed: `resolve_plugin`'s lookup fails against the
 /// lazily-connecting pool and falls back to treating the path segment as a
 /// literal plugin id, exactly as `server/src/api/plugins.rs`'s own
-/// `a_registered_renderer_is_reachable_over_http` test relies on.
+/// `a_registered_renderer_is_reachable_over_http` test relies on. The pool
+/// points at the reserved `.invalid` TLD (RFC 2606) rather than `localhost`,
+/// so the lookup fails on DNS resolution alone - no environment can make it
+/// succeed by happening to have a database of that name reachable locally,
+/// which would silently swap this test onto a different code path than the
+/// one it means to cover.
 #[tokio::test]
 async fn plugin_page_viewer_and_account_are_always_the_callers_own() {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -2233,7 +2238,7 @@ async fn plugin_page_viewer_and_account_are_always_the_callers_own() {
     let mut pages = PageHost::new();
     pages.register(plugin_id, Arc::new(RecordingRenderer(seen.clone())));
 
-    let pool = sqlx::PgPool::connect_lazy("postgres://localhost/nonexistent").unwrap();
+    let pool = sqlx::PgPool::connect_lazy("postgres://nonexistent.invalid/nonexistent").unwrap();
     let mut state = app_state(Arc::new(PgDataService::new(pool)));
     state.plugin_pages = Arc::new(pages);
 
