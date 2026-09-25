@@ -734,17 +734,18 @@ mod tests {
     use chrono::Utc;
     use evm::{ChainFamily, HdWallet, generate_mnemonic};
 
-    /// The onboarding doc points a merchant at `derive-xpub`, then at
-    /// `POST /wallets` to register what it printed. This proves the two
-    /// agree: the xpub `HdWallet` derives for a fresh mnemonic - exactly what
-    /// the CLI prints - produces, through the same [`derive_entries`] call
-    /// `create_wallet` makes, the identical addresses `HdWallet` derives
-    /// directly for that mnemonic. Wallet persistence stores the xpub and
-    /// namespace strings verbatim and touches neither, so this is the whole
-    /// gap between "the tool printed an xpub" and "the server accepts it and
-    /// hands back the addresses the tool already showed" - the join a manual
-    /// run against a live instance checked once, pinned here so it is
-    /// checked on every run instead.
+    /// Pins `derive_entries` - the function `create_wallet` calls to build
+    /// `verification_addresses` - against `HdWallet` directly: given a wallet
+    /// row holding the xpub `derive-xpub` would print, the addresses the two
+    /// produce for the same mnemonic must match. This is an internal
+    /// invariant, not the end-to-end claim it used to describe itself as: it
+    /// hand-builds the `Wallet` row and never goes through `validate_xpub` or
+    /// `WalletWriter::create_wallet`, so it would not catch a validation
+    /// regression that rejects everything `derive-xpub` prints. That case is
+    /// covered by
+    /// `an_xpub_derive_xpub_prints_is_accepted_by_the_real_wallet_endpoint`
+    /// in `server/tests/wallet_registration.rs`, which calls the real
+    /// `create_wallet` handler against a real database.
     #[test]
     fn a_wallet_registered_from_derive_xpub_output_verifies_against_its_own_addresses() {
         let mnemonic = generate_mnemonic(24).unwrap();
