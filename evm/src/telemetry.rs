@@ -751,6 +751,13 @@ mod tests {
             "expected at least one structured log to reach the envelope"
         );
         for log in &logs {
+            assert!(
+                log.attributes.contains_key("mnemonic"),
+                "the mnemonic field never reached log.attributes at all — the \
+                 negative check below would pass vacuously regardless of \
+                 whether scrub_log redacts anything: {:?}",
+                log.attributes
+            );
             let attrs = format!("{:?}", log.attributes);
             assert!(
                 !attrs.contains("sausage"),
@@ -789,6 +796,13 @@ mod tests {
             "expected at least one structured log to reach the envelope"
         );
         for log in &logs {
+            assert!(
+                log.attributes.contains_key("context"),
+                "the context field never reached log.attributes at all — the \
+                 negative check below would pass vacuously regardless of \
+                 whether scrub_log redacts anything: {:?}",
+                log.attributes
+            );
             let attrs = format!("{:?}", log.attributes);
             assert!(
                 !attrs.contains(pk),
@@ -833,6 +847,13 @@ mod tests {
             "expected at least one structured log to reach the envelope"
         );
         for log in &logs {
+            assert!(
+                log.attributes.contains_key("context"),
+                "the context field never reached log.attributes at all — the \
+                 negative check below would pass vacuously regardless of \
+                 whether scrub_log redacts anything: {:?}",
+                log.attributes
+            );
             let attrs = format!("{:?}", log.attributes);
             assert!(
                 !attrs.contains(pk),
