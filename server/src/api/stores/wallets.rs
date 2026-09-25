@@ -545,16 +545,7 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // ###############################################################
-    // ### DELIBERATE SABOTAGE - ABLATION EXPERIMENT. DO NOT MERGE. ###
-    // ### The tenant guard below is disabled on purpose, to find    ###
-    // ### out whether cross_tenant_isolation.rs actually exercises  ###
-    // ### it. If that test still passes with this line commented    ###
-    // ### out, the test does not test isolation.                    ###
-    // ###############################################################
-    // if !has_permission {
-    //     return Err(StatusCode::FORBIDDEN);
-    // }
+    // ABLATION - DO NOT MERGE: the tenant guard here is disabled on purpose.
     let _ = has_permission;
 
     if let Some(method_id) = query.payment_method_id {
