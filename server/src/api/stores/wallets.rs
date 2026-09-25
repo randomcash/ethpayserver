@@ -546,7 +546,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // ###############################################################
-    // ### DELIBERATE SABOTAGE - ABLATION FOR RCS-339. DO NOT MERGE. ###
+    // ### DELIBERATE SABOTAGE - ABLATION EXPERIMENT. DO NOT MERGE. ###
     // ### The tenant guard below is disabled on purpose, to find    ###
     // ### out whether cross_tenant_isolation.rs actually exercises  ###
     // ### it. If that test still passes with this line commented    ###
