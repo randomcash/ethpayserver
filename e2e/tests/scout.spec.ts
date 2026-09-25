@@ -177,10 +177,26 @@ async function discoverLinkedRoutes(): Promise<string[]> {
   // the way a locator assertion would. gotoAuthed only waits for network-idle,
   // not for the WASM client to finish hydrating, so calling this immediately
   // after a navigation can undercount links - down to zero - with nothing to
-  // say it happened. Waiting for the first link to attach catches up with
-  // hydration without a fixed sleep; it's a no-op once links are already there,
-  // and a bounded wait (not a hang) on pages that never render one, like checkout.
-  await scoutPage.locator('a[href]').first().waitFor({ state: 'attached', timeout: 5_000 }).catch(() => {});
+  // say it happened.
+  //
+  // Waiting for a link itself to attach would conflate two things that need
+  // different treatment: hydration running slow, and a page - checkout, say
+  // - that genuinely renders zero nav links once hydrated. Both look
+  // identical from "did an <a href> show up". #initial-loader (index.html)
+  // doesn't have that ambiguity: it's removed synchronously the moment
+  // payserver-client's mount_app() runs, on every hard navigation, regardless
+  // of whether the page it mounts has any links at all. So waiting for it to
+  // detach is a wait for "hydration finished", not "this page happens to
+  // have a link" - a timeout here means hydration didn't complete, and is
+  // worth a finding rather than a silent pass-through.
+  const hydrated = await scoutPage
+    .locator('#initial-loader')
+    .waitFor({ state: 'detached', timeout: 5_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!hydrated) {
+    issue('ROUTE_DISCOVERY', `${scoutPage.url()} did not finish hydrating within 5s - link discovery likely undercounted`);
+  }
   const hrefs = await scoutPage
     .locator('a[href]')
     .evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? ''));
@@ -219,7 +235,14 @@ interface PluginPagesResponse {
  * plugins endpoint would otherwise fail silently: `discoverPluginRoutes`
  * would return `[]`, the walk would visit zero billing pages, and both
  * route-coverage tests would pass clean having checked nothing. Every exit
- * path below is therefore its own issue() rather than a quiet empty array.
+ * path below is therefore its own issue() rather than a quiet empty array -
+ * including a well-formed `200 {}` (no `plugins` field, a schema change this
+ * test would otherwise coalesce into "no plugins" via `?? []`) and a
+ * well-formed `200 {"plugins": []}` once CI's fixture plugin is accounted
+ * for: `.github/workflows/ci.yml` seeds one merchant-visible page before the
+ * server starts specifically so this account always has at least one to
+ * find, so an empty result here means discovery broke, not that nothing was
+ * installed.
  */
 async function discoverPluginRoutes(): Promise<string[]> {
   const resp = await scoutPage.request.get('/api/plugins').catch(() => null);
@@ -236,9 +259,17 @@ async function discoverPluginRoutes(): Promise<string[]> {
     issue('NETWORK', 'GET /api/plugins returned a body that could not be parsed as JSON');
     return [];
   }
-  return (body.plugins ?? []).flatMap((plugin) =>
+  if (!('plugins' in body)) {
+    issue('NETWORK', 'GET /api/plugins response has no "plugins" field - response shape may have changed');
+    return [];
+  }
+  const routes = (body.plugins ?? []).flatMap((plugin) =>
     (plugin.pages ?? []).map((page) => `/evm/plugins/${plugin.id}/${page.path}`),
   );
+  if (routes.length === 0) {
+    issue('ROUTE_DISCOVERY', 'GET /api/plugins listed zero pages for this account - the billing surface would go unwalked');
+  }
+  return routes;
 }
 
 // A route reachable only through a real record's id - invoice, payment,
