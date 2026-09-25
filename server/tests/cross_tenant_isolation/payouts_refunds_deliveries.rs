@@ -2,6 +2,14 @@
 //! as invoices and payments (a path id checked with `get_user_store`, then the
 //! row itself matched to that store), so the same nil/foreign/admin questions
 //! apply and had no coverage at all before this test.
+//!
+//! Review finding, checked: calling `get_payout`/`list_payouts`,
+//! `list_refunds`, and `list_deliveries_for_invoice`/`list_deliveries_for_store`
+//! directly proves the handler's tenancy logic but not that an HTTP request
+//! reaches it. All five are mounted routes (`server/src/api/mod.rs`):
+//! `GET /{store_id}/payouts`, `GET /{store_id}/payouts/{payout_id}`,
+//! `GET /{invoice_id}/refunds`, `GET /{store_id}/webhook-deliveries`, and
+//! `GET /{invoice_id}/webhook-deliveries` - not orphaned handlers.
 
 use std::sync::Arc;
 

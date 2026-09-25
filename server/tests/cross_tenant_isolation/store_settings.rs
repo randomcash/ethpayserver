@@ -2,6 +2,11 @@
 //! `require_store_settings_permission`/permission-gated `Path<Uuid>` shape as
 //! the store wallet endpoints, tested separately because each is its own
 //! handler with its own copy of the guard.
+//!
+//! Review finding, checked: `list_store_members`, `get_store_webhook` and
+//! `get_token_policy` are mounted at `GET /{store_id}/members`,
+//! `GET /{store_id}/webhook` and `GET /{store_id}/token-policy`
+//! (`server/src/api/mod.rs`) - not orphaned handlers.
 
 use std::sync::Arc;
 
