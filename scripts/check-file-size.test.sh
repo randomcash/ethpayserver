@@ -310,5 +310,44 @@ else
   fail=1
 fi
 
+# An entry in the ratchet file must hold a file WHERE IT IS, not exempt it. The
+# second of these is the load-bearing one: if an enrolled file can grow freely,
+# the entry is a dispensation rather than a debt and the gate has a hole in it
+# shaped exactly like the thing it was added to avoid.
+RATCHET_T="$(mktemp -d)"
+(
+  cd "$RATCHET_T" && git init -q . && git config user.email t@t && git config user.name t
+  : > .keep && git add -A && git commit -qm "empty base"
+  git branch base
+  mkdir -p scripts
+  printf 'big.rs 8\n' > scripts/file-size-ratchet.txt
+  lines 8 > big.rs
+  git add -A && git commit -qm "add an oversized file, enrolled at its size"
+)
+out="$(cd "$RATCHET_T" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "ok: a new file enrolled at its own size is held, not blocked"
+else
+  echo "FAIL: an enrolled file at its ceiling should pass"; printf '%s\n' "$out"; fail=1
+fi
+
+( cd "$RATCHET_T" && lines 12 > big.rs && git commit -qam "grow past the enrolled ceiling" )
+out="$(cd "$RATCHET_T" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'big.rs grew from 8 to 12'; then
+  echo "ok: an enrolled file that GROWS past its ceiling is still refused"
+else
+  echo "FAIL: enrolment must not become exemption - growth past the ceiling must fail"
+  printf '%s\n' "$out"; fail=1
+fi
+
+( cd "$RATCHET_T" && rm scripts/file-size-ratchet.txt && lines 8 > other.rs && git add -A && git commit -qm "an unenrolled new oversized file" )
+out="$(cd "$RATCHET_T" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"; rc=$?
+rm -rf "$RATCHET_T"
+if [ "$rc" -eq 1 ]; then
+  echo "ok: a new oversized file with no entry is still refused"
+else
+  echo "FAIL: absence of a ratchet file must not exempt anything"; printf '%s\n' "$out"; fail=1
+fi
+
 [ "$fail" -eq 0 ] && echo "check-file-size.sh behaves as documented"
 exit "$fail"
