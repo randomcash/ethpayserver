@@ -116,12 +116,25 @@ test.beforeAll(async ({ browser }) => {
       issue('NETWORK', `${req.method()} ${url.pathname} -> ${status}`);
     }
   });
-  // Connection-level failures (aborted, refused, DNS) never reach 'response'
-  // at all, so they need their own listener rather than a status check.
+  // Connection-level failures (refused, DNS, reset) never reach 'response' at
+  // all, so they need their own listener rather than a status check. But
+  // walkRoutes does a hard goto() per route, and tearing a page down to
+  // navigate to the next one cancels whatever that page still had in flight
+  // (a poll, a session-refresh ping, a slow list fetch) - Chromium reports
+  // that to Playwright as 'requestfailed' with errorText 'net::ERR_ABORTED',
+  // not because anything broke but because the page it belonged to is gone.
+  // Excluded by errorText rather than dropped as a class: an abort caused by
+  // something other than our own navigation would still report under this
+  // name, but the alternative - flagging every cross-page navigation in the
+  // crawl - makes the run fail unpredictably on browser-normal behavior,
+  // which gets a suite ignored or disabled exactly as fast as one that
+  // silently prints.
   scoutPage.on('requestfailed', (req) => {
     const url = new URL(req.url());
     if (!url.pathname.startsWith('/api/')) return;
-    issue('NETWORK', `${req.method()} ${url.pathname} failed: ${req.failure()?.errorText ?? 'unknown error'}`);
+    const errorText = req.failure()?.errorText ?? 'unknown error';
+    if (errorText === 'net::ERR_ABORTED') return;
+    issue('NETWORK', `${req.method()} ${url.pathname} failed: ${errorText}`);
   });
 });
 
