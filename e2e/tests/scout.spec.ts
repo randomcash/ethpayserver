@@ -78,12 +78,14 @@ test.beforeAll(async ({ browser }) => {
     //
     // A 401/403 before any session exists is the same kind of expected shape
     // - the client probes /api/auth/me on every load, and that probe is
-    // supposed to fail pre-login. Everything else in the 4xx/5xx space is not
-    // expected anywhere in this walk: a 409 or 422 from a payment or invoice
-    // endpoint is exactly the class of bug this listener exists to catch, not
-    // noise to filter past.
+    // supposed to fail pre-login. Scoped to that exact path, the same way the
+    // 404 exclusion above is scoped to the placeholder id rather than
+    // excluding the status everywhere: a 401/403 from any OTHER endpoint
+    // pre-login (a public config fetch, a CSRF token endpoint) would be a
+    // regression, not the expected probe, and a blanket exclusion would drop
+    // it silently the same way a blanket 404 exclusion would.
     if (status === 404 && url.pathname.includes(PLACEHOLDER_ID)) return;
-    if ((status === 401 || status === 403) && !authenticated) return;
+    if ((status === 401 || status === 403) && !authenticated && url.pathname === '/api/auth/me') return;
 
     if (status >= 500) {
       issue('NETWORK', `${req.method()} ${url.pathname} -> ${status}`);
@@ -169,6 +171,12 @@ const MOBILE_VIEWPORT = { width: 375, height: 812 };
  * `discoverPluginRoutes` below rather than this crawl: whether a plugin's
  * link happens to be in the DOM this scan reaches depends on rendering
  * timing and page layout, where the server's own plugin registry does not.
+ *
+ * This is still a DOM crawl, not a router read: a route this scout account
+ * can't reach - gated behind a role it doesn't have, a feature flag, or a
+ * data-dependent empty state that renders no link - stays invisible the same
+ * way it did before this file existed. Give it its own data source, the way
+ * `discoverPluginRoutes` does, rather than assuming a link will appear here.
  */
 const ROUTE_HREF_PATTERN = /^\/(evm(\/|$)|checkout\/)/;
 
