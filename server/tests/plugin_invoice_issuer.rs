@@ -78,11 +78,11 @@ impl SessionService for UnusedSessionService {
     }
 }
 
-/// `#[ignore]` plus a silent `None` when `DATABASE_URL` is unset or
-/// unreachable looks, out of context, like two independent ways for these
-/// tests to report green having asserted nothing. It is not new to this
-/// file: it is the same convention every DB-backed integration test in this
-/// crate already uses (`server/tests/plugin_invoice_creation_filter.rs`,
+/// `#[ignore]` plus a silent `None` when `DATABASE_URL` is unset looks, out
+/// of context, like a way for these tests to report green having asserted
+/// nothing. It is not new to this file: it is the same convention every
+/// DB-backed integration test in this crate already uses
+/// (`server/tests/plugin_invoice_creation_filter.rs`,
 /// `server/tests/email_change_smtp_gate.rs`), and it is not the gate that
 /// actually matters - `.github/workflows/ci.yml`'s "Integration tests" step
 /// sets `DATABASE_URL` to a real, migrated Postgres and runs
@@ -91,13 +91,19 @@ impl SessionService for UnusedSessionService {
 /// tests always run for real there. The silent skip only fires for a
 /// developer running `cargo test` locally without a database, which is the
 /// point of `#[ignore]`, not a way to avoid failing.
+///
+/// The two outcomes are not the same, so only the first one skips: a missing
+/// `DATABASE_URL` means "no database configured, skip" (`None`), but once the
+/// var is set, a failed `connect` means "a database was configured and this
+/// run could not reach it" - a real failure that must not read the same as
+/// an intentionally-skipped local run, so it panics instead.
 async fn service() -> Option<PgDataService> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
-        .ok()?;
+        .expect("DATABASE_URL was set but the database was unreachable");
     Some(PgDataService::new(pool))
 }
 
@@ -244,6 +250,72 @@ fn a_real_issuer_creates_a_real_payable_invoice_in_base_units() {
         options[0].amount, "49990000",
         "49.99 USDC at 6 decimals is 49_990_000 base units - a lost or invented \
          digit here is this product charging the wrong amount for itself"
+    );
+}
+
+/// The 18-decimal case, priced with one more fractional digit than the
+/// asset can represent. `USDC`'s 6 decimals in the test above divides
+/// `49.99` evenly and can't expose a rounding choice; an 18-decimal,
+/// ETH-shaped method priced with 19 fractional digits forces
+/// `convert_human_to_smallest_unit` to pick a direction, and this pins it to
+/// floor - the same direction `test_convert_floors_result` already pins for
+/// the rate-converted path, exercised here end to end against a real
+/// database instead of the pure function in isolation.
+#[test]
+#[ignore]
+fn a_real_issuer_floors_precision_the_asset_cannot_represent() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+
+    let Some(pg) = rt.block_on(service()) else {
+        return;
+    };
+    let pool = pg.pool().clone();
+    let owner = rt.block_on(seed_user_with_id(
+        &pool,
+        Uuid::parse_str(BILLING_TEST_OWNER).unwrap(),
+    ));
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    rt.block_on(pg.create_store_owned_by(&store, UserId(owner)))
+        .expect("seed store owned by user");
+
+    rt.block_on(pg.create_payment_method(
+        store.id.0,
+        &ChainId::evm(11155111),
+        None,
+        "ETH",
+        18,
+        Some(TEST_XPUB),
+    ))
+    .expect("seed a working, wallet-backed payment method");
+
+    let pg = Arc::new(pg);
+    let state = app_state(pg.clone());
+    let own_store = types::StoreId(store.id.0);
+    let api: Arc<dyn HostInvoiceIssuer> = Arc::new(PluginHostApi::new(state, own_store));
+    let issuer = DeferredIssuer::new();
+    assert!(issuer.publish(api));
+
+    // 0.1234567890123456789 has 19 fractional digits against an 18-decimal
+    // asset: `* 10^18` leaves a trailing 0.9 of a base unit, which must be
+    // floored away, not rounded up (that would invent a unit the merchant
+    // never priced) or truncated on the wrong digit (either over- or
+    // undercharging the customer for the same subscription).
+    let answer = issue(
+        issuer,
+        br#"{"asset_symbol":"ETH","amount":"0.1234567890123456789"}"#,
+    )
+    .expect("a store with a real payment method must be able to issue");
+
+    let invoice_id = types::InvoiceId(answer["invoice_id"].as_str().unwrap().to_string());
+    let options = rt
+        .block_on(PaymentOptionReader::get_for_invoice(&*pg, &invoice_id))
+        .expect("read back payment options");
+    assert_eq!(options.len(), 1);
+    assert_eq!(
+        options[0].amount, "123456789012345678",
+        "19 fractional digits against an 18-decimal asset must floor to the \
+         base unit, never round up and invent money or truncate the wrong digit"
     );
 }
 
