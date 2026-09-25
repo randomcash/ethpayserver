@@ -190,31 +190,39 @@ const MOBILE_VIEWPORT = { width: 375, height: 812 };
  */
 const ROUTE_HREF_PATTERN = /^\/(evm(\/|$)|checkout\/)/;
 
-async function discoverLinkedRoutes(): Promise<string[]> {
-  // evaluateAll snapshots whatever matches right now and does not auto-wait
-  // the way a locator assertion would. gotoAuthed only waits for network-idle,
-  // not for the WASM client to finish hydrating, so calling this immediately
-  // after a navigation can undercount links - down to zero - with nothing to
-  // say it happened.
-  //
-  // Waiting for a link itself to attach would conflate two things that need
-  // different treatment: hydration running slow, and a page - checkout, say
-  // - that genuinely renders zero nav links once hydrated. Both look
-  // identical from "did an <a href> show up". #initial-loader (index.html)
-  // doesn't have that ambiguity: it's removed synchronously the moment
-  // payserver-client's mount_app() runs, on every hard navigation, regardless
-  // of whether the page it mounts has any links at all. So waiting for it to
-  // detach is a wait for "hydration finished", not "this page happens to
-  // have a link" - a timeout here means hydration didn't complete, and is
-  // worth a finding rather than a silent pass-through.
+// gotoAuthed/goto only wait for network-idle, not for the WASM client to
+// finish hydrating, so anything that inspects the DOM right after a
+// navigation - a link scan, an overflow measurement - can read the loading
+// skeleton instead of the real page, with nothing to say it happened.
+//
+// Waiting for the page's own content to appear would conflate two things
+// that need different treatment: hydration running slow, and a page -
+// checkout, say - that genuinely renders no nav links, or no overflow, once
+// hydrated. Both look identical from "did the expected thing show up".
+// #initial-loader (index.html) doesn't have that ambiguity: it's removed
+// synchronously the moment payserver-client's mount_app() runs, on every hard
+// navigation, regardless of what the page it mounts contains. So waiting for
+// it to detach is a wait for "hydration finished", not "this page happens to
+// have a link" or "this page happens to overflow" - a timeout here means
+// hydration didn't complete, and is worth a finding rather than a silent
+// pass-through, at every call site that measures the DOM.
+async function waitForHydration(context: string, label: 'ROUTE_DISCOVERY' | 'RESPONSIVE'): Promise<boolean> {
   const hydrated = await scoutPage
     .locator('#initial-loader')
     .waitFor({ state: 'detached', timeout: 5_000 })
     .then(() => true)
     .catch(() => false);
   if (!hydrated) {
-    issue('ROUTE_DISCOVERY', `${scoutPage.url()} did not finish hydrating within 5s - link discovery likely undercounted`);
+    issue(label, `${context} did not finish hydrating within 5s - measurement likely inaccurate`);
   }
+  return hydrated;
+}
+
+async function discoverLinkedRoutes(): Promise<string[]> {
+  // evaluateAll snapshots whatever matches right now and does not auto-wait
+  // the way a locator assertion would, so the hydration wait above has to run
+  // first or this can undercount links - down to zero.
+  await waitForHydration(scoutPage.url(), 'ROUTE_DISCOVERY');
   const hrefs = await scoutPage
     .locator('a[href]')
     .evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? ''));
@@ -228,7 +236,7 @@ async function discoverLinkedRoutes(): Promise<string[]> {
 }
 
 interface PluginPagesResponse {
-  plugins?: { id: string; pages?: { path: string }[] }[];
+  plugins?: { id: string; slug: string; pages?: { path: string }[] }[];
 }
 
 /**
@@ -281,8 +289,12 @@ async function discoverPluginRoutes(): Promise<string[]> {
     issue('NETWORK', 'GET /api/plugins response has no "plugins" field - response shape may have changed');
     return [];
   }
+  // A real browser builds this link from the slug (short, human-chosen -
+  // `/billing/subscriptions`), never the id (`/cash.random.billing/...`);
+  // `get_page` accepts either, but only the slug shape is what the client
+  // actually requests, so that's the shape worth walking.
   const routes = (body.plugins ?? []).flatMap((plugin) =>
-    (plugin.pages ?? []).map((page) => `/evm/plugins/${plugin.id}/${page.path}`),
+    (plugin.pages ?? []).map((page) => `/evm/plugins/${plugin.slug}/${page.path}`),
   );
   if (routes.length === 0) {
     issue('ROUTE_DISCOVERY', 'GET /api/plugins listed zero pages for this account - the billing surface would go unwalked');
@@ -334,6 +346,11 @@ const OVERFLOW_TOLERANCE_PX = 1;
 // check further down - both are "does the page rendered at this viewport fit
 // it", and duplicating the evaluate() would let the two drift.
 async function recordOverflow(path: string) {
+  // A loading skeleton is very unlikely to overflow horizontally regardless
+  // of how broken the real hydrated page is, so this has to wait for
+  // hydration itself - it cannot rely on a caller's crawl step to have done
+  // it, since the mobile walk below measures overflow with crawl disabled.
+  await waitForHydration(path, 'RESPONSIVE');
   // null (not 0) on failure: this check's only job is to catch overflow, so a
   // page that crashed mid-evaluate must not read the same as a page that
   // measured cleanly at zero.
@@ -370,9 +387,17 @@ async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise
     visited.add(path);
     order.push(path);
 
-    // The only public route in the mix; everything else needs a session.
+    // The only public route in the mix; everything else needs a session. A
+    // real customer reaches checkout with no session at all, but scoutPage is
+    // the same context that just registered as the merchant - clear its
+    // cookies for this one visit and restore them right after, so a branch
+    // keyed off "is there any session on this browser" gets exercised the way
+    // a customer would trigger it, without logging the rest of the walk out.
     if (path.startsWith('/checkout/')) {
+      const cookies = await scoutPage.context().cookies();
+      await scoutPage.context().clearCookies();
       await goto(path);
+      await scoutPage.context().addCookies(cookies);
     } else {
       await gotoAuthed(path);
     }
