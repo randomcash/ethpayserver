@@ -41,12 +41,11 @@ pub use api_types::{
 /// `SYNTHETIC_STORE_NAME` in `e2e/scripts/sweep-e2e-stores.mjs` - kept in
 /// sync by hand since one side is Rust and the other JavaScript.
 ///
-/// This is the only thing standing between `hard_delete_store` and a real
-/// merchant's store: the endpoint hard-deletes on a live server, so unlike
-/// `delete_user_account` it cannot lean on "no financial history" as its
-/// safety property - the whole point is to remove stores that *do* have
-/// recorded payments. Scoping it to a name only this one CI job ever
-/// generates is what takes the place of that check.
+/// A name match alone is not proof of where a store came from - a store's
+/// name is ordinary caller-supplied input, so anyone who can create a store
+/// can give it this exact shape. `hard_delete_store` also requires the store
+/// to be owned by [`E2E_STORE_OWNER_ID`], which is what actually keeps this
+/// endpoint from reaching a real merchant's store.
 fn is_synthetic_e2e_store_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("e2e-synthetic-") else {
         return false;
@@ -72,6 +71,22 @@ fn is_synthetic_e2e_store_name(name: &str) -> bool {
         && literal(19, b'-')
         && (20..23).all(digit)
         && literal(23, b'Z')
+}
+
+/// The only account `synthetic-payment.spec.ts` ever creates stores under -
+/// mirrors `PROTECTED_USER_IDS` in `e2e/scripts/sweep-e2e-accounts.mjs`, kept
+/// in sync by hand for the same reason [`is_synthetic_e2e_store_name`]
+/// mirrors that script's `SYNTHETIC_STORE_NAME` regex.
+///
+/// `hard_delete_store` requires a store to match this *and* the name shape
+/// before it will remove it. Either check alone is spoofable by an ordinary
+/// caller (a name is just a string; ownership by itself says nothing about
+/// what a store is named) - together they mean a real merchant's store,
+/// however it happens to be named, is never both.
+pub const E2E_STORE_OWNER_ID: &str = "c5ae10f2-da34-4002-af3b-5a4ec8b6ec97";
+
+fn is_e2e_store_owner(owner_id: UserId) -> bool {
+    owner_id.0.to_string() == E2E_STORE_OWNER_ID
 }
 
 // ============================================================================
@@ -643,22 +658,27 @@ async fn ensure_no_payout_or_refund(
 /// This is not `DELETE /stores/{id}`: that endpoint archives, on purpose, so
 /// a merchant's invoices and payments stay readable for a post-mortem after
 /// the store leaves their store list. This endpoint actually removes the
-/// rows, which is why it is gated by name rather than by ownership or
+/// rows, which is why it is gated by name *and* ownership rather than by
 /// financial history:
 ///
 /// - The name must match the exact `e2e-synthetic-<ISO timestamp>` shape
 ///   `synthetic-payment.spec.ts` gives the store it creates on every
-///   scheduled run. Nothing else can ever be named this by construction, so
-///   this is what keeps the endpoint from ever reaching a real merchant's
-///   store - unlike `delete_user_account`, it cannot lean on "no financial
-///   history" for that, because removing a paid synthetic invoice is the
-///   entire point.
+///   scheduled run - unlike `delete_user_account`, this endpoint cannot lean
+///   on "no financial history" to stay off a real merchant's store, because
+///   removing a paid synthetic invoice is the entire point.
+/// - The store must be owned by [`E2E_STORE_OWNER_ID`]. A name is ordinary
+///   caller-supplied input - nothing stops a real merchant, or anyone probing
+///   the pattern, from naming a store the same way - so the name check alone
+///   is not proof of where a store came from. Ownership is: `E2E_STORE_OWNER_ID`
+///   is the one account `synthetic-payment.spec.ts` ever creates stores
+///   under, and neither check alone is enough to keep this endpoint off a
+///   real merchant's store.
 /// - Payouts and refunds against the store are checked anyway and block the
 ///   delete: `ON DELETE CASCADE` does not cover them (see
 ///   `data_service::account_deletion` for why), so a raw delete would either
 ///   silently destroy that history or fail on the foreign key. Neither the
 ///   synthetic-payment job nor the backfill sweep should ever produce one,
-///   so seeing one here means the name matched something it should not have.
+///   so seeing one here means something matched that should not have.
 #[utoipa::path(
     delete,
     path = "/admin/stores/{id}",
@@ -667,7 +687,7 @@ async fn ensure_no_payout_or_refund(
     params(("id" = String, Path, description = "Store ID")),
     responses(
         (status = 204, description = "Store deleted"),
-        (status = 400, description = "Invalid store ID, or the name does not match the synthetic E2E pattern"),
+        (status = 400, description = "Invalid store ID, or the store does not match the synthetic E2E name and owner"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin access required"),
         (status = 404, description = "Store not found"),
@@ -699,11 +719,11 @@ where
         })?
         .ok_or((StatusCode::NOT_FOUND, "Store not found".to_string()))?;
 
-    if !is_synthetic_e2e_store_name(&store.name) {
+    if !is_synthetic_e2e_store_name(&store.name) || !is_e2e_store_owner(store.owner_id) {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Only a store named like the synthetic-payment E2E job's own \
-             stores can be hard-deleted through this endpoint."
+            "Only a store named like, and owned by, the synthetic-payment \
+             E2E job's own account can be hard-deleted through this endpoint."
                 .to_string(),
         ));
     }
@@ -917,9 +937,9 @@ mod tests {
     use super::*;
     use types::ChainId;
 
-    /// This regex is the entire safety property of `hard_delete_store` - it
-    /// can reach a real merchant's store the moment this accepts something it
-    /// should not.
+    /// This regex is half of `hard_delete_store`'s safety property - it can
+    /// reach a real merchant's store the moment this accepts something it
+    /// should not, though `is_e2e_store_owner` still has to agree too.
     #[test]
     fn synthetic_e2e_store_name_matches_only_the_exact_shape() {
         assert!(is_synthetic_e2e_store_name(
@@ -942,6 +962,76 @@ mod tests {
         assert!(!is_synthetic_e2e_store_name(
             "e2e-synthetic-2026-08-27T17-29-33-59Z"
         ));
+    }
+
+    /// The other half of `hard_delete_store`'s safety property: a name match
+    /// by itself is a string comparison against caller-supplied input, so it
+    /// proves nothing about who actually created the store.
+    #[test]
+    fn e2e_store_owner_matches_only_the_known_account() {
+        let owner: uuid::Uuid = E2E_STORE_OWNER_ID.parse().expect("valid uuid literal");
+        assert!(is_e2e_store_owner(UserId(owner)));
+        assert!(!is_e2e_store_owner(UserId(uuid::Uuid::new_v4())));
+    }
+
+    fn cleanup_info(
+        address: &str,
+        token_address: Option<&str>,
+        chain_id: ChainId,
+    ) -> CleanupAddressInfo {
+        CleanupAddressInfo {
+            address: address.to_string(),
+            payment_option_id: data_service::PaymentOptionId::new(),
+            invoice_id: "inv-test".to_string(),
+            chain_id,
+            token_address: token_address.map(str::to_string),
+        }
+    }
+
+    /// The one branch a malformed watch row must not fall into: an unparsable
+    /// token address is not the same as no token address, and treating it as
+    /// one would unwatch the native-asset entry instead of the ERC20 one,
+    /// leaving the real watch live under a reported success.
+    #[test]
+    fn parse_watch_target_rejects_a_malformed_token_address_instead_of_treating_it_as_none() {
+        let info = cleanup_info(
+            "0x1111111111111111111111111111111111111111",
+            Some("not-an-address"),
+            ChainId::evm(11155111),
+        );
+        assert_eq!(parse_watch_target(&info), None);
+    }
+
+    #[test]
+    fn parse_watch_target_rejects_a_malformed_address() {
+        let info = cleanup_info("not-an-address", None, ChainId::evm(11155111));
+        assert_eq!(parse_watch_target(&info), None);
+    }
+
+    #[test]
+    fn parse_watch_target_rejects_a_non_evm_chain() {
+        let info = cleanup_info(
+            "0x1111111111111111111111111111111111111111",
+            None,
+            ChainId::new("tron", "728126428").expect("valid chain id"),
+        );
+        assert_eq!(parse_watch_target(&info), None);
+    }
+
+    #[test]
+    fn parse_watch_target_accepts_a_well_formed_native_watch() {
+        let info = cleanup_info(
+            "0x1111111111111111111111111111111111111111",
+            None,
+            ChainId::evm(11155111),
+        );
+        let (addr, token, eip155) = parse_watch_target(&info).expect("should parse");
+        let expected: Address = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .expect("valid address");
+        assert_eq!(addr, expected);
+        assert_eq!(token, None);
+        assert_eq!(eip155, 11155111);
     }
 
     #[test]

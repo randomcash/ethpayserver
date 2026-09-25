@@ -31,7 +31,9 @@ use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
 use server::api::AdminAuth;
-use server::api::admin::{delete_user_account, hard_delete_store, list_user_stores};
+use server::api::admin::{
+    E2E_STORE_OWNER_ID, delete_user_account, hard_delete_store, list_user_stores,
+};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 
@@ -77,8 +79,7 @@ async fn service() -> Option<PgDataService> {
 /// `get_user` - and `row_to_user` deserializes both into `KdfParams` and
 /// `EncryptedBlob`, so an empty object fails with "missing field `algorithm`"
 /// before the handler under test ever runs.
-async fn seed_user(pool: &PgPool, role: &str) -> Uuid {
-    let id = Uuid::new_v4();
+async fn seed_user_with_id(pool: &PgPool, id: Uuid, role: &str) {
     sqlx::query(
         "INSERT INTO users (id, kdf_params, encrypted_symmetric_key, \
          recovery_verification_hash, kdf_salt_identifier, role) \
@@ -92,6 +93,21 @@ async fn seed_user(pool: &PgPool, role: &str) -> Uuid {
     .execute(pool)
     .await
     .expect("seed user");
+}
+
+async fn seed_user(pool: &PgPool, role: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    seed_user_with_id(pool, id, role).await;
+    id
+}
+
+/// The only account `hard_delete_store` will ever act on - see
+/// `E2E_STORE_OWNER_ID`. A store owned by anyone else, however it is named,
+/// must be refused, so the success-path tests below need a store actually
+/// owned by this exact id, not an arbitrary one.
+async fn seed_e2e_owner(pool: &PgPool) -> Uuid {
+    let id: Uuid = E2E_STORE_OWNER_ID.parse().expect("valid uuid literal");
+    seed_user_with_id(pool, id, "user").await;
     id
 }
 
@@ -379,11 +395,12 @@ async fn list_user_stores_is_scoped_to_the_requested_user() {
     cleanup(state.data_service.pool(), &[caller, target, other]).await;
 }
 
-/// The whole safety property of `hard_delete_store`: it hard-deletes on a
-/// live server and cannot lean on "no financial history" the way
+/// Half of `hard_delete_store`'s safety property: it hard-deletes on a live
+/// server and cannot lean on "no financial history" the way
 /// `delete_user_account` does, since removing a paid synthetic invoice is the
-/// point. The name check is what stands between it and a real merchant's
-/// store.
+/// point. The name check is one of the two things that stand between it and a
+/// real merchant's store - the other is ownership, covered by
+/// `hard_delete_store_refuses_a_synthetic_name_owned_by_someone_else` below.
 #[tokio::test]
 #[ignore]
 async fn hard_delete_store_refuses_a_name_that_is_not_the_synthetic_shape() {
@@ -421,6 +438,60 @@ async fn hard_delete_store_refuses_a_name_that_is_not_the_synthetic_shape() {
     cleanup(state.data_service.pool(), &[caller, target]).await;
 }
 
+/// The other half: a store name is ordinary caller-supplied input, so
+/// anyone who can create a store can give it the exact synthetic shape.
+/// Without an ownership check, a real merchant's store that happened (or was
+/// made) to collide on name - after it had taken a real payment but before
+/// any payout or refund, the common early-life state of a store - would be
+/// fully eligible for irreversible hard-deletion. This is the case that
+/// makes the name check alone insufficient.
+#[tokio::test]
+#[ignore]
+async fn hard_delete_store_refuses_a_synthetic_name_owned_by_someone_else() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let caller = seed_user(pg.pool(), "server_admin").await;
+    let target = seed_user(pg.pool(), "user").await;
+    let store = Store::new(
+        "e2e-synthetic-2026-01-03T00-00-00-000Z".to_string(),
+        UserId(target),
+    );
+    pg.create_store_owned_by(&store, UserId(target))
+        .await
+        .expect("seed store");
+    let invoice = seed_invoice(pg.pool(), store.id.0).await;
+    seed_payment(pg.pool(), &invoice).await;
+
+    let state = app_state(Arc::new(pg));
+
+    let result = hard_delete_store(
+        admin_auth(caller),
+        Path(store.id.0.to_string()),
+        State(state.clone()),
+    )
+    .await;
+
+    let Err((status, _)) = result else {
+        panic!(
+            "a synthetic-named store owned by someone other than the E2E account must be refused"
+        );
+    };
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let still_there: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stores WHERE id = $1")
+        .bind(store.id.0)
+        .fetch_one(state.data_service.pool())
+        .await
+        .expect("count store");
+    assert_eq!(
+        still_there, 1,
+        "the refusal must not have deleted a real merchant's payment history"
+    );
+
+    cleanup(state.data_service.pool(), &[caller, target]).await;
+}
+
 /// The success path the synthetic-payment job's own cleanup and the store
 /// backfill sweep both depend on: a matching-name store, along with the
 /// invoice and payment it carries, is actually gone afterward - not merely
@@ -432,7 +503,7 @@ async fn hard_delete_store_removes_a_synthetic_store_with_its_invoice_and_paymen
         return;
     };
     let caller = seed_user(pg.pool(), "server_admin").await;
-    let target = seed_user(pg.pool(), "user").await;
+    let target = seed_e2e_owner(pg.pool()).await;
     let store = Store::new(
         "e2e-synthetic-2026-01-01T00-00-00-000Z".to_string(),
         UserId(target),
@@ -492,7 +563,7 @@ async fn hard_delete_store_refuses_when_a_payout_exists() {
         return;
     };
     let caller = seed_user(pg.pool(), "server_admin").await;
-    let target = seed_user(pg.pool(), "user").await;
+    let target = seed_e2e_owner(pg.pool()).await;
     let store = Store::new(
         "e2e-synthetic-2026-01-02T00-00-00-000Z".to_string(),
         UserId(target),
@@ -560,7 +631,7 @@ async fn hard_delete_store_tells_a_live_monitor_to_unwatch_a_pending_invoices_ad
         .expect("subscribe to the commands channel");
 
     let caller = seed_user(pg.pool(), "server_admin").await;
-    let target = seed_user(pg.pool(), "user").await;
+    let target = seed_e2e_owner(pg.pool()).await;
     let store = Store::new(
         "e2e-synthetic-2026-01-04T00-00-00-000Z".to_string(),
         UserId(target),
@@ -637,7 +708,7 @@ async fn hard_delete_store_refused_by_a_payout_never_tells_the_monitor_to_unwatc
         .expect("subscribe to the commands channel");
 
     let caller = seed_user(pg.pool(), "server_admin").await;
-    let target = seed_user(pg.pool(), "user").await;
+    let target = seed_e2e_owner(pg.pool()).await;
     let store = Store::new(
         "e2e-synthetic-2026-01-05T00-00-00-000Z".to_string(),
         UserId(target),
@@ -681,4 +752,79 @@ async fn hard_delete_store_refused_by_a_payout_never_tells_the_monitor_to_unwatc
 
     clear_payouts_for_store(state.data_service.pool(), store.id.0).await;
     cleanup(state.data_service.pool(), &[caller, target]).await;
+}
+
+/// The account-deletion mirror of `hard_delete_store_tells_a_live_monitor_to_unwatch_a_pending_invoices_address`.
+/// Every other `delete_user_account` test above builds `PgAppState` with
+/// `evm_monitor: None`, so `unwatch_after_delete` always takes its early
+/// return there too - and the one success test that does seed a store
+/// (`deleting_an_untraded_account_succeeds_and_takes_its_store`) seeds no
+/// invoice, so `active_watched_addresses` would run against an empty vec even
+/// with a monitor wired in. Neither proves `delete_user_account` reaches the
+/// monitor at all: the `store_ids` it computes from `owned_stores` could be
+/// wrong, or the read-before-delete-unwatch-after ordering could regress,
+/// and every existing test would still pass. This is the one test that wires
+/// in a real `RedisEVMMonitor` and a still-pending, still-watched invoice
+/// under the deleted account's own store, and listens on the commands
+/// channel to prove the delete actually tells the monitor to stop watching.
+#[tokio::test]
+#[ignore]
+async fn deleting_an_account_tells_a_live_monitor_to_unwatch_a_pending_invoices_address() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let Some(redis_url) = std::env::var("REDIS_URL").ok() else {
+        return;
+    };
+    let monitor = RedisEVMMonitor::connect(&redis_url)
+        .await
+        .unwrap_or_else(|e| panic!("REDIS_URL is set but connecting failed: {e}"));
+
+    let subscriber = RedisBridge::new(&redis_url, EVENTS_CHANNEL, COMMANDS_CHANNEL)
+        .await
+        .expect("connect a second bridge to observe published commands");
+    let mut commands = subscriber
+        .subscribe_commands()
+        .await
+        .expect("subscribe to the commands channel");
+
+    let caller = seed_user(pg.pool(), "server_admin").await;
+    let target = seed_user(pg.pool(), "user").await;
+    let store = Store::new(format!("store-{target}"), UserId(target));
+    pg.create_store_owned_by(&store, UserId(target))
+        .await
+        .expect("seed store owned by target");
+    let invoice = seed_invoice(pg.pool(), store.id.0).await;
+    // Never paid - the case `account_deletion_blockers` would miss, and the
+    // one `active_watched_addresses` exists for.
+    let address = format!("0x{:040x}", Uuid::new_v4().as_u128());
+    let payment_option = seed_payment_option(pg.pool(), &invoice, &address).await;
+    seed_watched_address(pg.pool(), &invoice, payment_option, &address).await;
+
+    let state = app_state_with_monitor(Arc::new(pg), Some(Arc::new(monitor)));
+
+    let result = delete_user_account(
+        admin_auth(caller),
+        Path(target.to_string()),
+        State(state.clone()),
+    )
+    .await;
+    assert_eq!(result, Ok(StatusCode::NO_CONTENT));
+
+    let published = tokio::time::timeout(Duration::from_secs(5), commands.next())
+        .await
+        .expect("an unwatch command should have been published once the delete completed")
+        .expect("the commands stream ended unexpectedly");
+
+    match published {
+        MonitorCommand::UnwatchAddress(cmd) => {
+            assert_eq!(cmd.chain_id, 11155111);
+            let expected: evm::Address = address.parse().expect("valid test address");
+            assert_eq!(cmd.address, expected);
+            assert_eq!(cmd.token_contract, None);
+        }
+        other => panic!("expected an UnwatchAddress command, got {other:?}"),
+    }
+
+    cleanup(state.data_service.pool(), &[caller]).await;
 }
