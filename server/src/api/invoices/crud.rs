@@ -6,7 +6,7 @@ use auth::{SessionService, repository::UserStoreRepository};
 use data_service::StorePaymentMethodReader;
 use rust_decimal::Decimal;
 
-use crate::api::extractors::AuthenticatedUser;
+use crate::api::extractors::AuthenticatedCaller;
 use crate::metrics;
 use crate::services::plugins::{
     FilterVerdict, InvoiceCreationFilterRequest, run_invoice_creation_filters,
@@ -40,7 +40,7 @@ use super::{
 )]
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // validation + payment-option setup is one logical flow
 pub async fn create_invoice<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    AuthenticatedCaller { user, is_operator }: AuthenticatedCaller,
     State(state): State<PgAppState<A>>,
     Json(req): Json<CreateInvoiceRequest>,
 ) -> Result<(StatusCode, Json<InvoiceResponse>), (StatusCode, Json<serde_json::Value>)>
@@ -76,16 +76,19 @@ where
     // enforce a lapsed subscription. The merchant keeps every other
     // capability; only this endpoint is ever filtered.
     //
-    // Our own billing store is exempt, and that exemption is load-bearing
-    // rather than a convenience. The invoice that renews a subscription is
-    // created on this store, by the same plugin that decides whether
-    // subscriptions are in good standing. Without the exemption a plugin
-    // that refuses - because of a bug, or simply because it is down and
-    // fails closed - refuses the renewal that would have cleared the
-    // refusal, and nothing short of editing the database gets out of it.
-    let is_our_own_billing_store = state
-        .billing_store_id
-        .is_some_and(|own| own.0 == req.store_id);
+    // A request authenticated as the operator is exempt, and that exemption
+    // is load-bearing rather than a convenience. The invoice that renews a
+    // subscription is created by the same plugin that decides whether
+    // subscriptions are in good standing, authenticated with the operator's
+    // own credential. Without the exemption a plugin that refuses - because
+    // of a bug, or simply because it is down and fails closed - refuses the
+    // renewal that would have cleared the refusal, and nothing short of
+    // editing the database gets out of it.
+    //
+    // `is_operator` is a property of the credential, decided at
+    // authentication time - never a comparison against the requested store,
+    // and never implied by role. An admin session is not exempt; only a
+    // credential explicitly granted this carries it.
 
     // Resolved only when something is actually going to be asked. Billing is
     // per merchant rather than per store - a merchant running three stores
@@ -93,7 +96,7 @@ where
     // - so a filter needs the owner, not just the store. That costs a read,
     // and this is the invoice-creation path, so no plugin installed means no
     // read: the common case, and every deployment today.
-    let account_id = if is_our_own_billing_store || state.invoice_creation_filters.is_empty() {
+    let account_id = if is_operator || state.invoice_creation_filters.is_empty() {
         None
     } else {
         match auth::StoreRepository::get_store(&*state.data_service, StoreId(req.store_id)).await {

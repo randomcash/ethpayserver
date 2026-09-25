@@ -95,18 +95,56 @@ export async function createUserWithApiKey(
   await client.connect();
   try {
     const { rows } = await client.query(
+      // These two columns are JSONB, and every value in them has to DESERIALISE,
+      // not merely parse. `row_to_user` (data-service/src/postgres/auth/user.rs)
+      // does `serde_json::from_value` into `KdfParams` and `EncryptedBlob`, so
+      // `{}` is accepted by Postgres and then fails in the server as
+      // `500: Failed to resolve user` on every authenticated request - which
+      // reads as a broken endpoint rather than a broken fixture.
+      //
+      // Shapes are taken from payserver-commons `crypto/src/types.rs`, not from
+      // the column COMMENTs in the migration: those say `memory_mib` and
+      // `{ciphertext_base64, nonce_base64, tag_base64}`, and the actual fields
+      // are `memory_kb` and `{ciphertext, iv, mac}`. The comments are stale.
+      //
+      // Byte fields go through `base64_bytes`, which is STANDARD base64 with
+      // padding. The values are never decrypted - these tests authenticate with
+      // the API key created below, never with a password - so any well-formed
+      // blob does; they are zeroed rather than random to read as obviously inert.
       `INSERT INTO users (email, kdf_params, encrypted_symmetric_key,
                           recovery_verification_hash, role)
-       VALUES ($1, '{}', 'e2e-placeholder', 'e2e-placeholder', $2)
+       VALUES ($1, $2, $3, 'e2e-placeholder', $4)
        RETURNING id`,
-      [`e2e-${crypto.randomBytes(6).toString('hex')}@example.test`, role],
+      [
+        `e2e-${crypto.randomBytes(6).toString('hex')}@example.test`,
+        JSON.stringify({
+          algorithm: 'argon2id',
+          memory_kb: 65536,
+          iterations: 3,
+          parallelism: 4,
+          salt: Buffer.alloc(16).toString('base64'),
+        }),
+        JSON.stringify({
+          ciphertext: Buffer.alloc(32).toString('base64'),
+          iv: Buffer.alloc(16).toString('base64'),
+          mac: Buffer.alloc(32).toString('base64'),
+        }),
+        role,
+      ],
     );
     const userId = rows[0].id as string;
 
+    // `id` is supplied, unlike for `users` above. The two tables differ:
+    // `users.id` is `UUID PRIMARY KEY DEFAULT uuid_generate_v4()`, while
+    // `api_keys.id` is `UUID PRIMARY KEY` with no default, so omitting it is
+    // `null value in column "id" violates not-null constraint` rather than a
+    // generated key. Production never hits this because the server generates
+    // the id in `auth::api::api_keys`; only a fixture writing the row directly
+    // has to know.
     await client.query(
-      `INSERT INTO api_keys (user_id, name, key_hash, key_prefix, is_active)
-       VALUES ($1, 'e2e', $2, $3, true)`,
-      [userId, keyHash, apiKey.slice(0, 12)],
+      `INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, is_active)
+       VALUES ($1, $2, 'e2e', $3, $4, true)`,
+      [crypto.randomUUID(), userId, keyHash, apiKey.slice(0, 12)],
     );
     return { userId, apiKey };
   } finally {
