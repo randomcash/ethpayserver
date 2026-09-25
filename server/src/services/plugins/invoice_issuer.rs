@@ -124,13 +124,11 @@ pub trait HostInvoiceIssuer: Send + Sync {
 ///
 /// That import binding itself - a compiled wasm guest actually reaching
 /// `PluginCalls::invoice_create` through wasmtime, not just a Rust-level call
-/// to it - is not code in this repository, so it cannot be shown in this
-/// diff: the linker that binds the `invoice_create` import is
-/// `host_linker` in `payserver-plugin-host::runtime` (the crate this
-/// workspace pins by `rev` in the root `Cargo.toml`), and the guest-side
-/// round trip is exercised end to end, through a real compiled wasm module
-/// and a real `wasmtime::Linker`, by
-/// `a_plugin_can_ask_the_host_to_issue_an_invoice` in that crate's
+/// to it - lives in `payserver-plugin-host::runtime` (the crate this
+/// workspace pins by `rev` in the root `Cargo.toml`): `host_linker` binds the
+/// `invoice_create` import, and the guest-side round trip is exercised end
+/// to end, through a real compiled wasm module and a real `wasmtime::Linker`,
+/// by `a_plugin_can_ask_the_host_to_issue_an_invoice` in that crate's
 /// `runtime.rs` tests.
 ///
 /// This type's own half - that a published `PluginHostApi`, not a test
@@ -141,29 +139,23 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// The `server.rs` call site that does the publishing (`plugin_issuer.publish`,
 /// guarded on a configured billing store) has no test of its own, but that is
 /// this repository's existing convention, not a gap this capability
-/// introduced: capability 6's identical boot-time call,
-/// `plugin_capabilities.volume.publish`, is exercised the same way -
-/// `a_published_volume_reader_answers_a_plugin_in_its_own_units` in
+/// introduced: the identical boot-time call for the volume-reporting
+/// capability, `plugin_capabilities.volume.publish`, is exercised the same
+/// way - `a_published_volume_reader_answers_a_plugin_in_its_own_units` in
 /// `host_calls.rs` publishes a hand-built `FixedVolume`, never `main`'s real
 /// one. Neither capability's `server.rs` wiring runs under a test that boots
 /// the actual binary, because none of this repo's tests do that.
 ///
-/// Plans' half of this slice - "an admin creates a plan, and it persists
-/// across a restart" - rests on a second pre-existing host capability that
-/// this ticket did not have to add either: [`super::storage::PluginSchema`]
-/// hands a plugin a transaction scoped to its own schema, and
+/// Schema-scoped persistence for a plugin's own tables is a separate,
+/// pre-existing host capability: [`super::storage::PluginSchema`] hands a
+/// plugin a transaction scoped to its own schema, and
 /// `a_plugin_role_can_use_a_table_created_after_it_was_provisioned` in
 /// `storage.rs`'s tests writes a row into, and reads it back from, a table
-/// literally named `subscriptions` through that scoped connection.
-/// `uninstall_without_drop_schema_keeps_the_data` and
-/// `dropping_the_role_leaves_the_plugins_data_intact` cover the durability
-/// half: a plugin's committed rows outlive an uninstall and a role drop, and
-/// so trivially outlive a server process restart, since nothing on that path
-/// touches Postgres. Between that and capability 3 above, both of slice 1's
-/// `Verify` properties have a proven host-side path already in this repo -
-/// what is missing is the plan itself, which is billing-plugin business
-/// logic and, per this ticket, belongs in the private `payserver-billing`
-/// repository this worker does not have a checkout of.
+/// through that scoped connection. `uninstall_without_drop_schema_keeps_the_data`
+/// and `dropping_the_role_leaves_the_plugins_data_intact` cover the
+/// durability half: a plugin's committed rows outlive an uninstall and a
+/// role drop, and so trivially outlive a server process restart, since
+/// nothing on that path touches Postgres.
 pub struct PluginHostApi<A> {
     state: PgAppState<A>,
     own_store_id: StoreId,
