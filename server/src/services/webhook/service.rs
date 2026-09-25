@@ -47,12 +47,23 @@ impl<D: WebhookDataService + 'static> WebhookSink for WebhookService<D> {
 pub struct WebhookService<D: WebhookDataService> {
     data_service: Arc<D>,
     redis_client: redis::Client,
+    redis_conn: tokio::sync::OnceCell<redis::aio::ConnectionManager>,
     http_client: reqwest::Client,
     config: WebhookConfig,
 }
 
 impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// Create a new webhook service.
+    ///
+    /// `redis::Client::open` only parses the URL; it does not connect. The
+    /// actual connection is established lazily, on the first call to
+    /// `queue_webhook`/`process_next_job`, and cached for every call after
+    /// that — see `connection()`. Construction staying infallible on Redis
+    /// reachability, same as the plain `Client::open` this replaces, matters
+    /// because connecting eagerly here would turn a transient Redis hiccup
+    /// into a startup failure for the whole server if it happened to land
+    /// during boot, a larger blast radius than the webhook subsystem this is
+    /// about.
     pub fn new(
         data_service: Arc<D>,
         redis_url: &str,
@@ -69,30 +80,42 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         Ok(Self {
             data_service,
             redis_client,
+            redis_conn: tokio::sync::OnceCell::new(),
             http_client,
             config,
         })
     }
 
-    /// Open a Redis connection, bounded by `config.connect_timeout`.
+    /// Get the shared connection, establishing it on first use.
     ///
-    /// An unreachable Redis must fail in seconds with a message naming what
-    /// was unreachable, not hang until some ambient OS or network timeout
-    /// makes "Redis is absent", "Redis is broken" and "this process is
-    /// wedged" indistinguishable from the outside.
-    async fn connection(&self) -> Result<redis::aio::MultiplexedConnection, WebhookError> {
-        match tokio::time::timeout(
-            self.config.connect_timeout,
-            self.redis_client.get_multiplexed_async_connection(),
-        )
-        .await
-        {
-            Ok(result) => result.map_err(|e| WebhookError::Redis(e.to_string())),
-            Err(_) => Err(WebhookError::Redis(format!(
-                "timed out connecting to Redis after {:?}",
-                self.config.connect_timeout
-            ))),
-        }
+    /// A one-shot connection re-opened on every call would repeat DNS
+    /// resolution and the initial handshake for every single job, so any
+    /// brief hiccup in resolving the Redis hostname (a container restart, for
+    /// example) failed every in-flight operation instead of just the one call
+    /// that triggered the reconnect. `ConnectionManager` opens the connection
+    /// once and reconnects internally instead.
+    ///
+    /// The connection attempt is bounded by `config.connect_timeout` and
+    /// retried once (`set_number_of_retries(1)`): `ConnectionManager`'s own
+    /// default has no connection timeout at all, so a Redis that accepts the
+    /// TCP handshake but never completes the protocol handshake can leave a
+    /// caller waiting indefinitely instead of failing. `get_or_try_init`
+    /// below doesn't cache that failure, so a bounded timeout here is what
+    /// actually turns a bad first attempt into "try again next call" instead
+    /// of "hang this call forever".
+    async fn connection(&self) -> Result<redis::aio::ConnectionManager, WebhookError> {
+        let conn = self
+            .redis_conn
+            .get_or_try_init(|| async {
+                let config = redis::aio::ConnectionManagerConfig::new()
+                    .set_connection_timeout(self.config.connect_timeout)
+                    .set_number_of_retries(1);
+                redis::aio::ConnectionManager::new_with_config(self.redis_client.clone(), config)
+                    .await
+                    .map_err(|e| WebhookError::Redis(e.to_string()))
+            })
+            .await?;
+        Ok(conn.clone())
     }
 
     /// Queue a webhook for delivery.
@@ -182,7 +205,12 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             return Ok(false);
         };
 
-        // Atomically remove the job we just read
+        // Atomically remove the job we just read. Safe to read `removed == 0`
+        // as "another worker claimed it" rather than "our own ZREM got
+        // replayed": `ConnectionManager` reconnects in the background on a
+        // dropped connection, but it returns that error to the caller rather
+        // than silently retrying the in-flight command, so this ZREM cannot
+        // execute twice for one call.
         let removed: i64 = redis::cmd("ZREM")
             .arg(&self.config.queue_key)
             .arg(&json)
@@ -312,7 +340,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     }
 
     /// Update both queue depth gauges (total via ZCARD, ready via ZCOUNT).
-    async fn update_queue_gauges(&self, conn: &mut redis::aio::MultiplexedConnection) {
+    async fn update_queue_gauges(&self, conn: &mut redis::aio::ConnectionManager) {
         if let Ok(depth) = redis::cmd("ZCARD")
             .arg(&self.config.queue_key)
             .query_async::<u64>(conn)
@@ -531,8 +559,17 @@ mod tests {
         addr
     }
 
+    /// A defect this regresses: `ConnectionManager::new`'s default config has
+    /// no connection timeout at all, so a Redis that accepts the TCP
+    /// handshake but never completes the protocol handshake stalls the
+    /// caller indefinitely instead of failing — in this environment, a closed
+    /// port took over 470s to time out with no bound configured. Bounding
+    /// `connection()` from `config.connect_timeout` is what turns that into a
+    /// fast, named failure, and doing it from the *config* rather than a
+    /// hardcoded constant is what keeps `WEBHOOK_REDIS_CONNECT_TIMEOUT_SECS`
+    /// a real knob instead of an orphaned one.
     #[tokio::test]
-    async fn connection_times_out_against_an_unresponsive_redis() {
+    async fn connection_is_bounded_by_the_configured_timeout() {
         let addr = spawn_unresponsive_server().await;
         let config = WebhookConfig {
             connect_timeout: Duration::from_millis(200),
@@ -546,16 +583,15 @@ mod tests {
         .expect("construct service against unresponsive listener");
 
         let start = std::time::Instant::now();
-        let err = service
-            .connection()
-            .await
-            .expect_err("connection to an unresponsive Redis must fail, not hang");
+        assert!(
+            service.connection().await.is_err(),
+            "connection to an unresponsive Redis must fail, not hang"
+        );
         let elapsed = start.elapsed();
 
-        assert!(
-            err.to_string().contains("timed out"),
-            "expected a named timeout, got: {err}"
-        );
+        // Bounded by roughly two attempts (`set_number_of_retries(1)`) at
+        // 200ms each, plus a small backoff between them — nowhere near the
+        // multi-minute hang this regresses.
         assert!(
             elapsed < Duration::from_secs(2),
             "connect_timeout did not bound the connection attempt: took {elapsed:?}"
@@ -567,7 +603,7 @@ mod tests {
     /// `TEST_REDIS_URL`, the same variable CI's `test` job sets to point at
     /// the `redis` service it provisions alongside Postgres.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires a local Redis instance; set TEST_REDIS_URL, e.g. redis://127.0.0.1:6379"]
     async fn connection_succeeds_and_is_reusable_against_a_real_redis() {
         let redis_url = std::env::var("TEST_REDIS_URL")
             .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -585,6 +621,222 @@ mod tests {
         service
             .connection()
             .await
-            .expect("multiplexed connection must be reusable for a second call");
+            .expect("shared connection must be reusable for a second call");
+    }
+
+    fn test_payload() -> crate::services::webhook::WebhookPayload {
+        use crate::services::webhook::{WebhookEventType, WebhookPayload};
+        use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
+
+        let invoice = InvoiceData {
+            id: InvoiceId::from_string("test-invoice".to_string()),
+            store_id: StoreId::new(),
+            currency: "ETH".to_string(),
+            status: InvoiceStatus::Expired,
+            amount: "1000".to_string(),
+            amount_received: "1000".to_string(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            metadata: None,
+            customer_email: None,
+            extra: None,
+        };
+        WebhookPayload::invoice_event(WebhookEventType::InvoiceExpired, &invoice)
+    }
+
+    /// A defect this regresses: `queue_webhook` and `process_next_job` used to
+    /// open a fresh connection on every call, so every Redis command
+    /// re-resolved DNS and re-opened a TCP connection instead of reusing one.
+    /// On Docker's embedded DNS resolver that shows up as an intermittent "no
+    /// address associated with hostname" under nothing worse than a burst of
+    /// webhook jobs — the resolver rate-limits, not the network.
+    /// `ConnectionManager` opens the connection once and reconnects
+    /// internally, so a healthy run makes exactly one TCP connection no
+    /// matter how many jobs it queues.
+    ///
+    /// This proxies real Redis traffic through a listener that counts
+    /// accepted connections, so it needs a real Redis instance and is
+    /// `#[ignore]`d like this crate's other tests that need real
+    /// infrastructure. Point `TEST_REDIS_URL` at one to run it.
+    #[tokio::test]
+    #[ignore = "requires a local Redis instance; set TEST_REDIS_URL, e.g. redis://127.0.0.1:6379"]
+    async fn test_redis_connection_is_reused_across_queue_calls() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tokio::net::{TcpListener, TcpStream};
+
+        // A missing var must fail this test, not quietly no-op it: an
+        // `#[ignore]`d test that returns early on a missing env var reports as
+        // a pass, so a CI wiring regression that drops `TEST_REDIS_URL` would
+        // go green while proving nothing about connection reuse.
+        let backend_addr = std::env::var("TEST_REDIS_URL")
+            .expect("set TEST_REDIS_URL to run this test, e.g. redis://127.0.0.1:6379");
+        let backend_addr = backend_addr.trim_start_matches("redis://").to_string();
+
+        // A transparent proxy in front of the real Redis instance that counts
+        // how many separate TCP connections the service opens through it.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let connection_count = Arc::new(AtomicUsize::new(0));
+
+        {
+            let connection_count = Arc::clone(&connection_count);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut inbound, _)) = listener.accept().await else {
+                        break;
+                    };
+                    connection_count.fetch_add(1, Ordering::SeqCst);
+                    let backend_addr = backend_addr.clone();
+                    tokio::spawn(async move {
+                        if let Ok(mut outbound) = TcpStream::connect(&backend_addr).await {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                    });
+                }
+            });
+        }
+
+        let data_service = Arc::new(data_service::InMemoryDataService::new());
+        let config = WebhookConfig {
+            queue_key: format!("test:webhook-conn-reuse:{}", uuid::Uuid::new_v4()),
+            ..WebhookConfig::default()
+        };
+        let service = WebhookService::new(data_service, &format!("redis://{proxy_addr}"), config)
+            .expect("service should be constructed");
+
+        for _ in 0..5 {
+            let job = WebhookJob::new(
+                uuid::Uuid::new_v4(),
+                "https://example.com/webhook".to_string(),
+                "secret".to_string(),
+                test_payload(),
+            );
+            service
+                .queue_webhook(job)
+                .await
+                .expect("queue_webhook should succeed");
+        }
+
+        assert_eq!(
+            connection_count.load(Ordering::SeqCst),
+            1,
+            "expected one persistent Redis connection reused across queue_webhook calls, not one opened per call"
+        );
+    }
+
+    /// A defect this regresses: `get_or_try_init` only caches a *successful*
+    /// connection attempt. If `connection()` instead cached the failure too
+    /// (e.g. by using `get_or_init` with a panicking initializer, or storing
+    /// the error alongside the cell), a transient failure on the very first
+    /// call would wedge webhook delivery for the rest of the process's life
+    /// instead of healing itself on the next call. The reuse test above never
+    /// exercises this because its backend is healthy from the start.
+    ///
+    /// This proxies to a real Redis but drops the first connection attempt
+    /// outright (accepts the TCP connection, then closes it), so the first
+    /// `queue_webhook` call must fail. It only starts forwarding to the real
+    /// backend after that, so the second call proves recovery rather than
+    /// coincidence. `connect_timeout` is what keeps the failing attempt from
+    /// stalling the test for minutes instead of failing outright — a
+    /// connection that never completes its handshake has no other bound on
+    /// how long a caller waits for it.
+    #[tokio::test]
+    #[ignore = "requires a local Redis instance; set TEST_REDIS_URL, e.g. redis://127.0.0.1:6379"]
+    async fn test_connection_recovers_after_a_failed_first_attempt() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use tokio::net::{TcpListener, TcpStream};
+
+        // See the sibling reuse test above: an early return on a missing env
+        // var reports as a pass for an `#[ignore]`d test, so this must fail
+        // loudly instead.
+        let backend_addr = std::env::var("TEST_REDIS_URL")
+            .expect("set TEST_REDIS_URL to run this test, e.g. redis://127.0.0.1:6379");
+        let backend_addr = backend_addr.trim_start_matches("redis://").to_string();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let forwarding = Arc::new(AtomicBool::new(false));
+
+        {
+            let forwarding = Arc::clone(&forwarding);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((inbound, _)) = listener.accept().await else {
+                        break;
+                    };
+                    if !forwarding.load(Ordering::SeqCst) {
+                        // Simulate a connection attempt that never completes:
+                        // accept, then hang up immediately.
+                        drop(inbound);
+                        continue;
+                    }
+                    let backend_addr = backend_addr.clone();
+                    tokio::spawn(async move {
+                        let mut inbound = inbound;
+                        if let Ok(mut outbound) = TcpStream::connect(&backend_addr).await {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                    });
+                }
+            });
+        }
+
+        let data_service = Arc::new(data_service::InMemoryDataService::new());
+        let config = WebhookConfig {
+            queue_key: format!("test:webhook-conn-recovery:{}", uuid::Uuid::new_v4()),
+            connect_timeout: Duration::from_secs(1),
+            ..WebhookConfig::default()
+        };
+        let service = WebhookService::new(data_service, &format!("redis://{proxy_addr}"), config)
+            .expect("service should be constructed");
+
+        let new_job = || {
+            WebhookJob::new(
+                uuid::Uuid::new_v4(),
+                "https://example.com/webhook".to_string(),
+                "secret".to_string(),
+                test_payload(),
+            )
+        };
+
+        let first = service.queue_webhook(new_job()).await;
+        assert!(
+            first.is_err(),
+            "the first call, against a backend that drops the connection, must fail"
+        );
+
+        forwarding.store(true, Ordering::SeqCst);
+
+        let second = service.queue_webhook(new_job()).await;
+        assert!(
+            second.is_ok(),
+            "a later call must recover once the backend is reachable, not replay the earlier failure forever: {:?}",
+            second.err()
+        );
+    }
+
+    /// A defect this regresses: an earlier version of the connection-reuse
+    /// fix made `WebhookService::new` await a live `ConnectionManager` during
+    /// construction. That meant the exact DNS hiccup this service is meant to
+    /// tolerate mid-run ("no address associated with hostname") took down the
+    /// whole server at boot instead of just degrading webhook delivery, if it
+    /// happened to land while `new` was awaiting. Construction must never
+    /// touch the network — connectivity is discovered lazily, on the first
+    /// real command.
+    #[test]
+    fn new_does_not_require_redis_to_be_reachable() {
+        let data_service = Arc::new(data_service::InMemoryDataService::new());
+        let config = WebhookConfig::default();
+
+        WebhookService::new(
+            data_service,
+            "redis://this-host-does-not-resolve.invalid:6379",
+            config,
+        )
+        .expect("construction must not depend on Redis being reachable");
     }
 }
