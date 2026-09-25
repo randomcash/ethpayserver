@@ -140,11 +140,20 @@ jobs:
       # landing right before it deploys. github.event.before is the sha the
       # branch pointed at immediately before this push, which can never equal
       # HEAD (there would be no push event to fire), and fetch-depth: 0 above
-      # already pulled it down as an ancestor - no extra fetch needed. Reuses
-      # the base-ref fetch above for the pull_request/merge_group case.
+      # already pulled it down as an ancestor - no extra fetch needed.
+      #
+      # merge_group has the same shape of problem as push: github.base_ref is
+      # only populated for pull_request(_target) events, so without a case of
+      # its own this falls through to the literal 'testnet' regardless of what
+      # the merge queue is actually testing against - a diff against the wrong
+      # baseline that still resolves and still looks green, not an empty one
+      # that would at least be visibly suspicious. github.event.merge_group's
+      # base_sha is the exact commit the queue is merging into; it needs no
+      # origin/ prefix and no extra fetch, since fetch-depth: 0 above already
+      # has it as an ancestor of the queue's merge commit.
       - name: No file grows past the line limit
         env:
-          BASE_REF: ${{ github.event_name == 'push' && github.event.before || format('origin/{0}', github.base_ref || 'testnet') }}
+          BASE_REF: ${{ github.event_name == 'push' && github.event.before || github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref || 'testnet') }}
         run: ./scripts/check-file-size.sh
 
       - name: File size guard self-test

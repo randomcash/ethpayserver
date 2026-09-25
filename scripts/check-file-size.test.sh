@@ -72,6 +72,29 @@ else
   fail=1
 fi
 
+# A path git tracks but that isn't a regular file in the working tree (e.g. a
+# bad checkout leaving a directory where a file should be) breaks `wc -l` the
+# same way a broken `git ls-files` breaks the listing above - and must fail
+# the same way, not silently read as 0 lines and vanish from the report.
+#
+# A directory in place of the file, not chmod: same reasoning as the
+# git-ls-files fault injection above - permission bits are a no-op against
+# root, but you can never `wc -l` a directory's contents regardless of who's
+# asking.
+rm short.rs
+mkdir short.rs
+out="$(cd "$TMP" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"
+rc=$?
+rmdir short.rs
+lines 3 > short.rs
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '::error::wc -l failed for short.rs'; then
+  echo "ok: a tracked path that isn't a regular file fails the report instead of reading as 0 lines"
+else
+  echo "FAIL: an unreadable tracked file should fail the report, not silently report 0 lines"
+  printf '%s\n' "$out"
+  fail=1
+fi
+
 check "an untouched change (nothing over the limit grew) passes" 0
 
 lines 4 > short.rs
