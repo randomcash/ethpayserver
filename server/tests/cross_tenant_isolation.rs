@@ -1514,6 +1514,15 @@ async fn list_deliveries_for_store_as_server_admin_reaches_every_tenants_store()
 // `AuthenticatedUser::from_request_parts` directly to assert the rejection
 // itself, not just what a successful call can reach). If a narrower per-key
 // scope is ever added, it needs its own tests here.
+//
+// What this section does NOT claim: it is not a reproduction of any specific
+// tracked defect, open or otherwise - this file has no way to read a tracker
+// and doesn't try to. It is an exhaustive list of the scope-violation shapes
+// *this schema* can structurally produce today. If a real key-scope bug
+// turns out to need a shape this schema cannot express (e.g. a key legitimately
+// narrower than its owner, reaching beyond that narrower grant), no test here
+// proves or disproves it, and closing that would need a schema change first -
+// a new column and a check against it, then a test here for that check.
 // ============================================================================
 
 #[tokio::test]
