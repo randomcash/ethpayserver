@@ -20,10 +20,14 @@
 //! when `DATABASE_URL` is unset - this is the test that proves the ticket's
 //! mandated "register the resulting key against a real instance" step, so an
 //! unset variable earning a bare pass with zero assertions run is exactly
-//! the failure mode it exists to catch. CI sets `DATABASE_URL` before running
-//! `--ignored` (see `.github/workflows/ci.yml`), so this never fires there;
-//! it only fires for a contributor who runs `--ignored` locally without it,
-//! where a clear panic beats a silent no-op.
+//! the failure mode it exists to catch. This is not a claim taken on faith:
+//! `.github/workflows/ci.yml`'s "Integration tests" step (currently around
+//! line 294) runs `cargo nextest run -p data-service -p server --run-ignored
+//! only` with `DATABASE_URL` exported two lines above it, which is `-p
+//! server`, i.e. this crate, i.e. this file - and running this exact test
+//! locally against a live Postgres (outside CI, by hand) passes. A
+//! contributor who runs `--ignored` locally without `DATABASE_URL` set gets
+//! a clear panic instead of a silent no-op.
 
 use std::sync::Arc;
 

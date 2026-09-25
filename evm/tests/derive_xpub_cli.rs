@@ -109,3 +109,63 @@ fn generate_prints_an_xpub_prefixed_key() {
         "printed key doesn't look like an xpub-prefixed key: {xpub_line}"
     );
 }
+
+/// A merchant hitting Enter on an empty line (or piping an empty file) must
+/// get a clean, loud failure - not a panic and not a plausible-looking xpub
+/// derived from an empty string.
+#[test]
+fn from_existing_with_a_blank_mnemonic_fails_cleanly() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_derive-xpub"))
+        .arg("from-existing")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn derive-xpub");
+
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    writeln!(stdin).expect("write to stdin");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for derive-xpub");
+    assert!(
+        !output.status.success(),
+        "derive-xpub should reject a blank mnemonic, got:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains("no mnemonic given"),
+        "expected the blank-mnemonic error, got:\n{stderr}"
+    );
+}
+
+/// A typo'd or garbled seed phrase must fail loud, not silently derive a
+/// plausible-looking but wrong xpub the merchant would register in good
+/// faith - the same class of failure this tool exists to prevent.
+#[test]
+fn from_existing_with_an_invalid_mnemonic_fails_cleanly() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_derive-xpub"))
+        .arg("from-existing")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn derive-xpub");
+
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    write!(stdin, "not a valid bip39 mnemonic at all\n\n").expect("write to stdin");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for derive-xpub");
+    assert!(
+        !output.status.success(),
+        "derive-xpub should reject an invalid mnemonic, got:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains("invalid mnemonic"),
+        "expected the invalid-mnemonic error, got:\n{stderr}"
+    );
+}
