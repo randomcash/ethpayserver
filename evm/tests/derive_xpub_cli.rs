@@ -9,6 +9,7 @@
 //! argument matching, stdin read order, or which field gets printed would
 //! reach a merchant with zero test coverage catching it first.
 
+use evm::{ChainFamily, HdWallet};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -73,6 +74,32 @@ fn from_existing_with_a_passphrase_prints_the_passphrase_protected_xpub() {
         !stdout.contains(EVM_ACCOUNT_XPUB),
         "output contains the empty-passphrase xpub - the passphrase line was \
          dropped or ignored:\n{stdout}"
+    );
+}
+
+/// A BIP-39 passphrase is used byte-for-byte, so leading/trailing spaces a
+/// merchant genuinely typed must survive the two stdin reads intact - only
+/// the trailing line ending `read_line` leaves behind may be stripped. If
+/// this ever regressed to a general `.trim()`, this would silently start
+/// deriving a different, wrong xpub with no error, and every other test in
+/// this file (which use whitespace-free passphrases) would keep passing.
+#[test]
+fn from_existing_preserves_leading_and_trailing_passphrase_whitespace() {
+    let padded_passphrase = "  secret  ";
+    let expected_xpub = HdWallet::from_mnemonic(TEST_MNEMONIC, padded_passphrase)
+        .expect("valid mnemonic")
+        .account_xpub_string_for(ChainFamily::Evm)
+        .expect("derive xpub");
+
+    let stdout = run_from_existing(TEST_MNEMONIC, padded_passphrase);
+    assert!(
+        stdout.contains(&expected_xpub),
+        "expected the whitespace-preserving xpub {expected_xpub} in output, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(EVM_ACCOUNT_XPUB_WITH_PASSPHRASE),
+        "output matches the trimmed-passphrase xpub - leading/trailing whitespace was \
+         stripped instead of preserved:\n{stdout}"
     );
 }
 
