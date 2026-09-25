@@ -1,5 +1,10 @@
 //! Wallets: list, get-by-id, and the store-wallet binding endpoints
 //! (read and configure), across tenants.
+//!
+//! Review finding, checked: `list_wallets`, `get_wallet_by_id` and
+//! `get_store_wallet`/`configure_store_wallet` are mounted at `GET /wallets/`,
+//! `GET /wallets/{wallet_id}` and `GET`/`PUT /stores/{store_id}/wallet`
+//! (`server/src/api/mod.rs`) - not orphaned handlers.
 
 use std::sync::Arc;
 

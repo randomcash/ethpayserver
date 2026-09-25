@@ -1,4 +1,8 @@
 //! Stores: get-by-id and list, across tenants.
+//!
+//! Review finding, checked: `get_store` and `list_stores` are mounted at
+//! `GET /stores/{store_id}` and `GET /stores/` (`server/src/api/mod.rs`) -
+//! not orphaned handlers.
 
 use std::sync::Arc;
 

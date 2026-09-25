@@ -1,6 +1,10 @@
 //! Dashboard: aggregate counters and volume, scoped by `get_stores_for_user`
 //! rather than a client-supplied `store_id` - the leak to guard against here
 //! is another tenant's rows folding into the caller's own totals.
+//!
+//! Review finding, checked: `get_stats` and `get_analytics` are mounted at
+//! `GET /dashboard/stats` and `GET /dashboard/analytics`
+//! (`server/src/api/mod.rs`) - not orphaned handlers.
 
 use std::sync::Arc;
 

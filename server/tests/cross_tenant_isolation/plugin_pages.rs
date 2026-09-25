@@ -1,4 +1,8 @@
 //! Plugin pages: viewer and account come from the session, never the request.
+//!
+//! Review finding, checked: `get_page` is mounted at
+//! `GET /plugins/{id}/pages/{*path}` (`server/src/api/mod.rs`) - not an
+//! orphaned handler.
 
 use std::sync::{Arc, Mutex};
 

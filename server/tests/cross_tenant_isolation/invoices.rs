@@ -1,5 +1,12 @@
 //! Invoices: list (unfiltered, by store id, by nil store id, as admin) and
 //! get-by-id, payments-on-invoice, and status, all across tenants.
+//!
+//! Review finding, checked: `list_invoices`, `get_invoice`,
+//! `get_invoice_payments` and `get_invoice_status` are mounted at
+//! `GET /invoices/`, `GET /invoices/{invoice_id}`,
+//! `GET /invoices/{invoice_id}/payments` and
+//! `GET /invoices/{invoice_id}/status` (`server/src/api/mod.rs`) - not
+//! orphaned handlers.
 
 use std::sync::Arc;
 

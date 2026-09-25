@@ -24,6 +24,17 @@
 //! narrower than its owner, reaching beyond that narrower grant), no test here
 //! proves or disproves it, and closing that would need a schema change first -
 //! a new column and a check against it, then a test here for that check.
+//!
+//! Review finding, checked: `cross_tenant_reads` and `scope_parity` call
+//! `get_invoice`, `get_payment`, `list_payments`, `get_invoice_payments`,
+//! `get_invoice_status`, `list_wallets`, `get_wallet_by_id`,
+//! `get_store_wallet`, `get_store`, `list_stores`, `get_payout`,
+//! `list_payouts`, `list_refunds`, `list_deliveries_for_invoice` and
+//! `list_deliveries_for_store` directly, the same handlers whose mounted
+//! routes are already confirmed by the sibling `invoices.rs`, `payments.rs`,
+//! `wallets.rs`, `stores.rs` and `payouts_refunds_deliveries.rs` modules -
+//! not re-stated here to avoid two tests claiming the same route mounting
+//! fact independently.
 
 mod cross_tenant_reads;
 mod lifecycle;

@@ -1,5 +1,9 @@
 //! Payments: the same list/get shapes as invoices, kept in their own module
 //! because each is its own handler with its own copy of the guard.
+//!
+//! Review finding, checked: `list_payments` and `get_payment` are mounted at
+//! `GET /payments/` and `GET /payments/{payment_id}`
+//! (`server/src/api/mod.rs`) - not orphaned handlers.
 
 use std::sync::Arc;
 

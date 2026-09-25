@@ -2,6 +2,10 @@
 //! guard as `list_invoices`/`list_payments`, but is a separate handler and a
 //! separate response path (a streamed file, not JSON), so the guard being
 //! wired to the list endpoint proves nothing about the export one.
+//!
+//! Review finding, checked: `export_invoices_csv` and `export_payments_csv`
+//! are mounted at `GET /invoices/export.csv` and `GET /payments/export.csv`
+//! (`server/src/api/mod.rs`) - not orphaned handlers.
 
 use std::sync::Arc;
 
