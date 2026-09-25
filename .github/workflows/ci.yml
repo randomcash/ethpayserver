@@ -151,6 +151,16 @@ jobs:
       # base_sha is the exact commit the queue is merging into; it needs no
       # origin/ prefix and no extra fetch, since fetch-depth: 0 above already
       # has it as an ancestor of the queue's merge commit.
+      #
+      # The remaining case - pull_request - resolves origin/<base_ref>
+      # (e.g. origin/testnet) with no fetch of its own either. That isn't
+      # reliant on the "No session URLs" step's manual `git fetch` above
+      # despite running right after it: `fetch-depth: 0` on the checkout at
+      # the top of this job makes actions/checkout use the refspec
+      # `+refs/heads/*:refs/remotes/origin/*`, which pulls every branch - not
+      # just the ref that triggered the run - so origin/<base_ref> already
+      # resolves before any step in this job runs, this one included, run in
+      # any order.
       - name: No file grows past the line limit
         env:
           BASE_REF: ${{ github.event_name == 'push' && github.event.before || github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref || 'testnet') }}
