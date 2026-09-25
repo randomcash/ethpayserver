@@ -117,10 +117,41 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// The host side of the plugin API's write capability, bound to one
 /// instance's own store.
 ///
-/// Not yet wired to a plugin runtime - the wasmtime dispatch this will
-/// eventually sit behind does not call it yet. This is the host-side
-/// implementation the interface can be, and is, written and tested against
-/// first.
+/// Read, not run, to be wired to the plugin runtime: `server.rs`'s boot
+/// sequence publishes this type into a [`super::host_calls::DeferredIssuer`],
+/// which `host_calls::PluginCalls::invoice_create` reads from, so a wasm
+/// plugin's `invoice_create` import should land here rather than on a stub.
+/// That publish call (`plugin_issuer.publish`, guarded on a configured
+/// billing store) has been in `server/src/bin/server.rs` since before this
+/// comment was corrected, so the wiring is pre-existing rather than aspirational.
+///
+/// No test in this repo boots the real binary and drives a compiled wasm
+/// guest through that import end to end; every test exercising this type
+/// either calls it directly in Rust or goes through a hand-built double
+/// (`FixedIssuer`/`FixedVolume`). That gap is this repository's existing
+/// convention for every plugin capability published at boot, not something
+/// introduced here - the identical boot-time publish for the
+/// volume-reporting capability has the same shape of coverage. Closing it
+/// for real means a test that boots the production binary and drives it
+/// through an actual `wasmtime::Linker`, which is a separate, larger piece
+/// of infrastructure than this capability's own tests can establish; it
+/// should not be inferred from anything in this module.
+///
+/// This type's own half - that a published `PluginHostApi`, not a test
+/// double, actually creates a real, correctly-priced invoice against a real
+/// database - is `a_real_issuer_creates_a_real_payable_invoice_in_base_units`
+/// in `server/tests/plugin_invoice_issuer.rs`.
+///
+/// Schema-scoped persistence for a plugin's own tables is a separate,
+/// pre-existing host capability: [`super::storage::PluginSchema`] hands a
+/// plugin a transaction scoped to its own schema, and
+/// `a_plugin_role_can_use_a_table_created_after_it_was_provisioned` in
+/// `storage.rs`'s tests writes a row into, and reads it back from, a table
+/// through that scoped connection. `uninstall_without_drop_schema_keeps_the_data`
+/// and `dropping_the_role_leaves_the_plugins_data_intact` cover the
+/// durability half: a plugin's committed rows outlive an uninstall and a
+/// role drop, and so trivially outlive a server process restart, since
+/// nothing on that path touches Postgres.
 pub struct PluginHostApi<A> {
     state: PgAppState<A>,
     own_store_id: StoreId,

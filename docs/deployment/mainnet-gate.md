@@ -84,9 +84,14 @@ The gate passes when ALL of the following are true:
 1. `/health/deep` returns HTTP 200.
 2. `build_sha` in the response matches the commit being deployed
    (`EXPECTED_SHA`, the first 7 of `GITHUB_SHA`).
-3. Postgres reports `status: "ok"`.
-4. Redis reports `status: "ok"`.
-5. All RPC chains report `status: "ok"` (no chain in error, disconnected,
+3. The `x-sentry-release` response header matches `build_sha`. The two are
+   set by separate CI steps from the same commit sha, so they can drift
+   apart (a rename, a typo, a rebuild stage that drops the env var) without
+   either build step failing — this catches that on the deployed binary,
+   not the build log.
+4. Postgres reports `status: "ok"`.
+5. Redis reports `status: "ok"`.
+6. All RPC chains report `status: "ok"` (no chain in error, disconnected,
    or connecting state).
 
 If the gate does not pass within the timeout, the job fails. Because
@@ -185,6 +190,21 @@ short commit SHA baked into the binary at compile time. This allows:
 
 - The health-gate script to confirm the new version is actually running.
 - Operators to quickly confirm which version is live.
+
+The same response also carries an `x-sentry-release` header — the value
+compiled into the binary via `option_env!("SENTRY_RELEASE")`, i.e. what this
+process hands Sentry as its `release` tag. `build_sha` and the Sentry
+release are set by separate CI steps from the same commit sha and can drift
+apart without either step failing, so the health gate compares them on the
+running process rather than trusting that the build succeeded.
+
+evmmonitor is a second binary that tags its own Sentry events from the same
+`SENTRY_RELEASE`, compiled in its own CI step, and has no HTTP endpoint of
+its own to check directly. When it's configured, the response carries its
+compiled release too, relayed through the same Redis channel evmmonitor
+already reports chain health over, as `x-evmmonitor-sentry-release`. The
+health gate compares that against `build_sha` the same way, so a drift in
+evmmonitor's build step is caught on the deployed process as well.
 
 ```json
 {
