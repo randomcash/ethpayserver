@@ -11,6 +11,8 @@
 //! - `analytics`: Dashboard payment-volume aggregation
 //! - `wallet`: Account wallet derivation and store resolution
 //! - `wallet_migration`: the account-wallets migration run over old-shape data
+//! - `backfill_truncated_payment_symbols`: the truncated-address backfill,
+//!   resolving known tokens and falling back for the rest
 //! - `account_deletion`: what blocks deleting an account, against the real FKs
 //! - `store_creation`: a store and the membership that owns it, as one unit
 //! - `payout_claims`: which invoices a store's payouts already hold
@@ -20,10 +22,13 @@
 //! - `merchant_directory`: the plugin host's server-wide account/store list
 //! - `installed_plugins`: what is installed survives a restart, and the
 //!   audit trail outlives the plugin it describes
+//! - `seeded_tokens`: the migration-seeded L2 and testnet tokens, resolved
+//!   by `TokenReader::get_by_address` the way a real payment resolves them
 
 mod account_deletion;
 mod aggregation;
 mod analytics;
+mod backfill_truncated_payment_symbols;
 mod email_change;
 mod installed_plugins;
 mod invoice;
@@ -31,6 +36,8 @@ mod invoice_creation;
 mod merchant_directory;
 mod payment;
 mod payout_claims;
+mod seeded_tokens;
+mod server_settings;
 mod store_creation;
 mod wallet;
 mod wallet_migration;

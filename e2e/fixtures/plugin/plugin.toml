@@ -1,0 +1,28 @@
+# The manifest for the e2e fixture plugin.
+#
+# `kind = "action"` deliberately. A filter that cannot run resolves to its
+# declared failure mode, which defaults to *closed* - so a fixture registered
+# as a filter would refuse every invoice on the instance for as long as it
+# stayed installed, turning a plugin test into a failure in every other spec
+# file in this suite.
+id = "com.example.e2efixture"
+version = "0.1.0"
+# `^0.1.0` is the plugin host crate's own version, which is what it presents
+# for this dependency check - not the server's. A caret on a 0.x version only
+# matches that exact minor line, so this is a real constraint the host can
+# fail, not a permissive one it never would.
+dependencies = ["ethpayserver:^0.1.0"]
+kind = "action"
+slug = "e2efixture"
+ui_schema = 1
+
+[[pages]]
+path = "overview"
+label = "Fixture overview"
+
+# Declared admin-only so the suite has something to prove is filtered out of a
+# merchant's navigation.
+[[pages]]
+path = "operators"
+label = "Fixture operators"
+admin_only = true

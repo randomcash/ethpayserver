@@ -701,12 +701,12 @@ async fn hard_delete_store_tells_a_live_monitor_to_unwatch_a_pending_invoices_ad
     let Some(pg) = service().await else {
         return;
     };
-    let Some(redis_url) = std::env::var("REDIS_URL").ok() else {
+    let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };
     let monitor = RedisEVMMonitor::connect(&redis_url)
         .await
-        .unwrap_or_else(|e| panic!("REDIS_URL is set but connecting failed: {e}"));
+        .unwrap_or_else(|e| panic!("TEST_REDIS_URL is set but connecting failed: {e}"));
 
     let subscriber = RedisBridge::new(&redis_url, EVENTS_CHANNEL, COMMANDS_CHANNEL)
         .await
@@ -778,12 +778,12 @@ async fn hard_delete_store_refused_by_a_payout_never_tells_the_monitor_to_unwatc
     let Some(pg) = service().await else {
         return;
     };
-    let Some(redis_url) = std::env::var("REDIS_URL").ok() else {
+    let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };
     let monitor = RedisEVMMonitor::connect(&redis_url)
         .await
-        .unwrap_or_else(|e| panic!("REDIS_URL is set but connecting failed: {e}"));
+        .unwrap_or_else(|e| panic!("TEST_REDIS_URL is set but connecting failed: {e}"));
 
     let subscriber = RedisBridge::new(&redis_url, EVENTS_CHANNEL, COMMANDS_CHANNEL)
         .await
@@ -857,12 +857,12 @@ async fn deleting_an_account_with_a_still_watched_address_is_refused() {
     let Some(pg) = service().await else {
         return;
     };
-    let Some(redis_url) = std::env::var("REDIS_URL").ok() else {
+    let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };
     let monitor = RedisEVMMonitor::connect(&redis_url)
         .await
-        .unwrap_or_else(|e| panic!("REDIS_URL is set but connecting failed: {e}"));
+        .unwrap_or_else(|e| panic!("TEST_REDIS_URL is set but connecting failed: {e}"));
 
     let subscriber = RedisBridge::new(&redis_url, EVENTS_CHANNEL, COMMANDS_CHANNEL)
         .await

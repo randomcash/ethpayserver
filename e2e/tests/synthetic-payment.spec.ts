@@ -153,7 +153,17 @@ interface PaymentMethod {
   derivation_index: number | null;
 }
 
-/** `GET /stores/{id}/wallet` — the wallet the store actually derives from. */
+/**
+ * `GET /stores/{id}/wallet?payment_method_id=...` — the wallet that specific
+ * payment method actually derives from.
+ *
+ * Queried with `payment_method_id` rather than bare: the method below is
+ * created with its own xpub, which pins it to a wallet independent of
+ * whatever the store's own override/primary resolve to. The bare form of
+ * this endpoint reports only the latter, so it can name a different wallet
+ * than the one address allocation is actually using - which is exactly the
+ * gap this run exists to catch.
+ */
 interface StoreWallet {
   id: string;
   derivation_index: number;
@@ -427,13 +437,18 @@ test.describe('Synthetic payment (live testnet)', () => {
         },
       });
 
-      // The starting point for the counter assertion, read from the wallet the
-      // store resolves to. A fresh store on a fresh xpub starts at 0, but read
-      // rather than assumed: the xpub comes from a mnemonic the account may
-      // have used on a previous night, and the wallet remembers that across
-      // stores. Asserting a delta from whatever it is now is the
+      // The starting point for the counter assertion, read from the wallet
+      // *this method* resolves to - not the store's bare fallback, which
+      // stops seeing the method's own pin the moment the account's primary
+      // or override moves elsewhere. A fresh store on a fresh xpub starts at
+      // 0, but read rather than assumed: the xpub comes from a mnemonic the
+      // account may have used on a previous night, and the wallet remembers
+      // that across stores. Asserting a delta from whatever it is now is the
       // only form that holds either way.
-      const storeWallet = await api<StoreWallet>(`/stores/${store.id}/wallet`, { token });
+      const storeWallet = await api<StoreWallet>(
+        `/stores/${store.id}/wallet?payment_method_id=${method.id}`,
+        { token },
+      );
       // `null` when the resolution chain runs out, and `undefined` if the field
       // ever stops being sent — both are "no wallet", and both must fail here
       // rather than at the first invoice with no explanation.
@@ -531,12 +546,17 @@ test.describe('Synthetic payment (live testnet)', () => {
       // is the server's business — three invoices consume three either way.
       //
       // Read from the wallet, which is where the counter lives
-      // (`data-service/src/postgres/wallet.rs`, `next_derivation_index`). The
-      // payment method reports the same number through the resolution chain,
-      // but reading it there would keep passing if a second counter ever
-      // reappeared per method — the exact bug this whole run exists to catch.
-      // One store, one xpub, so the wallet's delta is the run's whole draw.
-      const wallet = await api<StoreWallet>(`/stores/${store.id}/wallet`, { token });
+      // (`data-service/src/postgres/wallet.rs`, `next_derivation_index`) -
+      // scoped to this method again, for the same reason as the read above.
+      // The payment method reports the same number through the resolution
+      // chain, but reading it there would keep passing if a second counter
+      // ever reappeared per method — the exact bug this whole run exists to
+      // catch. One store, one xpub, so the wallet's delta is the run's whole
+      // draw.
+      const wallet = await api<StoreWallet>(
+        `/stores/${store.id}/wallet?payment_method_id=${method.id}`,
+        { token },
+      );
       expect(
         wallet.id,
         `the store resolved to wallet ${wallet.id} before the invoices and ` +

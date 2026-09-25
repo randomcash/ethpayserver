@@ -43,8 +43,12 @@ pub struct WebhookJob {
 }
 
 impl WebhookJob {
-    /// Stripe-like retry delays: 1m, 5m, 30m, 2h, 12h, 24h.
-    /// Index by (attempts - 1), clamped to last entry.
+    /// Retry delays: 1m, 5m, 30m, 2h, 12h, 24h.
+    ///
+    /// Escalating rather than fixed, and reaching a day rather than stopping
+    /// at minutes: the failures worth retrying at all are a subscriber's
+    /// deploy, a certificate rollover or an outage, and none of those is over
+    /// in five minutes. Index by `attempts - 1`, clamped to the last entry.
     const RETRY_DELAYS_SECS: [u64; 6] = [60, 300, 1800, 7200, 43200, 86400];
 
     /// Create a new webhook job.
@@ -68,7 +72,7 @@ impl WebhookJob {
         }
     }
 
-    /// Calculate delay for next retry using a Stripe-like backoff schedule.
+    /// Calculate the delay before the next retry.
     ///
     /// Attempt 1: 1 minute
     /// Attempt 2: 5 minutes

@@ -126,11 +126,76 @@ jobs:
       - name: Session URL guard self-test
         run: ./scripts/check-no-session-urls.test.sh
 
+      # A 2026-09-14 audit found 26 files over 400 lines; nine days later, with
+      # no check in between, that was 47 - despite split tickets landing in the
+      # same window. The existing backlog doesn't fail the build (that would
+      # fail on all 47 the day this lands and get switched off in a week); what
+      # fails is a file getting worse in this change, which is exactly the
+      # pattern that let the backlog double.
+      #
+      # On push, github.base_ref is unset, so the naive fallback resolves to
+      # origin/testnet - and a push straight to testnet fetches the ref this
+      # job's own checkout just became, so that diff is empty by construction
+      # and the ratchet never fires on the trigger that matters most: a push
+      # landing right before it deploys. github.event.before is the sha the
+      # branch pointed at immediately before this push, which can never equal
+      # HEAD (there would be no push event to fire), and fetch-depth: 0 above
+      # already pulled it down as an ancestor - no extra fetch needed.
+      #
+      # merge_group has the same shape of problem as push: github.base_ref is
+      # only populated for pull_request(_target) events, so without a case of
+      # its own this falls through to the literal 'testnet' regardless of what
+      # the merge queue is actually testing against - a diff against the wrong
+      # baseline that still resolves and still looks green, not an empty one
+      # that would at least be visibly suspicious. github.event.merge_group's
+      # base_sha is the exact commit the queue is merging into; it needs no
+      # origin/ prefix and no extra fetch, since fetch-depth: 0 above already
+      # has it as an ancestor of the queue's merge commit.
+      #
+      # The remaining case - pull_request - resolves origin/<base_ref>
+      # (e.g. origin/testnet) with no fetch of its own either. That isn't
+      # reliant on the "No session URLs" step's manual `git fetch` above
+      # despite running right after it: `fetch-depth: 0` on the checkout at
+      # the top of this job makes actions/checkout use the refspec
+      # `+refs/heads/*:refs/remotes/origin/*`, which pulls every branch - not
+      # just the ref that triggered the run - so origin/<base_ref> already
+      # resolves before any step in this job runs, this one included, run in
+      # any order.
+      - name: No file grows past the line limit
+        env:
+          BASE_REF: ${{ github.event_name == 'push' && github.event.before || github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref || 'testnet') }}
+        run: ./scripts/check-file-size.sh
+
+      - name: File size guard self-test
+        run: ./scripts/check-file-size.test.sh
+
       - name: Migration versions are distinct
         run: ./scripts/check-migrations.sh
 
       - name: Migration guard self-test
         run: ./scripts/check-migrations.test.sh
+
+      # Proves check-health-deep.sh - the between-deploys watchdog for
+      # /health/deep - actually goes red on the failure modes it claims to
+      # catch (a stalled RPC, a monitor gone stale, its own state-tracking
+      # erroring), against a real local HTTP server rather than a comment
+      # asserting someone ran it once.
+      - name: Health check guard self-test
+        run: ./scripts/check-health-deep.test.sh
+
+      # The deploy gate decides whether a cutover is allowed to stand, and CI
+      # runs it post-deploy - so every refusal branch in it was code nobody had
+      # ever seen refuse anything. Same reasoning as the guard self-test above.
+      - name: Deploy health gate self-test
+        run: ./scripts/health-gate.test.sh
+
+      # The build steps below refuse to compile with an empty SENTRY_RELEASE,
+      # but github.sha is never empty in normal operation - so nothing
+      # organically exercises the failing branch. Proves the guard itself
+      # goes red and green on the cases it claims to, rather than shipping a
+      # check nobody ever saw refuse anything.
+      - name: Sentry release guard self-test
+        run: ./scripts/check-sentry-release.test.sh
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -230,13 +295,22 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      # For the `#[ignore]`d admin-deletion tests that exercise the unwatch
-      # step against a real `RedisEVMMonitor` rather than the `None` branch -
-      # without this, that code path only ever runs against nothing.
+      # `-p server` below runs that package's `#[ignore]`d integration tests,
+      # and some need a real Redis the same way the rest need the Postgres
+      # above - without this, the first such test can only fail, and it does
+      # so by hanging until some ambient timeout fires rather than with a
+      # message saying Redis was never there. That now includes the
+      # admin-deletion tests exercising the unwatch step against a real
+      # `RedisEVMMonitor` rather than the `None` branch.
       redis:
         image: redis:7-alpine
         ports:
           - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -284,7 +358,7 @@ jobs:
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
             cargo run --release --bin migrate_postgres
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
-          REDIS_URL="redis://127.0.0.1:6379" \
+          TEST_REDIS_URL="redis://127.0.0.1:6379" \
             cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1
 
   # Runs on pull requests too, deliberately. This used to be branch-only, so a
@@ -346,13 +420,28 @@ jobs:
             if [ "$attempt" = 3 ]; then echo "::error::apt failed 3 times"; exit 1; fi
           done
 
+      # SENTRY_RELEASE has to be a real env var at compile time: the binaries
+      # read it with `option_env!`, which resolves when rustc runs and never
+      # sees anything set later (a runtime env var, a Docker ENV on a base
+      # image, etc). Same 7 chars as `sha_tag` and `EXPECTED_SHA` below, so
+      # the release Sentry shows matches the build_sha the deploy check
+      # verifies against.
       - name: Build server
+        env:
+          SENTRY_RELEASE: ${{ github.sha }}
         run: |
+          export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
+          ./scripts/check-sentry-release.sh "$SENTRY_RELEASE"
           cargo build --release --bin ethpayserver
           cargo build --release --bin migrate_postgres
 
       - name: Build monitor
-        run: cargo build --release --bin evmmonitor --features monitor-bin
+        env:
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: |
+          export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
+          ./scripts/check-sentry-release.sh "$SENTRY_RELEASE"
+          cargo build --release --bin evmmonitor --features monitor-bin
 
       # upload-artifact@v4 roots the archive at the least common ancestor of the
       # paths given. While `client/dist/` was in this list that ancestor was the
@@ -447,9 +536,31 @@ jobs:
           DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
         run: ./target/release/migrate_postgres
 
+      # Before the server starts, deliberately. The host instantiates plugins
+      # at boot, so a plugin installed through the API afterwards is recorded
+      # and not running - `POST /admin/plugins` answers `restart_required`.
+      # Seeding it here is what a restart would have left behind, and it is
+      # the only way the page tests exercise a plugin that is genuinely
+      # loaded rather than skipping.
+      #
+      # `npm ci` here rather than with the browsers below: this needs `pg`,
+      # and it needs it before the server exists.
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: npm ci
+
+      - name: Seed the fixture plugin
+        working-directory: e2e
+        env:
+          E2E_DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
+        run: node scripts/seed-plugin.mjs "$GITHUB_WORKSPACE/e2e-plugins"
+
       - name: Start server
         env:
           DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
+          # Where the seed step wrote the fixture's artifact. Absolute,
+          # because the server's working directory is not this step's.
+          ETHPAY_PLUGIN_DIR: ${{ github.workspace }}/e2e-plugins
           REDIS_URL: redis://127.0.0.1:6379
           # The limiter is per IP, and the entire suite is one IP (127.0.0.1)
           # driven by a single worker. On the defaults - auth 5/min, write
@@ -554,9 +665,9 @@ jobs:
           curl -sf http://localhost:8080/api/health/live \
             || { echo "::error::frontend proxy is not reaching the API"; docker logs e2e-frontend; exit 1; }
 
-      - name: Install Playwright
+      - name: Install Playwright browsers
         working-directory: e2e
-        run: npm ci && npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium
 
       # Steps print regardless of TTY; plain `list` only prints tests as they
       # FINISH, so a job killed at the 30-minute cap would name the last

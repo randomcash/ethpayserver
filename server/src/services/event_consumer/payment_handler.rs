@@ -15,6 +15,29 @@ use crate::services::webhook::WebhookEventType;
 
 use super::{EventConsumer, EventConsumerDataService, EventConsumerError};
 
+/// What to store in `payments.asset_symbol` for an ERC-20.
+///
+/// `ERC20` whenever the token has no symbol of its own - whether it is absent
+/// from the `tokens` table or present without one. The two cases were handled
+/// differently and only one of them was right: an unregistered token was
+/// recorded as `0x1c7d4b...`, a truncated address.
+///
+/// That is a display string, and this column is not a display. It goes
+/// wherever the column goes - the analytics reader groups by it, the plugin
+/// volume capability prices against it - and nothing can resolve an
+/// abbreviation. The first real USDC payment on testnet was therefore worth
+/// zero to the billing ladder.
+///
+/// Generalising loses nothing. `token_address` sits on the same row and
+/// carries the identity exactly; six hex digits never did.
+#[must_use]
+fn asset_symbol_for(symbol: Option<String>) -> String {
+    match symbol {
+        Some(symbol) if !symbol.trim().is_empty() => symbol,
+        _ => "ERC20".to_string(),
+    }
+}
+
 impl<
     D: EventConsumerDataService + 'static,
     M: EVMMonitor + 'static,
@@ -53,19 +76,18 @@ impl<
             // the old "only if we recognise this network" branch is gone —
             // testnets used to fall through it and lose their token symbols.
             let symbol = {
-                match TokenReader::get_by_address(&*self.data_service, &chain_id, &token_addr_str)
-                    .await?
-                {
-                    Some(token) => token.symbol.unwrap_or_else(|| "ERC20".to_string()),
-                    None => {
-                        tracing::warn!(
-                            token_address = %token_addr_str,
-                            chain_id = event.chain_id,
-                            "Unknown token, using address as symbol"
-                        );
-                        format!("0x{}...", &token_addr_str[2..8])
-                    }
+                let found =
+                    TokenReader::get_by_address(&*self.data_service, &chain_id, &token_addr_str)
+                        .await?;
+                if found.as_ref().is_none_or(|t| t.symbol.is_none()) {
+                    tracing::warn!(
+                        token_address = %token_addr_str,
+                        chain_id = event.chain_id,
+                        "no symbol for this token; recording it as ERC20 - register it in \
+                         `tokens` to give this chain's payments a real one"
+                    );
                 }
+                asset_symbol_for(found.and_then(|t| t.symbol))
             };
 
             (AssetType::ERC20, symbol, Some(token_addr_str))
@@ -247,5 +269,58 @@ impl<
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod symbol_tests {
+    use super::asset_symbol_for;
+
+    #[test]
+    fn a_token_with_a_symbol_keeps_it() {
+        assert_eq!(asset_symbol_for(Some("USDC".to_string())), "USDC");
+    }
+
+    /// The case that shipped wrong. An unregistered token was stored as
+    /// `0x1c7d4b...`, which is a display string in a column that is read by
+    /// machines: the analytics reader groups by it and the plugin volume
+    /// capability asks a rate provider to price it. No provider can resolve
+    /// an abbreviation, so a payment stored this way is worth nothing to the
+    /// billing ladder - which is exactly what happened to the first USDC
+    /// payment on testnet.
+    #[test]
+    fn an_unknown_token_is_never_recorded_as_an_abbreviated_address() {
+        let symbol = asset_symbol_for(None);
+        assert_eq!(symbol, "ERC20");
+        assert!(
+            !symbol.starts_with("0x"),
+            "an address fragment is not a symbol: {symbol}"
+        );
+        assert!(
+            !symbol.contains("..."),
+            "an ellipsis means this was formatted for a screen: {symbol}"
+        );
+    }
+
+    /// A row that exists but carries no symbol lands in the same place. The
+    /// two used to diverge, and the divergence was the bug.
+    #[test]
+    fn a_registered_token_without_a_symbol_agrees_with_an_unregistered_one() {
+        assert_eq!(
+            asset_symbol_for(None),
+            asset_symbol_for(Some(String::new()))
+        );
+        assert_eq!(
+            asset_symbol_for(None),
+            asset_symbol_for(Some("   ".to_string()))
+        );
+    }
+
+    /// `asset_symbol` is `varchar(32)`. A full address is 42 characters,
+    /// which is why the original truncated one - so the replacement has to
+    /// fit without needing to.
+    #[test]
+    fn the_fallback_fits_the_column() {
+        assert!(asset_symbol_for(None).len() <= 32);
     }
 }

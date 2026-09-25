@@ -4,6 +4,18 @@
 //! `storage_query` or `invoice_create`, gets a length back, and copies the
 //! answer out with `host_take`. This is the other end.
 //!
+//! That wasm-to-host wiring - a compiled guest module actually reaching this
+//! layer through wasmtime, not just a Rust-level call to it - is not code in
+//! this repository, so it cannot be shown in a diff here: the linker that
+//! binds the `storage_query` import lives in `payserver-plugin-host::runtime`
+//! (the crate this workspace pins by `rev` in the root `Cargo.toml`), and the
+//! guest-side round trip is exercised end to end, through a real compiled
+//! wasm module and a real `wasmtime::Linker`, by
+//! `a_plugin_can_ask_the_host_a_question_and_read_the_answer` in that crate's
+//! `runtime.rs` tests. Combined with this file's own tests against a real
+//! `PluginCalls` and a real Postgres, the two repositories together cover the
+//! whole path a plugin's write actually takes; neither alone does.
+//!
 //! Two capabilities, and they are not alike. Storage runs SQL on a
 //! connection Postgres authenticated as *that plugin's* role, and the
 //! database is what confines it. Invoicing has no such backstop - it writes
@@ -157,6 +169,55 @@ impl std::fmt::Debug for DeferredIssuer {
     }
 }
 
+/// The same late-binding cell for capability 6.
+///
+/// Separate from [`DeferredIssuer`] rather than one cell holding both,
+/// because the two are available under different conditions: issuing needs
+/// the instance's own store and reading a merchant's volume does not. Sharing
+/// a cell would make an instance with no billing store silently unable to
+/// answer a question it can answer perfectly well.
+#[derive(Clone, Default)]
+pub struct DeferredVolume(Arc<std::sync::OnceLock<Arc<dyn super::MerchantVolumeReader>>>);
+
+impl DeferredVolume {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publish the reader. Returns whether this call is the one that set it.
+    pub fn publish(&self, reader: Arc<dyn super::MerchantVolumeReader>) -> bool {
+        self.0.set(reader).is_ok()
+    }
+
+    fn get(&self) -> Option<&Arc<dyn super::MerchantVolumeReader>> {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Debug for DeferredVolume {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DeferredVolume")
+            .field(&self.get().is_some())
+            .finish()
+    }
+}
+
+/// The late-bound host capabilities a plugin's imports resolve through.
+///
+/// One struct rather than one parameter per cell, because these are threaded
+/// from `server.rs` through three layers of boot before they reach a plugin,
+/// and a fourth capability should be a field here rather than a fourth
+/// argument at every layer. Each cell is still published independently: they
+/// become available at different moments and under different conditions.
+#[derive(Clone, Default, Debug)]
+pub struct DeferredCapabilities {
+    /// Capability 3: issuing an invoice on the instance's own store.
+    pub issuer: DeferredIssuer,
+    /// Capability 6: reading what an account settled over a window.
+    pub volume: DeferredVolume,
+}
+
 /// One plugin's host imports: its database, and whether it may invoice.
 pub struct PluginCalls {
     plugin: PluginId,
@@ -170,6 +231,10 @@ pub struct PluginCalls {
     /// means the plugin is told invoicing is unavailable, rather than the
     /// host guessing at a store.
     issuer: DeferredIssuer,
+    /// Who answers when this plugin asks what an account settled, if
+    /// anything does. Unpublished means the plugin is told so, rather than
+    /// being handed a zero it would read as "this merchant sold nothing".
+    volume: DeferredVolume,
     /// The runtime to drive the async database work on.
     ///
     /// [`PluginHostCalls`] is sync because the runtime calls plugins from
@@ -189,6 +254,7 @@ impl PluginCalls {
             plugin,
             pools,
             issuer: DeferredIssuer::default(),
+            volume: DeferredVolume::default(),
             handle: tokio::runtime::Handle::current(),
         }
     }
@@ -336,13 +402,79 @@ struct InvoiceIssued {
     checkout_path: String,
 }
 
+/// What a plugin quotes volume in when it does not say.
+///
+/// Named rather than defaulted silently: a plugin that omits the currency is
+/// asking for "the usual", and the usual on this instance is the unit its
+/// brackets are written in.
+const DEFAULT_VOLUME_CURRENCY: &str = "USD";
+
+/// A plugin asking what one account settled.
+#[derive(Debug, Deserialize)]
+struct VolumeRequest {
+    account_id: String,
+    /// How far back to sum. Clamped host-side - see
+    /// [`MAX_WINDOW_DAYS`](super::MAX_WINDOW_DAYS) - because the plugin names
+    /// it.
+    window_days: u32,
+    #[serde(default)]
+    currency: String,
+}
+
+/// The answer: one number, and what could not be counted towards it.
+#[derive(Debug, Serialize)]
+struct VolumeAnswer {
+    /// A decimal string. Every value crossing this boundary is text - a JSON
+    /// number cannot carry what these columns hold.
+    volume: String,
+    currency: String,
+    /// Assets present in the window that could not be priced, and are
+    /// therefore missing from `volume`. Their absence makes the answer an
+    /// undercount, which can only under-bill.
+    unpriced_assets: Vec<String>,
+}
+
 impl PluginCalls {
-    /// Point this plugin's `invoice_create` at an issuer, which may not have
-    /// been published yet.
+    /// Point this plugin's host calls at the instance's capabilities, which
+    /// may not have been published yet.
     #[must_use]
-    pub fn with_issuer(mut self, issuer: DeferredIssuer) -> Self {
-        self.issuer = issuer;
+    pub fn with_capabilities(mut self, capabilities: &DeferredCapabilities) -> Self {
+        self.issuer = capabilities.issuer.clone();
+        self.volume = capabilities.volume.clone();
         self
+    }
+
+    fn read_volume(&self, request: &VolumeRequest) -> Result<VolumeAnswer, String> {
+        let Some(reader) = self.volume.get().cloned() else {
+            return Err("this host does not report merchant volume".to_string());
+        };
+
+        // The account is parsed here rather than passed through as text, so
+        // an id this instance could never have issued is refused before it
+        // reaches a query. The plugin holds the same string the page request
+        // handed it, which is a `UserId` rendered - anything else is either a
+        // bug in the plugin or a plugin asking about something it made up.
+        let account_id = uuid::Uuid::parse_str(&request.account_id)
+            .map(types::UserId)
+            .map_err(|_| format!("{} is not an account id", request.account_id))?;
+
+        let currency = if request.currency.trim().is_empty() {
+            DEFAULT_VOLUME_CURRENCY
+        } else {
+            request.currency.trim()
+        };
+
+        let volume = self.handle.block_on(reader.merchant_volume(
+            account_id,
+            request.window_days,
+            currency,
+        ))?;
+
+        Ok(VolumeAnswer {
+            volume: volume.volume,
+            currency: volume.currency,
+            unpriced_assets: volume.unpriced_assets,
+        })
     }
 
     fn issue(&self, request: InvoiceRequest) -> Result<InvoiceIssued, String> {
@@ -388,6 +520,15 @@ impl PluginHostCalls for PluginCalls {
         let issued = self.issue(parsed)?;
         serde_json::to_vec(&issued)
             .map_err(|e| format!("could not serialise the invoice answer: {e}"))
+    }
+
+    fn merchant_volume(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        let parsed: VolumeRequest = serde_json::from_slice(request)
+            .map_err(|e| format!("could not read the volume request: {e}"))?;
+
+        let answer = self.read_volume(&parsed)?;
+        serde_json::to_vec(&answer)
+            .map_err(|e| format!("could not serialise the volume answer: {e}"))
     }
 
     fn storage_query(&self, request: &[u8]) -> Result<Vec<u8>, String> {
@@ -520,6 +661,159 @@ mod tests {
         assert!(err.contains("no database access"), "{err}");
     }
 
+    /// A double that answers with a fixed volume and records what it was
+    /// asked, so the test can check the request survived the JSON boundary.
+    struct FixedVolume {
+        asked: std::sync::Mutex<Vec<(types::UserId, u32, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::MerchantVolumeReader for FixedVolume {
+        async fn merchant_volume(
+            &self,
+            account_id: types::UserId,
+            window_days: u32,
+            currency: &str,
+        ) -> Result<super::super::MerchantVolume, String> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((account_id, window_days, currency.to_string()));
+            Ok(super::super::MerchantVolume {
+                volume: "12345.67".to_string(),
+                currency: currency.to_string(),
+                unpriced_assets: vec!["FOO".to_string()],
+            })
+        }
+    }
+
+    fn volume_calls(volume: &DeferredVolume) -> PluginCalls {
+        let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
+        PluginCalls::new(PluginId::new("cash.random.volume").unwrap(), pools).with_capabilities(
+            &DeferredCapabilities {
+                issuer: DeferredIssuer::default(),
+                volume: volume.clone(),
+            },
+        )
+    }
+
+    /// The whole point of the capability, through the boundary a plugin
+    /// actually reaches it by: JSON in, JSON out, and the reader published
+    /// through the deferred cell rather than held directly.
+    #[test]
+    fn a_published_volume_reader_answers_a_plugin_in_its_own_units() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let reader = Arc::new(FixedVolume {
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let volume = DeferredVolume::new();
+        assert!(volume.publish(reader.clone()));
+        let calls = volume_calls(&volume);
+
+        let account = types::UserId::new();
+        let answer = PluginHostCalls::merchant_volume(
+            &calls,
+            format!(
+                r#"{{"account_id":"{}","window_days":30,"currency":"USD"}}"#,
+                account.0
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+        assert_eq!(parsed["volume"], "12345.67");
+        assert_eq!(parsed["currency"], "USD");
+        assert_eq!(parsed["unpriced_assets"][0], "FOO");
+
+        let asked = reader.asked.lock().unwrap();
+        assert_eq!(
+            asked[0],
+            (account, 30, "USD".to_string()),
+            "the reader must see the account, window and currency the plugin asked for"
+        );
+    }
+
+    /// Absent means absent. A plugin that prices on volume and is handed a
+    /// zero would read it as "this merchant sold nothing" and bill them the
+    /// bottom bracket forever, which is the one wrong answer that looks
+    /// entirely normal.
+    #[test]
+    fn an_unpublished_volume_reader_is_an_error_and_never_a_zero() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let calls = volume_calls(&DeferredVolume::new());
+        let err = PluginHostCalls::merchant_volume(
+            &calls,
+            format!(
+                r#"{{"account_id":"{}","window_days":30}}"#,
+                types::UserId::new().0
+            )
+            .as_bytes(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("does not report merchant volume"), "{err}");
+    }
+
+    /// The account is parsed before it reaches a query. A plugin holds the
+    /// string the host handed it; anything else is a plugin asking about
+    /// something it made up.
+    #[test]
+    fn an_account_id_that_is_not_an_account_id_is_refused() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let reader = Arc::new(FixedVolume {
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let volume = DeferredVolume::new();
+        volume.publish(reader.clone());
+        let calls = volume_calls(&volume);
+
+        let err = PluginHostCalls::merchant_volume(
+            &calls,
+            br#"{"account_id":"'; DROP TABLE subscriptions; --","window_days":30}"#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("is not an account id"), "{err}");
+        assert!(
+            reader.asked.lock().unwrap().is_empty(),
+            "a request that names no real account must not reach the reader"
+        );
+    }
+
+    /// A plugin that omits the currency gets the instance's own unit, not an
+    /// empty string that would make the answer unreadable.
+    #[test]
+    fn an_omitted_currency_falls_back_to_the_instance_unit() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let reader = Arc::new(FixedVolume {
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let volume = DeferredVolume::new();
+        volume.publish(reader.clone());
+        let calls = volume_calls(&volume);
+
+        PluginHostCalls::merchant_volume(
+            &calls,
+            format!(
+                r#"{{"account_id":"{}","window_days":30,"currency":"  "}}"#,
+                types::UserId::new().0
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(reader.asked.lock().unwrap()[0].2, DEFAULT_VOLUME_CURRENCY);
+    }
+
     #[test]
     fn a_malformed_request_is_an_error_not_a_panic() {
         let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
@@ -608,6 +902,85 @@ mod tests {
             row["amount"],
             Some("129.000000000000000000".to_string()),
             "the amount must cross with every digit Postgres stored"
+        );
+
+        storage.drop_role(&plugin).await.unwrap();
+        storage.uninstall(&plugin, true).await.unwrap();
+    }
+
+    /// The module doc's own canonical example - `UPDATE subscriptions SET
+    /// ... WHERE account_id = $2` - is never run against a real row
+    /// anywhere in this file; only `INSERT` is. That gap matters because
+    /// the shape is not academic: a plugin marking an account cancelled,
+    /// same as one advancing `paid_until`, is exactly this statement, and
+    /// its `rows_affected` is the only signal such a plugin has that the
+    /// write actually matched something rather than silently no-op'ing on
+    /// a stale or wrong account id.
+    ///
+    /// It is also the sharp edge the comment on `rows_affected` above
+    /// warns about, proven rather than just asserted: an `UPDATE` with no
+    /// `RETURNING` reports zero rows *even when it matches and changes
+    /// one*, because this call counts rows `fetch_all` returned, not rows
+    /// Postgres changed. `RETURNING` is what turns that back into a
+    /// trustworthy signal.
+    #[tokio::test]
+    #[ignore]
+    async fn an_update_without_returning_cannot_confirm_its_own_match() {
+        // Unlike the file's other `live()`-gated tests, a silent skip here
+        // would defeat the point: this test exists to *prove* the
+        // `rows_affected` footgun, and a green run that never touched
+        // Postgres would look identical to one that did. CI always has
+        // `DATABASE_URL` set for `--ignored` runs; a bare `cargo test
+        // --ignored` without it fails loudly instead.
+        let Some((calls, schema, storage, plugin)) = live("cash.random.hc.update").await else {
+            panic!(
+                "DATABASE_URL must be set to run this test - it exists to \
+                 prove a real Postgres behaviour, so skipping it silently \
+                 would prove nothing"
+            );
+        };
+
+        calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"INSERT INTO \"{schema}\".subscriptions (account_id) VALUES ($1)","params":["acct-3"]}}]}}"#
+            )))
+            .await
+            .expect("the fixture row must insert");
+
+        let blind = calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"UPDATE \"{schema}\".subscriptions SET paid_until = now() WHERE account_id = $1","params":["acct-3"]}}]}}"#
+            )))
+            .await
+            .expect("the update itself must succeed");
+        assert_eq!(
+            blind.results[0].rows_affected, "0",
+            "documented behaviour: an UPDATE with no RETURNING reports zero \
+             rows even though this one matched and changed acct-3"
+        );
+
+        let confirmed = calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"UPDATE \"{schema}\".subscriptions SET paid_until = now() WHERE account_id = $1 RETURNING account_id","params":["acct-3"]}}]}}"#
+            )))
+            .await
+            .expect("the update itself must succeed");
+        assert_eq!(
+            confirmed.results[0].rows_affected, "1",
+            "RETURNING is what makes rows_affected trustworthy for a write \
+             that needs to know whether it matched anything"
+        );
+
+        let missed = calls
+            .run(request(&format!(
+                r#"{{"statements":[{{"sql":"UPDATE \"{schema}\".subscriptions SET paid_until = now() WHERE account_id = $1 RETURNING account_id","params":["acct-does-not-exist"]}}]}}"#
+            )))
+            .await
+            .expect("an update matching nothing is not an error");
+        assert_eq!(
+            missed.results[0].rows_affected, "0",
+            "and a real miss still reads as zero, so the signal round-trips \
+             both ways"
         );
 
         storage.drop_role(&plugin).await.unwrap();

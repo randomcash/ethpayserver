@@ -60,7 +60,7 @@ use axum::{
     middleware::{self, Next},
     response::Response,
 };
-use payserver_plugin_api::PluginId;
+use payserver_plugin_api::{Manifest, PluginId};
 
 use super::ApiErr;
 use super::extractors::AuthenticatedUser;
@@ -139,6 +139,31 @@ impl From<PageError> for ApiErr {
     }
 }
 
+/// The plugin whose manifest claims `slug`, if any.
+///
+/// Reads the installed list rather than a cached map: installs are rare, page
+/// requests are not hot enough for it to matter, and a cache would need
+/// invalidating on install, uninstall and enable - three chances to serve a
+/// page from a plugin that is no longer the one behind that URL.
+async fn resolve_plugin<A>(state: &PgAppState<A>, slug: &str) -> Option<PluginId>
+where
+    A: SessionService + 'static,
+{
+    // Refuse the lookup outright if it is not a well-formed slug, so a
+    // request for `../..` never reaches a manifest comparison.
+    let slug = payserver_plugin_api::PluginSlug::new(slug).ok()?;
+
+    let installed =
+        data_service::InstalledPluginReader::list_installed_plugins(&*state.data_service)
+            .await
+            .ok()?;
+
+    installed.into_iter().find_map(|row| {
+        let manifest: Manifest = row.manifest_toml.parse().ok()?;
+        (manifest.slug.as_ref() == Some(&slug)).then_some(manifest.id)
+    })
+}
+
 /// Which declared pages a caller is offered.
 ///
 /// Its own function so the rule can be tested without a database behind it.
@@ -150,10 +175,16 @@ fn visible_pages(
 ) -> Vec<PluginPageInfo> {
     declared
         .into_iter()
-        .filter(|page| is_admin || !page.admin_only)
+        // `admin_only` or an admin-settings placement - either is enough.
+        // A page placed in admin settings is admin-only by definition (there
+        // is nowhere else it is reachable from), so a plugin should not have
+        // to say it twice, and a merchant must not be offered it because the
+        // author said it only once.
+        .filter(|page| is_admin || !(page.admin_only || page.placement.is_admin_only()))
         .map(|page| PluginPageInfo {
             path: page.path,
             label: page.label,
+            icon: page.icon.into(),
         })
         .collect()
 }
@@ -161,7 +192,12 @@ fn visible_pages(
 /// One plugin's pages, as the client should list them.
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct PluginPagesInfo {
+    /// The plugin's identity. Stable, and what admin surfaces name.
     pub id: String,
+    /// What its pages live under in a URL. Short, and what a client builds
+    /// links from - `/billing/subscriptions`, never
+    /// `/cash.random.billing/subscriptions`.
+    pub slug: String,
     pub pages: Vec<PluginPageInfo>,
 }
 
@@ -170,6 +206,55 @@ pub struct PluginPageInfo {
     /// Append to `/plugins/{id}/pages/` to fetch it.
     pub path: String,
     pub label: String,
+    pub icon: PluginPageIcon,
+}
+
+/// The icon a plugin's page shows in navigation, mirrored from
+/// [`payserver_plugin_api::PageIcon`] for the sake of an API schema:
+/// `payserver-plugin-api` does not depend on `utoipa`, and a fixed,
+/// API-facing vocabulary is a better reason to add that dependency there
+/// than this one field.
+///
+/// The consumer is `payserver-client`, a separate repository: its
+/// `PluginLinks` (`src/app/layout.rs`) maps each variant here to a component
+/// in `src/app/icons.rs`. That mapping cannot live in this diff - it is a
+/// different crate in a different repo - so it ships as its own commit and
+/// PR there, opened alongside this one.
+///
+/// `payserver-billing`'s own manifest still needs `icon = "card"` added now
+/// that this vocabulary exists, so its sidebar entry stops using the
+/// fallback too. That repo is private and isn't checked out anywhere this
+/// change can reach it from, so it is not done here - tracked as a follow-up
+/// against that repo instead of silently left undone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginPageIcon {
+    Card,
+    Coins,
+    Chart,
+    Users,
+    Shield,
+    Bell,
+    Key,
+    Tag,
+    Plug,
+}
+
+impl From<payserver_plugin_api::PageIcon> for PluginPageIcon {
+    fn from(icon: payserver_plugin_api::PageIcon) -> Self {
+        use payserver_plugin_api::PageIcon;
+        match icon {
+            PageIcon::Card => Self::Card,
+            PageIcon::Coins => Self::Coins,
+            PageIcon::Chart => Self::Chart,
+            PageIcon::Users => Self::Users,
+            PageIcon::Shield => Self::Shield,
+            PageIcon::Bell => Self::Bell,
+            PageIcon::Key => Self::Key,
+            PageIcon::Tag => Self::Tag,
+            PageIcon::Plug => Self::Plug,
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -207,7 +292,6 @@ where
     A: SessionService + 'static,
 {
     use data_service::InstalledPluginReader;
-    use payserver_plugin_api::Manifest;
 
     let installed = InstalledPluginReader::list_installed_plugins(&*state.data_service)
         .await
@@ -237,6 +321,9 @@ where
             }
 
             let manifest: Manifest = row.manifest_toml.parse().ok()?;
+            // No slug, no URL to offer. A manifest with pages and no slug
+            // cannot parse, so this is a plugin that declared neither.
+            let slug = manifest.slug?.to_string();
             let pages = visible_pages(manifest.pages, is_admin);
 
             // A plugin with no pages a caller may see is not listed at all,
@@ -245,7 +332,11 @@ where
             if pages.is_empty() {
                 return None;
             }
-            Some(PluginPagesInfo { id: row.id, pages })
+            Some(PluginPagesInfo {
+                id: row.id,
+                slug,
+                pages,
+            })
         })
         .collect();
 
@@ -255,13 +346,21 @@ where
 pub async fn get_page<A>(
     State(state): State<PgAppState<A>>,
     AuthenticatedUser(user): AuthenticatedUser,
-    Path((plugin_id, path)): Path<(String, String)>,
+    Path((plugin_ref, path)): Path<(String, String)>,
 ) -> Result<Json<PageElement>, ApiErr>
 where
     A: SessionService + 'static,
 {
-    let plugin_id = PluginId::new(plugin_id)
-        .map_err(|e| ApiErr::from((StatusCode::NOT_FOUND, e.to_string())))?;
+    // Addressed by slug, with the id still accepted. A URL a person reads
+    // uses the slug; an admin tool, a log line and an older client all have
+    // the id, and breaking those to make the URL pretty would be a poor
+    // trade. Slug first, because that is the one a plugin chose and the one
+    // that must win if a plugin ever picks a slug that looks like an id.
+    let plugin_id = match resolve_plugin(&state, &plugin_ref).await {
+        Some(id) => id,
+        None => PluginId::new(plugin_ref)
+            .map_err(|e| ApiErr::from((StatusCode::NOT_FOUND, e.to_string())))?,
+    };
 
     // Both halves of "who is asking" are resolved here, from the session the
     // host authenticated, and neither is anything the request claimed. A
@@ -700,17 +799,21 @@ mod tests {
     /// the order a menu is built in.
     #[test]
     fn admin_only_pages_are_offered_only_to_an_admin() {
-        use payserver_plugin_api::PageDeclaration;
+        use payserver_plugin_api::{PageDeclaration, PageIcon, PagePlacement};
 
         let declared = vec![
             PageDeclaration {
                 path: "subscription".to_string(),
                 label: "Subscription".to_string(),
+                placement: PagePlacement::Nav,
+                icon: PageIcon::Plug,
                 admin_only: false,
             },
             PageDeclaration {
                 path: "subscriptions".to_string(),
                 label: "Subscriptions".to_string(),
+                placement: PagePlacement::Nav,
+                icon: PageIcon::Plug,
                 admin_only: true,
             },
         ];
@@ -728,8 +831,119 @@ mod tests {
         );
     }
 
+    /// A page placed in admin settings is admin-only by definition - there is
+    /// nowhere else it is reachable from. A plugin should not have to say so
+    /// twice, and a merchant must not be offered it because the author said
+    /// it only once.
+    #[test]
+    fn an_admin_settings_page_is_admin_only_without_saying_so_twice() {
+        use payserver_plugin_api::{PageDeclaration, PageIcon, PagePlacement};
+
+        let declared = vec![PageDeclaration {
+            path: "subscriptions".to_string(),
+            label: "All merchants".to_string(),
+            placement: PagePlacement::AdminSettings,
+            icon: PageIcon::Plug,
+            // Deliberately NOT set: the placement alone must be enough.
+            admin_only: false,
+        }];
+
+        assert!(
+            visible_pages(declared.clone(), false).is_empty(),
+            "a merchant must not be offered a page about other merchants"
+        );
+        assert_eq!(visible_pages(declared, true).len(), 1);
+    }
+
+    /// The icon a plugin declares is what a client is told to draw, not
+    /// whatever the generic default happens to be - otherwise the field
+    /// could parse correctly in the manifest and still never reach anyone
+    /// reading the response.
+    #[test]
+    fn a_declared_icon_reaches_the_response() {
+        use payserver_plugin_api::{PageDeclaration, PageIcon, PagePlacement};
+
+        let declared = vec![PageDeclaration {
+            path: "subscription".to_string(),
+            label: "Subscription".to_string(),
+            placement: PagePlacement::Nav,
+            icon: PageIcon::Card,
+            admin_only: false,
+        }];
+
+        let pages = visible_pages(declared, false);
+        assert_eq!(pages[0].icon, PluginPageIcon::Card);
+    }
+
+    /// A manifest predating this field, or one written against a newer icon
+    /// vocabulary than this build knows, both land on [`PageIcon::Plug`]
+    /// before `visible_pages` ever sees them (that defaulting and fallback
+    /// is `payserver-plugin-api`'s own, and is tested there). What this repo
+    /// owns is the mapping onto [`PluginPageIcon`], so this only needs to
+    /// confirm the default variant survives that mapping unchanged.
+    #[test]
+    fn a_page_with_the_default_icon_maps_to_the_generic_one() {
+        use payserver_plugin_api::{PageDeclaration, PageIcon, PagePlacement};
+
+        let declared = vec![PageDeclaration {
+            path: "subscription".to_string(),
+            label: "Subscription".to_string(),
+            placement: PagePlacement::Nav,
+            icon: PageIcon::default(),
+            admin_only: false,
+        }];
+
+        let pages = visible_pages(declared, false);
+        assert_eq!(pages[0].icon, PluginPageIcon::Plug);
+    }
+
     #[test]
     fn everyone_else_is_the_merchant_viewer() {
         assert_eq!(viewer_for(Role::User), Viewer::Merchant);
+    }
+
+    /// A slug resolves to the plugin that declared it, and the id still
+    /// works - an admin tool, a log line and an older client all carry ids,
+    /// and breaking those to make a URL pretty would be a poor trade.
+    #[test]
+    fn a_manifest_declares_the_slug_a_url_is_built_from() {
+        let manifest: Manifest = r#"
+            id = "cash.random.billing"
+            version = "0.1.0"
+            dependencies = ["ethpayserver:^1.2.0"]
+            kind = "filter"
+            slug = "billing"
+
+            [[pages]]
+            path = "subscriptions"
+            label = "Subscriptions"
+        "#
+        .parse()
+        .unwrap();
+
+        assert_eq!(manifest.slug.as_ref().unwrap().as_str(), "billing");
+        assert_eq!(
+            manifest.id.as_str(),
+            "cash.random.billing",
+            "the id is unchanged - the slug is an addition, not a rename"
+        );
+    }
+
+    /// The lookup validates before it compares, so a traversal attempt never
+    /// reaches a manifest at all. Without this, `..` would be compared
+    /// against every installed plugin's slug - harmless today, and exactly
+    /// the sort of input that should be refused at the door rather than
+    /// relied on to match nothing.
+    #[test]
+    fn a_malformed_slug_is_refused_before_any_lookup() {
+        use payserver_plugin_api::PluginSlug;
+
+        for bad in ["..", "../admin", "bil/ling", "Billing", ""] {
+            assert!(
+                PluginSlug::new(bad).is_err(),
+                "{bad:?} must not survive to be compared against a manifest"
+            );
+        }
+        assert!(PluginSlug::new("billing").is_ok());
     }
 }

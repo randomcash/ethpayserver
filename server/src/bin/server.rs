@@ -13,7 +13,7 @@ use anyhow::Result;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::{AuthConfig, AuthService, captcha::CloudflareTurnstile};
 use data_service::PgDataService;
@@ -40,15 +40,18 @@ async fn main() -> Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();
 
-    // Initialize Sentry (no-op when SENTRY_DSN is unset)
+    // Initialize Sentry (no-op when SENTRY_DSN is unset). SENTRY_RELEASE is
+    // set by the CI build step from GITHUB_SHA — option_env! reads it at
+    // compile time, so it must be a real env var at `cargo build`, not
+    // something exported at deploy/run time.
     let (_sentry_guard, sentry_dsn_configured, sentry_environment) =
-        evm::telemetry::init_sentry(option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from));
+        evm::telemetry::init_sentry(option_env!("SENTRY_RELEASE").map(Cow::from));
 
     // Load configuration
     let config = Config::from_env()?;
 
     // Initialize tracing (includes Sentry layer when DSN is configured)
-    init_tracing(&config.log_level);
+    init_tracing(&config.log_level, &config.log_format);
 
     // Report whether error reporting is actually on. `tracing::info!` before
     // this point has no subscriber to write to, so this must come after
@@ -233,14 +236,15 @@ async fn main() -> Result<()> {
     // around. Handed to the loader now because this is where a plugin is
     // given its host calls, and a plugin that got none here would have no
     // way to be granted them later.
-    let plugin_issuer = server::services::plugins::DeferredIssuer::new();
+    let plugin_capabilities = server::services::plugins::DeferredCapabilities::default();
+    let plugin_issuer = plugin_capabilities.issuer.clone();
 
     let loaded = match load_installed_plugins(
         &*data_service,
         plugin_host.as_deref(),
         &plugin_artifacts,
         Some(&plugin_pools),
-        &plugin_issuer,
+        &plugin_capabilities,
     )
     .await
     {
@@ -326,7 +330,9 @@ async fn main() -> Result<()> {
         Some(Arc::clone(&ws_broadcast)),
         Arc::clone(&email_sender),
     );
-    let event_consumer = match own_store_payments {
+    // Cloned rather than moved: the same observers are also handed to the
+    // reconciliation loop below, which is the pull path under this push one.
+    let event_consumer = match own_store_payments.clone() {
         Some((store_id, observers)) => event_consumer.with_own_store_payments(store_id, observers),
         None => event_consumer,
     };
@@ -391,6 +397,9 @@ async fn main() -> Result<()> {
     state.invoice_creation_filters = plugin_filters;
     // Never filtered: see `AppState::billing_store_id`.
     state.billing_store_id = billing_store_id;
+    // Checked against every nomination of a new billing store: see
+    // `AppState::operator_account_id`.
+    state.operator_account_id = config.operator_account_id;
 
     // Capability 3, published. An instance with no configured billing store
     // publishes nothing, and its plugins are told invoicing is unavailable -
@@ -399,17 +408,50 @@ async fn main() -> Result<()> {
     // customers.
     match billing_store_id {
         Some(store_id) => {
-            let issuer: Arc<dyn server::services::plugins::HostInvoiceIssuer> = Arc::new(
-                server::services::plugins::PluginHostApi::new(state.clone(), store_id),
-            );
+            let api = Arc::new(server::services::plugins::PluginHostApi::new(
+                state.clone(),
+                store_id,
+            ));
+            let issuer: Arc<dyn server::services::plugins::HostInvoiceIssuer> = api.clone();
             if plugin_issuer.publish(issuer) {
                 tracing::info!(%store_id, "plugins may issue invoices on this instance's own store");
+            }
+
+            // The pull half of own-store payment reporting. Push is the fast
+            // path and never the source of truth: a dispatch is lost whenever
+            // the plugin could not take it - disabled after repeated failure,
+            // trapped, past its deadline, or not loaded because this process
+            // was restarting when the payment confirmed. Every one of those
+            // is a merchant who paid and was not credited, and none of them
+            // is visible, because the payment itself succeeded.
+            if let Some((_, observers)) = own_store_payments.as_ref() {
+                let reader: Arc<dyn server::services::plugins::OwnStorePaymentReader> = api;
+                tokio::spawn(server::services::plugins::reconcile::run(
+                    reader,
+                    observers.clone(),
+                    server::services::plugins::reconcile::DEFAULT_INTERVAL,
+                ));
+                tracing::info!(
+                    interval_secs =
+                        server::services::plugins::reconcile::DEFAULT_INTERVAL.as_secs(),
+                    "reconciling own-store payments on a loop; a lost dispatch is caught here"
+                );
             }
         }
         None => tracing::info!(
             "plugins cannot issue invoices: ETHPAY_BILLING_STORE_ID is unset, so this \
              instance has no store of its own to bill on"
         ),
+    }
+
+    // Capability 6, published unconditionally. Unlike capability 3 it needs
+    // no own store: an instance that sells nothing still has merchants with
+    // volume, and a plugin asking what one settled deserves the real answer
+    // rather than silence that reads as zero.
+    if plugin_capabilities.volume.publish(Arc::new(
+        server::services::plugins::PluginMerchantVolume::new(state.clone()),
+    )) {
+        tracing::info!("plugins may read what an account settled over a window");
     }
 
     // Capability 5. `PageHost` is built empty by `AppState::new` and has
@@ -491,13 +533,97 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(log_level: &str) {
+/// Whether `log_format` selects JSON output, and a warning to log for a value
+/// that is neither `json` nor `pretty` — an unrecognized value (a typo, wrong
+/// case) would otherwise silently fall back to the human-readable format a
+/// log shipper can't parse, with no signal that anything is wrong.
+fn resolve_log_format(log_format: &str) -> (bool, Option<String>) {
+    match log_format {
+        "json" => (true, None),
+        "pretty" => (false, None),
+        other => (
+            false,
+            Some(format!(
+                "LOG_FORMAT={other:?} is not \"json\" or \"pretty\"; defaulting to pretty"
+            )),
+        ),
+    }
+}
+
+fn init_tracing(log_level: &str, log_format: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(sentry_tracing::layer())
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // `json` is what a log shipper (Grafana Cloud's Loki agent) parses; any
+    // other value keeps the human-readable format for local/dev use.
+    let (json, warning) = resolve_log_format(log_format);
+
+    // Gates which levels become Sentry *structured logs* specifically, so
+    // testnet can ship INFO there while mainnet ships WARN and above. Applied
+    // as the Sentry layer's own per-layer filter (below) rather than folded
+    // into `filter`, because a bare `.with(filter)` layer sits in the same
+    // `Layered` stack as every other layer and `Layered::enabled` ANDs across
+    // all of them — an event `filter` (LOG_LEVEL) rejects never reaches the
+    // Sentry layer's `on_event` at all, so `SENTRY_LOG_LEVEL` could only ever
+    // be a *further* restriction on top of LOG_LEVEL, never independent of
+    // it. Per-layer filtering (`.with_filter` on each layer instead of a
+    // shared `.with(filter)`) is what actually decouples them.
+    let sentry_log_level = evm::telemetry::resolve_sentry_log_level();
+    // Floor for the Sentry layer's own callsite interest, independent of
+    // LOG_LEVEL. Fixed at INFO because `sentry_tracing`'s event/span
+    // classification never does anything below INFO regardless of
+    // `sentry_log_level` (DEBUG/TRACE are always `EventFilter::Ignore`), so
+    // this can't suppress anything `sentry_log_event_filter` would keep.
+    let sentry_filter = tracing_subscriber::filter::LevelFilter::INFO;
+
+    if json {
+        tracing_subscriber::registry()
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .with_filter(sentry_filter),
+            )
+            .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .with_filter(sentry_filter),
+            )
+            .with(tracing_subscriber::fmt::layer().with_filter(filter))
+            .init();
+    }
+
+    // Logged after `.init()` on purpose: there is no subscriber to write to
+    // before that.
+    if let Some(warning) = warning {
+        tracing::warn!("{warning}");
+    }
+}
+
+#[cfg(test)]
+mod tracing_config_tests {
+    use super::resolve_log_format;
+
+    #[test]
+    fn json_selects_json_with_no_warning() {
+        assert_eq!(resolve_log_format("json"), (true, None));
+    }
+
+    #[test]
+    fn pretty_selects_pretty_with_no_warning() {
+        assert_eq!(resolve_log_format("pretty"), (false, None));
+    }
+
+    #[test]
+    fn unrecognized_value_falls_back_to_pretty_with_a_warning() {
+        let (json, warning) = resolve_log_format("JSON");
+        assert!(!json);
+        assert!(
+            warning.is_some(),
+            "a typo'd LOG_FORMAT must not fail silently"
+        );
+    }
 }

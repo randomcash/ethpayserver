@@ -559,10 +559,26 @@ async fn test_erc20_payment_detection_event_consumer() {
         .await
         .unwrap();
     assert_eq!(payments.len(), 1);
-    // On testnets, unknown tokens get a shortened address as symbol: "0x{first6hex}..."
+    // This used to assert the opposite - that an unknown token is recorded as
+    // `0x{first6hex}...` - and the expectation was the bug rather than the
+    // code failing to meet it.
+    //
+    // `asset_symbol` is read by machines. The analytics reader groups by it
+    // and the plugin volume capability hands it to a rate provider, and no
+    // provider resolves six hex digits and an ellipsis. The first real USDC
+    // payment on testnet was stored that way and priced at zero, which is how
+    // this was found.
+    //
+    // `ERC20` is what the neighbouring branch already returned for a token
+    // that is registered without a symbol, so the two now agree. Nothing is
+    // lost: `token_address` is on the same row and is the identity in full.
+    assert_eq!(
+        payments[0].asset_symbol, "ERC20",
+        "an unregistered token must record a resolvable symbol, not an address fragment"
+    );
     assert!(
-        payments[0].asset_symbol.starts_with("0x"),
-        "expected shortened address symbol for testnet ERC20, got: {}",
+        !payments[0].asset_symbol.contains("..."),
+        "an ellipsis means this was formatted for a screen: {}",
         payments[0].asset_symbol
     );
     assert!(!payments[0].reorged);
