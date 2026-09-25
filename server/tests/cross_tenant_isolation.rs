@@ -58,7 +58,7 @@ use payserver_plugin_api::PluginId;
 use payserver_plugin_host::{PageHost, PageRenderError, PageRenderer};
 use rates::NoOpRateProvider;
 use server::api::AuthenticatedUser;
-use server::api::stores::SetStoreWalletRequest;
+use server::api::stores::{SetStoreWalletRequest, StoreWalletResult};
 use server::services::RedisEVMMonitor;
 use server::services::plugins::{PageElement, PageRequest, Viewer};
 use server::state::PgAppState;
@@ -1034,8 +1034,8 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
     )
     .await;
     assert_eq!(
-        get_result.unwrap_err(),
-        StatusCode::FORBIDDEN,
+        get_result.err(),
+        Some(StatusCode::FORBIDDEN),
         "A must not be able to read B's store wallet"
     );
 
@@ -1071,7 +1071,7 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
     )
     .await
     .expect("A must be able to read A's own store wallet");
-    assert_eq!(own.wallet.id, a.wallet.id);
+    assert!(matches!(own, StoreWalletResult::Bare(r) if r.wallet.id == a.wallet.id));
 }
 
 #[tokio::test]
@@ -1660,8 +1660,8 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
     )
     .await;
     assert_eq!(
-        result.unwrap_err(),
-        StatusCode::FORBIDDEN,
+        result.err(),
+        Some(StatusCode::FORBIDDEN),
         "an API key must not read another tenant's store wallet"
     );
 
@@ -1683,7 +1683,7 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
     )
     .await
     .expect("an API key must be able to read its owner's own store wallet");
-    assert_eq!(own.wallet.id, a.wallet.id);
+    assert!(matches!(own, StoreWalletResult::Bare(r) if r.wallet.id == a.wallet.id));
 }
 
 #[tokio::test]
