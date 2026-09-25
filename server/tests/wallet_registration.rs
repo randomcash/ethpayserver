@@ -15,8 +15,15 @@
 //!
 //! Needs a real Postgres and is `#[ignore]`d, matching the convention
 //! `data-service`'s own DB-backed tests use: set `DATABASE_URL` and run with
-//! `--ignored`. Skips (rather than failing) when it is unset, same as those
-//! tests, so the default `cargo test` run stays DB-free.
+//! `--ignored`, so the default `cargo test` run stays DB-free. Unlike some
+//! of those tests, this one fails loud (`expect`, not a silent early return)
+//! when `DATABASE_URL` is unset - this is the test that proves the ticket's
+//! mandated "register the resulting key against a real instance" step, so an
+//! unset variable earning a bare pass with zero assertions run is exactly
+//! the failure mode it exists to catch. CI sets `DATABASE_URL` before running
+//! `--ignored` (see `.github/workflows/ci.yml`), so this never fires there;
+//! it only fires for a contributor who runs `--ignored` locally without it,
+//! where a clear panic beats a silent no-op.
 
 use std::sync::Arc;
 
@@ -118,9 +125,9 @@ async fn cleanup(pool: &PgPool, user: Uuid) {
 #[tokio::test]
 #[ignore]
 async fn an_xpub_derive_xpub_prints_is_accepted_by_the_real_wallet_endpoint() {
-    let Some(state) = state().await else {
-        return;
-    };
+    let state = state()
+        .await
+        .expect("DATABASE_URL must be set to run this ignored test - CI sets it before passing --ignored");
     let pool = state.data_service.pool().clone();
     // Unique per run, not a fixed literal: a prior failed run that skipped
     // `cleanup` (reached only on the happy path) would otherwise leave a row

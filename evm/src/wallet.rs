@@ -406,6 +406,18 @@ mod tests {
     /// two strings says which is which.
     const TRON_ACCOUNT_XPUB: &str = "xpub6D1AabNHCupeiLM65ZR9UStMhJ1vCpyV4XbZdyhMZBiJXALQtmn9p42VTQckoHVn8WNqS7dqnJokZHAHcHGoaQgmv8D45oNUKx6DZMNZBCd";
 
+    /// `TEST_MNEMONIC` with the BIP-39 passphrase `"secret"` ("25th word"),
+    /// computed once from this crate's own derivation and pinned here as a
+    /// regression guard - not an externally-sourced vector like
+    /// `EVM_ACCOUNT_XPUB`/`TRON_ACCOUNT_XPUB` above, but different from both
+    /// of those by construction, since the seed a passphrase produces is
+    /// unrelated to the empty-passphrase seed. If `from_mnemonic` ever
+    /// dropped or mishandled the passphrase argument, this would collapse to
+    /// `EVM_ACCOUNT_XPUB`/`TRON_ACCOUNT_XPUB` instead and the assertion below
+    /// would fail.
+    const EVM_ACCOUNT_XPUB_WITH_PASSPHRASE: &str = "xpub6Bmqz11Kt5qtj3xbXZkzEyYw43EDFGCon5GzC4udf7DPugyKjVppdX2amQZrGs4rqAJH79pDtge2UDENZzjz9DgcV3WmfbwYAXj2epC5cgz";
+    const TRON_ACCOUNT_XPUB_WITH_PASSPHRASE: &str = "xpub6C7191Y1fJQN5X3REaqgCesHj2fhXCsLYuK6vf53MHyroMKGER3vX9NvfJmSz7MgCUnbMcUWYFiPAiuQpDD1AXQz5CMX9EuDtJb5of7vMU6";
+
     /// `HdWallet` must export the exact string a real wallet would - not just
     /// something `XpubDeriver` can parse back.
     ///
@@ -430,6 +442,31 @@ mod tests {
             wallet.account_xpub_string_for(ChainFamily::Tron).unwrap(),
             TRON_ACCOUNT_XPUB
         );
+    }
+
+    /// A non-empty BIP-39 passphrase ("25th word") is the `derive-xpub
+    /// from-existing` path a merchant with an existing seed phrase walks -
+    /// and it produces a different account, so a silent regression that
+    /// dropped or ignored the argument would export `EVM_ACCOUNT_XPUB`
+    /// instead of a merchant's real passphrase-protected key, with no error
+    /// anywhere in the chain (`validate_xpub` accepts either string). Pinned
+    /// at the xpub-string level, not just `derive_address` as
+    /// `test_passphrase_changes_addresses` already does, so a regression
+    /// that reached only the account-key export path and not per-index
+    /// derivation would still be caught.
+    #[test]
+    fn passphrase_changes_the_exported_account_xpub() {
+        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "secret").unwrap();
+        assert_eq!(
+            wallet.account_xpub_string_for(ChainFamily::Evm).unwrap(),
+            EVM_ACCOUNT_XPUB_WITH_PASSPHRASE
+        );
+        assert_eq!(
+            wallet.account_xpub_string_for(ChainFamily::Tron).unwrap(),
+            TRON_ACCOUNT_XPUB_WITH_PASSPHRASE
+        );
+        assert_ne!(EVM_ACCOUNT_XPUB_WITH_PASSPHRASE, EVM_ACCOUNT_XPUB);
+        assert_ne!(TRON_ACCOUNT_XPUB_WITH_PASSPHRASE, TRON_ACCOUNT_XPUB);
     }
 
     /// `from_seed` got the identical one-line `Hint::Legacy` fix as

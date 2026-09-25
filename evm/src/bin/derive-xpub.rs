@@ -83,7 +83,12 @@ fn from_existing() -> ExitCode {
     if std::io::stdin().lock().read_line(&mut passphrase).is_err() {
         return fail("could not read from stdin");
     }
-    let passphrase = passphrase.trim();
+    // BIP-39 passphrases are used byte-for-byte, so `.trim()` (which strips
+    // any leading/trailing whitespace, not just the newline `read_line`
+    // leaves) would silently derive a different key for a passphrase that
+    // legitimately starts or ends with a space - exactly the class of silent
+    // mismatch the prompt above warns about. Only strip the line ending.
+    let passphrase = passphrase.trim_end_matches(['\n', '\r']);
 
     emit(&mnemonic, passphrase)
 }
