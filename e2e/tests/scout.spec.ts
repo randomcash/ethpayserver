@@ -994,6 +994,11 @@ test.describe('Auth & Authenticated', () => {
     // covers all three detail pages plus checkout below.
     const seedName = `scout-${Date.now().toString(36)}`;
     await createStoreReadyForInvoices(scoutPage, seedName);
+    // createStoreAndOpen (inside createStoreReadyForInvoices) leaves scoutPage
+    // on the store's own detail page and nothing between here and the capture
+    // navigates away, so this is the store's real id - needed below to check
+    // the crawl actually reached this page, not just assumed it would.
+    const storeId = new URL(scoutPage.url()).pathname.split('/').pop()!;
     await createInvoice(scoutPage, '0.01');
     // createInvoice already waited for the URL to match /evm/invoices/.+, so
     // the last path segment is guaranteed non-empty here.
@@ -1025,6 +1030,27 @@ test.describe('Auth & Authenticated', () => {
       `/checkout/${invoiceId}`,
       ...PLACEHOLDER_ROUTES,
     ]);
+
+    // The comment above PLACEHOLDER_ROUTES assumes the store/invoice list
+    // pages render a plain <a href> to the record just seeded, so the crawl
+    // finds it on its own - never actually checked. If either list renders its
+    // row via a click handler or a non-anchor element instead, the crawl
+    // silently never visits that detail page and the walk above still
+    // "succeeds" having covered neither. `discoveredRoutes` is every path the
+    // walk actually landed on, so checking it here is checking the real
+    // outcome instead of the assumption.
+    if (!discoveredRoutes.includes(`/evm/stores/${storeId}`)) {
+      issue('ROUTE_DISCOVERY', `Store detail page /evm/stores/${storeId} was never crawled - the store card's link may not be a plain <a href>`);
+    }
+    if (!discoveredRoutes.includes(`/evm/invoices/${invoiceId}`)) {
+      issue('ROUTE_DISCOVERY', `Invoice detail page /evm/invoices/${invoiceId} was never crawled - the invoice row's link may not be a plain <a href>`);
+    }
+    // No id captured for the wallet the invoice's payment method implicitly
+    // created (see the comment above), so this checks the shape of the route
+    // rather than a specific one - a fresh scout account has exactly one.
+    if (!discoveredRoutes.some((route) => /^\/evm\/wallets\/[^/]+$/.test(route))) {
+      issue('ROUTE_DISCOVERY', 'No wallet detail page was crawled - the wallet card\'s link may not be a plain <a href>');
+    }
   });
 
   test('route coverage: mobile', async () => {
