@@ -1200,7 +1200,12 @@ test.describe('Auth & Authenticated', () => {
         if (statusText?.trim() !== 'Paid') {
           issue('PAYMENT', `Invoice ${invoiceId} shows status "${statusText?.trim() ?? '(not found)'}" after a full payment was seeded - expected "Paid"`);
         }
+        // Scoped to the "Amount received" row specifically, not just the
+        // success-styled class - a second green-styled value elsewhere on
+        // the card (a confirmation count, a fee line) would otherwise let
+        // `.first()` silently read the wrong field.
         const receivedText = await scoutPage
+          .locator('.detail-row', { hasText: 'Amount received' })
           .locator('.detail-value-success')
           .first()
           .textContent({ timeout: 5_000 })
