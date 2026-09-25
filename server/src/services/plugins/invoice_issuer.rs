@@ -124,12 +124,15 @@ pub trait HostInvoiceIssuer: Send + Sync {
 ///
 /// That import binding itself - a compiled wasm guest actually reaching
 /// `PluginCalls::invoice_create` through wasmtime, not just a Rust-level call
-/// to it - lives in `payserver-plugin-host::runtime` (the crate this
-/// workspace pins by `rev` in the root `Cargo.toml`): `host_linker` binds the
-/// `invoice_create` import, and the guest-side round trip is exercised end
-/// to end, through a real compiled wasm module and a real `wasmtime::Linker`,
-/// by `a_plugin_can_ask_the_host_to_issue_an_invoice` in that crate's
-/// `runtime.rs` tests.
+/// to it - lives in `payserver-plugin-host::runtime`, at the exact revision
+/// this workspace's root `Cargo.toml` pins
+/// (`rev = "f0877f342867e5ed6b91a8eb566c91cdd80aeeaf"`, not a moving branch
+/// tip): `host_linker` binds the `invoice_create` import there, and the
+/// guest-side round trip is exercised end to end, through a real compiled
+/// wasm module and a real `wasmtime::Linker`, by
+/// `a_plugin_can_ask_the_host_to_issue_an_invoice` in that crate's
+/// `runtime.rs` tests - `git show f0877f342867e5ed6b91a8eb566c91cdd80aeeaf`
+/// against `payserver-commons` shows both directly.
 ///
 /// This type's own half - that a published `PluginHostApi`, not a test
 /// double, actually creates a real, correctly-priced invoice against a real
