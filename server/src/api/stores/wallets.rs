@@ -17,9 +17,10 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
 };
-use serde::Deserialize;
-use utoipa::IntoParams;
+use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use auth::repository::{StoreRepository, UserStoreRepository};
@@ -84,6 +85,46 @@ pub struct StoreWalletQuery {
 impl StoreWalletQuery {
     fn namespace(&self) -> &str {
         self.namespace.as_deref().unwrap_or(NAMESPACE_EIP155)
+    }
+}
+
+/// The method-scoped answer to `GET /stores/{store_id}/wallet`.
+///
+/// A superset of `StoreWalletResponse`: `is_override` here means exactly what
+/// it means in the bare form, the store has an explicit override configured,
+/// never whether this method's own pin happens to differ from it. Those are
+/// different facts. A method can resolve to a wallet the store's bare walk
+/// does not reach with no store override configured at all, if its pin has
+/// not caught up with a primary-wallet change. `differs_from_store_wallet` is
+/// that fact, named for what it is instead of folded into a field whose other
+/// reader already means something else by it.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct MethodWalletResponse {
+    #[serde(flatten)]
+    pub store_wallet: StoreWalletResponse,
+    /// True when this method's resolved wallet is not the wallet the store's
+    /// bare fallback would land on right now - independent of `is_override`,
+    /// and true even when the store has no override configured.
+    pub differs_from_store_wallet: bool,
+}
+
+/// What `GET /stores/{store_id}/wallet` answers - the shape depends on
+/// whether `payment_method_id` was given.
+///
+/// Kept as an enum, rather than always returning the superset
+/// `MethodWalletResponse`, so the bare form's wire shape is unchanged for
+/// callers who never pass `payment_method_id`.
+pub enum StoreWalletResult {
+    Bare(StoreWalletResponse),
+    Method(MethodWalletResponse),
+}
+
+impl IntoResponse for StoreWalletResult {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Bare(r) => Json(r).into_response(),
+            Self::Method(r) => Json(r).into_response(),
+        }
     }
 }
 
@@ -456,6 +497,13 @@ where
 /// derive from a wallet this endpoint never mentions the moment the account's
 /// primary or override moves elsewhere. Passing `payment_method_id` asks the
 /// same question `allocate_derivation` answers instead.
+///
+/// `is_override` means the same thing in both forms - the store has an
+/// explicit override configured - never whether the method-scoped answer
+/// differs from the bare one. A pinned method can resolve away from the
+/// store's bare walk with no override in play at all, so that second fact
+/// travels as its own field, `differs_from_store_wallet`, present only on the
+/// method-scoped response. See `MethodWalletResponse`.
 #[utoipa::path(
     get,
     path = "/stores/{store_id}/wallet",
@@ -463,7 +511,13 @@ where
     security(("bearer_auth" = [])),
     params(("store_id" = Uuid, Path, description = "Store ID"), StoreWalletQuery),
     responses(
-        (status = 200, description = "Resolved wallet", body = StoreWalletResponse),
+        (status = 200, description = "Resolved wallet. With `payment_method_id`, the \
+                                      body additionally carries \
+                                      `differs_from_store_wallet` (see \
+                                      `MethodWalletResponse`); `is_override` always \
+                                      means the store has an explicit override \
+                                      configured, in both forms.",
+         body = StoreWalletResponse),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "No wallet for this family: the store has no \
@@ -477,7 +531,7 @@ pub async fn get_store_wallet<A>(
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Query(query): Query<StoreWalletQuery>,
-) -> Result<Json<StoreWalletResponse>, StatusCode>
+) -> Result<StoreWalletResult, StatusCode>
 where
     A: SessionService + 'static,
 {
@@ -512,7 +566,7 @@ where
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .is_some();
 
-    Ok(Json(StoreWalletResponse {
+    Ok(StoreWalletResult::Bare(StoreWalletResponse {
         store_id,
         wallet: wallet.into(),
         is_override,
@@ -531,7 +585,7 @@ async fn get_payment_method_wallet<A>(
     state: &PgAppState<A>,
     store_id: Uuid,
     method_id: Uuid,
-) -> Result<Json<StoreWalletResponse>, StatusCode>
+) -> Result<StoreWalletResult, StatusCode>
 where
     A: SessionService + 'static,
 {
@@ -547,19 +601,34 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Whether this method's own resolution differs from the store's bare
-    // fallback - the exact condition under which the two forms of this
-    // endpoint can name different wallets for the same store.
     let namespace = method.chain_id.namespace();
-    let is_override = WalletReader::resolve_store_wallet(&*state.data_service, store_id, namespace)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .is_none_or(|store_wallet| store_wallet.id != wallet_id);
+    let store_wallet =
+        WalletReader::resolve_store_wallet(&*state.data_service, store_id, namespace)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(StoreWalletResponse {
-        store_id,
-        wallet: wallet.into(),
-        is_override,
+    // Same meaning as the bare form: the store has an explicit override
+    // configured. Not whether this method's pin happens to differ from it -
+    // see `differs_from_store_wallet` below for that.
+    let is_override =
+        WalletReader::get_store_wallet_override(&*state.data_service, store_id, namespace)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_some();
+
+    // Whether this method's own resolution differs from the store's bare
+    // fallback - true even with no override configured, when a pin has not
+    // caught up with a primary-wallet change.
+    let differs_from_store_wallet =
+        store_wallet.is_none_or(|store_wallet| store_wallet.id != wallet_id);
+
+    Ok(StoreWalletResult::Method(MethodWalletResponse {
+        store_wallet: StoreWalletResponse {
+            store_id,
+            wallet: wallet.into(),
+            is_override,
+        },
+        differs_from_store_wallet,
     }))
 }
 
