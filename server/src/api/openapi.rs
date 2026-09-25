@@ -70,14 +70,14 @@ use super::{admin, dashboard, health, invoices, plugins, rates, stores, users};
         // Rates
         rates::get_rate,
         // Users
-        users::list_api_keys,
-        users::create_api_key,
-        users::revoke_api_key,
-        users::update_api_key,
-        users::rotate_api_key,
-        users::list_wallet_credentials,
-        users::create_wallet_reauth_challenge,
-        users::set_primary_wallet_credential,
+        users::api_keys::list_api_keys,
+        users::api_keys::create_api_key,
+        users::api_keys::revoke_api_key,
+        users::api_keys::update_api_key,
+        users::api_keys::rotate_api_key,
+        users::wallets::list_wallet_credentials,
+        users::wallets::create_wallet_reauth_challenge,
+        users::wallets::set_primary_wallet_credential,
         // Admin
         admin::list_users,
         admin::deletion::account::list_user_stores,

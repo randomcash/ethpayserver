@@ -90,8 +90,20 @@ where
     A: SessionService + 'static,
 {
     let Some(monitor) = &state.evm_monitor else {
-        // No live monitor wired into this process, so nothing was ever
-        // watched through it and there is nothing to unwatch.
+        // Assumes watching and unwatching always go through the same
+        // process's monitor handle - true for every deployment shape this
+        // runs in today, but not something this function can verify. Logged
+        // rather than silently skipped so that assumption failing anywhere
+        // is at least observable instead of indistinguishable from a normal
+        // no-op unwatch.
+        if !addresses.is_empty() {
+            tracing::warn!(
+                count = addresses.len(),
+                "no live monitor wired into this process; skipped unwatching \
+                 address(es) after delete - if a separate process is watching \
+                 them via Redis, the monitor may keep polling a deleted invoice",
+            );
+        }
         return;
     };
 
