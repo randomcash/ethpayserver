@@ -30,7 +30,7 @@ use data_service::PgDataService;
 use evm::{ChainFamily, HdWallet, generate_mnemonic};
 use rates::NoOpRateProvider;
 use server::api::AuthenticatedUser;
-use server::api::stores::create_wallet;
+use server::api::stores::{VERIFICATION_ADDRESS_COUNT, create_wallet};
 use server::services::email::NoopEmailSender;
 use server::state::{AppState, PgAppState};
 use sqlx::PgPool;
@@ -69,7 +69,7 @@ async fn state() -> Option<PgAppState<UnusedSessionService>> {
         .max_connections(5)
         .connect(&database_url)
         .await
-        .ok()?;
+        .expect("DATABASE_URL is set but the database is unreachable");
     Some(AppState::new(
         Arc::new(PgDataService::new(pool)),
         Arc::new(UnusedSessionService),
@@ -98,14 +98,16 @@ async fn seed_user(pool: &PgPool, email: &str) -> Uuid {
 }
 
 async fn cleanup(pool: &PgPool, user: Uuid) {
-    let _ = sqlx::query("DELETE FROM wallets WHERE user_id = $1")
+    sqlx::query("DELETE FROM wallets WHERE user_id = $1")
         .bind(user)
         .execute(pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+        .await
+        .expect("delete test wallet");
+    sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user)
         .execute(pool)
-        .await;
+        .await
+        .expect("delete test user");
 }
 
 /// The exact join the ticket asked to see walked: generate a mnemonic the way
@@ -159,7 +161,14 @@ async fn an_xpub_derive_xpub_prints_is_accepted_by_the_real_wallet_endpoint() {
     let (status, Json(body)) = response;
     assert_eq!(status, StatusCode::CREATED);
 
-    let expected: Vec<String> = (0..body.verification_addresses.len() as u32)
+    assert_eq!(
+        body.verification_addresses.len(),
+        VERIFICATION_ADDRESS_COUNT as usize,
+        "POST /wallets returned a different number of verification addresses \
+         than create_wallet is supposed to derive"
+    );
+
+    let expected: Vec<String> = (0..VERIFICATION_ADDRESS_COUNT)
         .map(|i| {
             ChainFamily::Evm.encode_address(
                 wallet

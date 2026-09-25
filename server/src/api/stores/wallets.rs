@@ -41,7 +41,7 @@ pub use api_types::{
 /// another application and one is not a pattern - a single match could be
 /// coincidence in a way three consecutive ones cannot. More than a handful and
 /// nobody reads them.
-const VERIFICATION_ADDRESS_COUNT: u32 = 3;
+pub const VERIFICATION_ADDRESS_COUNT: u32 = 3;
 
 /// Query parameters for listing wallet addresses.
 #[derive(Debug, Deserialize, IntoParams)]
