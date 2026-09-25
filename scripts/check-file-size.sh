@@ -25,6 +25,9 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 
 LINE_LIMIT="${LINE_LIMIT:-400}"
 BASE_REF="${BASE_REF:-origin/testnet}"
+# Per-file ceilings for files that predate this gate but are new to the base.
+# See the file's own header for why an entry is a debt rather than an exemption.
+RATCHET_FILE="${RATCHET_FILE:-scripts/file-size-ratchet.txt}"
 status=0
 
 # Report: every .rs file over the limit right now, worst first, independent of
@@ -132,7 +135,20 @@ while IFS=$'\t' read -r dstatus path1 path2; do
     A*)
       # A genuinely new path has nothing to look up at base - 0 is the
       # correct answer here, not a swallowed failure standing in for one.
+      #
+      # Unless it is enrolled in the ratchet. A file arriving from a branch that
+      # predates this gate is new to the BASE but not new to the project, and
+      # treating it as growth from zero blocks it outright rather than holding it
+      # where it is. An entry gives it what the files already over the limit get
+      # for free: it may not grow, and it is not blocked.
       before=0
+      if [ -f "$RATCHET_FILE" ]; then
+        enrolled="$(awk -v want="$f" '$1 == want { print $2; exit }' "$RATCHET_FILE")"
+        if [ -n "$enrolled" ]; then
+          before="$enrolled"
+          echo "note: $f is enrolled in the ratchet at $enrolled lines - it may not grow past that" >&2
+        fi
+      fi
       ;;
     *)
       # `$?` here, not PIPESTATUS: the pipe runs inside this command
