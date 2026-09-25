@@ -79,8 +79,7 @@ async fn state() -> Option<PgAppState<UnusedSessionService>> {
     ))
 }
 
-async fn seed_user(pool: &PgPool, email: &str) -> Uuid {
-    let id = Uuid::new_v4();
+async fn seed_user(pool: &PgPool, id: Uuid, email: &str) {
     sqlx::query(
         "INSERT INTO users (id, email, kdf_params, encrypted_symmetric_key, \
          recovery_verification_hash, kdf_salt_identifier) \
@@ -94,7 +93,6 @@ async fn seed_user(pool: &PgPool, email: &str) -> Uuid {
     .execute(pool)
     .await
     .expect("seed user");
-    id
 }
 
 async fn cleanup(pool: &PgPool, user: Uuid) {
@@ -124,11 +122,17 @@ async fn an_xpub_derive_xpub_prints_is_accepted_by_the_real_wallet_endpoint() {
         return;
     };
     let pool = state.data_service.pool().clone();
-    let user_id = seed_user(&pool, "wallet-registration@example.com").await;
+    // Unique per run, not a fixed literal: a prior failed run that skipped
+    // `cleanup` (reached only on the happy path) would otherwise leave a row
+    // that collides on the next run's INSERT and masks a real regression
+    // behind a unique-constraint error instead.
+    let user_id = Uuid::new_v4();
+    let email = format!("wallet-registration-{user_id}@example.com");
+    seed_user(&pool, user_id, &email).await;
 
     let user = UserInfo {
         id: UserId(user_id),
-        email: Some("wallet-registration@example.com".to_string()),
+        email: Some(email),
         primary_wallet_address: None,
         created_at: Utc::now(),
         last_login_at: None,

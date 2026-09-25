@@ -55,7 +55,7 @@ fn generate() -> ExitCode {
         "This wallet exists to receive payments and nothing else. Don't reuse it \
          as a daily-driver wallet, and don't import it into a browser extension."
     );
-    emit(&mnemonic)
+    emit(&mnemonic, "")
 }
 
 fn from_existing() -> ExitCode {
@@ -69,15 +69,27 @@ fn from_existing() -> ExitCode {
     if std::io::stdin().lock().read_line(&mut line).is_err() {
         return fail("could not read from stdin");
     }
-    let mnemonic = line.trim();
+    let mnemonic = line.trim().to_string();
     if mnemonic.is_empty() {
         return fail("no mnemonic given");
     }
-    emit(mnemonic)
+
+    eprintln!(
+        "\nIf this wallet has a BIP-39 passphrase set (some wallets call it a \
+         \"25th word\"), enter it now - leave blank if it doesn't have one. \
+         Getting this wrong produces a different, wrong xpub with no error:"
+    );
+    let mut passphrase = String::new();
+    if std::io::stdin().lock().read_line(&mut passphrase).is_err() {
+        return fail("could not read from stdin");
+    }
+    let passphrase = passphrase.trim();
+
+    emit(&mnemonic, passphrase)
 }
 
-fn emit(mnemonic: &str) -> ExitCode {
-    let wallet = match HdWallet::from_mnemonic(mnemonic, "") {
+fn emit(mnemonic: &str, passphrase: &str) -> ExitCode {
+    let wallet = match HdWallet::from_mnemonic(mnemonic, passphrase) {
         Ok(w) => w,
         Err(e) => return fail(&format!("invalid mnemonic: {e}")),
     };

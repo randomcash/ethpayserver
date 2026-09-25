@@ -229,13 +229,17 @@ Two ways to actually get one, in the order worth trying:
    tool takes it: `cargo run --bin derive-xpub -- from-existing` reads a
    mnemonic from stdin, one line, and never as a command-line argument -
    arguments end up in shell history and process listings, a mnemonic should
-   end up in neither. MetaMask derives its accounts at `m/44'/60'/0'/0/i`, so
-   the account-level extended key sitting above every address it shows you is
-   at `m/44'/60'/0'` - the same path this tool and this server both use. Do
-   this only on a machine you trust, offline if you can manage it: typing a
-   seed phrase into any piece of software is indistinguishable, to your
-   future self, from the exact thing every wallet-draining phishing site
-   asks for. If that risk is not one you are willing to take, use option 1
+   end up in neither. It then asks for the wallet's BIP-39 passphrase (the
+   "25th word"), if it has one - leave it blank if it doesn't. Getting this
+   wrong doesn't error, it silently derives a different, wrong xpub, so check
+   the printed addresses against your own wallet before trusting either.
+   MetaMask derives its accounts at `m/44'/60'/0'/0/i`, so the account-level
+   extended key sitting above every address it shows you is at `m/44'/60'/0'`
+   - the same path this tool and this server both use. Do this only on a
+   machine you trust, offline if you can manage it: typing a seed phrase into
+   any piece of software is indistinguishable, to your future self, from the
+   exact thing every wallet-draining phishing site asks for. If that risk is
+   not one you are willing to take, use option 1
    instead and set up the new wallet as your store's payout destination.
 
 Wallets belong to the account, not to a store. Every store uses the account's
