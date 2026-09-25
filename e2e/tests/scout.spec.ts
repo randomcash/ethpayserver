@@ -389,15 +389,29 @@ async function walkRoutes(seedRoutes: string[], opts: WalkOptions = {}): Promise
 
     // The only public route in the mix; everything else needs a session. A
     // real customer reaches checkout with no session at all, but scoutPage is
-    // the same context that just registered as the merchant - clear its
-    // cookies for this one visit and restore them right after, so a branch
-    // keyed off "is there any session on this browser" gets exercised the way
-    // a customer would trigger it, without logging the rest of the walk out.
+    // the same context that just registered as the merchant. The server
+    // extracts auth from an `Authorization: Bearer` header, never a cookie
+    // (server/src/api/extractors.rs), and the client reads that token from
+    // localStorage on boot (ui-kit's AuthContext::load_session), not from a
+    // cookie either - clearing cookies alone (an earlier version of this fix)
+    // leaves the merchant's token in localStorage, so the freshly-booted
+    // client on this "anonymous" visit would authenticate itself anyway.
+    // Snapshot and clear localStorage the same way cookies are handled, and
+    // restore both right after, so a branch keyed off "is there any session
+    // on this browser" gets exercised the way a customer would trigger it,
+    // without logging the rest of the walk out.
     if (path.startsWith('/checkout/')) {
       const cookies = await scoutPage.context().cookies();
+      const storage = await scoutPage.evaluate(() => JSON.stringify(localStorage));
       await scoutPage.context().clearCookies();
+      await scoutPage.evaluate(() => localStorage.clear());
       await goto(path);
       await scoutPage.context().addCookies(cookies);
+      await scoutPage.evaluate((serialized) => {
+        for (const [key, value] of Object.entries(JSON.parse(serialized) as Record<string, string>)) {
+          localStorage.setItem(key, value);
+        }
+      }, storage);
     } else {
       await gotoAuthed(path);
     }
