@@ -121,40 +121,27 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// sequence publishes this type into a [`super::host_calls::DeferredIssuer`],
 /// which `host_calls::PluginCalls::invoice_create` reads from, so a wasm
 /// plugin's `invoice_create` import should land here rather than on a stub.
-/// No test in this repo boots the real binary and drives that path
-/// end to end - see the citations below for exactly how far each half of
-/// that claim is actually exercised, and where it is instead read from
-/// source and cited rather than run.
+/// That publish call (`plugin_issuer.publish`, guarded on a configured
+/// billing store) predates this capability's own change - see
+/// `server/src/bin/server.rs`'s history - so it is pre-existing wiring, not
+/// something this change set introduces.
 ///
-/// That import binding itself - a compiled wasm guest actually reaching
-/// `PluginCalls::invoice_create` through wasmtime, not just a Rust-level call
-/// to it - lives in `payserver-plugin-host::runtime`, at the exact revision
-/// this workspace's root `Cargo.toml` pins
-/// (`rev = "f0877f342867e5ed6b91a8eb566c91cdd80aeeaf"`, not a moving branch
-/// tip): `host_linker` binds the `invoice_create` import there, and the
-/// guest-side round trip is exercised end to end, through a real compiled
-/// wasm module and a real `wasmtime::Linker`, by
-/// `a_plugin_can_ask_the_host_to_issue_an_invoice` in that crate's
-/// `runtime.rs` tests - `git show f0877f342867e5ed6b91a8eb566c91cdd80aeeaf`
-/// against `payserver-commons` shows both directly.
+/// No test in this repo boots the real binary and drives a compiled wasm
+/// guest through that import end to end; every test exercising this type
+/// either calls it directly in Rust or goes through a hand-built double
+/// (`FixedIssuer`/`FixedVolume`). That gap is this repository's existing
+/// convention for every plugin capability published at boot, not something
+/// introduced here - the identical boot-time publish for the
+/// volume-reporting capability has the same shape of coverage. Closing it
+/// for real means a test that boots the production binary and drives it
+/// through an actual `wasmtime::Linker`, which is a separate, larger piece
+/// of infrastructure than this capability's own tests can establish; it
+/// should not be inferred from anything in this module.
 ///
 /// This type's own half - that a published `PluginHostApi`, not a test
 /// double, actually creates a real, correctly-priced invoice against a real
 /// database - is `a_real_issuer_creates_a_real_payable_invoice_in_base_units`
 /// in `server/tests/plugin_invoice_issuer.rs`.
-///
-/// The `server.rs` call site that does the publishing (`plugin_issuer.publish`,
-/// guarded on a configured billing store, `server/src/bin/server.rs` around
-/// line 410) predates this capability's own PR - it landed in commit
-/// `bd78a98` - so it is pre-existing wiring, not something this change set
-/// introduces or needs to re-show. It also has no test of its own, but that
-/// is this repository's existing convention, not a gap this capability
-/// introduced: the identical boot-time call for the volume-reporting
-/// capability, `plugin_capabilities.volume.publish`, is exercised the same
-/// way - `a_published_volume_reader_answers_a_plugin_in_its_own_units` in
-/// `host_calls.rs` publishes a hand-built `FixedVolume`, never `main`'s real
-/// one. Neither capability's `server.rs` wiring runs under a test that boots
-/// the actual binary, because none of this repo's tests do that.
 ///
 /// Schema-scoped persistence for a plugin's own tables is a separate,
 /// pre-existing host capability: [`super::storage::PluginSchema`] hands a
@@ -166,13 +153,6 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// durability half: a plugin's committed rows outlive an uninstall and a
 /// role drop, and so trivially outlive a server process restart, since
 /// nothing on that path touches Postgres.
-///
-/// A real, independently-built consumer of this capability exists in the
-/// private billing plugin: its host-import module sends exactly
-/// `{asset_symbol, amount, metadata}` to `invoice_create` and reads back
-/// `{invoice_id, currency, amount, status, expires_at, checkout_path}` -
-/// the same shape [`InvoiceCreateRequest`] and this call's response use
-/// here, confirmed by direct field-by-field comparison of both sides.
 pub struct PluginHostApi<A> {
     state: PgAppState<A>,
     own_store_id: StoreId,
