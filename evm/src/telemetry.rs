@@ -730,11 +730,18 @@ mod tests {
     /// Ablated to confirm this can actually fail: with the `is_sensitive_key`
     /// branch removed from `scrub_log`, this test panics with
     /// `mnemonic field survived as a structured-log attribute through the
-    /// real sentry_tracing conversion: {"mnemonic": LogAttribute(String("legal
-    /// winner thank year wave sausage worth useful legal winner thank
-    /// yellow")), ...}` — the plaintext mnemonic present, unredacted, under
-    /// the same key `contains_key` just confirmed arrived. Restored before
-    /// committing.
+    /// real sentry_tracing conversion: {"mnemonic": LogAttribute(String("just
+    /// some ordinary text about a wallet load")), ...}` — the plaintext value
+    /// present, unredacted, under the same key `contains_key` just confirmed
+    /// arrived. Restored before committing.
+    ///
+    /// The value is deliberately *not* a real BIP-39 phrase: a genuine 12+
+    /// lowercase-word mnemonic is itself content-matched by the generic
+    /// mnemonic rule inside `redact_secrets` (the same one `redact_value`
+    /// falls through to for every non-sensitive key), so it would still come
+    /// out redacted even with `is_sensitive_key` broken — passing for the
+    /// wrong reason and proving nothing about the key-based branch this test
+    /// exists to isolate.
     #[test]
     fn scrub_log_redacts_a_sensitive_key_attribute_through_the_real_capture_pipeline() {
         use tracing_subscriber::prelude::*;
@@ -745,7 +752,7 @@ mod tests {
             )
             .set_default();
 
-        let m = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let m = "just some ordinary text about a wallet load";
 
         let envelopes = sentry::test::with_captured_envelopes_options(
             || {
@@ -769,7 +776,7 @@ mod tests {
             );
             let attrs = format!("{:?}", log.attributes);
             assert!(
-                !attrs.contains("sausage"),
+                !attrs.contains(m),
                 "mnemonic field survived as a structured-log attribute through the \
                  real sentry_tracing conversion: {attrs}"
             );
