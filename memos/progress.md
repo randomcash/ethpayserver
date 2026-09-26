@@ -6,6 +6,134 @@ what you learned, not only what you changed.
 
 ---
 
+## 2026-09-26 — F002: the post-delete unwatch counter, shown moving on both branches
+
+**Feature:** F002. A test for a counter that already existed and had never been
+seen fire.
+
+**Result:** pass. Both branches of `unwatch_after_delete` that call
+`record_unwatch_failed` are covered, and both were shown red on purpose before
+they were green. `scripts/check.sh` exits 0 with the variables unset.
+
+Files:
+
+- `server/src/api/admin/deletion/unwatch_counter_tests.rs` — new, five unit
+  tests on the counter.
+- `server/src/api/admin/deletion/mod.rs` — the seam (below), the doc-comment
+  repair (below), `cleanup_info` widened to `pub(super)` so the new module
+  reuses the fixture instead of copying it.
+- `server/src/api/admin/deletion/store.rs`, `server/src/api/users/deletion.rs` —
+  the two call sites, one line each.
+- `server/tests/admin_account_deletion/self_service.rs`,
+  `.../support.rs` — the reachability test and its counter reader.
+- `memos/features.json` — F002 `passes` only.
+
+**Why a unit test, and why that is the stronger placement here.** The last
+session's warning was about a test that CI compiles out; the mirror of it is a
+test CI runs only in the pass that needs a database, where this suite's own
+convention is `let Some(pg) = service().await else { return; }` — which reports
+green when the variable is unset. These five need no database and no live-watch
+store, so they run in the ordinary `cargo test --workspace` step and cannot be
+skipped into a green by a missing variable. The claim they cannot make is
+reachability, so that is a separate `#[ignore]`d test in `server/tests/`
+(`-p server` is in CI's `--run-ignored` pass) driving the real `DELETE /users/me`
+handler against a real database with no monitor wired.
+
+**The seam, and why it was needed.** `unwatch_after_delete` took
+`&PgAppState<A>`, which pins the monitor to `RedisEVMMonitor` — and that type
+cannot be constructed at all without a reachable live-watch store, so there was
+no way to produce a publish failure from a test. It now takes
+`Option<&E>, E: EVMMonitor + ?Sized`, which is the only thing it ever read off
+the state. Call sites pass `state.evm_monitor.as_deref()`. Nothing else changed
+about it.
+
+**Red before green, four ablations:**
+
+1. per-address increment commented out →
+   `a_publish_failure_is_counted_once_per_address_and_stops_nothing` failed,
+   `left: 0, right: 2`, "each address whose unwatch could not be published must
+   be counted". The other four stayed green, so the tests are not
+   interchangeable.
+2. no-monitor increment commented out →
+   `no_monitor_wired_counts_every_watch_it_left_behind` failed, `left: 0,
+   right: 3`. Again only that one.
+3. same ablation, integration test → `left: 0, right: 1`. So the endpoint-level
+   test depends on the counter and not merely on the delete succeeding.
+4. the `unwatch_after_delete` CALL removed from `delete_account` → the same
+   integration test failed identically. That is the reachability half: it fails
+   if the handler stops reaching the branch at all, not only if the counter
+   stops counting.
+
+**What the counter cannot see, now written down in three places rather than
+one.** `unwatch_address_by_chain_id` succeeds when the command is *published*.
+Nothing acknowledges it, so a command published to a channel with no subscriber
+increments nothing, and `a_published_unwatch_counts_nothing_even_though_nothing_acknowledged_it`
+is named to stop a reader concluding a zero means the monitor acted.
+
+**A third silent path, found by writing the tests and deliberately left
+alone.** A row `parse_watch_target` rejects is `continue`d without a command
+being built and without being counted, and it leaves exactly the same stale
+watch. It is not counted on purpose: the realistic instance is a watch on a
+non-EVM chain, which this process's monitor never held, so counting it would
+report a failure that did not happen. A malformed address would be worth
+counting and is indistinguishable from the non-EVM case at that point. Pinned by
+`a_row_the_monitor_cannot_address_is_skipped_without_counting` and stated in
+`record_unwatch_failed`'s docs, so the next reader does not have to rediscover
+it from a zero. Separating the two needs the row to carry why it was rejected,
+which is more than F002.
+
+**Two doc comments were lying, and are the only non-test behaviourless changes
+here.** `unwatch_after_delete` had no doc comment at all: its block had been
+absorbed into `record_unwatch_failed`'s (no blank line between them), and it
+still said "Only `hard_delete_store` calls this: `delete_user_account` and
+self-service `delete_account` both refuse outright" — self-service stopped
+refusing and started calling it when the narrowing landed. `delete_account`'s
+own doc still promised a refusal on a still-watched address, and its OpenAPI 409
+still advertised one. The admin route's identical text is correct and was left
+alone; it really does still refuse.
+
+**Reading the counter in a test.** Through a recorder local to the calling
+thread, never the process-wide one — that can be installed once per process and
+this crate's own metrics tests already contend for it. Thread-local means the
+future has to be polled on the thread that installs it: `block_on` in the unit
+tests, and `#[tokio::test]`'s current-thread runtime in the integration one. A
+future polled elsewhere would record into the global recorder and the assertion
+would read zero no matter what the code did — a test that cannot fail, arrived
+at by accident.
+
+**F002's `notes` field in `features.json` still says "It is NOT yet covered by a
+test, so it stays false".** Left untouched because the brief said to change only
+`passes`. It now contradicts the flag beside it.
+
+**Pre-existing failures, re-measured rather than assumed, both unrelated:**
+
+- `cargo test -p server -- --ignored` fails only on
+  `the_create_wallet_endpoint_returns_addresses_to_verify_a_tron_key`, with
+  `409 this xpub is already registered to another account` — the test-isolation
+  defect the last entry recorded, in a file this change does not touch.
+  `-p data-service -- --ignored`: 138 passed, 0 failed.
+- `evm/tests/monitor_recovery` failed once in the FIRST (cold) `check.sh` run of
+  this session and passed on every run after, including a clean `check.sh`. The
+  last entry logged the same thing as an unexplained flake; this is the
+  explanation. Those tests use wall-clock sleeps against a
+  `timeout(Duration::from_secs(2))` wait for the monitor's startup event, so a
+  box still finishing a full workspace compile can miss it. It is not a product
+  failure and not caused by anything here. Worth knowing: `cargo test -p evm
+  --test monitor_recovery` on its own will not even COMPILE — that binary needs
+  `evm`'s `test-utils`, which nothing but `server`'s dev-dependency turns on, so
+  it only exists under `--workspace`. Add `--features test-utils` to run it
+  alone. Ten minutes went into reading that as a second, different failure.
+
+**Next step:** F001's caller. The counter is the cheap signal and is now
+trustworthy as far as it goes, which is publish failures only; nothing yet
+reports either of the reconciler's two directions to an operator, and that is
+the reading that would actually answer "is a watch missing".
+
+**Blockers:** none for F002. The API 502 from two entries ago was not
+re-checked.
+
+---
+
 ## 2026-09-26 — F001: the watch set the database expects, against the one the monitor holds
 
 **Feature:** F001. Detection only — both directions, reported separately.
