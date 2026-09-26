@@ -32,16 +32,16 @@ RATE_LIMIT_READ=10000 RATE_LIMIT_WS=10000 \
   cargo run --release --bin ethpayserver
 ```
 
-The stock defaults are `auth_rpm: 5`, `write_rpm: 10`, `read_rpm: 60`. A full
-suite run makes far more than ten writes a minute, so against a stock server a
-scattering of tests fails with no obvious pattern — and the rate limiter
-returns 429 **without logging anything** (`server/src/api/rate_limit.rs`), so
+The stock defaults are `auth_rpm: 30`, `write_rpm: 120`, `read_rpm: 300`,
+`ws_rpm: 60` (`server/src/api/rate_limit.rs`) — raised more than once since
+this suite was first written, most recently to "numbers a payment processor
+can live with." A full suite run still makes far more requests than that in a
+minute, so against a stock server a scattering of tests fails with no obvious
+pattern — and the rate limiter returns 429 **without logging anything**, so
 the server logs look perfectly healthy while it happens. Failures land in
 whichever tests happened to be running when the window filled, which makes them
 read like flakiness or like a regression in whatever changed most recently.
-
-Measured on this suite: stock limits produced 9 failures on one run and 20+ on
-another; the same code at CI's limits passes 76/76.
+Run at CI's `RATE_LIMIT_*=10000` and this stops being a variable at all.
 
 ## What is not here
 
@@ -110,14 +110,16 @@ registration against live testnet completes end to end.
 It is **not** `resetDatabase()`. `fixtures/db.ts` returns early when `E2E_REMOTE`
 is `true`, so it is already a no-op remotely.
 
-The real blocker is **rate limiting**: the auth tier allows 5 requests per minute
-per IP (`RATE_LIMIT_AUTH`), and this spec performs five registrations plus a login
-well inside a minute. Remotely it returns `HTTP 429: Too many requests` and three
-of five tests fail. `scout.spec.ts` registers once, which is why it passes
-remotely and this does not.
+The real blocker is **rate limiting**: the auth tier defaults to
+`RATE_LIMIT_AUTH=30` requests per minute per IP (whatever the deployed
+environment actually sets it to may differ), and this spec performs five
+registrations plus a login. Depending on what else is hitting the same IP,
+this can still return `HTTP 429: Too many requests` for some of the five
+tests. `scout.spec.ts` registers once, which is why it is far less likely to
+trip this than this spec is.
 
-`E2E_SKIP_AUTH=false` force-runs them; expect 429s until either the spec paces
-itself under the limit or test traffic gets a higher one.
+`E2E_SKIP_AUTH=false` force-runs them; expect occasional 429s until either the
+spec paces itself under the limit or test traffic gets a dedicated one.
 
 **Still local-only for a different reason:** `invoices`, `stores`,
 `payment-methods`, `ui-interactions` and `webhooks` all call `resetDatabase()`.
