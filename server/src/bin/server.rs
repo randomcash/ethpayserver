@@ -397,6 +397,9 @@ async fn main() -> Result<()> {
     state.invoice_creation_filters = plugin_filters;
     // Never filtered: see `AppState::billing_store_id`.
     state.billing_store_id = billing_store_id;
+    // Checked against every nomination of a new billing store: see
+    // `AppState::operator_account_id`.
+    state.operator_account_id = config.operator_account_id;
 
     // Capability 3, published. An instance with no configured billing store
     // publishes nothing, and its plugins are told invoicing is unavailable -
