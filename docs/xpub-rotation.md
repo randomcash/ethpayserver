@@ -95,8 +95,10 @@ Content-Type: application/json
 
 ### 1. Generate a new xpub
 
-Use your wallet software (e.g., MetaMask, Trezor Suite, Ledger Live) to export
-a fresh BIP-32 extended public key. The key must be a valid `xpub` (base58).
+MetaMask, Trezor Suite and Ledger Live have no export flow for an Ethereum
+account-level extended public key - see [Where do I get an
+xpub?](merchant-api-guide.md#where-do-i-get-an-xpub) in the integration guide
+for how to actually generate one. The key must be a valid `xpub` (base58).
 
 ### 2. Rotate via API
 
