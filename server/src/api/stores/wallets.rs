@@ -28,7 +28,7 @@ use auth::{SessionService, StoreId};
 use data_service::{
     self, StorePaymentMethod, StorePaymentMethodReader, WalletReader, WalletWriter,
 };
-use evm::{XpubDeriver, validate_xpub};
+use evm::{XpubDeriver, looks_like_a_private_key, validate_xpub};
 use types::NAMESPACE_EIP155;
 
 use super::super::extractors::AuthenticatedUser;
@@ -789,9 +789,21 @@ where
 {
     require_store_settings_permission(&state, &user, store_id).await?;
 
-    // Validate the new xpub
+    // Validate the new xpub. The bare 400 this used to return said nothing,
+    // so a dashboard could only ever show a generic failure for a typo and
+    // for a pasted spending key alike - the one boundary this ticket calls
+    // out as mattering most. Naming which one fired costs nothing extra: the
+    // rejection itself is still `validate_xpub`'s version-byte check, not
+    // this string match.
     if !validate_xpub(&req.xpub) {
-        return Err(StatusCode::BAD_REQUEST.into());
+        let reason = if looks_like_a_private_key(&req.xpub) {
+            "invalid_xpub: this looks like a private key (xprv), not a public one - rotation \
+             needs an extended PUBLIC key, and the private key must never leave the wallet \
+             software that holds it"
+        } else {
+            "invalid_xpub: not a valid base58-encoded extended public key"
+        };
+        return Err((StatusCode::BAD_REQUEST, reason.to_string()).into());
     }
 
     // And the family it is being rotated into. A namespace this build cannot

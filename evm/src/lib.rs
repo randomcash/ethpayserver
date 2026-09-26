@@ -63,7 +63,10 @@ pub use network::{
 };
 pub use provider::EvmProvider;
 pub use tokens::{EvmTokenStandard, Token, discover_token, get_token_balance, get_token_info};
-pub use wallet::{HdWallet, XpubDeriver, generate_mnemonic, validate_mnemonic, validate_xpub};
+pub use wallet::{
+    HdWallet, XpubDeriver, generate_mnemonic, looks_like_a_private_key, validate_mnemonic,
+    validate_xpub,
+};
 
 // Re-export alloy primitives that users will commonly need
 pub use alloy::primitives::{Address, B256, U256};
