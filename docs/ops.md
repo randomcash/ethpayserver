@@ -63,12 +63,14 @@ Always returns **200** with a JSON body containing per-dependency status and lat
 | `rpcs.<chain_id>.error` | Present only when the chain is unhealthy |
 | `monitor.data_fresh` | `true` if evmmonitor has published health data to Redis |
 
-### Existing admin-only endpoints
+### Existing endpoints with admin-gated detail
 
-These require a `Bearer` token with server admin privileges:
-
-- `GET /health/chains` — detailed per-chain health from evmmonitor (same data as `/health/deep` RPCs section, but includes watched address counts)
-- `GET /metrics` — Prometheus exposition format for scraping
+- `GET /health/chains` — per-chain health from evmmonitor. Public: chain
+  identity and up/down only. With a `Bearer` token carrying server admin
+  privileges: block heights, watched-address counts and failure reasons too
+  (same underlying data as `/health/deep`'s RPCs section).
+- `GET /metrics` — Prometheus exposition format for scraping. Admin-only, no
+  unauthenticated response at all.
 
 ## Watching `/health/deep` between deploys
 
