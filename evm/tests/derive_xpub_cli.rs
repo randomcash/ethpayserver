@@ -19,12 +19,10 @@ const TEST_MNEMONIC: &str =
 /// Matches `EVM_ACCOUNT_XPUB` in `evm/src/wallet.rs`'s test module - kept as
 /// an independent literal rather than importing the library constant, so
 /// this test still catches a regression that broke the constant itself.
-const EVM_ACCOUNT_XPUB: &str =
-    "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
+const EVM_ACCOUNT_XPUB: &str = "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
 
 /// Matches `EVM_ACCOUNT_XPUB_WITH_PASSPHRASE` in `evm/src/wallet.rs`.
-const EVM_ACCOUNT_XPUB_WITH_PASSPHRASE: &str =
-    "xpub6Bmqz11Kt5qtj3xbXZkzEyYw43EDFGCon5GzC4udf7DPugyKjVppdX2amQZrGs4rqAJH79pDtge2UDENZzjz9DgcV3WmfbwYAXj2epC5cgz";
+const EVM_ACCOUNT_XPUB_WITH_PASSPHRASE: &str = "xpub6Bmqz11Kt5qtj3xbXZkzEyYw43EDFGCon5GzC4udf7DPugyKjVppdX2amQZrGs4rqAJH79pDtge2UDENZzjz9DgcV3WmfbwYAXj2epC5cgz";
 
 fn run_from_existing(mnemonic: &str, passphrase: &str) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_derive-xpub"))

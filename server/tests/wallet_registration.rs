@@ -129,9 +129,9 @@ async fn cleanup(pool: &PgPool, user: Uuid) {
 #[tokio::test]
 #[ignore]
 async fn an_xpub_derive_xpub_prints_is_accepted_by_the_real_wallet_endpoint() {
-    let state = state()
-        .await
-        .expect("DATABASE_URL must be set to run this ignored test - CI sets it before passing --ignored");
+    let state = state().await.expect(
+        "DATABASE_URL must be set to run this ignored test - CI sets it before passing --ignored",
+    );
     let pool = state.data_service.pool().clone();
     // Unique per run, not a fixed literal: a prior failed run that skipped
     // `cleanup` (reached only on the happy path) would otherwise leave a row
