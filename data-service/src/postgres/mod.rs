@@ -25,12 +25,14 @@ mod store_webhook;
 mod token;
 pub(crate) mod wallet;
 mod wallet_rotation;
+mod watch_reconciliation;
 mod watched_address;
 mod watched_address_deletion;
 mod webhook_delivery;
 
 pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository, WalletReauthChallenge};
 pub use wallet_rotation::WalletRotation;
+pub use watch_reconciliation::{WatchDivergence, WatchKey, compare_watches, reconcile_watches};
 pub use watched_address::PendingWatch;
 
 #[cfg(test)]
