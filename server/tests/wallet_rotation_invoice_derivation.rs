@@ -11,7 +11,8 @@
 //!
 //! Calls `create_invoice` and `rotate_store_wallet` directly against a real
 //! database, the same pattern `plugin_invoice_creation_filter.rs` uses:
-//! `AuthenticatedUser` and `State` are plain data the extractors produce, so
+//! `AuthenticatedUser`, `AuthenticatedCaller` and `State` are plain data the
+//! extractors produce, so
 //! nothing here depends on routing or middleware.
 
 use std::sync::Arc;
@@ -32,9 +33,9 @@ use data_service::store_creation::StoreCreationWriter;
 use evm::XpubDeriver;
 use rates::NoOpRateProvider;
 use server::api::ApiErr;
-use server::api::AuthenticatedUser;
 use server::api::invoices::{CreateInvoiceRequest, create_invoice};
 use server::api::stores::{RotateWalletRequest, RotateWalletResponse, rotate_store_wallet};
+use server::api::{AuthenticatedCaller, AuthenticatedUser};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 use types::{ChainId, InvoiceId, PaymentOptionReader, StorePaymentMethodWriter};
@@ -158,7 +159,15 @@ async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
 
     // Invoice created before the rotation - the one that must NOT move.
     let (status, Json(pending_invoice)) = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        AuthenticatedCaller {
+            user: user_info(owner),
+            // Behaviourally inert here - `create_invoice` only consults this
+            // when invoice-creation filters are installed, and this test
+            // installs none. `false` because the caller IS a merchant: if a
+            // filter is ever added to this test it should exercise the
+            // merchant path rather than silently bypass it.
+            is_operator: false,
+        },
         State(app_state(Arc::clone(&ds))),
         Json(invoice_request(store.id.0)),
     )
@@ -193,7 +202,15 @@ async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
 
     // A new invoice after rotation must derive from the new key.
     let (status, Json(new_invoice)) = create_invoice(
-        AuthenticatedUser(user_info(owner)),
+        AuthenticatedCaller {
+            user: user_info(owner),
+            // Behaviourally inert here - `create_invoice` only consults this
+            // when invoice-creation filters are installed, and this test
+            // installs none. `false` because the caller IS a merchant: if a
+            // filter is ever added to this test it should exercise the
+            // merchant path rather than silently bypass it.
+            is_operator: false,
+        },
         State(app_state(Arc::clone(&ds))),
         Json(invoice_request(store.id.0)),
     )
