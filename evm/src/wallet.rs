@@ -33,6 +33,14 @@ use coins_bip32::{
 use coins_bip39::{English, Mnemonic};
 use std::str::FromStr;
 
+/// How many addresses a merchant is asked to compare by eye against another
+/// wallet before trusting a registered key. Shared between the offline
+/// `derive-xpub` tool's printed check addresses and the server's
+/// `verification_addresses` on `POST /wallets` so the two count the same
+/// thing from one source rather than two constants that could silently drift
+/// apart.
+pub const VERIFICATION_ADDRESS_COUNT: u32 = 3;
+
 /// HD wallet for deriving Ethereum addresses.
 #[derive(Clone)]
 pub struct HdWallet {

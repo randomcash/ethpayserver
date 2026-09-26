@@ -10,17 +10,13 @@
 //! derive-xpub from-existing  # derive from a mnemonic already held
 //! ```
 
-use evm::{ChainFamily, HdWallet, generate_mnemonic};
+use evm::{ChainFamily, HdWallet, VERIFICATION_ADDRESS_COUNT, generate_mnemonic};
 use std::io::BufRead;
 use std::process::ExitCode;
 
 /// Every payment this server derives is Ethereum/EVM; the tool has no reason
 /// to ask which family, so it never does.
 const FAMILY: ChainFamily = ChainFamily::Evm;
-
-/// Addresses printed for comparison against a wallet's own display and
-/// against `verification_addresses` in the `POST /wallets` response.
-const CHECK_ADDRESS_COUNT: u32 = 3;
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
@@ -105,7 +101,7 @@ fn emit(mnemonic: &str, passphrase: &str) -> ExitCode {
     println!("\naccount path: {}", FAMILY.account_path());
     println!("xpub:         {xpub}\n");
     println!(
-        "First {CHECK_ADDRESS_COUNT} receiving addresses - compare these against your \
+        "First {VERIFICATION_ADDRESS_COUNT} receiving addresses - compare these against your \
          own wallet, and against `verification_addresses` from `POST /wallets`, \
          before a single invoice quotes one:\n"
     );
@@ -113,7 +109,7 @@ fn emit(mnemonic: &str, passphrase: &str) -> ExitCode {
 }
 
 fn print_check_addresses(wallet: &HdWallet) -> ExitCode {
-    for index in 0..CHECK_ADDRESS_COUNT {
+    for index in 0..VERIFICATION_ADDRESS_COUNT {
         match wallet.derive_address_for(FAMILY, index) {
             Ok(address) => println!(
                 "  [{index}] {} ({})",

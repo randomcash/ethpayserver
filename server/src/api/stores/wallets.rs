@@ -37,11 +37,10 @@ pub use api_types::{
 
 /// How many addresses a newly registered wallet hands back for checking.
 ///
-/// Three, because the merchant is comparing them by eye against a list in
-/// another application and one is not a pattern - a single match could be
-/// coincidence in a way three consecutive ones cannot. More than a handful and
-/// nobody reads them.
-pub const VERIFICATION_ADDRESS_COUNT: u32 = 3;
+/// Re-exported from `evm`, which also drives the offline `derive-xpub`
+/// tool's printed check addresses - one constant, so the two lists a
+/// merchant compares by eye can't silently drift apart.
+pub use evm::VERIFICATION_ADDRESS_COUNT;
 
 /// Query parameters for listing wallet addresses.
 #[derive(Debug, Deserialize, IntoParams)]
