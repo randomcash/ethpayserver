@@ -3,7 +3,10 @@
  * scripts/visual-review-report.mjs decides what counts as an error vs a
  * finding and how the two render. Nothing here exercises a browser or the
  * Anthropic API, so — like the route-coverage test in visual-review.spec.ts —
- * it isn't gated behind E2E_VISUAL_REVIEW and runs on every push.
+ * it isn't gated behind E2E_VISUAL_REVIEW and runs whenever the `e2e` job
+ * does: pushes to main/testnet and release tags, not `pull_request` (see
+ * playwright.config.ts), so a regression here is caught once a branch lands
+ * on testnet rather than at PR time.
  *
  * The property that matters most: a run that broke and a run that came back
  * clean must never render as the same string. That's the one thing this

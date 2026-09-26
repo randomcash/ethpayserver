@@ -160,12 +160,15 @@ test.describe('Authenticated routes', () => {
   });
 });
 
-// Static, no browser, not gated on E2E_VISUAL_REVIEW — this runs on every
-// unfiltered `npx playwright test` (ci.yml's `e2e` job), so a route added to
-// scout.spec.ts's walk and not mirrored above fails the next push instead of
-// just quietly never getting screenshotted. A hand-duplicated list with
-// nothing to catch drift is indistinguishable, months later, from one that's
-// still accurate.
+// Static, no browser, not gated on E2E_VISUAL_REVIEW — this runs whenever
+// `npx playwright test` runs unfiltered, which is ci.yml's `e2e` job. That
+// job is gated to pushes on main/testnet and release tags, not
+// `pull_request` (see playwright.config.ts), so a route added to
+// scout.spec.ts's walk and not mirrored above stays green through the PR
+// that adds it and only fails once that lands on testnet — not "the next
+// push" in general. Still real drift detection, just not at PR time. A
+// hand-duplicated list with nothing to catch drift is indistinguishable,
+// months later, from one that's still accurate.
 test('scout.spec.ts route coverage stays in sync with this file', () => {
   const scoutSrc = fs.readFileSync(path.join('tests', 'scout.spec.ts'), 'utf8');
   const reached = new Set([...scoutSrc.matchAll(/goto(?:Authed)?\('([^']+)'\)/g)].map((m) => m[1]));
