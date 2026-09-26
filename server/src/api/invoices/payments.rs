@@ -11,11 +11,11 @@ use data_service::PaymentOptionReader;
 
 use super::{
     InvoiceStatusResponse, ListPaymentsQuery, PaymentListResponse, PaymentResponse, StoreScope,
-    build_payment_filter_params, get_invoice_with_permission, resolve_store_names,
-    verify_store_access_for_query,
+    VIEW_INVOICES, build_payment_filter_params, get_invoice_with_permission, narrow_scope_by_key,
+    resolve_store_names, verify_store_access_for_query,
 };
 use crate::api::ApiErr;
-use crate::api::extractors::AuthenticatedUser;
+use crate::api::extractors::{StoreScopedUser, key_grants_store_permission};
 use crate::state::PgAppState;
 
 /// Get payments for an invoice.
@@ -36,7 +36,7 @@ use crate::state::PgAppState;
     )
 )]
 pub async fn get_invoice_payments<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<Vec<PaymentResponse>>, StatusCode>
@@ -46,7 +46,7 @@ where
     let id = InvoiceId::from_string(invoice_id);
 
     // Verify permission
-    let _invoice = get_invoice_with_permission(&state, &user, &id).await?;
+    let _invoice = get_invoice_with_permission(&state, &user, key_scope.as_deref(), &id).await?;
 
     let payments = PaymentReader::get_for_invoice(&*state.data_service, &id)
         .await
@@ -73,7 +73,7 @@ where
     )
 )]
 pub async fn list_payments<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListPaymentsQuery>,
 ) -> Result<Json<PaymentListResponse>, ApiErr>
@@ -84,6 +84,9 @@ where
     // caller's own stores, or the whole server for an admin. The distinction is
     // load-bearing - a nil-UUID sentinel here was once an authorization hole.
     let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    // A payment has no permission of its own; it's read under its invoice's
+    // `canviewinvoices`, same as every other payment/invoice read in this file.
+    let scope = narrow_scope_by_key(scope, key_scope.as_deref(), VIEW_INVOICES)?;
 
     // The same builder the CSV export uses, so the two cannot answer different
     // questions - an export that ignores a filter the list applied downloads
@@ -194,7 +197,7 @@ where
     )
 )]
 pub async fn get_payment<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(payment_id): Path<Uuid>,
 ) -> Result<Json<PaymentResponse>, StatusCode>
@@ -223,6 +226,10 @@ where
         if !is_member {
             return Err(StatusCode::NOT_FOUND);
         }
+    }
+
+    if !key_grants_store_permission(key_scope.as_deref(), VIEW_INVOICES, invoice.store_id) {
+        return Err(StatusCode::NOT_FOUND);
     }
 
     // The invoice is already in hand from the membership check above, so
@@ -257,7 +264,7 @@ where
     )
 )]
 pub async fn get_invoice_status<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<InvoiceStatusResponse>, StatusCode>
@@ -266,7 +273,7 @@ where
 {
     let id = InvoiceId::from_string(invoice_id);
 
-    let invoice = get_invoice_with_permission(&state, &user, &id).await?;
+    let invoice = get_invoice_with_permission(&state, &user, key_scope.as_deref(), &id).await?;
 
     let payments = PaymentReader::get_for_invoice(&*state.data_service, &id)
         .await

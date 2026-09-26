@@ -13,9 +13,12 @@ use ::types::{
 };
 use auth::SessionService;
 
-use super::{ListInvoicesQuery, ListPaymentsQuery, StoreScope, verify_store_access_for_query};
+use super::{
+    ListInvoicesQuery, ListPaymentsQuery, StoreScope, VIEW_INVOICES, narrow_scope_by_key,
+    verify_store_access_for_query,
+};
 use crate::api::ApiErr;
-use crate::api::extractors::AuthenticatedUser;
+use crate::api::extractors::StoreScopedUser;
 use crate::state::PgAppState;
 
 /// Maximum number of rows allowed in a CSV export.
@@ -118,7 +121,7 @@ pub(crate) fn build_payment_filter_params(
 /// in pages of 1000 rows to avoid full-result buffering.
 #[allow(clippy::too_many_lines)] // CSV export: filter assembly + paged stream + row serialization
 pub async fn export_invoices_csv<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListInvoicesQuery>,
 ) -> Result<Response, ApiErr>
@@ -126,6 +129,7 @@ where
     A: SessionService + 'static,
 {
     let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    let scope = narrow_scope_by_key(scope, key_scope.as_deref(), VIEW_INVOICES)?;
     let base_params = build_invoice_filter_params(
         &scope,
         query.status.as_deref(),
@@ -253,7 +257,7 @@ where
 /// in pages of 1000 rows to avoid full-result buffering.
 #[allow(clippy::too_many_lines)] // CSV export: filter assembly + paged stream + row serialization
 pub async fn export_payments_csv<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListPaymentsQuery>,
 ) -> Result<Response, ApiErr>
@@ -261,6 +265,7 @@ where
     A: SessionService + 'static,
 {
     let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    let scope = narrow_scope_by_key(scope, key_scope.as_deref(), VIEW_INVOICES)?;
     let base_params =
         build_payment_filter_params(&scope, query.status.as_deref(), query.search.as_deref())?;
 

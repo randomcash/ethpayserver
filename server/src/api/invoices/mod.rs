@@ -45,8 +45,17 @@ use auth::{SessionService, repository::UserStoreRepository};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
+use crate::api::extractors::key_grants_store_permission;
 use crate::services::EVMMonitor;
 use crate::state::PgAppState;
+
+/// `ethpay.store.canviewinvoices` - the permission that gates every read of
+/// invoice or payment data below. A key's stored scope must grant this on a
+/// store, on top of whatever the owner's own membership already allows, or a
+/// key narrowed to (say) `cancreateinvoice` alone would still be able to read
+/// every invoice and payment the owner can see - the same "key exceeds its
+/// declared scope" gap this ticket exists to close, just on the read side.
+pub(crate) const VIEW_INVOICES: &str = "ethpay.store.canviewinvoices";
 
 /// Build a JSON error response for the create-invoice endpoint.
 pub(crate) fn invoice_error(
@@ -178,11 +187,14 @@ pub(crate) fn decimal_to_integer_string(value: Decimal) -> Result<String, &'stat
     }
 }
 
-/// Fetch invoice and verify user has access (admin or store member).
-/// Returns NOT_FOUND for both missing invoices and permission denied (prevents enumeration).
+/// Fetch invoice and verify user has access (admin or store member), AND that
+/// the authenticating key (if any) was scoped to `VIEW_INVOICES` on this
+/// store. Returns NOT_FOUND for a missing invoice, a non-member, or a key
+/// that isn't scoped to read it (prevents enumeration in every case alike).
 pub(crate) async fn get_invoice_with_permission<A: SessionService>(
     state: &PgAppState<A>,
     user: &auth::UserInfo,
+    key_scope: Option<&[String]>,
     invoice_id: &InvoiceId,
 ) -> Result<InvoiceData, StatusCode> {
     let invoice = InvoiceReader::get(&*state.data_service, invoice_id)
@@ -203,7 +215,44 @@ pub(crate) async fn get_invoice_with_permission<A: SessionService>(
         }
     }
 
+    if !key_grants_store_permission(key_scope, VIEW_INVOICES, invoice.store_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     Ok(invoice)
+}
+
+/// Narrow a resolved [`StoreScope`] by what the authenticating key's stored
+/// permission set grants for `policy`. Session auth and an unscoped or
+/// `unrestricted` key pass every store through unchanged - `None`/`unrestricted`
+/// are exactly the cases `key_grants_store_permission` grants everything for -
+/// so this only ever shrinks what a narrowly-scoped key can list, never widens
+/// what the caller's own store membership already allowed.
+///
+/// `StoreScope::One` came from an explicit `?store_id=` the caller named, so a
+/// key that doesn't cover it is refused outright (matching every other
+/// single-store permission check in this file) rather than silently returning
+/// zero rows for a store the caller asked for by ID.
+pub(crate) fn narrow_scope_by_key(
+    scope: StoreScope,
+    key_scope: Option<&[String]>,
+    policy: &str,
+) -> Result<StoreScope, StatusCode> {
+    match scope {
+        StoreScope::One(id) => {
+            if key_grants_store_permission(key_scope, policy, id) {
+                Ok(StoreScope::One(id))
+            } else {
+                Err(StatusCode::FORBIDDEN)
+            }
+        }
+        StoreScope::Membership(ids) => Ok(StoreScope::Membership(
+            ids.into_iter()
+                .filter(|id| key_grants_store_permission(key_scope, policy, *id))
+                .collect(),
+        )),
+        StoreScope::All => Ok(StoreScope::All),
+    }
 }
 
 /// Resolve the store scope for a list/export query, verifying access.
