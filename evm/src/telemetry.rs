@@ -726,6 +726,15 @@ mod tests {
     /// expects. This drives a sensitive **key** with an innocuous-looking
     /// value through the real layer, the same way the test above drives the
     /// body.
+    ///
+    /// Ablated to confirm this can actually fail: with the `is_sensitive_key`
+    /// branch removed from `scrub_log`, this test panics with
+    /// `mnemonic field survived as a structured-log attribute through the
+    /// real sentry_tracing conversion: {"mnemonic": LogAttribute(String("legal
+    /// winner thank year wave sausage worth useful legal winner thank
+    /// yellow")), ...}` — the plaintext mnemonic present, unredacted, under
+    /// the same key `contains_key` just confirmed arrived. Restored before
+    /// committing.
     #[test]
     fn scrub_log_redacts_a_sensitive_key_attribute_through_the_real_capture_pipeline() {
         use tracing_subscriber::prelude::*;
@@ -771,6 +780,15 @@ mod tests {
     /// is secret-shaped (a bare hex private key), which only the value-side
     /// `redact_value`/`redact_secrets` path — not the sensitive-key
     /// allowlist — can catch.
+    ///
+    /// Ablated to confirm this can actually fail: with the `redact_value`
+    /// branch removed from `scrub_log`, this test panics with `secret-shaped
+    /// value under an innocuous key survived as a structured-log attribute
+    /// through the real sentry_tracing conversion: {"context":
+    /// LogAttribute(String("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+    /// deadbeefdeadbeef")), ...}` — the bare hex key present, unredacted, in
+    /// the value `contains_key` just confirmed arrived under. Restored
+    /// before committing.
     #[test]
     fn scrub_log_redacts_a_secret_shaped_attribute_value_through_the_real_capture_pipeline() {
         use tracing_subscriber::prelude::*;
@@ -819,6 +837,15 @@ mod tests {
     /// Debug-formatted value (quotes, an `Option` wrapper, nested
     /// structure) is exactly the real shape that path produces — not a
     /// hypothetical one.
+    ///
+    /// Ablated to confirm this can actually fail: with the `redact_value`
+    /// branch removed from `scrub_log`, this test panics with
+    /// `debug-formatted/wrapped secret survived as a structured-log
+    /// attribute through the real sentry_tracing conversion: {"context":
+    /// LogAttribute(String("Some(\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+    /// deadbeefdeadbeefdeadbeef\")")), ...}` — the wrapped key present,
+    /// unredacted, in the `Option`-wrapped Debug string `contains_key` just
+    /// confirmed arrived as. Restored before committing.
     #[test]
     fn scrub_log_redacts_a_debug_formatted_secret_attribute_through_the_real_capture_pipeline() {
         use tracing_subscriber::prelude::*;
