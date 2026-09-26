@@ -3,7 +3,7 @@
     "id": "F001",
     "desc": "A watch present in the monitor but not expected by the database, or expected and not held, is detected and counted. Report both directions separately; the missing-watch direction means a payment can arrive uncredited and is the expensive one.",
     "test": "reconciler reports a seeded stale watch and a removed live watch, each distinctly",
-    "passes": false,
+    "passes": true,
     "notes": "The authoritative set is in Redis under the watch key prefix, hydrated on monitor startup, and already readable by an existing reader that SCANs rather than enumerating. Diff the database against Redis, never against the monitor's in-memory map - that is the component reporting on itself. Acceptance is red-before-green: a check for a condition that is hard to produce by accident must be shown going red on purpose. THE DIFF KEY IS THE FULL TUPLE, NOT THE ADDRESS: the reader returns address, invoice, chain and an optional token, and the same address is watched separately per asset. Comparing on address alone would silently miss a missing token watch on an address that still holds its native watch - which is the direction that loses a payment. The test needs TEST_REDIS_URL as well as DATABASE_URL."
   },
   {
