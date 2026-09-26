@@ -101,9 +101,14 @@ future polled elsewhere would record into the global recorder and the assertion
 would read zero no matter what the code did — a test that cannot fail, arrived
 at by accident.
 
-**F002's `notes` field in `features.json` still says "It is NOT yet covered by a
-test, so it stays false".** Left untouched because the brief said to change only
-`passes`. It now contradicts the flag beside it.
+**F002's `notes` field in `features.json` said "It is NOT yet covered by a test,
+so it stays false" and has been rewritten.** It was left alone on the grounds
+that the brief says to change only `passes`, which was the wrong call: the notes
+then contradicted the flag beside them, and of the two the notes are the part a
+reader believes, because they explain rather than assert. The rule means "do not
+edit another feature's row", not "leave a statement standing once it has become
+false". The replacement says what the tests cover and, as importantly, what a
+zero on this counter still does not rule out.
 
 **Pre-existing failures, re-measured rather than assumed, both unrelated:**
 
