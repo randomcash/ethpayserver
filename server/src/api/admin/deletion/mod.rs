@@ -103,8 +103,10 @@ fn record_unwatch_failed() {
     metrics::counter!("ethpayserver_unwatch_after_delete_failures_total").increment(1);
 }
 
-pub(crate) async fn unwatch_after_delete<A>(state: &PgAppState<A>, addresses: Vec<CleanupAddressInfo>)
-where
+pub(crate) async fn unwatch_after_delete<A>(
+    state: &PgAppState<A>,
+    addresses: Vec<CleanupAddressInfo>,
+) where
     A: SessionService + 'static,
 {
     let Some(monitor) = &state.evm_monitor else {
