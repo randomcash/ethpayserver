@@ -14,6 +14,7 @@ use rates::NoOpRateProvider;
 use server::api::admin::E2E_STORE_OWNER_ID;
 use server::api::{AdminAuth, AuthenticatedUser};
 use server::services::RedisEVMMonitor;
+use server::services::plugins::AccountClosedObserver;
 use server::state::PgAppState;
 
 /// Not exercised: neither handler calls back into session management, only
@@ -255,4 +256,13 @@ pub(crate) fn app_state_with_monitor(
         Arc::new(NoOpRateProvider),
         Arc::new(server::services::email::NoopEmailSender),
     )
+}
+
+pub(crate) fn app_state_with_observers(
+    data_service: Arc<PgDataService>,
+    observers: Vec<Arc<dyn AccountClosedObserver>>,
+) -> PgAppState<UnusedSessionService> {
+    let mut state = app_state(data_service);
+    state.account_closed_observers = observers;
+    state
 }
