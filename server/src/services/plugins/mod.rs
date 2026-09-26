@@ -71,7 +71,8 @@ pub use boot::{
     report_boot,
 };
 pub use dispatch::{
-    FILTER_INVOICE_CREATION, PAYMENT_SETTLED, PluginInvoiceCreationFilter, PluginPaymentObserver,
+    CANCEL_SUBSCRIPTION, CancelSubscriptionOutcome, FILTER_INVOICE_CREATION, PAYMENT_SETTLED,
+    PluginInvoiceCreationFilter, PluginPaymentObserver, cancel_subscription,
     invoice_creation_filters, own_store_payment_reporting, payment_observers,
 };
 pub use filter::{
@@ -83,7 +84,8 @@ pub use invoice_issuer::{
     HostInvoiceIssuer, InvoiceCreateRequest, InvoiceIssuerError, PluginHostApi, enforce_own_store,
 };
 pub use merchant_volume::{
-    MAX_WINDOW_DAYS, MerchantVolume, MerchantVolumeReader, PluginMerchantVolume,
+    AccountVolume, BulkMerchantVolumeReader, MAX_ACCOUNTS_PER_BULK_READ, MAX_WINDOW_DAYS,
+    MerchantVolume, MerchantVolumeReader, PluginMerchantVolume,
 };
 pub use page_renderer::{RENDER_PAGE, WasmPageRenderer};
 pub use payment_observer::{

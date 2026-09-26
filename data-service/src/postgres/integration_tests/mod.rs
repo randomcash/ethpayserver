@@ -22,6 +22,8 @@
 //! - `merchant_directory`: the plugin host's server-wide account/store list
 //! - `installed_plugins`: what is installed survives a restart, and the
 //!   audit trail outlives the plugin it describes
+//! - `seeded_tokens`: the migration-seeded L2 and testnet tokens, resolved
+//!   by `TokenReader::get_by_address` the way a real payment resolves them
 
 mod account_deletion;
 mod aggregation;
@@ -34,6 +36,7 @@ mod invoice_creation;
 mod merchant_directory;
 mod payment;
 mod payout_claims;
+mod seeded_tokens;
 mod server_settings;
 mod store_creation;
 mod wallet;
