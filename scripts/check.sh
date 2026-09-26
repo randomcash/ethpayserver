@@ -64,13 +64,20 @@ run "cargo clippy"              cargo clippy --workspace --all-targets -- -D war
 echo "== tests =="
 run "cargo test (workspace)"    cargo test --workspace --no-fail-fast
 
-if [ -n "${DATABASE_URL:-}" ]; then
-    echo "== integration (DATABASE_URL set) =="
+# Both, not just DATABASE_URL. Some of these tests need Redis as well, so with a
+# database and no Redis they are skipped while this block reports as having run -
+# a green that covers less than it says, which is the exact fault this script was
+# written to avoid. Caught by a reader before it could mislead anyone.
+if [ -n "${DATABASE_URL:-}" ] && [ -n "${TEST_REDIS_URL:-}" ]; then
+    echo "== integration (DATABASE_URL and TEST_REDIS_URL set) =="
     # -j 1 is not cosmetic: these share one real Postgres and run in parallel
     # they produce failures CI never sees.
     run "integration tests"     cargo test --workspace --no-fail-fast -- --ignored --test-threads=1
 else
-    skipped="${skipped}  - integration tests: DATABASE_URL unset. ~210 ignored tests did not run,
+    missing=""
+    [ -z "${DATABASE_URL:-}" ] && missing="DATABASE_URL"
+    [ -z "${TEST_REDIS_URL:-}" ] && missing="${missing:+$missing and }TEST_REDIS_URL"
+    skipped="${skipped}  - integration tests: $missing unset. ~210 ignored tests did not run,
     including the tenant-isolation suite. CI runs these and they gate merges.
 "
 fi
