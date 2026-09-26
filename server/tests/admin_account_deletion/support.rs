@@ -266,3 +266,15 @@ pub(crate) fn app_state_with_observers(
     state.account_closed_observers = observers;
     state
 }
+
+/// Needed by refusal tests that must drive a real monitor to prove a blocked
+/// deletion never unwatches *and* never notifies a plugin the account is gone.
+pub(crate) fn app_state_with_monitor_and_observers(
+    data_service: Arc<PgDataService>,
+    evm_monitor: Option<Arc<RedisEVMMonitor>>,
+    observers: Vec<Arc<dyn AccountClosedObserver>>,
+) -> PgAppState<UnusedSessionService> {
+    let mut state = app_state_with_monitor(data_service, evm_monitor);
+    state.account_closed_observers = observers;
+    state
+}

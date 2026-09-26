@@ -48,6 +48,11 @@ impl AccountClosedObserver for RecordingObserver {
 /// The guard the ticket's automated sweep depends on: whatever matches a
 /// cleanup query must not be able to reach the one account a deployment
 /// cannot lose just because it also matched.
+///
+/// Also the first of this file's refusal paths to prove it notifies nobody -
+/// a plugin is licensed to discard its own data for an account `account_closed`
+/// names, so a refusal that fired the notification anyway would be silent
+/// data loss for an account that was never actually deleted.
 #[tokio::test]
 #[ignore]
 async fn deleting_a_server_admin_target_is_refused() {
@@ -56,7 +61,9 @@ async fn deleting_a_server_admin_target_is_refused() {
     };
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_user(pg.pool(), "server_admin").await;
-    let state = app_state(Arc::new(pg));
+    let observer = Arc::new(RecordingObserver::default());
+    let observers: Vec<Arc<dyn AccountClosedObserver>> = vec![observer.clone()];
+    let state = app_state_with_observers(Arc::new(pg), observers);
 
     let result = delete_user_account(
         admin_auth(caller),
@@ -76,6 +83,10 @@ async fn deleting_a_server_admin_target_is_refused() {
         .await
         .expect("count target");
     assert_eq!(still_there, 1, "the refusal must not have deleted anything");
+    assert!(
+        observer.seen.lock().unwrap().is_empty(),
+        "an account that was never deleted must never be reported closed"
+    );
 
     cleanup(state.data_service.pool(), &[caller, target]).await;
 }
@@ -99,7 +110,9 @@ async fn deleting_an_account_that_took_a_payment_is_refused() {
     let invoice = seed_invoice(pg.pool(), store.id.0).await;
     seed_payment(pg.pool(), &invoice).await;
 
-    let state = app_state(Arc::new(pg));
+    let observer = Arc::new(RecordingObserver::default());
+    let observers: Vec<Arc<dyn AccountClosedObserver>> = vec![observer.clone()];
+    let state = app_state_with_observers(Arc::new(pg), observers);
 
     let result = delete_user_account(
         admin_auth(caller),
@@ -123,6 +136,10 @@ async fn deleting_an_account_that_took_a_payment_is_refused() {
         .await
         .expect("count target");
     assert_eq!(still_there, 1, "the refusal must not have deleted anything");
+    assert!(
+        observer.seen.lock().unwrap().is_empty(),
+        "an account that was never deleted must never be reported closed"
+    );
 
     cleanup(state.data_service.pool(), &[caller, target]).await;
 }
@@ -289,7 +306,10 @@ async fn deleting_an_account_with_a_still_watched_address_is_refused() {
     let payment_option = seed_payment_option(pg.pool(), &invoice, &address).await;
     seed_watched_address(pg.pool(), &invoice, payment_option, &address).await;
 
-    let state = app_state_with_monitor(Arc::new(pg), Some(Arc::new(monitor)));
+    let observer = Arc::new(RecordingObserver::default());
+    let observers: Vec<Arc<dyn AccountClosedObserver>> = vec![observer.clone()];
+    let state =
+        app_state_with_monitor_and_observers(Arc::new(pg), Some(Arc::new(monitor)), observers);
 
     let result = delete_user_account(
         admin_auth(caller),
@@ -320,6 +340,10 @@ async fn deleting_an_account_with_a_still_watched_address_is_refused() {
         .await
         .expect("count target");
     assert_eq!(still_there, 1, "the refusal must not have deleted anything");
+    assert!(
+        observer.seen.lock().unwrap().is_empty(),
+        "an account that was never deleted must never be reported closed"
+    );
 
     cleanup(state.data_service.pool(), &[caller, target]).await;
 }
