@@ -26,7 +26,9 @@ import { groupByRoute, renderReport, crashOutputs } from './visual-review-report
 const VISUAL_DIR = path.join('test-results', 'visual');
 const MANIFEST_PATH = path.join(VISUAL_DIR, 'manifest.json');
 const MODEL = process.env.VISUAL_REVIEW_MODEL || 'claude-sonnet-5';
-const API_URL = 'https://api.anthropic.com/v1/messages';
+// Overridable so a test can point this at a local stand-in instead of the
+// real Anthropic API — see visual-review-main.spec.ts.
+const API_URL = process.env.VISUAL_REVIEW_API_URL || 'https://api.anthropic.com/v1/messages';
 
 const RUBRIC = `You are doing a nightly visual QA pass on a non-custodial crypto payment
 processor's merchant dashboard. You are shown full-page screenshots of one
