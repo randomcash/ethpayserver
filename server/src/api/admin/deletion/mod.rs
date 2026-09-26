@@ -4,11 +4,11 @@
 //! limit) along the two endpoints it covers: `account` is
 //! `DELETE /admin/users/{id}`, `store` is `DELETE /admin/stores/{id}`. Both
 //! read a target's still-active watched addresses before their cascading
-//! delete removes the rows those addresses point at - `account`'s read (and
-//! self-service `delete_account`'s, in `api::users`, which shares it) is only
-//! ever a refuse-if-nonempty gate, while `store`'s hands the result to a
-//! post-delete unwatch step, since unwatching a synthetic E2E store on
-//! purpose is the whole point there. That shared read is [`active_watched_addresses`].
+//! delete removes the rows those addresses point at - `account`'s read is
+//! only ever a refuse-if-nonempty gate, while `store`'s and self-service
+//! `delete_account`'s (in `api::users`, which shares the read) hand the
+//! result to a post-delete unwatch step. That shared read is
+//! [`active_watched_addresses`]; the unwatch step is [`unwatch_after_delete`].
 
 use evm::Address;
 
@@ -21,6 +21,15 @@ use axum::http::StatusCode;
 
 pub(crate) mod account;
 pub(crate) mod store;
+
+/// What [`record_unwatch_failed`] counts, and the two branches it fires on.
+///
+/// Its own file rather than an addition to the `tests` module at the bottom of
+/// this one: that module covers [`parse_watch_target`] and these cover the
+/// counter, and keeping them apart is also what stops either file from being
+/// pushed over the size gate by the other's growth.
+#[cfg(test)]
+mod unwatch_counter_tests;
 
 pub use account::{delete_user_account, list_user_stores};
 pub use store::{E2E_STORE_OWNER_ID, hard_delete_store};
@@ -61,30 +70,6 @@ where
         })
 }
 
-/// Tell the monitor to stop watching `addresses`, once the delete that made
-/// them stale has already succeeded - never before.
-///
-/// An earlier version of this ran the unwatch step *before* the delete, to
-/// close the gap the ticket calls out by name: a no-TTL Redis key pointing at
-/// an invoice id that no longer exists, left behind because deleting straight
-/// through a still-pending, still-watched invoice never told the monitor to
-/// stop. That ordering opened a worse gap of its own: unwatching is an
-/// external side effect with no rollback, so a delete that was then refused
-/// (a payment landing in the window between the two steps, or any other
-/// failure) left a still-*live* invoice unwatched - the account survived, but
-/// the monitor had already been told to stop polling it. Run only after a
-/// delete that has already committed, the reverse is what happens instead: a
-/// failure here can at worst reproduce the original trap (the monitor keeps
-/// polling a now-deleted invoice a little longer), never destroy the watch on
-/// one that still exists. Best-effort and logged rather than propagated for
-/// that same reason - the delete this follows already succeeded, and a
-/// network error talking to the monitor must not turn that into a reported
-/// failure.
-///
-/// Only `hard_delete_store` calls this: `delete_user_account` and self-service
-/// `delete_account` both refuse outright on a still-watched address rather
-/// than unwatching and proceeding, so `addresses` is never non-empty by the
-/// time either of them would reach a call here.
 /// Counts failures of the post-delete unwatch.
 ///
 /// Deliberately defined here rather than in `metrics.rs`, which is 169 lines
@@ -105,6 +90,15 @@ where
 /// and then dropped. Each of those leaves exactly the stale watch this is
 /// about and increments nothing.
 ///
+/// Nor does it see a row [`parse_watch_target`] rejects. Such a row is skipped
+/// without a command being built at all, which leaves the same stale watch,
+/// and it is deliberately not counted here: the realistic case is a watch on a
+/// non-EVM chain, which this monitor never held, so counting it would report a
+/// failure that did not happen. A malformed address would be worth counting
+/// and is indistinguishable from that one at this point, so both are logged
+/// only. [`unwatch_counter_tests`] pins that, rather than leaving a reader to
+/// infer it from a zero.
+///
 /// So a non-zero value is a real problem, and a zero rules out publish
 /// failures and nothing else. Only a reconciler comparing the monitor's actual
 /// watch set against the database can answer the question this counter looks
@@ -113,13 +107,39 @@ fn record_unwatch_failed() {
     metrics::counter!("ethpayserver_unwatch_after_delete_failures_total").increment(1);
 }
 
-pub(crate) async fn unwatch_after_delete<A>(
-    state: &PgAppState<A>,
-    addresses: Vec<CleanupAddressInfo>,
-) where
-    A: SessionService + 'static,
+/// Tell the monitor to stop watching `addresses`, once the delete that made
+/// them stale has already succeeded - never before.
+///
+/// An earlier version of this ran the unwatch step *before* the delete, to
+/// close the gap it exists for: a no-TTL live-watch key pointing at an invoice
+/// id that no longer exists, left behind because deleting straight through a
+/// still-pending, still-watched invoice never told the monitor to stop. That
+/// ordering opened a worse gap of its own: unwatching is an external side
+/// effect with no rollback, so a delete that was then refused (a payment
+/// landing in the window between the two steps, or any other failure) left a
+/// still-*live* invoice unwatched - the account survived, but the monitor had
+/// already been told to stop polling it. Run only after a delete that has
+/// already committed, the reverse is what happens instead: a failure here can
+/// at worst reproduce the original trap (the monitor keeps polling a
+/// now-deleted invoice a little longer), never destroy the watch on one that
+/// still exists. Best-effort and logged rather than propagated for that same
+/// reason - the delete this follows already succeeded, and a network error
+/// talking to the monitor must not turn that into a reported failure.
+///
+/// `hard_delete_store` and self-service `delete_account` both call this.
+/// `delete_user_account` (the admin route) does not: it still refuses outright
+/// on a still-watched address, so `addresses` is never non-empty by the time
+/// it would reach a call here.
+///
+/// Takes the monitor handle rather than the whole `AppState` because that is
+/// all it reads, and because a fixed `PgAppState` pins the monitor to the one
+/// implementation that can only be built against a reachable live-watch store
+/// - which left both of [`record_unwatch_failed`]'s branches untestable.
+pub(crate) async fn unwatch_after_delete<E>(monitor: Option<&E>, addresses: Vec<CleanupAddressInfo>)
+where
+    E: EVMMonitor + ?Sized,
 {
-    let Some(monitor) = &state.evm_monitor else {
+    let Some(monitor) = monitor else {
         // Assumes watching and unwatching always go through the same
         // process's monitor handle - true for every deployment shape this
         // runs in today, but not something this function can verify. Logged
@@ -213,7 +233,10 @@ mod tests {
     use super::*;
     use types::ChainId;
 
-    fn cleanup_info(
+    /// `pub(super)` so `unwatch_counter_tests` builds its rows the same way
+    /// rather than keeping a second copy of this fixture that can drift from
+    /// the real row shape.
+    pub(super) fn cleanup_info(
         address: &str,
         token_address: Option<&str>,
         chain_id: ChainId,

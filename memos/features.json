@@ -10,8 +10,8 @@
     "id": "F002",
     "desc": "Post-delete unwatch failures are visible. The account-deletion path used to make orphaned watches impossible by refusing the delete; it now clears them after the commit instead, which is best-effort.",
     "test": "counter increments when the unwatch cannot be published, and when no monitor is wired",
-    "passes": false,
-    "notes": "Counter exists and fires on both paths. It is NOT yet covered by a test, so it stays false. Note what it cannot see: the unwatch succeeds when the command is PUBLISHED, not acknowledged, so a command published to a channel nobody is subscribed to increments nothing. F001 is the real answer; this is the cheap signal."
+    "passes": true,
+    "notes": "Covered by tests as of this branch. Both branches of the counter were shown red on purpose before they were green - the per-address path where the unwatch command cannot be published, and the no-monitor-wired path - each by commenting out its own increment, and each ablation reddened only its own test. Reachability is a separate ignored test driving the real self-service delete handler against a real database with no monitor wired, because a unit test on the counter proves nothing about the path a merchant takes. Note what a zero does NOT mean, which is pinned as a named test rather than only a doc comment: the unwatch succeeds when the command is PUBLISHED, not acknowledged, so a command published to a channel nobody is subscribed to increments nothing. A third silent path is deliberate - a watch row the parser rejects is skipped uncounted, because the realistic instance is a non-EVM chain this process never held. F001 is the real answer; this is the cheap signal."
   },
   {
     "id": "F003",

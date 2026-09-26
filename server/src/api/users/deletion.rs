@@ -48,15 +48,14 @@ fn deletion_confirmation_matches(expected: &str, typed: &str) -> bool {
 /// key and surface as a 500. `DELETE /stores/{id}` already archives rather than
 /// deletes for this reason; this endpoint declines rather than pretending.
 ///
-/// Also refuses while any owned store still has an actively watched address -
-/// the same guard `admin::deletion::delete_user_account` applies, for the same
-/// reason: `account_deletion_blockers` only sees *recorded* payments, so a
-/// `pending`, never-expired invoice whose customer has already broadcast a
-/// transaction that has not confirmed yet passes it untouched. Without this, a
-/// merchant could delete their own account out from under a payment in
-/// flight - the cascade removes the invoice while the monitor is still
-/// watching for it, and the payment that lands afterward has nothing left to
-/// credit.
+/// Does **not** refuse on a still-watched address, unlike
+/// `admin::deletion::delete_user_account`, which still does. An unpaid invoice
+/// must not stop a merchant deleting their own account; the case worth refusing
+/// is a payment already broadcast, and `account_deletion_blockers` catches that
+/// on its own because detection writes a `payments` row before it confirms. The
+/// watches such a delete orphans are cleared after the commit instead, by
+/// `admin::deletion::unwatch_after_delete` - best effort, and counted when it
+/// cannot be done.
 ///
 /// What it is for is the case deletion is actually asked for: an abandoned
 /// signup, a test account, a merchant who never traded. Those cascade cleanly -
@@ -69,7 +68,7 @@ fn deletion_confirmation_matches(expected: &str, typed: &str) -> bool {
     responses(
         (status = 204, description = "Account deleted"),
         (status = 400, description = "Confirmation did not match"),
-        (status = 409, description = "Account holds financial records, or a still-watched address, and cannot be deleted"),
+        (status = 409, description = "Account holds financial records and cannot be deleted"),
     ),
     tag = "users"
 )]
@@ -161,7 +160,8 @@ where
     // the monitor's watch set, because Postgres cannot see a stale watch at
     // all: `watched_addresses` cascades from both `invoices` and
     // `payment_options`, so the rows are gone and the monitor's are not.
-    crate::api::admin::deletion::unwatch_after_delete(&state, addresses).await;
+    crate::api::admin::deletion::unwatch_after_delete(state.evm_monitor.as_deref(), addresses)
+        .await;
 
     tracing::info!(user_id = %user.id.0, "account deleted at its owner's request");
     Ok(StatusCode::NO_CONTENT)

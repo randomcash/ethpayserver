@@ -24,6 +24,7 @@ use std::time::Duration;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use evm::monitor::{COMMANDS_CHANNEL, EVENTS_CHANNEL, EventBridge, RedisBridge};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
@@ -115,6 +116,74 @@ async fn deleting_your_own_account_with_an_unpaid_invoice_succeeds_and_unwatches
         .await
         .expect("count target");
     assert_eq!(gone, 0, "the account must actually be gone");
+
+    cleanup(state.data_service.pool(), &[target]).await;
+}
+
+/// The same delete with no monitor wired into the process, which is the branch
+/// that would otherwise be silent: nothing is unwatched, the stale watch stays
+/// exactly where it is, and before the counter existed the only trace was a
+/// warning.
+///
+/// The counter's two branches are unit-tested in
+/// `server/src/api/admin/deletion/unwatch_counter_tests.rs`, where they run in
+/// the ordinary workspace test step. What those cannot show is that a real
+/// endpoint ever reaches this branch with a non-empty list - `pub` is not
+/// reachability, and this repository has shipped code wired to nothing with
+/// green tests. So this drives the handler a merchant drives, against a real
+/// database, with the state a process that has no live-watch store configured
+/// actually has.
+///
+/// Reads a recorder local to this thread rather than the process-wide one: a
+/// global recorder can be installed only once per process, and `#[tokio::test]`
+/// polls this future on the thread that installs the guard.
+#[tokio::test]
+#[ignore]
+async fn deleting_your_own_account_with_no_monitor_wired_counts_the_watch_it_left_behind() {
+    let Some(pg) = service().await else {
+        return;
+    };
+
+    let target = seed_user(pg.pool(), "user").await;
+    let store = Store::new(format!("store-{target}"), UserId(target));
+    pg.create_store_owned_by(&store, UserId(target))
+        .await
+        .expect("seed store owned by target");
+    let invoice = seed_invoice(pg.pool(), store.id.0).await;
+    let address = format!("0x{:040x}", Uuid::new_v4().as_u128());
+    let payment_option = seed_payment_option(pg.pool(), &invoice, &address).await;
+    seed_watched_address(pg.pool(), &invoice, payment_option, &address).await;
+
+    // `app_state`, not `app_state_with_monitor`: no monitor at all is the
+    // condition under test, and it is the shape a server booted without a
+    // live-watch store runs in.
+    let state = app_state(Arc::new(pg));
+
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let result = {
+        let _recording = metrics::set_default_local_recorder(&recorder);
+        delete_account(
+            self_auth(target),
+            State(state.clone()),
+            Query(DeleteAccountQuery {
+                confirm: target.to_string(),
+            }),
+        )
+        .await
+    };
+
+    let status = result.unwrap_or_else(|(status, message)| {
+        panic!("an unpaid invoice must not block deletion, got {status}: {message}")
+    });
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        unwatch_failures(&handle.render()),
+        1,
+        "the one address this delete orphaned was never unwatched, and that has \
+         to be counted rather than only logged"
+    );
 
     cleanup(state.data_service.pool(), &[target]).await;
 }
