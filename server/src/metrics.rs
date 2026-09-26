@@ -234,20 +234,6 @@ pub fn record_invoice_expired() {
 }
 
 /// Record an invoice cancellation.
-/// Counts failures of the post-delete unwatch.
-///
-/// The account-deletion path used to make orphaned watches *impossible*: it
-/// refused the delete outright while any address was still watched. That
-/// refusal was broader than its purpose - it fired for an invoice with nothing
-/// broadcast to it - so it was removed, and the watches are now cleared after
-/// the delete commits instead. That trades "impossible" for "best effort", and
-/// this counter is how we find out which one we actually have. If it never
-/// moves, the gap is theoretical; if it does, a stale watch exists and the
-/// reconciler is not optional.
-pub fn record_unwatch_after_delete_failed() {
-    counter!("ethpayserver_unwatch_after_delete_failures_total").increment(1);
-}
-
 pub fn record_invoice_cancelled() {
     counter!("ethpayserver_invoices_cancelled_total").increment(1);
 }

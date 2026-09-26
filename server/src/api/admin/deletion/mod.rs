@@ -85,6 +85,24 @@ where
 /// `delete_account` both refuse outright on a still-watched address rather
 /// than unwatching and proceeding, so `addresses` is never non-empty by the
 /// time either of them would reach a call here.
+/// Counts failures of the post-delete unwatch.
+///
+/// Deliberately defined here rather than in `metrics.rs`, which is 169 lines
+/// over the file-size limit - the gate refuses any addition to it, so a new
+/// counter cannot go in the module that holds every other one. Move it there
+/// when that file is split.
+///
+/// Why it exists: the deletion path used to make orphaned watches impossible
+/// by refusing the delete while any address was watched. That refusal was
+/// broader than its purpose and is gone, so the watches are cleared after the
+/// delete commits instead - best effort rather than guaranteed. This is how we
+/// find out which of those we actually have. If it never moves, the gap is
+/// theoretical; if it does, a stale watch exists and the reconciler is not
+/// optional.
+fn record_unwatch_failed() {
+    metrics::counter!("ethpayserver_unwatch_after_delete_failures_total").increment(1);
+}
+
 pub(crate) async fn unwatch_after_delete<A>(state: &PgAppState<A>, addresses: Vec<CleanupAddressInfo>)
 where
     A: SessionService + 'static,
@@ -107,7 +125,7 @@ where
             // watch the counter exists to detect, and a warning nobody greps
             // is not detection.
             for _ in 0..addresses.len() {
-                crate::metrics::record_unwatch_after_delete_failed();
+                record_unwatch_failed();
             }
         }
         return;
@@ -129,7 +147,7 @@ where
                 "could not unwatch address after delete - the monitor may keep \
                  polling a deleted invoice",
             );
-            crate::metrics::record_unwatch_after_delete_failed();
+            record_unwatch_failed();
         }
     }
 }
