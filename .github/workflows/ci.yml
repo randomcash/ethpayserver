@@ -399,8 +399,19 @@ jobs:
     # runs on pull requests too so a PR that breaks it is red before merge
     # rather than after. `docker`, further down, keeps its branch/tag-only
     # `if:` unchanged - building on a PR must not push or sign anything.
+    #
+    # `merge_group` included for the same reason, and it is a precondition for
+    # switching the queue on rather than a tidy-up. A queue run's ref is
+    # `refs/heads/gh-readonly-queue/...` and its event is `merge_group`, so
+    # neither arm above matched it: with the queue enabled and this arm absent,
+    # `build` and `e2e` are SKIPPED on the merged result, and since a queue
+    # lands a pull request without re-running its own checks, nothing would
+    # ever build or end-to-end test what actually merges. Lint, Test and Audit
+    # are required and would still run, so the queue would report green while
+    # covering less than the pull request it replaced. `docker` keeps its
+    # branch/tag-only `if:` - a queue run must not push or sign an image.
     needs: [lint, audit, test]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - uses: actions/checkout@v4
 
@@ -509,7 +520,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'merge_group'
     services:
       postgres:
         image: postgres:16-alpine
