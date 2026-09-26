@@ -156,4 +156,25 @@ mod tests {
         assert_eq!(sepolia.name, "Sepolia");
         assert!(get_testnet_config(1).is_none()); // Mainnet not a testnet
     }
+
+    /// Every testnet that has USDC seeded in the `tokens` table must be one
+    /// this product actually offers - a seed row for a chain id nobody can
+    /// select is dead weight at best. Named by id, not iterated from
+    /// `ALL_TESTNETS`, so this fails the moment either list drifts from the
+    /// other instead of trivially agreeing with itself.
+    #[test]
+    fn test_seeded_testnets_are_all_offered() {
+        for (chain_id, name) in [
+            (11155111, "Sepolia"),
+            (11155420, "Optimism Sepolia"),
+            (421614, "Arbitrum Sepolia"),
+            (84532, "Base Sepolia"),
+            (43113, "Avalanche Fuji"),
+            (80002, "Polygon Amoy"),
+        ] {
+            let config = get_testnet_config(chain_id)
+                .unwrap_or_else(|| panic!("{name} ({chain_id}) is not in ALL_TESTNETS"));
+            assert_eq!(config.name, name);
+        }
+    }
 }
