@@ -1,0 +1,202 @@
+name: Nightly visual review (testnet)
+
+# A deterministic crawler can assert a page loaded, that no console error
+# fired, that no request 500'd — it cannot notice that a table runs off the
+# edge of its card, a primary button renders as an unlabelled blue rectangle,
+# or an amount reads "$30.000000000000000000". Every one of those was found by
+# a human looking at a phone, and none would have failed any test this repo
+# has. This walks the routes tests/scout.spec.ts already knows how to reach,
+# screenshots each at a mobile and a desktop viewport, and has an agent look
+# at every screenshot against a fixed rubric.
+#
+# Advisory only, on purpose: a model judging layout will produce false
+# positives, and a gate that cries wolf gets disabled or ignored — see
+# scripts/health-gate.sh's history. Findings land as a GitHub issue a person
+# skims in a minute; nothing here fails the build.
+#
+# ethpayserver is public, and on a public repo a workflow's artifacts and job
+# logs are exactly as downloadable as its issues — there is no "private
+# artifact" toggle. So the per-finding "what is wrong" text and the
+# screenshots themselves (they describe and picture live defects in a
+# production payment processor's UI: an unlabelled control, a raw decimal, a
+# disabled button with no reason given) are not published anywhere this
+# workflow reaches — not the issue body, not a build artifact, not the job
+# log. This org already treats that class of detail as private-tracker-only —
+# other internal automation here won't even put a link to it in this repo,
+# for the same reason. The issue below carries counts and routes only;
+# report.md, findings.json and the screenshots stay in the job's own
+# ephemeral workspace and are discarded when it ends. This repo alone has no
+# channel that can carry them anywhere durable without that being just as
+# public as the defect it describes.
+#
+# Getting the actual "what is wrong" text to a person therefore needs the
+# same missing piece as routing to Linear: a private receiver. This repo
+# already has half of a credential-safe path to build one: RCS_DISPATCH_PAT
+# (see notify-deploy-testnet in ci.yml) fires a repository_dispatch at
+# central-infrastructure without this repo ever holding a Linear token or
+# exposing findings text publicly. The missing half is the receiving
+# workflow over there — something that reads a dispatched findings payload
+# and files the full detail to Linear, privately — and that workflow, and the
+# credential it would use, can only be added by a commit to
+# central-infrastructure, which no automation dispatched against this
+# checkout can push or open a PR for. Adding the
+# dispatch call here without that receiver would just be firing an event
+# into a void: it would report success and do nothing, the same failure
+# shape as an unpolled queue. So this stays a central-infrastructure change
+# with its own review, not unfinished work this workflow can close alone —
+# until it lands, the nightly run's only durable output is "N findings
+# across these routes," not what they are.
+
+on:
+  schedule:
+    # 06:40 UTC daily — after the 06:00 scheduled E2E run, so the two don't
+    # contend for the same testnet session budget.
+    - cron: "40 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  E2E_REMOTE: "true"
+  E2E_BASE_URL: https://testnet.random.cash
+  E2E_API_URL: https://testnet.random.cash
+  E2E_VISUAL_REVIEW: "true"
+
+jobs:
+  review:
+    name: Screenshot + review
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testnet
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: npm ci && npx playwright install --with-deps chromium
+
+      - name: Capture screenshots
+        working-directory: e2e
+        run: npx playwright test tests/visual-review.spec.ts
+
+      - name: Run the review
+        working-directory: e2e
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node scripts/visual-review.mjs
+
+      # manifest.json only — which routes/viewports captured and which failed.
+      # No route content or judgment, just navigation outcomes, so it carries
+      # nothing the header comment above says must stay off a public
+      # artifact. report.md, findings.json and the screenshots hold the
+      # actual per-finding "what is wrong" text and pictures of the live UI;
+      # they are deliberately NOT uploaded here — see the header comment for
+      # why a build artifact on this repo is not a private place to put them.
+      - name: Upload manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-review-manifest
+          path: e2e/test-results/visual/manifest.json
+          retention-days: 14
+
+      - name: File findings
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const findingsPath = 'e2e/test-results/visual/findings.json';
+
+            // findings.json is always written once the review step actually
+            // ran, even when it found nothing or ran into trouble — see
+            // e2e/scripts/visual-review.mjs. A missing file means the step
+            // never got that far at all (e.g. killed by the job timeout),
+            // which is itself worth a report, not silence.
+            let findings = [];
+            let errors = [];
+            if (fs.existsSync(findingsPath)) {
+              ({ findings = [], errors = [] } = JSON.parse(fs.readFileSync(findingsPath, 'utf8')));
+            } else {
+              errors = [{ route: null, viewport: null, reason: 'findings.json missing — the review step produced no output at all' }];
+            }
+
+            if (findings.length === 0 && errors.length === 0) {
+              console.log('Visual review ran cleanly and found nothing to report.');
+              return;
+            }
+
+            const title = 'Nightly visual review: findings';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            // Counts and routes only — never `what_is_wrong`. That text
+            // describes live defects in a production payment processor's UI,
+            // and this issue is public, durable and search-indexed. The full
+            // report is not published anywhere from this workflow — see the
+            // workflow file's header comment for why a public-repo artifact
+            // or job log is not a private place to put it either.
+            const lines = ['# Nightly visual review', ''];
+            if (findings.length > 0) {
+              const byRoute = new Map();
+              for (const f of findings) byRoute.set(f.route, (byRoute.get(f.route) ?? 0) + 1);
+              lines.push(`${findings.length} finding(s) across ${byRoute.size} route(s):`, '');
+              for (const [route, count] of byRoute) lines.push(`- \`${route}\`: ${count}`);
+              lines.push('');
+            }
+            if (errors.length > 0) {
+              lines.push(`${errors.length} route(s) could not be reviewed — treat this run as incomplete, not clean:`, '');
+              for (const e of errors) {
+                const label = e.route ? `${e.route}${e.viewport && e.viewport !== 'n/a' ? ` (${e.viewport})` : ''}` : 'pipeline';
+                lines.push(`- ${label}: ${e.reason}`);
+              }
+              lines.push('');
+            }
+            lines.push(
+              `Run: ${runUrl}`,
+              '',
+              'Per-finding detail (what is wrong, per route and viewport) and the',
+              'screenshots are not published anywhere from this run — advisory',
+              'findings describe live defects in a production payment processor,',
+              'and this repo has no private place to put them yet (an artifact or',
+              'a job log here is exactly as public as this issue). That needs a',
+              'private receiver this repo alone cannot add; see the workflow file.',
+              '',
+              'This is advisory — a model judging layout will produce false positives.',
+            );
+            const body = lines.join('\n');
+
+            // Reuse the open issue if there is one, so a run that keeps finding
+            // the same thing does not file a fresh issue every night.
+            // per_page defaults to 30 and the listing includes pull requests, so
+            // without this the exact-title match can miss and duplicate.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'visual-review',
+              per_page: 100,
+            });
+            const match = existing.data.find(i => i.title === title);
+            if (match) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: match.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['visual-review'],
+              });
+            }
