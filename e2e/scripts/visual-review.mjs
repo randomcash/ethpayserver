@@ -109,7 +109,17 @@ async function reviewRoute(apiKey, route, { path: routePath, shots }) {
 
   const data = await resp.json();
   const toolUse = data.content?.find((b) => b.type === 'tool_use' && b.name === 'report_findings');
-  if (!toolUse) throw new Error(`no report_findings tool call in response: ${JSON.stringify(data).slice(0, 500)}`);
+  if (!toolUse) {
+    // Deliberately not `JSON.stringify(data)`: a response with no tool_use
+    // block is exactly the shape a policy refusal takes, and a refusal's
+    // freeform text is where the model would put a prose description of the
+    // screenshot — i.e. a leaked finding. This reason flows into `errors`,
+    // which the scheduled workflow does publish (unlike `findings`), so it
+    // must never carry model-authored text — only block *types*, which
+    // cannot.
+    const blockTypes = (data.content ?? []).map((b) => b.type).join(',') || 'none';
+    throw new Error(`no report_findings tool call in response (stop_reason=${data.stop_reason ?? 'unknown'}, blocks=[${blockTypes}])`);
+  }
 
   return (toolUse.input?.findings ?? []).map((f) => ({ route, path: routePath, ...f }));
 }
