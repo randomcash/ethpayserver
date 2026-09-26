@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# The definition of "done" for one unit of work. Exits non-zero on any failure.
+#
+# WHY THIS IS LONGER THAN fmt/clippy/test
+# ---------------------------------------
+# Those three were the obvious candidates and they are not sufficient here. On
+# 2026-09-26 every defect that reached `testnet` was caught by something that is
+# NOT one of them: a ticket id in public source, a migration filename, a file
+# growing past the line limit, a commons pin that did not match the lock, and an
+# end-to-end failure. A gate that runs three of nine checks and calls the result
+# "done" is a green that means less than the one CI already gives us.
+#
+# So this runs every repository check that can run locally, plus the compiler
+# ones, and it REPORTS WHAT IT DID NOT RUN rather than implying full coverage.
+#
+# WHAT THIS CANNOT TELL YOU
+# -------------------------
+# 656 of this workspace's 866 tests pass locally. The other 210 are `#[ignore]`d
+# and need a live Postgres and Redis; CI runs them with --run-ignored and they
+# gate merges the same as any other test. The end-to-end suite needs a real
+# server and the pinned client image on top of that.
+#
+# So a green run here means "nothing local objects", not "this is mergeable".
+# The difference is about a quarter of the gating tests, and it includes the
+# tenant-isolation suite. Set DATABASE_URL and TEST_REDIS_URL to close most of
+# the gap; the script says so at the end when they are unset.
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+export TMPDIR="${TMPDIR:-/var/tmp}"   # /tmp here is a RAM-backed tmpfs
+export PATH="$HOME/.cargo/bin:$PATH"
+
+failed=0
+skipped=""
+
+run() {
+    local name="$1"; shift
+    printf '  %-34s ' "$name"
+    if out="$("$@" 2>&1)"; then
+        echo "ok"
+    else
+        echo "FAIL"
+        printf '%s\n' "$out" | sed 's/^/      /' | tail -25
+        failed=$((failed + 1))
+    fi
+}
+
+echo "== repository checks =="
+# Each of these exists because something got through once. Losing one of them
+# from this list is how that thing gets through again.
+run "no ticket ids in source"   ./scripts/check-no-ticket-refs.sh
+run "no session urls"           ./scripts/check-no-session-urls.sh
+run "migration versions unique" ./scripts/check-migrations.sh
+run "commons pin matches lock"  ./scripts/check-commons-pin.sh
+run "no file grows past limit"  ./scripts/check-file-size.sh
+
+echo "== compiler =="
+run "cargo fmt"                 cargo fmt --all -- --check
+# --all-targets on purpose: the integration binaries under evm/tests and
+# server/tests are compiled here. Five of them sat red for days once because
+# nothing compiled them, while the gate reported green.
+run "cargo clippy"              cargo clippy --workspace --all-targets -- -D warnings
+
+echo "== tests =="
+run "cargo test (workspace)"    cargo test --workspace --no-fail-fast
+
+if [ -n "${DATABASE_URL:-}" ]; then
+    echo "== integration (DATABASE_URL set) =="
+    # -j 1 is not cosmetic: these share one real Postgres and run in parallel
+    # they produce failures CI never sees.
+    run "integration tests"     cargo test --workspace --no-fail-fast -- --ignored --test-threads=1
+else
+    skipped="${skipped}  - integration tests: DATABASE_URL unset. ~210 ignored tests did not run,
+    including the tenant-isolation suite. CI runs these and they gate merges.
+"
+fi
+
+skipped="${skipped}  - end-to-end: needs a running server and the pinned client image.
+    See e2e/README.md. Rate limits must be raised or the suite fails for the
+    wrong reason and logs nothing.
+"
+
+echo
+if [ -n "$skipped" ]; then
+    echo "NOT RUN BY THIS SCRIPT:"
+    printf '%s' "$skipped"
+    echo
+fi
+
+if [ "$failed" -ne 0 ]; then
+    echo "FAILED: $failed check(s). This is not done."
+    exit 1
+fi
+
+echo "All local checks passed. This is not the same as mergeable - see above."
+exit 0
