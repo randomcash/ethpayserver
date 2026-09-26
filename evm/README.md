@@ -4,7 +4,7 @@ EVM blockchain interaction layer for ethpayserver.
 
 ## Features
 
-- **Network configs** - Pre-defined settings for 10 EVM networks
+- **Network configs** - Pre-defined settings for 12 EVM mainnets and 9 testnets
 - **HD wallet** - BIP-32/44 address derivation for payment invoices
 - **RPC provider** - Alloy-based provider for blockchain interaction
 - **Token support** - ERC20, ERC721, ERC1155 standards
@@ -25,6 +25,12 @@ EVM blockchain interaction layer for ethpayserver.
 | zkSync Era | 324 | ETH |
 | Linea | 59144 | ETH |
 | Scroll | 534352 | ETH |
+| Fantom | 250 | FTM |
+| Gnosis | 100 | xDAI |
+
+Plus 9 testnets (Sepolia, Holesky, Hoodi, Polygon Amoy, Arbitrum Sepolia,
+Optimism Sepolia, Base Sepolia, Avalanche Fuji, BSC Testnet) — see
+`evm::testnet::ALL_TESTNETS`.
 
 ## Usage
 
@@ -48,13 +54,21 @@ let balance = provider.get_native_balance(address).await?;
 
 | Module | Description |
 |--------|-------------|
-| `network` | `EvmNetwork` enum and `ChainConfig` |
+| `network` | `EvmNetwork` enum and mainnet `ChainConfig`s |
+| `testnet` | Testnet `ChainConfig`s (`ALL_TESTNETS`) |
+| `family` | EVM/Tron chain-family logic shared across chain namespaces |
 | `wallet` | BIP-32/44 HD wallet derivation |
 | `provider` | Alloy RPC provider wrapper |
 | `tokens` | `EvmTokenStandard`, ERC20 operations |
 | `monitor` | Payment monitoring system |
+| `metrics` | RPC call metrics |
+| `telemetry` | Sentry PII/secret scrubber shared by `server` and `evmmonitor` (feature: `sentry-scrub`) |
+| `transaction` | Signing/broadcasting infrastructure, reserved for a possible future hot-wallet mode (feature: `hot-wallet`, default off) |
 | `error` | `EvmError` and `EvmResult` |
 | `api` | REST API endpoints (feature: `api`) |
+
+Other Cargo features: `redis` (event bridge), `test-utils`, `monitor-bin`
+(builds the `evmmonitor` binary).
 
 ## Payment Monitor (`evmmonitor` binary)
 
@@ -149,6 +163,7 @@ The monitor supports bidirectional communication via Redis:
 - `AddressUnwatched` - Address removed from watch list
 - `StatusReport` - Response to GetStatus command
 - `MonitorStarted` / `MonitorStopped` - Lifecycle events
+- `MonitorError` - Chain-level error (`chain_id`, `error`)
 
 ### API Server Integration
 
@@ -198,10 +213,13 @@ Enable with `--features api`. Provides axum routes for token and network managem
 ```rust
 use evm::api::{EvmState, router};
 use data_service::PgDataService;
+use auth::{AuthService, AuthRepository};
 use std::sync::Arc;
 
-let ds = Arc::new(PgDataService::connect("postgres://...").await?);
-let app = Router::new().nest("/evm", router(EvmState::new(ds)));
+let data_service = Arc::new(PgDataService::connect("postgres://...").await?);
+let auth_service = Arc::new(AuthService::new(auth_repo));
+let state = EvmState::new(data_service, auth_service);
+let app = Router::new().nest("/evm", router(state));
 ```
 
 ### Token Endpoints
