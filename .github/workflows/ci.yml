@@ -126,6 +126,49 @@ jobs:
       - name: Session URL guard self-test
         run: ./scripts/check-no-session-urls.test.sh
 
+      # A 2026-09-14 audit found 26 files over 400 lines; nine days later, with
+      # no check in between, that was 47 - despite split tickets landing in the
+      # same window. The existing backlog doesn't fail the build (that would
+      # fail on all 47 the day this lands and get switched off in a week); what
+      # fails is a file getting worse in this change, which is exactly the
+      # pattern that let the backlog double.
+      #
+      # On push, github.base_ref is unset, so the naive fallback resolves to
+      # origin/testnet - and a push straight to testnet fetches the ref this
+      # job's own checkout just became, so that diff is empty by construction
+      # and the ratchet never fires on the trigger that matters most: a push
+      # landing right before it deploys. github.event.before is the sha the
+      # branch pointed at immediately before this push, which can never equal
+      # HEAD (there would be no push event to fire), and fetch-depth: 0 above
+      # already pulled it down as an ancestor - no extra fetch needed.
+      #
+      # merge_group has the same shape of problem as push: github.base_ref is
+      # only populated for pull_request(_target) events, so without a case of
+      # its own this falls through to the literal 'testnet' regardless of what
+      # the merge queue is actually testing against - a diff against the wrong
+      # baseline that still resolves and still looks green, not an empty one
+      # that would at least be visibly suspicious. github.event.merge_group's
+      # base_sha is the exact commit the queue is merging into; it needs no
+      # origin/ prefix and no extra fetch, since fetch-depth: 0 above already
+      # has it as an ancestor of the queue's merge commit.
+      #
+      # The remaining case - pull_request - resolves origin/<base_ref>
+      # (e.g. origin/testnet) with no fetch of its own either. That isn't
+      # reliant on the "No session URLs" step's manual `git fetch` above
+      # despite running right after it: `fetch-depth: 0` on the checkout at
+      # the top of this job makes actions/checkout use the refspec
+      # `+refs/heads/*:refs/remotes/origin/*`, which pulls every branch - not
+      # just the ref that triggered the run - so origin/<base_ref> already
+      # resolves before any step in this job runs, this one included, run in
+      # any order.
+      - name: No file grows past the line limit
+        env:
+          BASE_REF: ${{ github.event_name == 'push' && github.event.before || github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref || 'testnet') }}
+        run: ./scripts/check-file-size.sh
+
+      - name: File size guard self-test
+        run: ./scripts/check-file-size.test.sh
+
       - name: Migration versions are distinct
         run: ./scripts/check-migrations.sh
 
@@ -145,6 +188,14 @@ jobs:
       # ever seen refuse anything. Same reasoning as the guard self-test above.
       - name: Deploy health gate self-test
         run: ./scripts/health-gate.test.sh
+
+      # The build steps below refuse to compile with an empty SENTRY_RELEASE,
+      # but github.sha is never empty in normal operation - so nothing
+      # organically exercises the failing branch. Proves the guard itself
+      # goes red and green on the cases it claims to, rather than shipping a
+      # check nobody ever saw refuse anything.
+      - name: Sentry release guard self-test
+        run: ./scripts/check-sentry-release.test.sh
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -244,6 +295,20 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # `-p server` below runs that package's `#[ignore]`d integration tests,
+      # and some need a real Redis the same way the rest need the Postgres
+      # above - without this, the first such test can only fail, and it does
+      # so by hanging until some ambient timeout fires rather than with a
+      # message saying Redis was never there.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -291,6 +356,7 @@ jobs:
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
             cargo run --release --bin migrate_postgres
           DATABASE_URL="postgres://test:test@127.0.0.1:5432/ethpayserver_test" \
+          TEST_REDIS_URL="redis://127.0.0.1:6379" \
             cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1
 
   # Runs on pull requests too, deliberately. This used to be branch-only, so a
@@ -326,8 +392,13 @@ jobs:
     # `test` included: without it a push whose tests fail still builds, pushes
     # an image and deploys. Tests gate merging a PR, but nothing gated the
     # branch itself.
+    #
+    # Also runs on pull_request: e2e (below) needs these binaries, and e2e now
+    # runs on pull requests too so a PR that breaks it is red before merge
+    # rather than after. `docker`, further down, keeps its branch/tag-only
+    # `if:` unchanged - building on a PR must not push or sign anything.
     needs: [lint, audit, test]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
@@ -363,6 +434,7 @@ jobs:
           SENTRY_RELEASE: ${{ github.sha }}
         run: |
           export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
+          ./scripts/check-sentry-release.sh "$SENTRY_RELEASE"
           cargo build --release --bin ethpayserver
           cargo build --release --bin migrate_postgres
 
@@ -371,6 +443,7 @@ jobs:
           SENTRY_RELEASE: ${{ github.sha }}
         run: |
           export SENTRY_RELEASE="${SENTRY_RELEASE::7}"
+          ./scripts/check-sentry-release.sh "$SENTRY_RELEASE"
           cargo build --release --bin evmmonitor --features monitor-bin
 
       # upload-artifact@v4 roots the archive at the least common ancestor of the
@@ -400,16 +473,27 @@ jobs:
   # passed / 1 skipped in 2.1 minutes, against 30-minute cap timeouts before.
   #
   # Removing the flag blocks nothing: the deploy dispatch needs [docker], not
-  # this job, and this job is skipped on pull_request (it is gated on
-  # refs/heads/*), so a red E2E cannot hold up a deploy or a merge. What it does
-  # is make a regression show as a red run instead of a green one - which is
-  # the whole point, and was impossible while the flag was set.
+  # this job, so a red E2E cannot hold up a deploy. What it does is make a
+  # regression show as a red run instead of a green one - which is the whole
+  # point, and was impossible while the flag was set.
   #
   # The skip is the synthetic payment spec, which needs a funded wallet.
   #
   # The synthetic payment spec stays out of this job regardless: it needs a
   # funded wallet and a live chain, so it only runs where
   # `E2E_SYNTHETIC_PAYMENT=true` is set (see e2e-scheduled.yml).
+  #
+  # Also runs on pull_request, deliberately. It used to be branch-only, so a
+  # change that broke every test in a file (a fixture inserting a value a
+  # JSONB column rejects outright, so `beforeAll` throws before a single test
+  # runs) was invisible until after it merged: CI was green on the PR because
+  # this job never ran, and the branch it landed on stayed red for days
+  # because nothing about a red e2e job on a branch push stops anything either
+  # (see `e2e-status` below). Running it here costs a build plus the suite on
+  # every PR, which is not free - if that cost turns out to dominate on a
+  # contended runner, narrowing this back to changes under `e2e/` would cover
+  # the case above for a fraction of it, at the price of missing a
+  # server-side change that breaks e2e without touching `e2e/` itself.
   e2e:
     name: E2E
     runs-on: ubuntu-latest
@@ -423,7 +507,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request'
     services:
       postgres:
         image: postgres:16-alpine
