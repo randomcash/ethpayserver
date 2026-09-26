@@ -12,6 +12,7 @@ use data_service::AccountDeletionReader;
 use super::active_watched_addresses;
 use crate::api::extractors::AdminAuth;
 use crate::api::stores::store_response;
+use crate::services::plugins::notify_account_closed;
 use crate::state::PgAppState;
 
 /// List the stores a user owns.
@@ -202,6 +203,13 @@ where
     // function already returned above if `addresses` was non-empty, so by
     // construction there is nothing left to unwatch by the time the delete
     // runs. Calling it here would always iterate zero elements.
+
+    // After the account is actually gone, not before: a plugin holding data
+    // for it must never be told "closed" for an account that a later failure
+    // in this handler left alive. The same call self-service deletion makes -
+    // a plugin should not be able to tell which path closed the account.
+    notify_account_closed(&state.account_closed_observers, uid).await;
+
     tracing::info!(actor = %admin.id, user_id = %uid, "account deleted by admin");
     Ok(StatusCode::NO_CONTENT)
 }

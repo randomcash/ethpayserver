@@ -14,6 +14,7 @@ use rates::NoOpRateProvider;
 use server::api::admin::E2E_STORE_OWNER_ID;
 use server::api::{AdminAuth, AuthenticatedUser};
 use server::services::RedisEVMMonitor;
+use server::services::plugins::AccountClosedObserver;
 use server::state::PgAppState;
 
 /// Not exercised: neither handler calls back into session management, only
@@ -255,4 +256,25 @@ pub(crate) fn app_state_with_monitor(
         Arc::new(NoOpRateProvider),
         Arc::new(server::services::email::NoopEmailSender),
     )
+}
+
+pub(crate) fn app_state_with_observers(
+    data_service: Arc<PgDataService>,
+    observers: Vec<Arc<dyn AccountClosedObserver>>,
+) -> PgAppState<UnusedSessionService> {
+    let mut state = app_state(data_service);
+    state.account_closed_observers = observers;
+    state
+}
+
+/// Needed by refusal tests that must drive a real monitor to prove a blocked
+/// deletion never unwatches *and* never notifies a plugin the account is gone.
+pub(crate) fn app_state_with_monitor_and_observers(
+    data_service: Arc<PgDataService>,
+    evm_monitor: Option<Arc<RedisEVMMonitor>>,
+    observers: Vec<Arc<dyn AccountClosedObserver>>,
+) -> PgAppState<UnusedSessionService> {
+    let mut state = app_state_with_monitor(data_service, evm_monitor);
+    state.account_closed_observers = observers;
+    state
 }

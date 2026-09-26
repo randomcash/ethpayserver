@@ -5,6 +5,7 @@ use axum::{extract::State, http::StatusCode};
 use auth::SessionService;
 
 use crate::api::extractors::AuthenticatedUser;
+use crate::services::plugins::notify_account_closed;
 use crate::state::PgAppState;
 
 /// Confirmation the caller must type back before the account is deleted.
@@ -162,6 +163,11 @@ where
     // all: `watched_addresses` cascades from both `invoices` and
     // `payment_options`, so the rows are gone and the monitor's are not.
     crate::api::admin::deletion::unwatch_after_delete(&state, addresses).await;
+
+    // After the account is actually gone, not before: a plugin holding data
+    // for it must never be told "closed" for an account that a later failure
+    // in this handler left alive.
+    notify_account_closed(&state.account_closed_observers, user.id).await;
 
     tracing::info!(user_id = %user.id.0, "account deleted at its owner's request");
     Ok(StatusCode::NO_CONTENT)

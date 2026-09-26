@@ -18,9 +18,10 @@
 //! taken. So an admin is currently refused where a merchant is not - recorded
 //! here as a choice rather than left to read as an oversight.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use evm::monitor::{COMMANDS_CHANNEL, EVENTS_CHANNEL, EventBridge, RedisBridge};
@@ -31,8 +32,26 @@ use auth::{Store, UserId};
 use data_service::store_creation::StoreCreationWriter;
 use server::api::users::{DeleteAccountQuery, delete_account};
 use server::services::RedisEVMMonitor;
+use server::services::plugins::AccountClosedObserver;
 
 use crate::support::*;
+
+/// Mirrors `plugin_account_closed.rs`'s own recorder: this file's guard is
+/// the last refusal path left in self-service deletion since the
+/// still-watched-address refusal moved to best-effort unwatching, and a
+/// refusal that still reported the account closed would tell a plugin to
+/// discard data for an account that is, in fact, still there.
+#[derive(Default)]
+struct RecordingObserver {
+    seen: Mutex<Vec<UserId>>,
+}
+
+#[async_trait]
+impl AccountClosedObserver for RecordingObserver {
+    async fn account_closed(&self, account_id: UserId) {
+        self.seen.lock().unwrap().push(account_id);
+    }
+}
 
 /// The case this test suite exists for: a pending invoice's address may have
 /// a real payment broadcast to it that just hasn't confirmed. Before this
@@ -148,4 +167,59 @@ async fn deleting_your_own_untraded_account_still_succeeds() {
         .await
         .expect("count target");
     assert_eq!(still_there, 0);
+}
+
+/// The one refusal path self-service deletion has left, now that an unpaid
+/// invoice no longer blocks it: a store that already took a payment.
+/// `account_deletion_blockers` refuses this before `delete_user` ever runs,
+/// so a plugin holding data for the account must not be told it is gone -
+/// the account very much still exists.
+#[tokio::test]
+#[ignore]
+async fn deleting_your_own_account_that_took_a_payment_notifies_nobody() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let target = seed_user(pg.pool(), "user").await;
+    let store = Store::new(format!("store-{target}"), UserId(target));
+    pg.create_store_owned_by(&store, UserId(target))
+        .await
+        .expect("seed store owned by target");
+    let invoice = seed_invoice(pg.pool(), store.id.0).await;
+    seed_payment(pg.pool(), &invoice).await;
+
+    let observer = Arc::new(RecordingObserver::default());
+    let observers: Vec<Arc<dyn AccountClosedObserver>> = vec![observer.clone()];
+    let state = app_state_with_observers(Arc::new(pg), observers);
+
+    let result = delete_account(
+        self_auth(target),
+        State(state.clone()),
+        Query(DeleteAccountQuery {
+            confirm: target.to_string(),
+        }),
+    )
+    .await;
+
+    let Err((status, message)) = result else {
+        panic!("an account that took a payment must be refused");
+    };
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        message.contains("payment"),
+        "the caller must see why, got: {message}"
+    );
+
+    let still_there: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = $1")
+        .bind(target)
+        .fetch_one(state.data_service.pool())
+        .await
+        .expect("count target");
+    assert_eq!(still_there, 1, "the refusal must not have deleted anything");
+    assert!(
+        observer.seen.lock().unwrap().is_empty(),
+        "an account that was never deleted must never be reported closed"
+    );
+
+    cleanup(state.data_service.pool(), &[target]).await;
 }
