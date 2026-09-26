@@ -11,10 +11,11 @@
  * would run on every push and capture screenshots nobody reviews. Run it
  * explicitly with E2E_VISUAL_REVIEW=true, as the scheduled workflow does.
  */
-import { test as base, expect, type Page } from '@playwright/test';
+import { test as base, type Page } from '@playwright/test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { setupVirtualAuthenticator, register } from '../fixtures/auth';
+import { UNAUTHENTICATED_ROUTES, AUTHENTICATED_ROUTES } from '../fixtures/visual-review-routes';
 
 const RUN = process.env.E2E_VISUAL_REVIEW === 'true';
 const SKIP_REASON = 'Nightly-only: set E2E_VISUAL_REVIEW=true to run (see scripts/visual-review.mjs)';
@@ -29,22 +30,9 @@ const VIEWPORTS = [
 // The routes scout.spec.ts is already known to reach unauthenticated and
 // after a single passkey registration. Hand-listed rather than imported —
 // scout's paths live inline in each test body, not behind an export — but
-// the "route coverage stays in sync" test below reads scout.spec.ts's source
-// and fails the (always-on) build if a route it reaches is missing here, so
-// the two lists can drift for a commit but not past CI.
-const UNAUTHENTICATED_ROUTES: [string, string][] = [
-  ['login', '/login'],
-  ['register', '/register'],
-];
-
-const AUTHENTICATED_ROUTES: [string, string][] = [
-  ['dashboard', '/evm'],
-  ['stores', '/evm/stores'],
-  ['invoices', '/evm/invoices'],
-  ['payments', '/evm/payments'],
-  ['wallets', '/evm/wallets'],
-  ['settings', '/evm/settings'],
-];
+// route-coverage.spec.ts reads scout.spec.ts's source and fails if a route it
+// reaches is missing from these lists, so the two can drift for a commit but
+// not past CI.
 
 interface ManifestEntry {
   route: string;
@@ -160,37 +148,11 @@ test.describe('Authenticated routes', () => {
   });
 });
 
-// Static, no browser, not gated on E2E_VISUAL_REVIEW — this runs whenever
-// `npx playwright test` runs unfiltered, which is ci.yml's `e2e` job. That
-// job is gated to pushes on main/testnet and release tags, not
-// `pull_request` (see playwright.config.ts), so a route added to
-// scout.spec.ts's walk and not mirrored above stays green through the PR
-// that adds it and only fails once that lands on testnet — not "the next
-// push" in general. Still real drift detection, just not at PR time. A
-// hand-duplicated list with nothing to catch drift is indistinguishable,
-// months later, from one that's still accurate.
-test('scout.spec.ts route coverage stays in sync with this file', () => {
-  const scoutSrc = fs.readFileSync(path.join('tests', 'scout.spec.ts'), 'utf8');
-  const reached = new Set([...scoutSrc.matchAll(/goto(?:Authed)?\('([^']+)'\)/g)].map((m) => m[1]));
-
-  // A regex that matches nothing (formatter switches quote style, a route
-  // becomes a template literal, scout.spec.ts gets renamed) makes `reached`
-  // empty and `missing` trivially [] — the same "0 missing" result as
-  // actually being in sync. Assert the parse actually found routes before
-  // trusting its diff, so a broken extractor fails loudly instead of
-  // reading as nothing-to-add.
-  expect(reached.size, 'route extraction from scout.spec.ts found nothing — the regex no longer matches').toBeGreaterThan(0);
-
-  // Not nav routes: /checkout/:id is a per-invoice page (there is no generic
-  // "the" checkout page to screenshot), and /evm/nonexistent is scout's
-  // deliberate 404 check, not a page this review should judge on its merits.
-  reached.delete('/checkout/00000000-0000-0000-0000-000000000000');
-  reached.delete('/evm/nonexistent');
-
-  const known = new Set([...UNAUTHENTICATED_ROUTES, ...AUTHENTICATED_ROUTES].map(([, p]) => p));
-  const missing = [...reached].filter((p) => !known.has(p));
-  expect(
-    missing,
-    `scout.spec.ts reaches ${missing.join(', ')} but this file's route lists do not — add it above`,
-  ).toHaveLength(0);
-});
+// The static "does scout.spec.ts's walk still match these route lists" check
+// used to live here, but this file's `beforeAll` above requests the `browser`
+// fixture unconditionally — Playwright launches Chromium to satisfy that the
+// moment it's named as a parameter, even on a run where every test below
+// skips itself. A check with no browser dependency of its own has no business
+// dragging that launch in just by sharing a file, so it now lives in
+// route-coverage.spec.ts, which imports these route lists instead of
+// reading them out of a file it would otherwise have to load.
