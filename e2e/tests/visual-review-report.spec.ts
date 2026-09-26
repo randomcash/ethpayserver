@@ -14,7 +14,7 @@
  * nightly issue has no other way to notice if it silently stopped holding.
  */
 import { test, expect } from '@playwright/test';
-import { groupByRoute, renderReport, crashOutputs } from '../scripts/visual-review-report.mjs';
+import { groupByRoute, renderReport, crashOutputs, renderPublicSummary } from '../scripts/visual-review-report.mjs';
 
 test.describe('groupByRoute', () => {
   test('buckets a captured shot by route and pushes a failed capture into errors, not routes', () => {
@@ -76,6 +76,55 @@ test.describe('renderReport', () => {
 
     expect(report).toContain('pipeline: no manifest — review did not run');
     expect(report).not.toContain('No issues found.');
+  });
+});
+
+test.describe('renderPublicSummary', () => {
+  test('a clean run with nothing to report is null, not an empty issue body', () => {
+    expect(renderPublicSummary([], [], 'https://example.invalid/run')).toBeNull();
+  });
+
+  test('never includes what_is_wrong text, even though the input carries it', () => {
+    const summary = renderPublicSummary(
+      [{ route: 'wallets', path: '/evm/wallets', viewport: 'mobile', what_is_wrong: 'SECRET_LIVE_DEFECT_TEXT' }],
+      [],
+      'https://example.invalid/run',
+    );
+
+    expect(summary).not.toBeNull();
+    expect(summary).not.toContain('SECRET_LIVE_DEFECT_TEXT');
+    expect(summary).toContain('1 finding(s) across 1 route(s)');
+    expect(summary).toContain('`wallets`: 1');
+  });
+
+  test('counts findings per route without collapsing distinct routes', () => {
+    const summary = renderPublicSummary(
+      [
+        { route: 'wallets', path: '/evm/wallets', viewport: 'mobile', what_is_wrong: 'x' },
+        { route: 'wallets', path: '/evm/wallets', viewport: 'desktop', what_is_wrong: 'y' },
+        { route: 'settings', path: '/evm/settings', viewport: 'mobile', what_is_wrong: 'z' },
+      ],
+      [],
+      'https://example.invalid/run',
+    );
+
+    expect(summary).toContain('3 finding(s) across 2 route(s)');
+    expect(summary).toContain('`wallets`: 2');
+    expect(summary).toContain('`settings`: 1');
+  });
+
+  test('an errors-only run still reports something, distinct from a clean run', () => {
+    const summary = renderPublicSummary([], [{ route: 'wallets', viewport: 'mobile', reason: 'capture failed' }], 'https://example.invalid/run');
+
+    expect(summary).not.toBeNull();
+    expect(summary).toContain('could not be reviewed — treat this run as incomplete, not clean');
+    expect(summary).toContain('wallets (mobile): capture failed');
+  });
+
+  test('carries the run URL so the redacted issue still points somewhere', () => {
+    const summary = renderPublicSummary([{ route: 'wallets', path: '/evm/wallets', viewport: 'mobile', what_is_wrong: 'x' }], [], 'https://example.invalid/run/42');
+
+    expect(summary).toContain('https://example.invalid/run/42');
   });
 });
 
