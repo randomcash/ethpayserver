@@ -407,32 +407,22 @@ fn an_unspecified_enabled_still_checks_the_chain() {
 // =========================================================================
 // create_payment_method - through the handler, against a real database
 //
-// Every test above calls `chain_has_no_adapter` or `update_should_check_chain`
-// directly. None of them would notice if `create_payment_method` itself
-// stopped calling the predicate, checked the wrong field, or placed the check
-// after a different early return - the exact "guard written but never
-// exercised" gap three review passes on this ticket flagged. These go through
-// the handler function itself, against the real `rcs-test-postgres` fixture
-// (see `DATABASE_URL` below), so that class of bug actually fails a test.
+// Every test above calls `chain_has_no_adapter`/`update_should_check_chain`
+// directly, so none would notice a broken call site in the real handler -
+// the "guard written but never exercised" gap. These go through the handler
+// itself against the real `rcs-test-postgres` fixture instead, `#[ignore]`d
+// and skipped with no `DATABASE_URL` like every other DB-backed test here.
 //
-// `#[ignore]`d and skipped with no `DATABASE_URL`, matching every other
-// database-backed test in this codebase (`data-service/src/postgres/
-// integration_tests/*`) - the `cargo test --workspace` gate does not touch
-// this container.
-//
-// `AuthenticatedUser` is constructed by hand rather than produced by
+// `AuthenticatedUser`/`StoreScopedUser` are built by hand rather than via
 // `FromRequestParts`: `require_store_settings_permission` returns `Ok(())`
-// for `Role::ServerAdmin` before it touches the database (see
-// `stores/mod.rs`), so no session and no store-membership row is needed to
-// reach the code under test. `NoAuthSessionService` only exists to give
-// `PgAppState<A>` a concrete `A` - `create_payment_method` never calls it.
+// for `Role::ServerAdmin` before touching the database, so no session or
+// membership row is needed. `NoAuthSessionService` only exists to give
+// `PgAppState<A>` a concrete `A`; `create_payment_method` never calls it.
 //
-// Ablation performed locally against this same fixture before writing this
-// comment: with the `if chain_has_no_adapter(...)` block in
-// `create_payment_method` deleted, `a_tron_payment_method_is_refused_by_the_
-// handler` failed with `Ok(StatusCode::CREATED, ...)` instead of the expected
-// `Err`, i.e. tron:728126428 was created - proving this test is sensitive to
-// the gate and not to some unrelated 400. The block was then restored.
+// Ablated locally: deleting the `if chain_has_no_adapter(...)` block in
+// `create_payment_method` turned the tron test's `expect_err` into an
+// `Ok(StatusCode::CREATED, ...)` - proving it's sensitive to the gate, not
+// some unrelated 400. Restored before committing.
 // =========================================================================
 
 use crate::api::extractors::{AuthenticatedUser, StoreScopedUser};
@@ -485,13 +475,10 @@ fn admin_user(user_id: Uuid) -> AuthenticatedUser {
     })
 }
 
-/// Same admin identity as `admin_user`, for handlers that gate a store
-/// permission and so need a key scope in hand - `None` (unscoped, same as
-/// session auth) since these tests exercise the ServerAdmin bypass in
+/// `admin_user`, unscoped - these tests hit the ServerAdmin bypass in
 /// `require_store_settings_permission`, not the key-intersection path.
-fn admin_store_scoped_user(user_id: Uuid) -> StoreScopedUser {
-    let AuthenticatedUser(info) = admin_user(user_id);
-    StoreScopedUser(info, None)
+fn admin_scoped(user_id: Uuid) -> StoreScopedUser {
+    StoreScopedUser(admin_user(user_id).0, None)
 }
 
 async fn seed_handler_test_user(pool: &sqlx::PgPool) -> Uuid {
@@ -556,18 +543,11 @@ fn handler_test_state(service: data_service::PgDataService) -> PgAppState<NoAuth
 /// refuse tron before either branch runs.
 const HANDLER_TEST_XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
 
-/// Test 1 of the ticket: `tron:728126428` must 400, naming the chain.
-///
-/// Ablation: with the `if chain_has_no_adapter(...)` block in
-/// `create_payment_method` replaced by `let _ = chain_has_no_adapter(...);`,
-/// this test's `expect_err` panicked with `Ok((StatusCode::CREATED, ..))` -
-/// tron:728126428 was created, pinned to `HANDLER_TEST_XPUB` via the same
-/// `wallet_for_store_xpub` path Sepolia uses below. Restored before
-/// committing. That is the "hole" this ticket closes: once created, an
-/// invoice against this method would derive a `0x...` address from that xpub
-/// regardless of namespace (`server/src/api/invoices/payment_options.rs`'s
-/// `derive_payment_address` builds an `evm::XpubDeriver` unconditionally) and
-/// nothing would ever watch it.
+/// `tron:728126428` must 400, naming the chain: unlike Sepolia below, it
+/// would otherwise be created pinned to `HANDLER_TEST_XPUB`, and an invoice
+/// against it would derive a `0x...` address from that xpub regardless of
+/// namespace (`invoices/payment_options.rs`'s `derive_payment_address`
+/// builds an `evm::XpubDeriver` unconditionally) with nothing to watch it.
 #[tokio::test]
 #[ignore]
 async fn a_tron_payment_method_is_refused_by_the_handler() {
@@ -588,7 +568,7 @@ async fn a_tron_payment_method_is_refused_by_the_handler() {
     };
 
     let err = create_payment_method(
-        admin_store_scoped_user(user_id),
+        admin_scoped(user_id),
         State(state),
         Path(store_id),
         Json(req),
@@ -627,7 +607,7 @@ async fn a_sepolia_payment_method_is_still_created_by_the_handler() {
     };
 
     let (status, response) = create_payment_method(
-        admin_store_scoped_user(user_id),
+        admin_scoped(user_id),
         State(state),
         Path(store_id),
         Json(req),

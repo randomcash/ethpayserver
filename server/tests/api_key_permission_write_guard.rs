@@ -185,6 +185,41 @@ async fn an_admin_cannot_launder_unrestricted_onto_a_non_admins_key() {
     );
 }
 
+/// Success path: an owner narrowing their own key to a real store
+/// permission gets back a 200 with the new scope reflected in the response
+/// body - the three guard tests above only ever prove a rejection path,
+/// which cannot distinguish "the handler composes correctly" from "the
+/// happy path is broken too".
+#[tokio::test]
+#[ignore]
+async fn an_owner_narrowing_their_own_key_succeeds_and_echoes_the_new_scope() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool(), "user").await;
+    let key_id = seed_key(&pg, owner, None).await;
+
+    let state = app_state(Arc::new(pg));
+    let requested = vec![auth::Permission::StoreCreateInvoice.as_policy().to_string()];
+
+    let result = update_api_key_permissions(
+        AuthenticatedUser(user_info(owner, Role::User)),
+        State(state),
+        Path(key_id),
+        Json(UpdateApiKeyPermissionsPayload {
+            permissions: Some(requested.clone()),
+        }),
+    )
+    .await;
+
+    let response = result.expect("a legitimate self-narrowing request must succeed");
+    assert_eq!(
+        response.0.permissions.as_deref(),
+        Some(requested.as_slice()),
+        "the response must echo the scope that was actually persisted"
+    );
+}
+
 /// Guard 3: a key that has been narrowed away from `unrestricted`
 /// authenticates as a plain `User` (see `validate_api_key`'s downgrade).
 /// This handler must not let that same narrowed request clear its own

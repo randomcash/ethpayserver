@@ -142,13 +142,18 @@ fn user_info_with_role(id: Uuid, role: Role) -> UserInfo {
     }
 }
 
-/// The caller most tests want: an ordinary, non-operator credential.
-fn caller(id: Uuid) -> AuthenticatedCaller {
+/// Every credential in this suite is unscoped; only `is_operator`/role vary.
+fn caller_as(user: UserInfo, is_operator: bool) -> AuthenticatedCaller {
     AuthenticatedCaller {
-        user: user_info(id),
-        is_operator: false,
+        user,
+        is_operator,
         key_scope: None,
     }
+}
+
+/// The caller most tests want: an ordinary, non-operator credential.
+fn caller(id: Uuid) -> AuthenticatedCaller {
+    caller_as(user_info(id), false)
 }
 
 /// Inserts a real, active `api_keys` row and returns the raw key a request
@@ -344,11 +349,7 @@ async fn operator_credential_is_never_filtered() {
     let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
 
     let result = create_invoice(
-        AuthenticatedCaller {
-            user: user_info(owner),
-            is_operator: true,
-            key_scope: None,
-        },
+        caller_as(user_info(owner), true),
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -381,11 +382,7 @@ async fn admin_without_the_operator_property_is_still_filtered() {
     let state = app_state(Arc::new(pg), vec![Arc::new(AlwaysDeny)]);
 
     let result = create_invoice(
-        AuthenticatedCaller {
-            user: user_info_with_role(admin, Role::ServerAdmin),
-            is_operator: false,
-            key_scope: None,
-        },
+        caller_as(user_info_with_role(admin, Role::ServerAdmin), false),
         State(state),
         Json(invoice_request(store.id.0)),
     )

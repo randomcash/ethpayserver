@@ -23,6 +23,8 @@ pub mod api_key_hash;
 pub mod api_key_permissions;
 pub mod api_key_rate_limit;
 pub mod api_key_scope;
+pub mod api_key_types;
+pub mod auth_freshness;
 pub mod checkout;
 pub mod dashboard;
 pub mod extractors;

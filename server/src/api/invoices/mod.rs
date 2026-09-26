@@ -10,6 +10,7 @@ mod list;
 mod lookup;
 mod payment_options;
 mod payments;
+mod scope;
 mod types;
 
 #[cfg(test)]
@@ -22,6 +23,8 @@ pub use list::*;
 pub use lookup::*;
 pub use payments::*;
 pub use types::*;
+
+pub(crate) use scope::{StoreScope, narrow_scope_by_key, verify_store_access_for_query};
 
 // Re-export pub(crate) items from sub-modules for tests.
 #[cfg(test)]
@@ -38,9 +41,7 @@ pub(crate) use payment_options::derive_payment_options;
 
 use axum::{Json, http::StatusCode};
 
-use ::types::{
-    InvoiceId, InvoiceQueryParams, InvoiceReader, PaymentQueryParams, StoreId, traits::InvoiceData,
-};
+use ::types::{InvoiceId, InvoiceReader, traits::InvoiceData};
 use auth::{SessionService, repository::UserStoreRepository};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -220,133 +221,6 @@ pub(crate) async fn get_invoice_with_permission<A: SessionService>(
     }
 
     Ok(invoice)
-}
-
-/// Narrow a resolved [`StoreScope`] by what the authenticating key's stored
-/// permission set grants for `policy`. Session auth and an unscoped or
-/// `unrestricted` key pass every store through unchanged - `None`/`unrestricted`
-/// are exactly the cases `key_grants_store_permission` grants everything for -
-/// so this only ever shrinks what a narrowly-scoped key can list, never widens
-/// what the caller's own store membership already allowed.
-///
-/// `StoreScope::One` came from an explicit `?store_id=` the caller named, so a
-/// key that doesn't cover it is refused outright (matching every other
-/// single-store permission check in this file) rather than silently returning
-/// zero rows for a store the caller asked for by ID.
-pub(crate) fn narrow_scope_by_key(
-    scope: StoreScope,
-    key_scope: Option<&[String]>,
-    policy: &str,
-) -> Result<StoreScope, StatusCode> {
-    match scope {
-        StoreScope::One(id) => {
-            if key_grants_store_permission(key_scope, policy, id) {
-                Ok(StoreScope::One(id))
-            } else {
-                Err(StatusCode::FORBIDDEN)
-            }
-        }
-        StoreScope::Membership(ids) => Ok(StoreScope::Membership(
-            ids.into_iter()
-                .filter(|id| key_grants_store_permission(key_scope, policy, *id))
-                .collect(),
-        )),
-        StoreScope::All => Ok(StoreScope::All),
-    }
-}
-
-/// Resolve the store scope for a list/export query, verifying access.
-///
-/// `Some(id)` is membership-checked and returned as a filter; `None` means
-/// "every store" and is permitted for server admins only.
-///
-/// The scope is deliberately an `Option` rather than a nil-UUID sentinel. A
-/// sentinel is a value a caller can also supply, and when it was one, passing
-/// `store_id=00000000-0000-0000-0000-000000000000` took the `Some` arm, skipped
-/// the admin check *and* the membership check, and then dropped the `WHERE
-/// store_id` clause - handing any authenticated user every invoice and payment
-/// in the deployment. Keep the two cases in the type; do not
-/// reintroduce an in-band marker.
-/// Which stores a listing query may read.
-///
-/// An enum rather than `Option<StoreId>` because there are three answers, and
-/// the two that mean "more than one store" are not interchangeable. Conflating
-/// them is the entire bug class here: a nil-UUID sentinel that meant "all"
-/// leaked every store, and an empty membership list silently meaning "no
-/// filter" would be the same leak wearing different clothes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StoreScope {
-    /// One store, membership already checked.
-    One(StoreId),
-    /// Every store the caller belongs to. May be empty, which matches nothing.
-    Membership(Vec<StoreId>),
-    /// Every store on the server. `ServerAdmin` only.
-    All,
-}
-
-impl StoreScope {
-    /// Apply this scope to invoice query params.
-    pub(crate) fn apply_invoice(&self, params: InvoiceQueryParams) -> InvoiceQueryParams {
-        match self {
-            StoreScope::One(id) => params.with_store_id(*id),
-            StoreScope::Membership(ids) => params.with_store_ids(ids.clone()),
-            StoreScope::All => params,
-        }
-    }
-
-    /// Apply this scope to payment query params.
-    pub(crate) fn apply_payment(&self, params: PaymentQueryParams) -> PaymentQueryParams {
-        match self {
-            StoreScope::One(id) => params.with_store_id(*id),
-            StoreScope::Membership(ids) => params.with_store_ids(ids.clone()),
-            StoreScope::All => params,
-        }
-    }
-}
-
-pub(crate) async fn verify_store_access_for_query<D>(
-    data_service: &D,
-    user: &auth::UserInfo,
-    store_id: Option<uuid::Uuid>,
-) -> Result<StoreScope, StatusCode>
-where
-    D: UserStoreRepository + ?Sized,
-{
-    match store_id {
-        Some(id) => {
-            let is_member = data_service
-                .get_user_store(user.id, StoreId(id))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .is_some();
-            if !is_member && user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::FORBIDDEN);
-            }
-            Ok(StoreScope::One(StoreId(id)))
-        }
-        // No store_id means "everything I can see". For an admin that is the
-        // whole server; for anyone else it is their own memberships.
-        //
-        // This used to be a flat 400 for non-admins, which made the "All Stores"
-        // sidebar option a dead end on Invoices and Payments - the client asked,
-        // the server refused, and the UI reported it as "pick a store".
-        // Answering with the caller's own stores is the same
-        // authorisation decision the `Some` arm makes, applied to a set.
-        None => {
-            if user.role == auth::Role::ServerAdmin {
-                return Ok(StoreScope::All);
-            }
-            let memberships = data_service
-                .get_user_stores(user.id)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            // Deliberately still a filter when empty: a user who belongs to no
-            // store sees nothing, not everything.
-            Ok(StoreScope::Membership(
-                memberships.into_iter().map(|m| m.store_id).collect(),
-            ))
-        }
-    }
 }
 
 /// Resolve store names for a page of list results.
