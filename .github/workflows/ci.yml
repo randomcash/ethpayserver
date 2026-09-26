@@ -299,7 +299,9 @@ jobs:
       # and some need a real Redis the same way the rest need the Postgres
       # above - without this, the first such test can only fail, and it does
       # so by hanging until some ambient timeout fires rather than with a
-      # message saying Redis was never there.
+      # message saying Redis was never there. That now includes the
+      # admin-deletion tests exercising the unwatch step against a real
+      # `RedisEVMMonitor` rather than the `None` branch.
       redis:
         image: redis:7-alpine
         ports:
