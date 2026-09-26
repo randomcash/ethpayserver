@@ -1270,9 +1270,24 @@ test.describe('Auth & Authenticated', () => {
     // horizontal overflow does; visible-but-wrong is a screenshot-diffing
     // problem, not "nearly free", so it stays out of this pass rather than
     // becoming a check that always passes.
+    // Same reasoning as `route coverage: desktop` above: this walk calls
+    // gotoAuthed (via walkRoutes) and hits the same throw-prone
+    // checkout cookie/localStorage dance, so an uncaught throw here would
+    // just as readily skip `summary: all issues` and discard every issue()
+    // collected across the whole run. The desktop test was hardened against
+    // this; this one wasn't, and it's at least as throw-prone since it's the
+    // pass that exists specifically to hit newly-flaky mobile rendering.
     await scoutPage.setViewportSize(MOBILE_VIEWPORT);
     try {
       await walkRoutes(discoveredRoutes, { crawl: false, checkOverflow: true });
+    } catch (err) {
+      // See the matching catch in `route coverage: desktop` for why a lost
+      // session (SkipError, expectedStatus === 'skipped') re-throws instead
+      // of being recorded as a SETUP issue.
+      if (test.info().expectedStatus === 'skipped') {
+        throw err;
+      }
+      issue('SETUP', `route coverage: mobile failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       await scoutPage.setViewportSize(DESKTOP_VIEWPORT);
     }

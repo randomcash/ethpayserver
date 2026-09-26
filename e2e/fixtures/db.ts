@@ -205,6 +205,11 @@ export async function seedPaymentForInvoice(
   await client.connect();
   try {
     const { rows } = await client.query(
+      // tx_index -1 is not a placeholder: it's the fixed sentinel the schema
+      // itself assigns every native-asset payment (see the column comment
+      // added by the tx_index migration and payment_handler.rs), chosen so
+      // it can never collide with a real ERC20 log index. Matches the
+      // 'native' asset_type above.
       `INSERT INTO payments (invoice_id, chain_id, asset_type, asset_symbol, amount,
                               tx_hash, block_number, from_address, confirmed_at, tx_index,
                               credited_amount)
