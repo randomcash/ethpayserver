@@ -731,7 +731,11 @@ mod tests {
         unsafe {
             std::env::remove_var("SENTRY_TRACES_SAMPLE_RATE");
         }
-        assert_eq!(resolve_traces_sample_rate(), 0.0, "unset must default to 0.0");
+        assert_eq!(
+            resolve_traces_sample_rate(),
+            0.0,
+            "unset must default to 0.0"
+        );
 
         // SAFETY: see above.
         unsafe {

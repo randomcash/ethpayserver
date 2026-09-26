@@ -631,5 +631,7 @@ pub fn with_sentry_performance_tracing(router: Router) -> Router {
     // `SentryHttpLayer`, per sentry-tower's documented ordering.
     router
         .layer(sentry::integrations::tower::SentryHttpLayer::new().enable_transaction())
-        .layer(sentry::integrations::tower::NewSentryLayer::<axum::extract::Request>::new_from_top())
+        .layer(sentry::integrations::tower::NewSentryLayer::<
+            axum::extract::Request,
+        >::new_from_top())
 }
