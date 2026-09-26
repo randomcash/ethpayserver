@@ -295,3 +295,6 @@ fn scrub_log_redacts_a_secret_through_the_real_capture_pipeline() {
         );
     }
 }
+
+#[cfg(test)]
+mod capture_tests;

@@ -40,7 +40,20 @@ run() {
         echo "ok"
     else
         echo "FAIL"
-        printf '%s\n' "$out" | sed 's/^/      /' | tail -25
+        # HEAD of the failure, not the tail. Tailing showed the last 25 lines,
+        # which for a test runner is the closing doctest summary rather than the
+        # assertion that failed - so a session had to re-run the whole suite to
+        # see what broke. The same truncation produced a wrong reading of the
+        # baseline audit the day this script was written: cutting output is how
+        # you end up answering "what did the last few lines say" instead of
+        # "what failed".
+        #
+        # Both ends: the first lines carry the error, the last carry the summary.
+        printf '%s\n' "$out" | sed 's/^/      /' | head -40
+        if [ "$(printf '%s\n' "$out" | wc -l)" -gt 60 ]; then
+            echo "      [...]"
+            printf '%s\n' "$out" | sed 's/^/      /' | tail -20
+        fi
         failed=$((failed + 1))
     fi
 }
