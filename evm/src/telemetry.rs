@@ -154,16 +154,17 @@ fn is_sensitive_key(key: &str) -> bool {
 }
 
 /// Redact the open-ended parts of a `contexts` map (present on both
-/// [`Event`] and `Transaction`, and untouched by either — every typed
-/// variant (`os`, `runtime`, `device`, ...) carries an `other: Map<String,
-/// Value>` catch-all for forward compatibility, `Context::Other` is fully
-/// free-form, and `Context::Response` carries HTTP response cookies/headers/
-/// body. Nothing in this codebase calls `Scope::set_context` today, so these
-/// are populated only by Sentry's own `contexts` integration (OS/runtime/
-/// device introspection) — but that integration's fixed fields (os name,
-/// runtime version, ...) are not secret-shaped, so leaving them alone here
-/// while closing the catch-alls matches the rest of this module's
-/// container-vs-field-level policy.
+/// [`Event`] and `Transaction`) — every typed variant (`os`, `runtime`,
+/// `device`, ...) carries an `other: Map<String, Value>` catch-all for
+/// forward compatibility, `Context::Other` is fully free-form,
+/// `Context::Response` carries HTTP response cookies/headers/body, and
+/// `Context::Trace` carries a free-text `description` plus its own open
+/// `data` map. Nothing in this codebase calls `Scope::set_context` today, so
+/// these are populated only by Sentry's own integrations: `contexts`
+/// (OS/runtime/device introspection — fixed, not secret-shaped fields, so
+/// left alone here) and `sentry-tower` (attaches `Context::Trace` to every
+/// transaction, which *is* closed below since it carries free text and an
+/// open map like the others).
 fn redact_contexts(contexts: &mut Map<String, Context>) {
     for context in contexts.values_mut() {
         match context {
@@ -185,6 +186,16 @@ fn redact_contexts(contexts: &mut Map<String, Context>) {
                 c.cookies = None;
                 c.headers.clear();
                 c.data = None;
+            }
+            Context::Trace(c) => {
+                // `sentry-tower` attaches one of these to every transaction,
+                // so once tracing is on this ships on essentially every
+                // envelope. `description` is free text and `data` is an open
+                // catch-all, same shape as the other variants above.
+                if let Some(description) = c.description.as_mut() {
+                    *description = redact_secrets(description);
+                }
+                redact_map(c.data.iter_mut());
             }
             _ => {}
         }
@@ -792,33 +803,79 @@ mod tests {
         );
     }
 
+    fn poisoned_contexts() -> Map<String, Context> {
+        use sentry::protocol::{ResponseContext, RuntimeContext, TraceContext};
+
+        let mut contexts = Map::new();
+        let mut runtime = RuntimeContext {
+            name: Some("rustc".to_string()),
+            ..Default::default()
+        };
+        runtime
+            .other
+            .insert("token".to_string(), Value::String("sk_live_x".to_string()));
+        contexts.insert("runtime".to_string(), Context::Runtime(Box::new(runtime)));
+        contexts.insert(
+            "response".to_string(),
+            Context::Response(Box::new(ResponseContext {
+                cookies: Some("session=abc123".to_string()),
+                data: Some(Value::String("body".to_string())),
+                ..Default::default()
+            })),
+        );
+        let mut other = Map::new();
+        other.insert("password".to_string(), Value::String("hunter2".to_string()));
+        contexts.insert("plugin".to_string(), Context::Other(other));
+        let mut trace = TraceContext {
+            description: Some("token=sk_live_x".to_string()),
+            ..Default::default()
+        };
+        trace
+            .data
+            .insert("secret".to_string(), Value::String("hunter2".to_string()));
+        contexts.insert("trace".to_string(), Context::Trace(Box::new(trace)));
+        contexts
+    }
+
+    fn assert_context_containers_are_clean(contexts: &Map<String, Context>) {
+        let Context::Runtime(runtime) = &contexts["runtime"] else {
+            panic!("expected runtime context")
+        };
+        assert_eq!(
+            runtime.other.get("token").and_then(Value::as_str),
+            Some("[redacted]"),
+            "runtime.other leaked a secret key"
+        );
+        let Context::Response(response) = &contexts["response"] else {
+            panic!("expected response context")
+        };
+        assert!(response.cookies.is_none());
+        assert!(response.data.is_none());
+        let Context::Other(plugin) = &contexts["plugin"] else {
+            panic!("expected other context")
+        };
+        assert_eq!(
+            plugin.get("password").and_then(Value::as_str),
+            Some("[redacted]")
+        );
+        let Context::Trace(trace) = &contexts["trace"] else {
+            panic!("expected trace context")
+        };
+        let description = trace.description.as_ref().unwrap();
+        assert!(
+            !description.contains("sk_live_x"),
+            "trace.description leaked a secret: {description}"
+        );
+        assert_eq!(
+            trace.data.get("secret").and_then(Value::as_str),
+            Some("[redacted]"),
+            "trace.data leaked a secret key"
+        );
+    }
+
     #[test]
     fn scrub_event_and_transaction_redact_contexts() {
-        use sentry::protocol::{Context, ResponseContext, RuntimeContext, Transaction};
-
-        fn poisoned_contexts() -> Map<String, Context> {
-            let mut contexts = Map::new();
-            let mut runtime = RuntimeContext {
-                name: Some("rustc".to_string()),
-                ..Default::default()
-            };
-            runtime
-                .other
-                .insert("token".to_string(), Value::String("sk_live_x".to_string()));
-            contexts.insert("runtime".to_string(), Context::Runtime(Box::new(runtime)));
-            contexts.insert(
-                "response".to_string(),
-                Context::Response(Box::new(ResponseContext {
-                    cookies: Some("session=abc123".to_string()),
-                    data: Some(Value::String("body".to_string())),
-                    ..Default::default()
-                })),
-            );
-            let mut other = Map::new();
-            other.insert("password".to_string(), Value::String("hunter2".to_string()));
-            contexts.insert("plugin".to_string(), Context::Other(other));
-            contexts
-        }
+        use sentry::protocol::Transaction;
 
         let event = Event {
             contexts: poisoned_contexts(),
@@ -833,29 +890,6 @@ mod tests {
         };
         scrub_transaction(&mut transaction);
         assert_context_containers_are_clean(&transaction.contexts);
-
-        fn assert_context_containers_are_clean(contexts: &Map<String, Context>) {
-            let Context::Runtime(runtime) = &contexts["runtime"] else {
-                panic!("expected runtime context")
-            };
-            assert_eq!(
-                runtime.other.get("token").and_then(Value::as_str),
-                Some("[redacted]"),
-                "runtime.other leaked a secret key"
-            );
-            let Context::Response(response) = &contexts["response"] else {
-                panic!("expected response context")
-            };
-            assert!(response.cookies.is_none());
-            assert!(response.data.is_none());
-            let Context::Other(plugin) = &contexts["plugin"] else {
-                panic!("expected other context")
-            };
-            assert_eq!(
-                plugin.get("password").and_then(Value::as_str),
-                Some("[redacted]")
-            );
-        }
     }
 
     #[test]
