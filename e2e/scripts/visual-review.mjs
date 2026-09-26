@@ -21,7 +21,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { groupByRoute, renderReport } from './visual-review-report.mjs';
+import { groupByRoute, renderReport, crashOutputs } from './visual-review-report.mjs';
 
 const VISUAL_DIR = path.join('test-results', 'visual');
 const MANIFEST_PATH = path.join(VISUAL_DIR, 'manifest.json');
@@ -175,10 +175,10 @@ main().catch((err) => {
   // to produce a report a human skims, not a gate anyone depends on being green.
   // Still write findings.json — an empty one would read as "reviewed, clean",
   // which is exactly the outcome a crash must not produce.
-  const reason = `visual-review.mjs crashed: ${err instanceof Error ? err.stack : err}`;
-  console.error(reason);
+  const { findings, errors } = crashOutputs(err);
+  console.error(errors[0].reason);
   try {
-    writeOutputs([], [{ route: null, viewport: null, reason }]);
+    writeOutputs(findings, errors);
   } catch (writeErr) {
     console.error(`could not even write the failure report: ${writeErr instanceof Error ? writeErr.stack : writeErr}`);
   }

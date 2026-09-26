@@ -11,7 +11,7 @@
  * nightly issue has no other way to notice if it silently stopped holding.
  */
 import { test, expect } from '@playwright/test';
-import { groupByRoute, renderReport } from '../scripts/visual-review-report.mjs';
+import { groupByRoute, renderReport, crashOutputs } from '../scripts/visual-review-report.mjs';
 
 test.describe('groupByRoute', () => {
   test('buckets a captured shot by route and pushes a failed capture into errors, not routes', () => {
@@ -73,5 +73,27 @@ test.describe('renderReport', () => {
 
     expect(report).toContain('pipeline: no manifest — review did not run');
     expect(report).not.toContain('No issues found.');
+  });
+});
+
+test.describe('crashOutputs', () => {
+  test('turns an unexpected throw into a non-empty error, never an empty findings.json', () => {
+    const { findings, errors } = crashOutputs(new Error('fetch is not defined'));
+
+    expect(findings).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].reason).toContain('visual-review.mjs crashed');
+    expect(errors[0].reason).toContain('fetch is not defined');
+
+    const report = renderReport(findings, errors);
+    expect(report).not.toContain('No issues found.');
+    expect(report).toContain('treat this run as incomplete, not clean');
+  });
+
+  test('handles a thrown non-Error value without losing the crash signal', () => {
+    const { findings, errors } = crashOutputs('manifest.json is not valid JSON');
+
+    expect(findings).toEqual([]);
+    expect(errors[0].reason).toContain('manifest.json is not valid JSON');
   });
 });

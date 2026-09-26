@@ -65,3 +65,13 @@ export function renderReport(findings, errors) {
   }
   return lines.join('\n');
 }
+
+// visual-review.mjs's top-level main().catch() must turn an unexpected throw
+// into the same shape writeOutputs() always produces — an empty findings
+// array and a non-empty errors array — never an empty findings.json, which
+// would render identically to a clean run. Pulled out so that invariant is
+// checkable without actually crashing main() end to end.
+export function crashOutputs(err) {
+  const reason = `visual-review.mjs crashed: ${err instanceof Error ? err.stack : err}`;
+  return { findings: [], errors: [{ route: null, viewport: null, reason }] };
+}
