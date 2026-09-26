@@ -54,5 +54,12 @@
     "test": "a restore from the offsite copy reproduces live row counts",
     "passes": false,
     "notes": "The local backup exists and has been restored successfully with matching row counts. Offsite does not. This became materially more important once irreversible account deletion shipped: restore-from-backup is now the only undo, and the copy lives on the same box as the database. The credential must be write-only - hiding a file is a form of deletion, so retention must be enforced by lifecycle rule rather than by trusting the key."
+  },
+  {
+    "id": "F009",
+    "desc": "A watch the database expects and nobody holds is re-established automatically. A watch held that the database does not expect is reported, never removed automatically.",
+    "test": "a seeded missing watch is re-established on the next pass; a seeded stale watch is reported and still held afterwards",
+    "passes": false,
+    "notes": "This is the failsafe the divergence question was answered with, and F001's detection is its input - do not rebuild the comparison. THE TWO DIRECTIONS ARE NOT SYMMETRIC AND THE CODE MUST NOT TREAT THEM SO: re-establishing a watch is idempotent and cheap, while removing one is an external side effect with no rollback, so a comparison that is wrong in that direction stops watching an address about to be paid into - turning a wasted resource into a lost payment. Re-establish missing, report stale, and let a person remove. The test for the stale direction must assert the watch is STILL HELD after the pass, or it cannot fail if someone later adds automatic removal. One benign case must not trip it: cleanup unwatches before it deactivates the database row, so a watch reads as missing between those two steps while everything is behaving - such an entry belongs to an invoice that is no longer pending, which is how it is told apart from the case that costs a payment. Needs DATABASE_URL and TEST_REDIS_URL."
   }
 ]
