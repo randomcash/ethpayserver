@@ -26,7 +26,6 @@ mod token;
 pub(crate) mod wallet;
 mod wallet_rotation;
 mod watched_address;
-mod watched_address_deletion;
 mod webhook_delivery;
 
 pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository, WalletReauthChallenge};

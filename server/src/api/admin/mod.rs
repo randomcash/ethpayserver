@@ -1,10 +1,12 @@
 //! Admin API endpoints.
 //!
-//! All endpoints require `AdminAuth` (ServerAdmin role). Covers user
-//! management and server-wide settings; `deletion` is account/store
-//! hard-delete, `plugins` is the plugin lifecycle (install, upgrade, enable,
-//! disable, uninstall, and its audit trail) - the only two parts of this
-//! surface large enough to need their own module.
+//! All endpoints require `AdminAuth` (ServerAdmin role).
+//! Covers user management and server-wide settings.
+//!
+//! `plugins` is the plugin lifecycle: install, upgrade, enable, disable,
+//! uninstall, and the audit trail of all of it. It lives in its own module
+//! because it is the only part of this surface that writes to disk and
+//! changes what code the server will execute on its next boot.
 
 use axum::{
     Json,
@@ -20,7 +22,6 @@ use auth::{
     Role, ServerSettings, ServerSettingsRepository, SessionService, UserId, UserRepository,
 };
 
-pub mod deletion;
 pub mod plugins;
 
 use super::extractors::AdminAuth;
@@ -29,7 +30,6 @@ pub use api_types::{
     AdminUserInfo, ServerSettingsResponse, UpdateRoleRequest, UpdateServerSettingsRequest,
     UserListResponse,
 };
-pub use deletion::{E2E_STORE_OWNER_ID, delete_user_account, hard_delete_store, list_user_stores};
 
 // ============================================================================
 // Types

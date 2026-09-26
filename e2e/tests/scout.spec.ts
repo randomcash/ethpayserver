@@ -4,31 +4,13 @@
  *
  * Run with:  E2E_REMOTE=true npx playwright test tests/scout.spec.ts
  */
-import { appendFileSync } from 'node:fs';
-
 import { test as base, expect, type Page, type ConsoleMessage } from '@playwright/test';
 import { setupVirtualAuthenticator, isClientPanic } from '../fixtures/auth';
-import { api } from '../fixtures/api';
 
 let scoutPage: Page;
 const issues: string[] = [];
 const consoleErrors: string[] = [];
 let authenticated = false;
-/**
- * The account `register with passkey` created, captured from the recovery
- * screen before it is dismissed - same source as `RecoveryCredentials.accountId`
- * in fixtures/auth.ts. Module scope because `afterAll` needs it after the test
- * that set it has already gone out of scope.
- */
-let createdUserId: string | null = null;
-/**
- * Set when the recovery screen was shown - so an account genuinely exists -
- * but reading `.ps-recovery-account-id-value` failed anyway. `createdUserId`
- * alone cannot tell that apart from "no account was created", and the two
- * need opposite handling: the first is a real leak with no other record of
- * it (the screen shows exactly once), the second is a correct no-op.
- */
-let idCaptureFailedAfterRegistration = false;
 
 function issue(label: string, detail: string) {
   issues.push(`[${label}] ${detail}`);
@@ -62,88 +44,10 @@ test.beforeAll(async ({ browser }) => {
   });
 });
 
-/**
- * Remove the account `register with passkey` just created.
- *
- * Without this, every run leaves a passkey-only account behind forever: there
- * is no session to reach `DELETE /users/me` with once this hook's own browser
- * context closes, and nobody holds the passkey to sign back in later. Cleanup
- * lives here, next to the registration that creates the account, rather than
- * in a separate script nobody is forced to run - a teardown living somewhere
- * else is exactly how this residue accumulated the first time.
- *
- * `E2E_API_TOKEN` (a `server_admin` bearer token) is optional: scout also runs
- * locally and against `E2E_REMOTE=false` without one, where leaving a throwaway
- * local account behind costs nothing. Skipped silently in that case, not
- * treated as a failure.
- *
- * A genuine leak (the id-capture failure below, or the delete itself failing)
- * throws rather than only pushing to `issues`. `issues` is what `summary: all
- * issues` asserts against, but that test - like every other test in this file
- * - runs *before* `afterAll`, which is the only place this function is called
- * from. Recording a leak here without throwing would report it to nobody: the
- * one test that reads `issues` has already passed by the time this runs,
- * exactly the "logged but doesn't fail the build" gap `synthetic-payment.spec.ts`'s
- * `afterEach` avoids by throwing for the same reason.
- */
-async function cleanupCreatedAccount() {
-  if (!createdUserId) {
-    if (idCaptureFailedAfterRegistration) {
-      // A real account exists - the recovery screen was shown - but its id
-      // was never captured, so nothing below can reach it to delete it and
-      // no later run can recognize it either: `scout.spec.ts` never sets an
-      // email or a wallet, so this is indistinguishable from any other
-      // passkey-only signup. A leak with no other record of it has to
-      // surface the same way a cleanup failure does, not disappear before
-      // that path is even reached.
-      const msg =
-        'Registration completed and the recovery screen was shown, but reading the ' +
-        'account id from .ps-recovery-account-id-value failed - the account exists but ' +
-        'cannot be identified or cleaned up here or by sweep-e2e-accounts.mjs.';
-      console.log(`::error title=Scout account id capture failed::${msg}`);
-      if (process.env.GITHUB_STEP_SUMMARY) {
-        appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ❌ Account id capture failed\n\n${msg}\n`);
-      }
-      issue('CLEANUP', msg);
-      throw new Error(msg);
-    }
-    return;
-  }
-  const token = process.env.E2E_API_TOKEN;
-  if (!token) {
-    console.log(`account ${createdUserId} left in place - set E2E_API_TOKEN to sweep it here`);
-    return;
-  }
-  try {
-    await api(`/admin/users/${createdUserId}`, { method: 'DELETE', token });
-    console.log(`cleaned up account ${createdUserId}`);
-  } catch (err) {
-    const msg =
-      `Failed to clean up scout account ${createdUserId}: ${err}. It is still on the ` +
-      `server and will stay there - delete it with \`node scripts/sweep-e2e-accounts.mjs --execute\`.`;
-    console.log(`::error title=Scout account leaked::${msg}`);
-    if (process.env.GITHUB_STEP_SUMMARY) {
-      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ❌ Account leaked\n\n${msg}\n`);
-    }
-    issue('CLEANUP', msg);
-    throw new Error(msg);
-  }
-}
-
 test.afterAll(async () => {
   if (consoleErrors.length > 0) {
     console.log('\n=== JS CONSOLE ERRORS ===');
     for (const e of consoleErrors) console.log(`  ${e}`);
-  }
-  // Captured rather than let propagate immediately: the issues log below and
-  // closing the browser context must still happen on a cleanup failure, and
-  // rethrowing after both is what actually fails this hook - which is what
-  // fails the run, since no test left running can see this happen otherwise.
-  let cleanupError: unknown;
-  try {
-    await cleanupCreatedAccount();
-  } catch (err) {
-    cleanupError = err;
   }
   if (issues.length > 0) {
     console.log('\n=== ISSUES FOUND ===');
@@ -152,7 +56,6 @@ test.afterAll(async () => {
     console.log('\n=== NO ISSUES FOUND ===');
   }
   await scoutPage?.context().close();
-  if (cleanupError) throw cleanupError;
 });
 
 async function goto(path: string) {
@@ -380,19 +283,6 @@ test.describe('Auth & Authenticated', () => {
     ]);
 
     if (await savedButton.isVisible().catch(() => false)) {
-      // Capture before dismissing: this screen is shown exactly once, and a
-      // passkey-only account has no email or wallet to identify it by
-      // afterwards. Same selector as `RecoveryCredentials.accountId` in
-      // fixtures/auth.ts.
-      createdUserId =
-        (
-          await scoutPage
-            .locator('.ps-recovery-account-id-value')
-            .textContent({ timeout: 2_000 })
-            .catch(() => null)
-        )?.trim() || null;
-      if (!createdUserId) idCaptureFailedAfterRegistration = true;
-
       await savedButton.click();
       await scoutPage.locator('.ps-checkbox').check();
       await scoutPage.locator('.ps-button-primary', { hasText: /complete setup/i }).click();
