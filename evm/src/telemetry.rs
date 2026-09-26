@@ -211,6 +211,89 @@ pub fn scrub_event(mut event: Event<'static>) -> Option<Event<'static>> {
     Some(event)
 }
 
+/// Applies [`scrub_event`]'s policy to a performance transaction.
+///
+/// `ClientOptions::before_send` (and `Scope`'s event processors) only run for
+/// error events: a `Transaction` is built, filled in by the `sentry-tower`
+/// integration — including the request URL and headers, via
+/// `TransactionOrSpan::set_request` — and handed straight to the transport in
+/// `Span::finish`, with no callback in between. Turning on
+/// `traces_sample_rate` therefore opens a second, unscrubbed path off the
+/// host unless something scrubs the transaction itself; [`ScrubbingTransport`]
+/// calls this just before an envelope is sent.
+fn scrub_transaction(transaction: &mut sentry::protocol::Transaction<'static>) {
+    // Same containers scrub_event drops: the request the tower integration
+    // attaches carries the raw URL and headers, not the route pattern.
+    transaction.request = None;
+    transaction.user = None;
+    transaction.server_name = None;
+
+    if let Some(name) = transaction.name.as_mut() {
+        *name = redact_secrets(name);
+    }
+    for tag_value in transaction.tags.values_mut() {
+        *tag_value = redact_secrets(tag_value);
+    }
+    redact_map(transaction.extra.iter_mut());
+
+    for span in &mut transaction.spans {
+        if let Some(description) = span.description.as_mut() {
+            *description = redact_secrets(description);
+        }
+        for tag_value in span.tags.values_mut() {
+            *tag_value = redact_secrets(tag_value);
+        }
+        redact_map(span.data.iter_mut());
+    }
+}
+
+/// Wraps the real transport so every outgoing envelope's `Transaction` items
+/// pass through [`scrub_transaction`] first. This is the only seam available
+/// for that in this SDK version — see [`scrub_transaction`] for why
+/// `before_send` doesn't reach transactions.
+struct ScrubbingTransport {
+    inner: Arc<dyn sentry::Transport>,
+}
+
+impl sentry::Transport for ScrubbingTransport {
+    fn send_envelope(&self, envelope: sentry::protocol::Envelope) {
+        let mut scrubbed =
+            sentry::protocol::Envelope::new().with_headers(envelope.headers().clone());
+        for item in envelope.into_items() {
+            match item {
+                sentry::protocol::EnvelopeItem::Transaction(mut transaction) => {
+                    scrub_transaction(&mut transaction);
+                    scrubbed.add_item(transaction);
+                }
+                other => scrubbed.add_item(other),
+            }
+        }
+        self.inner.send_envelope(scrubbed);
+    }
+
+    fn flush(&self, timeout: std::time::Duration) -> bool {
+        self.inner.flush(timeout)
+    }
+
+    fn shutdown(&self, timeout: std::time::Duration) -> bool {
+        self.inner.shutdown(timeout)
+    }
+}
+
+/// Builds the real (reqwest) transport and wraps it in [`ScrubbingTransport`].
+/// Installed as `ClientOptions::transport` in [`init_sentry`] instead of
+/// leaving it `None`, which would fall back to the same reqwest transport
+/// unscrubbed.
+struct ScrubbingTransportFactory;
+
+impl sentry::TransportFactory for ScrubbingTransportFactory {
+    fn create_transport(&self, options: &sentry::ClientOptions) -> Arc<dyn sentry::Transport> {
+        Arc::new(ScrubbingTransport {
+            inner: Arc::new(sentry::transports::ReqwestHttpTransport::new(options)),
+        })
+    }
+}
+
 /// Whether error reporting is on, and — when it is off — whether that is
 /// acceptable for the environment reporting failed to catch this itself once:
 /// a disabled integration looks identical to a working one unless something
@@ -310,10 +393,11 @@ pub fn resolve_traces_sample_rate() -> f32 {
 }
 
 /// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
-/// `before_send` hook and tagging events with [`resolve_environment`]. Shared
-/// by the `server` and `evmmonitor` binaries so the mainnet boot-gate and the
-/// PII scrubber live in exactly one place each, instead of two copies that
-/// can quietly diverge.
+/// `before_send` hook, [`ScrubbingTransportFactory`] as the transport (so
+/// performance transactions get scrubbed too), and tagging events with
+/// [`resolve_environment`]. Shared by the `server` and `evmmonitor` binaries
+/// so the mainnet boot-gate and the PII scrubber live in exactly one place
+/// each, instead of two copies that can quietly diverge.
 ///
 /// Returns the init guard, whether a DSN was actually configured, and the
 /// resolved environment tag — pass the latter two to
@@ -335,6 +419,11 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
         // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
         // API keys, emails and on-chain addresses before events leave the host.
         before_send: Some(Arc::new(scrub_event)),
+        // `before_send` doesn't run for performance transactions in this SDK
+        // version (see `scrub_transaction`), so the transport itself scrubs
+        // them instead of leaving the "mandatory" scrubber half-applied now
+        // that traces_sample_rate can be nonzero.
+        transport: Some(Arc::new(ScrubbingTransportFactory)),
         ..Default::default()
     });
     (guard, dsn_configured, environment)
@@ -592,6 +681,132 @@ mod tests {
         assert!(!scrubbed.message.unwrap().contains("4c0883a6"));
         let extra = scrubbed.extra.get("ctx").and_then(Value::as_str).unwrap();
         assert!(!extra.contains("supersecret"), "extra leaked: {extra}");
+    }
+
+    #[test]
+    fn scrub_transaction_drops_request_user_server_name_and_redacts_free_text() {
+        use sentry::protocol::{Request, Span, Transaction, User};
+
+        let mut span = Span {
+            description: Some(
+                "connecting to https://eth-sepolia.g.alchemy.com/v2/alch_supersecretkey"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        span.tags
+            .insert("note".to_string(), "password = hunter2".to_string());
+        span.data.insert(
+            "detail".to_string(),
+            Value::String("token=sk_live_supersecret".to_string()),
+        );
+
+        let mut transaction = Transaction {
+            name: Some("GET /api/invoices/{id}".to_string()),
+            request: Some(Request::default()),
+            user: Some(User::default()),
+            server_name: Some("payserver-prod-01".into()),
+            spans: vec![span],
+            ..Default::default()
+        };
+        transaction
+            .tags
+            .insert("path".to_string(), "email alice@example.com".to_string());
+        transaction.extra.insert(
+            "ctx".to_string(),
+            Value::String("token=sk_live_supersecret".to_string()),
+        );
+
+        scrub_transaction(&mut transaction);
+
+        assert!(transaction.request.is_none());
+        assert!(transaction.user.is_none());
+        assert!(transaction.server_name.is_none());
+        assert_eq!(
+            transaction.name.as_deref(),
+            Some("GET /api/invoices/{id}"),
+            "a route pattern must survive redaction unchanged"
+        );
+        assert!(!transaction.tags["path"].contains("alice@example.com"));
+        let extra = transaction
+            .extra
+            .get("ctx")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(!extra.contains("supersecret"), "extra leaked: {extra}");
+        let span = &transaction.spans[0];
+        assert!(
+            !span
+                .description
+                .as_ref()
+                .unwrap()
+                .contains("supersecretkey"),
+            "span description leaked: {:?}",
+            span.description
+        );
+        assert!(!span.tags["note"].contains("hunter2"));
+        let span_detail = span.data.get("detail").and_then(Value::as_str).unwrap();
+        assert!(
+            !span_detail.contains("supersecret"),
+            "span data leaked: {span_detail}"
+        );
+    }
+
+    #[test]
+    fn scrubbing_transport_scrubs_transactions_before_forwarding() {
+        use std::sync::Mutex;
+
+        use sentry::Transport;
+        use sentry::protocol::{Envelope, EnvelopeItem, Event, Request, Transaction};
+
+        #[derive(Default)]
+        struct RecordingTransport {
+            envelopes: Mutex<Vec<Envelope>>,
+        }
+
+        impl Transport for RecordingTransport {
+            fn send_envelope(&self, envelope: Envelope) {
+                self.envelopes.lock().unwrap().push(envelope);
+            }
+        }
+
+        let recorder = Arc::new(RecordingTransport::default());
+        let scrubber = ScrubbingTransport {
+            inner: recorder.clone(),
+        };
+
+        let mut envelope = Envelope::new();
+        envelope.add_item(Transaction {
+            request: Some(Request::default()),
+            ..Default::default()
+        });
+        envelope.add_item(Event::default());
+        scrubber.send_envelope(envelope);
+
+        let forwarded = recorder.envelopes.lock().unwrap();
+        assert_eq!(
+            forwarded.len(),
+            1,
+            "the envelope itself must still be forwarded"
+        );
+        let mut saw_transaction = false;
+        for item in forwarded[0].items() {
+            match item {
+                EnvelopeItem::Transaction(transaction) => {
+                    saw_transaction = true;
+                    assert!(
+                        transaction.request.is_none(),
+                        "transaction request must be scrubbed before forwarding"
+                    );
+                }
+                EnvelopeItem::Event(_) => {}
+                other => panic!("unexpected envelope item: {other:?}"),
+            }
+        }
+        assert!(
+            saw_transaction,
+            "the transaction item must be forwarded, not dropped"
+        );
     }
 
     /// Asserts the dependency-free scanners in payserver-commons `scrub` produce
