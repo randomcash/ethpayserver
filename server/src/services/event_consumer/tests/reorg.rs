@@ -476,6 +476,66 @@ async fn test_reorg_does_not_retract_a_survived_transaction() {
     );
 }
 
+/// A reorg whose survivor scan found nothing to scan *for* (no addresses
+/// currently watched) must retract nothing and notify nobody. An empty
+/// `survived_tx_hashes` from a scan that never ran is indistinguishable from
+/// one that ran and found every payment gone — so treating `survivors_verifiable:
+/// false` like a normal empty survivor list would retract every payment at or
+/// above the fork block on the ordinary quiet-server case, not just a real
+/// chain drop.
+///
+/// Goes red without the `survivors_verifiable` check: the payment comes back
+/// reorged and a retraction webhook fires for a reorg nothing actually verified.
+#[tokio::test]
+async fn test_reorg_with_unverifiable_survivors_retracts_nothing() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let sink = Arc::new(RecordingWebhookSink::new());
+    let consumer = create_test_consumer_with_webhook(ds.clone(), bridge.clone(), sink.clone());
+
+    let invoice_id = InvoiceId::new();
+    let store_id = StoreId::new();
+    ds.set_webhook(store_id.0, "https://example.com/hook", "secret");
+
+    InvoiceWriter::upsert(&*ds, &fully_paid_invoice(&invoice_id, store_id))
+        .await
+        .unwrap();
+    PaymentWriter::upsert(&*ds, &reorgable_payment(&invoice_id, "0xunverified", 100))
+        .await
+        .unwrap();
+
+    consumer
+        .handle_reorg_detected(ReorgDetected {
+            survivors_verifiable: false,
+            ..reorg_at(&invoice_id, 99)
+        })
+        .await
+        .unwrap();
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert!(
+        !payments[0].reorged,
+        "an unverified reorg must not retract a payment it never scanned for"
+    );
+
+    let invoice = InvoiceReader::get(&*ds, &invoice_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        invoice.status,
+        InvoiceStatus::Processing,
+        "an invoice with no retracted payments must not have its status touched"
+    );
+
+    assert!(
+        sink.jobs().is_empty(),
+        "nothing was retracted, so a subscriber must not be told to undo anything"
+    );
+}
+
 /// A reorg on this invoice at `fork_block`, on chain 1.
 fn reorg_at(invoice_id: &InvoiceId, fork_block: u64) -> ReorgDetected {
     ReorgDetected {
