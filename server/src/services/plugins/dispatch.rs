@@ -27,6 +27,15 @@
 //! *closed*. Register one action plugin as a filter and every invoice on the
 //! instance is refused, for as long as it stays installed. [`PluginHost::kind`]
 //! is what prevents that, and `only_filters` is the test that pins it.
+//!
+//! `cancel_subscription` below does not go through that gate, and the reason
+//! is what it is dispatched *for*: the filter and payment-observer calls above
+//! are broadcast to every loaded plugin of the matching kind on every invoice
+//! or every settlement, so a wrong one wedges the instance until someone
+//! notices. A cancellation is the opposite shape - one admin, asking one
+//! plugin they picked by id, once. A plugin that does not implement the
+//! export just reports it could not run, the same as a filter that trapped;
+//! nothing else on the instance is affected either way.
 
 use std::sync::Arc;
 
@@ -189,6 +198,61 @@ impl OwnStorePaymentObserver for PluginPaymentObserver {
             PAYMENT_SETTLED,
             &WirePaymentSettled::from(payment),
         );
+    }
+}
+
+/// The export asked to cancel one account's subscription now.
+pub const CANCEL_SUBSCRIPTION: &str = "cancel_subscription";
+
+#[derive(Debug, Serialize)]
+struct WireCancelSubscriptionRequest<'a> {
+    account_id: &'a str,
+}
+
+/// What a plugin answers a cancellation request with.
+#[derive(Debug, Deserialize)]
+struct WireCancelSubscriptionAnswer {
+    cancelled: bool,
+    /// The plugin's own words, same convention as a filter's `reason`: shown
+    /// to the admin verbatim when the plugin gives one.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// What asking a plugin to cancel a subscription came back with.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CancelSubscriptionOutcome {
+    /// The plugin cancelled it.
+    Cancelled,
+    /// The plugin ran and declined - no such account, already cancelled,
+    /// whatever `reason` says.
+    Refused { reason: Option<String> },
+    /// The call itself did not complete: no such plugin, it trapped, it ran
+    /// past the deadline, or its answer did not parse.
+    CouldNotRun { reason: String },
+}
+
+/// Ask `id` to cancel `account_id`'s subscription now.
+///
+/// Unlike [`run_filter`](PluginHost::run_filter), there is no failure-mode
+/// fallback: an admin action that silently no-ops on an unreachable plugin
+/// would report success when nothing happened. Every non-success path is
+/// returned instead of papered over.
+pub async fn cancel_subscription(
+    host: &PluginHost,
+    id: &PluginId,
+    account_id: &str,
+) -> CancelSubscriptionOutcome {
+    let wire = WireCancelSubscriptionRequest { account_id };
+    match host
+        .run_query::<_, WireCancelSubscriptionAnswer>(id, CANCEL_SUBSCRIPTION, &wire)
+        .await
+    {
+        Ok(answer) if answer.cancelled => CancelSubscriptionOutcome::Cancelled,
+        Ok(answer) => CancelSubscriptionOutcome::Refused {
+            reason: answer.reason,
+        },
+        Err(reason) => CancelSubscriptionOutcome::CouldNotRun { reason },
     }
 }
 
@@ -654,5 +718,94 @@ mod tests {
                 metadata: None,
             })
             .await;
+    }
+
+    /// The wire contract in the direction a real plugin uses it: the plugin
+    /// cancels and says so, and the admin who asked gets `Cancelled` back.
+    #[tokio::test]
+    async fn a_plugin_that_cancels_reports_cancelled() {
+        let host = host();
+        host.register(
+            manifest("cash.random.billing", "action", None),
+            &answering(CANCEL_SUBSCRIPTION, r#"{"cancelled":true}"#),
+        )
+        .unwrap();
+
+        let outcome = cancel_subscription(
+            &host,
+            &PluginId::new("cash.random.billing").unwrap(),
+            "acct-1",
+        )
+        .await;
+
+        assert_eq!(outcome, CancelSubscriptionOutcome::Cancelled);
+    }
+
+    /// A plugin that ran but declined - no such account, already cancelled -
+    /// must not be reported as a success, and its own words must reach the
+    /// caller, same as a filter's refusal.
+    #[tokio::test]
+    async fn a_plugin_that_declines_reports_the_refusal_and_its_reason() {
+        let host = host();
+        host.register(
+            manifest("cash.random.billing", "action", None),
+            &answering(
+                CANCEL_SUBSCRIPTION,
+                r#"{"cancelled":false,"reason":"no such account"}"#,
+            ),
+        )
+        .unwrap();
+
+        let outcome = cancel_subscription(
+            &host,
+            &PluginId::new("cash.random.billing").unwrap(),
+            "acct-does-not-exist",
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            CancelSubscriptionOutcome::Refused {
+                reason: Some("no such account".to_string())
+            }
+        );
+    }
+
+    /// A plugin that cannot run the export at all - not installed, or
+    /// installed but trapping - must not be reported as a success either.
+    /// Unlike a filter, there is no manifest failure mode to fall back to:
+    /// an admin action that no-ops silently would claim it worked.
+    #[tokio::test]
+    async fn a_plugin_that_cannot_run_reports_could_not_run() {
+        let host = host();
+        host.register(
+            manifest("cash.random.billing", "action", None),
+            &trapping(CANCEL_SUBSCRIPTION),
+        )
+        .unwrap();
+
+        let outcome = cancel_subscription(
+            &host,
+            &PluginId::new("cash.random.billing").unwrap(),
+            "acct-1",
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            CancelSubscriptionOutcome::CouldNotRun { .. }
+        ));
+
+        let missing = cancel_subscription(
+            &host,
+            &PluginId::new("cash.random.ghost").unwrap(),
+            "acct-1",
+        )
+        .await;
+
+        assert!(matches!(
+            missing,
+            CancelSubscriptionOutcome::CouldNotRun { .. }
+        ));
     }
 }

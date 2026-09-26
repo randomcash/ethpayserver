@@ -1,4 +1,28 @@
 import { defineConfig } from '@playwright/test';
+import { mkdirSync, rmSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+// Local runs only. CI's /tmp is disk-backed and the container is thrown away
+// after the job, so there is nothing to redirect there - and this box's own
+// /tmp is RAM-backed, which is where Playwright puts the chromium profile
+// directory. Playwright's default outputDir already puts screenshots, traces
+// and videos under e2e/test-results, which is disk; the profile directory is
+// the one thing that isn't covered there. Setting TMPDIR here, at config
+// load, redirects it for every invocation that loads this config -
+// `npx playwright test`, `npm test`, `--ui`, `--debug` alike - rather than
+// only ones that go through a wrapper script, which a bare
+// `npx playwright test` bypasses entirely.
+//
+// Wiping the directory here rather than trapping it on exit means even an
+// interruption no trap can catch (SIGKILL, a killed job) leaves at most one
+// stale profile behind instead of accumulating one per interruption - the
+// next invocation clears it before using it.
+if (!process.env.CI) {
+  const scratch = resolve(process.cwd(), '.tmp');
+  rmSync(scratch, { recursive: true, force: true });
+  mkdirSync(scratch, { recursive: true });
+  process.env.TMPDIR = scratch;
+}
 
 // `=== 'true'`, not truthiness: `E2E_REMOTE=false` would otherwise select the
 // remote origin. Must stay in step with fixtures/api.ts and fixtures/db.ts.

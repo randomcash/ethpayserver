@@ -64,11 +64,33 @@ export const SECOND_PLUGIN_SLUG = 'e2elate';
 export const SECOND_MANIFEST_TOML = [
   `id = "${SECOND_PLUGIN_ID}"`,
   'version = "0.1.0"',
+  'dependencies = ["ethpayserver:^0.1.0"]',
   'kind = "action"',
   `slug = "${SECOND_PLUGIN_SLUG}"`,
   '',
   '[[pages]]',
   'path = "overview"',
   'label = "Installed late"',
+  '',
+].join('\n');
+
+/**
+ * A manifest the install gate must still refuse: `^99.0.0` cannot match a
+ * 0.x host no matter which 0.x it is. This is the negative direction the
+ * positive-path fixtures above do not exercise - without it, a host whose
+ * dependency check silently loosened to "accept anything" would show up
+ * nowhere in this suite.
+ */
+export const INCOMPATIBLE_PLUGIN_ID = 'com.example.e2eincompatible';
+export const INCOMPATIBLE_MANIFEST_TOML = [
+  `id = "${INCOMPATIBLE_PLUGIN_ID}"`,
+  'version = "0.1.0"',
+  'dependencies = ["ethpayserver:^99.0.0"]',
+  'kind = "action"',
+  'slug = "e2eincompatible"',
+  '',
+  '[[pages]]',
+  'path = "overview"',
+  'label = "Should never install"',
   '',
 ].join('\n');

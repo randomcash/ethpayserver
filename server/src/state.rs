@@ -126,6 +126,15 @@ pub struct AppState<D, A, E> {
     /// `None` on any instance that sells nothing to itself, which exempts
     /// nothing.
     pub billing_store_id: Option<types::StoreId>,
+
+    /// The account `billing_store_id` must be owned by, per `Config`.
+    ///
+    /// Carried on the state the same way `billing_store_id` is: resolved once
+    /// at boot and never re-read from the environment, since an admin
+    /// settings save must be checked against the value this process actually
+    /// started with, not a fresh guess at what the environment currently
+    /// says.
+    pub operator_account_id: Option<types::UserId>,
     /// Sender used to verify a pending email-address change.
     ///
     /// Unlike `webhook_sink` this is never `None`: `create_email_sender`
@@ -191,6 +200,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             invoice_creation_filters: self.invoice_creation_filters.clone(),
             account_closed_observers: self.account_closed_observers.clone(),
             billing_store_id: self.billing_store_id,
+            operator_account_id: self.operator_account_id,
             email_sender: Arc::clone(&self.email_sender),
             plugin_pages: Arc::clone(&self.plugin_pages),
             plugin_host: self.plugin_host.clone(),
@@ -222,6 +232,7 @@ impl<D, A, E> AppState<D, A, E> {
             invoice_creation_filters: Vec::new(),
             account_closed_observers: Vec::new(),
             billing_store_id: None,
+            operator_account_id: None,
             email_sender,
             plugin_pages: Arc::new(PageHost::new()),
             plugin_host: None,
