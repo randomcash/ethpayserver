@@ -444,6 +444,22 @@ mod tests {
         }
     }
 
+    /// Every mainnet that has tokens seeded in the `tokens` table must be a
+    /// real member of `ALL_CHAINS` - the same check `evm::testnet` runs for
+    /// the newly-seeded testnets, mirrored here so both directions are
+    /// covered instead of just the one the original PR happened to add.
+    /// Named by id, not iterated from `ALL_CHAINS`, so this fails the moment
+    /// either list drifts from the other instead of trivially agreeing with
+    /// itself.
+    #[test]
+    fn test_seeded_mainnets_are_all_offered() {
+        for (chain_id, name) in [(324, "zkSync Era"), (59144, "Linea"), (534352, "Scroll")] {
+            let config = get_chain_config_by_id(chain_id)
+                .unwrap_or_else(|| panic!("{name} ({chain_id}) is not in ALL_CHAINS"));
+            assert_eq!(config.name, name);
+        }
+    }
+
     #[test]
     fn test_min_paid_unwatch_grace_period_is_double_the_confirmation_time() {
         // Polygon: 128 confirmations * 2s/block * 2 = 512s.

@@ -38,7 +38,7 @@ pub mod users;
 pub mod webhook_deliveries;
 pub mod ws;
 
-pub use extractors::{AdminAuth, AuthenticatedUser, FreshlyAuthenticatedUser};
+pub use extractors::{AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser};
 
 /// A status, optionally with a reason the caller can read.
 ///
@@ -191,6 +191,7 @@ impl From<(StatusCode, String)> for ApiErr {
         stores::UpdateWalletRequest,
         stores::SetStoreWalletRequest,
         stores::StoreWalletResponse,
+        stores::MethodWalletResponse,
         stores::WalletResponse,
         stores::CreateWalletResponse,
         stores::WalletXpubResponse,
