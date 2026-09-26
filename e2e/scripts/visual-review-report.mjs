@@ -76,46 +76,24 @@ export function crashOutputs(err) {
   return { findings: [], errors: [{ route: null, viewport: null, reason }] };
 }
 
-// The redacted counterpart to renderReport(), for the one output this
-// pipeline actually publishes: a public, durable GitHub issue. Deliberately
-// never touches `what_is_wrong` or a screenshot path — see the scheduled
-// workflow's header comment for why that text cannot leave this checkout.
-// Kept next to renderReport so the issue-filing step has a tested function to
-// call instead of re-deriving the route/count grouping on its own; that
-// duplication is what let a route silently disappear from a public report
-// undetected before this function existed.
+// The one output this pipeline actually publishes: a public, durable GitHub
+// issue. The rubric (see visual-review.mjs) only ever asks about layout/UX
+// defects — clipped content, an unlabelled control, a raw decimal — never a
+// security or fund-movement issue, and every one of those is already
+// visible to anyone loading the page. So there is nothing here that needs
+// keeping off a public issue: this is the same renderReport() a human reads
+// locally, plus the run URL. Delegating to renderReport rather than
+// re-deriving the route grouping is what keeps a route from silently
+// disappearing from the published report undetected.
 // Returns null for a clean run with nothing to report, so the caller can
 // skip opening or commenting on an issue at all.
 export function renderPublicSummary(findings, errors, runUrl) {
   if (findings.length === 0 && errors.length === 0) return null;
 
-  const lines = ['# Nightly visual review', ''];
-  if (findings.length > 0) {
-    const byRoute = new Map();
-    for (const f of findings) byRoute.set(f.route, (byRoute.get(f.route) ?? 0) + 1);
-    lines.push(`${findings.length} finding(s) across ${byRoute.size} route(s):`, '');
-    for (const [route, count] of byRoute) lines.push(`- \`${route}\`: ${count}`);
-    lines.push('');
-  }
-  if (errors.length > 0) {
-    lines.push(`${errors.length} route(s) could not be reviewed — treat this run as incomplete, not clean:`, '');
-    for (const e of errors) {
-      const label = e.route ? `${e.route}${e.viewport && e.viewport !== 'n/a' ? ` (${e.viewport})` : ''}` : 'pipeline';
-      lines.push(`- ${label}: ${e.reason}`);
-    }
-    lines.push('');
-  }
-  lines.push(
-    `Run: ${runUrl}`,
-    '',
-    'Per-finding detail (what is wrong, per route and viewport) and the',
-    'screenshots are not published anywhere from this run — advisory',
-    'findings describe live defects in a production payment processor,',
-    'and this repo has no private place to put them yet (an artifact or',
-    'a job log here is exactly as public as this issue). That needs a',
-    'private receiver this repo alone cannot add; see the workflow file.',
-    '',
-    'This is advisory — a model judging layout will produce false positives.',
+  return (
+    renderReport(findings, errors).trimEnd() +
+    '\n\n' +
+    `Run: ${runUrl}\n\n` +
+    'This is advisory — a model judging layout will produce false positives.\n'
   );
-  return lines.join('\n');
 }

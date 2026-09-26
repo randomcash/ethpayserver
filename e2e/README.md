@@ -289,17 +289,15 @@ visual-review-scheduled.yml` runs it nightly against testnet and files (or
 comments on) a `visual-review`-labelled issue only when there is something to
 report; it never fails the build.
 
-This repo is public, so the issue carries counts and affected routes only —
-never the per-finding "what is wrong" text, which describes live defects in a
-production payment processor's UI. That text and the screenshots are not
-published anywhere from the scheduled run: a build artifact or a job log on a
-public repo is exactly as downloadable as the issue itself, so report.md,
-findings.json and the screenshots stay in the job's own ephemeral workspace
-and are discarded when it ends. Only a `visual-review-manifest` artifact
-(which routes/viewports captured, no defect text) is uploaded, for debugging
-the capture pipeline. See the scheduled workflow's header comment for what
-would need to change (a private receiver in central-infrastructure) before
-the full report can go anywhere durable.
+This repo is public, so the issue carries the per-finding "what is wrong"
+text in full, not just counts and routes — the rubric only ever asks about
+layout/UX defects, never a security or fund-movement bug, and every one of
+those is already visible to anyone loading the page, so describing it here
+is no different from any other public bug report. Only the screenshots stay
+out of it: a `visual-review-manifest` artifact (which routes/viewports
+captured, no defect text) is uploaded for debugging the capture pipeline,
+and report.md / findings.json stay in the job's own ephemeral workspace,
+since a picture of the live UI adds nothing the text doesn't already say.
 
 A route that could not be captured (a broken passkey registration, a
 navigation timeout) or reviewed (an Anthropic API error) is not silently

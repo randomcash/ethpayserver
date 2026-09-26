@@ -2,9 +2,9 @@
 /**
  * Builds the body of the nightly visual-review GitHub issue from
  * findings.json, using renderPublicSummary() so the workflow's issue-filing
- * step never has to re-derive the route/count grouping (or the redaction)
- * itself — that hand-rolled duplicate was how a route could go untested and
- * `what_is_wrong` could leak into the public issue without anything failing.
+ * step never has to re-derive the route grouping itself — a hand-rolled
+ * duplicate was previously how a route could go untested and silently
+ * disappear from the public issue without anything failing.
  *
  *   node scripts/render-public-summary.mjs <out.md> <findings.json> <runUrl>
  *
