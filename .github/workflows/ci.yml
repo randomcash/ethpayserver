@@ -49,6 +49,56 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: No billing or subscription semantics in public source
+        # This repo is public; that vocabulary is not. A PR titled "Billing
+        # plugin: the instance sells subscriptions to itself" reached it on
+        # 2026-09-26 and a public PR's title, branch and diff cannot be
+        # retracted. The rule existed and nothing enforced it.
+        run: scripts/check-no-commercial-terms.sh
+
+      - name: No billing vocabulary in the branch name or PR title
+        # THE VECTOR THAT ACTUALLY LEAKED. The source guard above cannot see
+        # either of these, and on 2026-09-26 the exposure was a branch named
+        # rcs/rcs-261-billing-plugin-... and a PR titled "Billing plugin: the
+        # instance sells subscriptions to itself" - published before a line of
+        # code was reviewed, and permanent on a public repo.
+        #
+        # The worker derives its branch name from the tracker ticket's title,
+        # so this also catches a ticket whose title was never cleaned.
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -uo pipefail
+          bad=0
+          for field in HEAD_REF PR_TITLE; do
+            value="${!field}"
+            if printf '%s' "$value" | grep -qiE 'billing|stripe'; then
+              echo "::error title=Commercial vocabulary in $field::\"$value\" - a branch name and a PR title are public the moment they are pushed, and cannot be retracted. Rename the branch, retitle the PR, and fix the tracker ticket it came from." >&2
+              bad=1
+            fi
+          done
+          [ "$bad" -eq 0 ] && echo "branch name and PR title are clean"
+          exit "$bad"
+
+      - name: Commercial-term guard self-test
+        # The guard was written and appeared to pass while adding a term - the
+        # test had used an UNTRACKED file, invisible to `git ls-files`. So the
+        # self-test uses a tracked one and asserts the guard goes RED, because
+        # a guard only ever observed passing has not been shown to work.
+        run: |
+          set -uo pipefail
+          ./scripts/check-no-commercial-terms.sh || { echo "::error::guard fails on a clean tree"; exit 1; }
+          printf '\n// billing\n' >> server/src/metrics.rs
+          if ./scripts/check-no-commercial-terms.sh >/dev/null 2>&1; then
+            git checkout -- server/src/metrics.rs
+            echo "::error title=Guard is vacuous::the commercial-term guard did not fire on an added term"
+            exit 1
+          fi
+          git checkout -- server/src/metrics.rs
+          echo "guard fires on a new term and passes on a clean tree"
+
       - name: Install mold linker
         run: |
           # apt on hosted runners hangs often enough to matter: a stuck
