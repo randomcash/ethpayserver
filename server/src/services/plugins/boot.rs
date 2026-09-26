@@ -142,7 +142,7 @@ pub async fn load_installed_plugins<D>(
     host: Option<&PluginHost>,
     artifacts: &PluginArtifacts,
     pools: Option<&std::sync::Arc<super::PluginPools>>,
-    issuer: &super::DeferredIssuer,
+    capabilities: &super::DeferredCapabilities,
 ) -> Result<PluginBootReport, types::RepositoryError>
 where
     D: InstalledPluginReader + InstalledPluginWriter + ?Sized,
@@ -176,7 +176,7 @@ where
             continue;
         }
 
-        match register_or_disable(data, host, artifacts, &id, &row, pools, issuer).await {
+        match register_or_disable(data, host, artifacts, &id, &row, pools, capabilities).await {
             Ok(()) => report.loaded.push(id),
             Err(failure) => report.failed.push(failure),
         }
@@ -201,12 +201,12 @@ async fn register_or_disable<D>(
     id: &PluginId,
     row: &InstalledPlugin,
     pools: Option<&std::sync::Arc<super::PluginPools>>,
-    issuer: &super::DeferredIssuer,
+    capabilities: &super::DeferredCapabilities,
 ) -> Result<(), PluginLoadFailure>
 where
     D: InstalledPluginWriter + ?Sized,
 {
-    let calls = host_calls_for(id, row, pools, issuer).await;
+    let calls = host_calls_for(id, row, pools, capabilities).await;
 
     let Err((kind, reason)) = load_one(
         host,
@@ -321,14 +321,14 @@ async fn host_calls_for(
     id: &PluginId,
     row: &InstalledPlugin,
     pools: Option<&std::sync::Arc<super::PluginPools>>,
-    issuer: &super::DeferredIssuer,
+    capabilities: &super::DeferredCapabilities,
 ) -> Option<std::sync::Arc<dyn payserver_plugin_host::PluginHostCalls>> {
     let (pools, password) = (pools?, row.db_role_password.as_deref()?);
 
     match pools.register(id, password).await {
         Ok(()) => Some(std::sync::Arc::new(
             super::PluginCalls::new(id.clone(), std::sync::Arc::clone(pools))
-                .with_issuer(issuer.clone()),
+                .with_capabilities(capabilities),
         )
             as std::sync::Arc<dyn payserver_plugin_host::PluginHostCalls>),
         Err(e) => {
@@ -667,7 +667,7 @@ mod tests {
             Some(&host),
             &artifacts,
             None,
-            &crate::services::plugins::DeferredIssuer::default(),
+            &crate::services::plugins::DeferredCapabilities::default(),
         )
         .await
         .unwrap();
@@ -706,7 +706,7 @@ mod tests {
             Some(&host),
             &artifacts,
             None,
-            &crate::services::plugins::DeferredIssuer::default(),
+            &crate::services::plugins::DeferredCapabilities::default(),
         )
         .await
         .unwrap();
@@ -762,7 +762,7 @@ mod tests {
             Some(&host),
             &artifacts,
             None,
-            &crate::services::plugins::DeferredIssuer::default(),
+            &crate::services::plugins::DeferredCapabilities::default(),
         )
         .await
         .unwrap();
@@ -796,7 +796,7 @@ mod tests {
             None,
             &artifacts,
             None,
-            &crate::services::plugins::DeferredIssuer::default(),
+            &crate::services::plugins::DeferredCapabilities::default(),
         )
         .await
         .unwrap();
@@ -837,7 +837,7 @@ mod tests {
             Some(&host),
             &artifacts,
             None,
-            &crate::services::plugins::DeferredIssuer::default(),
+            &crate::services::plugins::DeferredCapabilities::default(),
         )
         .await
         .unwrap();
@@ -872,7 +872,7 @@ mod tests {
             Some(&host),
             &artifacts,
             None,
-            &crate::services::plugins::DeferredIssuer::default(),
+            &crate::services::plugins::DeferredCapabilities::default(),
         )
         .await
         .unwrap();
@@ -911,7 +911,7 @@ mod tests {
             Some(&host),
             &artifacts,
             None,
-            &crate::services::plugins::DeferredIssuer::default(),
+            &crate::services::plugins::DeferredCapabilities::default(),
         )
         .await
         .expect("a missing artifact is not a boot failure");
@@ -963,7 +963,7 @@ mod tests {
             Some(&host),
             &artifacts,
             None,
-            &crate::services::plugins::DeferredIssuer::default(),
+            &crate::services::plugins::DeferredCapabilities::default(),
         )
         .await
         .unwrap();
@@ -995,7 +995,7 @@ mod tests {
             Some(&host),
             &artifacts,
             None,
-            &crate::services::plugins::DeferredIssuer::default(),
+            &crate::services::plugins::DeferredCapabilities::default(),
         )
         .await
         .unwrap();

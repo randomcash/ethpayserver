@@ -203,6 +203,9 @@ pub struct ApiKeyAuthInfo {
     pub expires_at: Option<DateTime<Utc>>,
     /// Per-key rate limit in requests per minute. Null = server default.
     pub rate_limit_rpm: Option<i32>,
+    /// Explicitly granted, never inherited from role or owner. See the
+    /// `is_operator` column comment on `api_keys`.
+    pub is_operator: bool,
     /// Permission policy strings this key is scoped to. `None` means
     /// "inherit the owner's role in full" - see the migration that added
     /// this column.
@@ -234,7 +237,9 @@ impl PgDataService {
         key_hash: &str,
     ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyAuthInfo>(
-            "SELECT id, user_id, is_active, deprecated_at, expires_at, rate_limit_rpm, permissions FROM api_keys WHERE key_hash = $1",
+            "SELECT id, user_id, is_active, deprecated_at, expires_at, rate_limit_rpm, \
+                    is_operator, permissions \
+             FROM api_keys WHERE key_hash = $1",
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -341,7 +346,9 @@ impl PgDataService {
         id: Uuid,
     ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyAuthInfo>(
-            "SELECT id, user_id, is_active, deprecated_at, expires_at, rate_limit_rpm, permissions FROM api_keys WHERE id = $1",
+            "SELECT id, user_id, is_active, deprecated_at, expires_at, rate_limit_rpm, \
+                    is_operator, permissions \
+             FROM api_keys WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)

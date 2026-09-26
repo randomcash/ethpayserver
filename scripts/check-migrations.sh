@@ -22,7 +22,16 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 DIR="${MIGRATIONS_DIR:-data-service/migrations/postgres}"
 status=0
 
-versions="$(git ls-files "$DIR" \
+# `--others` as well as the index, because the file that introduces a
+# collision is by definition a new one. `git ls-files` alone sees only what is
+# already tracked, so running this straight after writing a migration - the
+# one moment it is worth running - reported "all distinct" about a directory
+# containing two copies of the same version. CI never saw the gap, since by
+# then everything is committed.
+#
+# `--exclude-standard` keeps .gitignore honoured, so build output and editor
+# leftovers do not become migrations.
+versions="$(git ls-files --cached --others --exclude-standard "$DIR" \
   | grep -E '\.sql$' \
   | grep -vE '\.down\.sql$' \
   | xargs -r -n1 basename \

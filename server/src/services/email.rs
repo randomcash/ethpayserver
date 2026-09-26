@@ -61,6 +61,17 @@ pub struct EmailChangeVerificationData {
     pub expires_in_minutes: i64,
 }
 
+/// A message to an account holder, composed by a caller that names no
+/// address - see `crate::services::plugins::account_notice` (capability 7).
+/// `subject` and `body` are sent verbatim: the caller is trusted to have
+/// written something a merchant should read, the same trust `FilterVerdict::
+/// Deny`'s `reason` is given today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountNotice {
+    pub subject: String,
+    pub body: String,
+}
+
 /// Email service that sends payment receipts via SMTP.
 pub struct EmailService {
     transport: AsyncSmtpTransport<Tokio1Executor>,
@@ -126,6 +137,30 @@ impl EmailService {
         Ok(())
     }
 
+    /// Send a notice to an account holder. The caller supplies `to` itself -
+    /// this is the SMTP-facing implementation the capability's host-side
+    /// lookup delivers through, not a second place that resolves an address.
+    pub async fn send_account_notice(
+        &self,
+        to: &str,
+        notice: &AccountNotice,
+    ) -> Result<(), EmailError> {
+        let email = Message::builder()
+            .from(self.from.parse().map_err(|_| EmailError::InvalidFrom)?)
+            .to(to.parse().map_err(|_| EmailError::InvalidRecipient)?)
+            .subject(notice.subject.clone())
+            .header(ContentType::TEXT_PLAIN)
+            .body(notice.body.clone())
+            .map_err(|e| EmailError::Build(e.to_string()))?;
+
+        self.transport
+            .send(email)
+            .await
+            .map_err(|e| EmailError::Send(e.to_string()))?;
+
+        Ok(())
+    }
+
     /// Send the verification code for a pending email-address change.
     pub async fn send_email_change_verification(
         &self,
@@ -175,6 +210,8 @@ pub enum EmailError {
     Build(String),
     #[error("smtp send error: {0}")]
     Send(String),
+    #[error("email is not configured on this host")]
+    NotConfigured,
 }
 
 /// Trait abstracting email sending for testability.
@@ -187,6 +224,14 @@ pub trait EmailSender: Send + Sync {
         to: &str,
         data: &EmailChangeVerificationData,
     ) -> Result<(), EmailError>;
+
+    /// Send a notice to an account holder. Like email-change verification and
+    /// unlike a receipt, this must not silently succeed when nothing was
+    /// actually sent: a caller that reads `Ok(())` here believes an account
+    /// has been notified, and that belief is the exact failure this
+    /// capability exists to close.
+    async fn send_account_notice(&self, to: &str, notice: &AccountNotice)
+    -> Result<(), EmailError>;
 
     /// Whether this sender actually delivers mail.
     ///
@@ -214,6 +259,14 @@ impl EmailSender for EmailService {
         self.send_email_change_verification(to, data).await
     }
 
+    async fn send_account_notice(
+        &self,
+        to: &str,
+        notice: &AccountNotice,
+    ) -> Result<(), EmailError> {
+        self.send_account_notice(to, notice).await
+    }
+
     fn is_configured(&self) -> bool {
         true
     }
@@ -234,6 +287,18 @@ impl EmailSender for NoopEmailSender {
         _data: &EmailChangeVerificationData,
     ) -> Result<(), EmailError> {
         Ok(())
+    }
+
+    async fn send_account_notice(
+        &self,
+        _to: &str,
+        _notice: &AccountNotice,
+    ) -> Result<(), EmailError> {
+        // Unlike a receipt, silently succeeding here is the failure this
+        // capability exists to close: a caller reading `Ok(())` believes an
+        // account was warned. `is_configured` already exists for exactly this
+        // check (see `request_email_change`); this is its second caller.
+        Err(EmailError::NotConfigured)
     }
 
     fn is_configured(&self) -> bool {
@@ -271,6 +336,22 @@ mod tests {
     #[test]
     fn noop_sender_reports_itself_unconfigured() {
         assert!(!NoopEmailSender.is_configured());
+    }
+
+    /// The same property as above, at the call a plugin (once this is
+    /// reachable from one) actually makes: a host with no SMTP configured
+    /// must return an error, not `Ok(())` that reads as "the account was
+    /// warned".
+    #[tokio::test]
+    async fn an_unconfigured_sender_refuses_an_account_notice_rather_than_pretending() {
+        let notice = AccountNotice {
+            subject: "You are approaching your bracket".to_string(),
+            body: "…".to_string(),
+        };
+        let result = NoopEmailSender
+            .send_account_notice("merchant@example.com", &notice)
+            .await;
+        assert!(matches!(result, Err(EmailError::NotConfigured)));
     }
 
     #[test]

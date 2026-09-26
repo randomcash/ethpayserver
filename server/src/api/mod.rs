@@ -38,7 +38,9 @@ pub mod users;
 pub mod webhook_deliveries;
 pub mod ws;
 
-pub use extractors::{AdminAuth, AuthenticatedUser, FreshlyAuthenticatedUser, StoreScopedUser};
+pub use extractors::{
+    AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser, StoreScopedUser,
+};
 
 /// A status, optionally with a reason the caller can read.
 ///
@@ -171,6 +173,7 @@ impl From<(StatusCode, String)> for ApiErr {
         admin::plugins::disable_plugin,
         admin::plugins::uninstall_plugin,
         admin::plugins::plugin_events,
+        admin::plugins::cancel_plugin_subscription,
     ),
     components(schemas(
         health::HealthResponse,
@@ -191,6 +194,7 @@ impl From<(StatusCode, String)> for ApiErr {
         stores::UpdateWalletRequest,
         stores::SetStoreWalletRequest,
         stores::StoreWalletResponse,
+        stores::MethodWalletResponse,
         stores::WalletResponse,
         stores::CreateWalletResponse,
         stores::WalletXpubResponse,
@@ -242,6 +246,7 @@ impl From<(StatusCode, String)> for ApiErr {
         admin::plugins::PluginMutationResponse,
         admin::plugins::PluginEventInfo,
         admin::plugins::PluginEventListResponse,
+        admin::plugins::CancelSubscriptionResponse,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -510,6 +515,10 @@ where
         .route(
             "/plugins/{id}/events",
             get(admin::plugins::plugin_events::<A>),
+        )
+        .route(
+            "/plugins/{id}/accounts/{account_id}/cancel-subscription",
+            post(admin::plugins::cancel_plugin_subscription::<A>),
         )
         .with_state(state.clone());
 

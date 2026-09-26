@@ -51,7 +51,8 @@ use payserver_plugin_api::{Manifest, PluginId};
 use crate::api::ApiErr;
 use crate::api::extractors::AdminAuth;
 use crate::services::plugins::{
-    PluginArtifacts, PluginRegistry, PluginStorage, generate_role_password, host_version,
+    CancelSubscriptionOutcome, PluginArtifacts, PluginRegistry, PluginStorage, cancel_subscription,
+    generate_role_password, host_version,
 };
 use crate::state::PgAppState;
 
@@ -111,6 +112,51 @@ pub struct AdminPluginListResponse {
     /// without it, every plugin reading `enabled: true, loaded: false` looks
     /// like a fleet of crashes rather than one flag.
     pub safe_mode: bool,
+}
+
+/// Refuse an install whose slug another plugin already owns.
+///
+/// Uniqueness cannot live on the slug type: that validates one slug and knows
+/// nothing about any other. Only the host knows what else is installed, so
+/// this is the one place it can be enforced - and it has to be, because two
+/// plugins sharing a slug means one silently owns the URL and the other's
+/// pages become unreachable.
+async fn refuse_a_taken_slug<A>(
+    state: &PgAppState<A>,
+    manifest: &Manifest,
+    id: &PluginId,
+) -> Result<(), ApiErr>
+where
+    A: SessionService + 'static,
+{
+    let Some(slug) = &manifest.slug else {
+        return Ok(());
+    };
+
+    let installed = InstalledPluginReader::list_installed_plugins(&*state.data_service)
+        .await
+        .map_err(|e| server_error(format!("could not read installed plugins: {e}")))?;
+
+    for row in &installed {
+        // An upgrade of this same plugin keeps its own slug.
+        if row.id == id.as_str() {
+            continue;
+        }
+        // A stored manifest that no longer parses cannot be compared, and is
+        // not a reason to refuse an unrelated install: it is already broken
+        // and reported as such at boot.
+        let Ok(other) = row.manifest_toml.parse::<Manifest>() else {
+            continue;
+        };
+        if other.slug.as_ref() == Some(slug) {
+            return Err(bad_request(format!(
+                "slug {slug:?} is already used by plugin {}; a slug is a URL and two \
+                 plugins cannot share one",
+                row.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Install a plugin, or upgrade one already installed.
@@ -182,6 +228,18 @@ pub struct PluginEventInfo {
 pub struct PluginEventListResponse {
     pub plugin_id: String,
     pub events: Vec<PluginEventInfo>,
+}
+
+/// What asking a plugin to cancel a subscription came back with.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CancelSubscriptionResponse {
+    pub plugin_id: String,
+    pub account_id: String,
+    /// False on a refusal the plugin explains in `detail`. A call that could
+    /// not run at all is not this response - see the 502 response below.
+    pub cancelled: bool,
+    /// Plain-language detail: what happened, and on a refusal, why.
+    pub detail: String,
 }
 
 // ============================================================================
@@ -444,6 +502,8 @@ where
     let id = manifest.id.clone();
     let version = manifest.version.to_string();
 
+    refuse_a_taken_slug(&state, &manifest, &id).await?;
+
     let existing = InstalledPluginReader::get_installed_plugin(&*state.data_service, id.as_str())
         .await
         .map_err(|e| server_error(format!("could not read the install record: {e}")))?;
@@ -664,6 +724,89 @@ where
     }))
 }
 
+/// Ask an installed plugin to cancel one account's subscription now.
+///
+/// This is the operator-side path onto a state nothing else can reach: a
+/// plugin page is read-only, so a merchant cannot ask to stop being billed
+/// through one, and there is no other trigger anywhere in this server for a
+/// plugin write. An admin picking the plugin and the account explicitly is
+/// deliberately not the same shape as the broadcast dispatch in
+/// `services::plugins::dispatch` - see that module's doc for why a wrong
+/// answer here costs one account, not every invoice on the instance.
+///
+/// The plugin owns whatever "cancelled" means for its own schema; this route
+/// only carries the ask and the plugin's answer. A plugin that does not
+/// implement `cancel_subscription` answers exactly like one that trapped -
+/// [`StatusCode::BAD_GATEWAY`], not a silent no-op reported as success.
+#[utoipa::path(
+    post,
+    path = "/admin/plugins/{id}/accounts/{account_id}/cancel-subscription",
+    tag = "admin",
+    params(
+        ("id" = String, Path, description = "Plugin id"),
+        ("account_id" = String, Path, description = "The account whose subscription to cancel"),
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "The plugin answered", body = CancelSubscriptionResponse),
+        (status = 404, description = "No such plugin, or plugins are disabled on this instance"),
+        (status = 502, description = "The plugin could not run the call"),
+    )
+)]
+pub async fn cancel_plugin_subscription<A>(
+    AdminAuth(admin): AdminAuth,
+    State(state): State<PgAppState<A>>,
+    Path((raw_id, account_id)): Path<(String, String)>,
+) -> Result<Json<CancelSubscriptionResponse>, ApiErr>
+where
+    A: SessionService + 'static,
+{
+    let id = parse_id(&raw_id)?;
+
+    let host = state.plugin_host.as_ref().ok_or_else(|| {
+        ApiErr::from((
+            StatusCode::NOT_FOUND,
+            format!("{id} is not loaded - plugins are disabled on this instance"),
+        ))
+    })?;
+
+    let outcome = cancel_subscription(host, &id, &account_id).await;
+
+    tracing::warn!(
+        plugin_id = %id,
+        %account_id,
+        actor = %admin.id,
+        outcome = ?outcome,
+        "admin requested a subscription cancellation"
+    );
+
+    let (cancelled, detail) = match outcome {
+        CancelSubscriptionOutcome::Cancelled => (
+            true,
+            format!("{id} cancelled the subscription for {account_id}."),
+        ),
+        CancelSubscriptionOutcome::Refused { reason } => (
+            false,
+            reason.unwrap_or_else(|| {
+                format!("{id} declined to cancel the subscription for {account_id}.")
+            }),
+        ),
+        CancelSubscriptionOutcome::CouldNotRun { reason } => {
+            return Err(ApiErr::from((
+                StatusCode::BAD_GATEWAY,
+                format!("{id} could not run the cancellation: {reason}"),
+            )));
+        }
+    };
+
+    Ok(Json(CancelSubscriptionResponse {
+        plugin_id: id.as_str().to_string(),
+        account_id,
+        cancelled,
+        detail,
+    }))
+}
+
 /// Remove a plugin: its install record and its artifact.
 ///
 /// The plugin's Postgres schema is deliberately left alone. Uninstalling is
@@ -876,6 +1019,11 @@ mod tests {
                 "POST",
                 vec!["GET"],
             ),
+            (
+                "/admin/plugins/cash.random.billing/accounts/acct-1/cancel-subscription",
+                "GET",
+                vec!["POST"],
+            ),
         ];
 
         for (path, wrong_method, expected) in probes {
@@ -931,6 +1079,10 @@ mod tests {
             ("POST", "/admin/plugins/cash.random.billing/enable"),
             ("POST", "/admin/plugins/cash.random.billing/disable"),
             ("GET", "/admin/plugins/cash.random.billing/events"),
+            (
+                "POST",
+                "/admin/plugins/cash.random.billing/accounts/acct-1/cancel-subscription",
+            ),
         ];
 
         for (method, path) in probes {

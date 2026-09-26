@@ -156,6 +156,7 @@ fn evm_only_settings() -> ServerSettings {
         invoice_expiry_minutes: 60,
         rate_limit_rpm: 100,
         enabled_chain_ids: [1u64, 137].into_iter().map(ChainId::evm).collect(),
+        billing_store_id: None,
     }
 }
 

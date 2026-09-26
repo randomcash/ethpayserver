@@ -55,6 +55,22 @@ pub struct AuthenticatedUser(pub UserInfo);
 /// know a key's scope.
 pub struct StoreScopedUser(pub UserInfo, pub Option<Vec<String>>);
 
+/// Like `AuthenticatedUser`, but also carries whether the credential used to
+/// authenticate this request has been explicitly granted the operator
+/// property, plus the same store-permission scope `StoreScopedUser` carries.
+///
+/// The operator property lives on the credential (today, only an API key's
+/// `is_operator` column), not on the requesting user's role or on any store
+/// the request names - it is decided once, at authentication time, and
+/// nothing downstream can derive it from *what* is being asked for. Use this
+/// instead of `AuthenticatedUser` only where both that distinction and the
+/// key's store scope matter - today, only `create_invoice`.
+pub struct AuthenticatedCaller {
+    pub user: UserInfo,
+    pub is_operator: bool,
+    pub key_scope: Option<Vec<String>>,
+}
+
 /// How long ago a session must have been created to count as a fresh proof of
 /// a passkey or wallet assertion. Matches the window `cleanup_expired_challenges`
 /// (auth crate, wallet/passkey challenge tables) treats a login challenge as
@@ -157,17 +173,18 @@ where
 {
     validate_session_with_scope(parts, state)
         .await
-        .map(|(user_info, _scope)| user_info)
+        .map(|(user_info, _is_operator, _scope)| user_info)
 }
 
-/// Same as `validate_session`, but also returns the API key's stored store-
-/// permission scope (`None` for session auth). Split out so the ~80 call
-/// sites that only ever want `UserInfo` don't have to carry a scope they
-/// never look at - see `StoreScopedUser`.
+/// Same as `validate_session`, but also returns whether the credential is
+/// explicitly granted the operator property (see `AuthenticatedCaller`) and
+/// the API key's stored store-permission scope (`None` for session auth).
+/// Split out so the ~80 call sites that only ever want `UserInfo` don't have
+/// to carry data they never look at - see `StoreScopedUser`.
 async fn validate_session_with_scope<A>(
     parts: &mut Parts,
     state: &PgAppState<A>,
-) -> Result<(UserInfo, Option<Vec<String>>), (StatusCode, &'static str)>
+) -> Result<(UserInfo, bool, Option<Vec<String>>), (StatusCode, &'static str)>
 where
     A: SessionService + 'static,
 {
@@ -190,13 +207,14 @@ where
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
 
-    // A session carries no key scope of its own - the caller is bound only
-    // by their role and store membership, same as before per-key scoping
-    // existed.
-    Ok((user_info, None))
+    // A session carries no operator property or key scope of its own - the
+    // caller is bound only by their role and store membership, same as
+    // before either existed.
+    Ok((user_info, false, None))
 }
 
-/// Validate an API key and return the associated user info.
+/// Validate an API key and return the associated user info, plus the key's
+/// own `is_operator` flag and stored store-permission scope.
 ///
 /// When the key is deprecated but within its grace window, stamps an
 /// `ApiKeyDeprecationInfo` into `parts.extensions` so the response-header
@@ -205,7 +223,7 @@ async fn validate_api_key<A>(
     raw_key: &str,
     parts: &mut Parts,
     state: &PgAppState<A>,
-) -> Result<(UserInfo, Option<Vec<String>>), (StatusCode, &'static str)>
+) -> Result<(UserInfo, bool, Option<Vec<String>>), (StatusCode, &'static str)>
 where
     A: SessionService + 'static,
 {
@@ -296,7 +314,7 @@ where
             .await;
     });
 
-    Ok((user, key_info.permissions))
+    Ok((user, key_info.is_operator, key_info.permissions))
 }
 
 /// Get the deprecation grace period in seconds (default: 48 hours).
@@ -337,8 +355,27 @@ where
         parts: &mut Parts,
         state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
-        let (user_info, scope) = validate_session_with_scope(parts, state).await?;
+        let (user_info, _is_operator, scope) = validate_session_with_scope(parts, state).await?;
         Ok(StoreScopedUser(user_info, scope))
+    }
+}
+
+impl<A> FromRequestParts<PgAppState<A>> for AuthenticatedCaller
+where
+    A: SessionService + 'static,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &PgAppState<A>,
+    ) -> Result<Self, Self::Rejection> {
+        let (user, is_operator, key_scope) = validate_session_with_scope(parts, state).await?;
+        Ok(AuthenticatedCaller {
+            user,
+            is_operator,
+            key_scope,
+        })
     }
 }
 
