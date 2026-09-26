@@ -28,6 +28,7 @@ pub mod health;
 pub mod http_metrics;
 pub mod idempotency;
 pub mod invoices;
+mod openapi;
 pub mod payouts;
 pub mod plugins;
 pub mod rate_limit;
@@ -39,6 +40,7 @@ pub mod webhook_deliveries;
 pub mod ws;
 
 pub use extractors::{AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser};
+pub use openapi::ApiDoc;
 
 /// A status, optionally with a reason the caller can read.
 ///
@@ -83,182 +85,6 @@ impl From<(StatusCode, String)> for ApiErr {
         Self(status, reason)
     }
 }
-
-/// OpenAPI documentation for the entire API.
-#[derive(OpenApi)]
-#[openapi(
-    info(
-        title = "ETHPayServer API",
-        version = "0.1.0",
-        description = "Self-hosted Ethereum payment processor API",
-        license(name = "MIT"),
-    ),
-    paths(
-        // Health
-        health::health_check,
-        health::liveness,
-        health::readiness,
-        health::deep_health,
-        health::chains_health,
-        health::prometheus_metrics,
-        // Stores
-        stores::list_stores,
-        stores::create_store,
-        stores::get_store,
-        stores::update_store,
-        stores::delete_store,
-        stores::list_store_members,
-        stores::add_store_member,
-        stores::update_store_member,
-        stores::remove_store_member,
-        stores::get_store_wallet,
-        stores::configure_store_wallet,
-        stores::delete_store_wallet,
-        stores::rotate_store_wallet,
-        stores::list_wallets,
-        stores::create_wallet,
-        stores::get_wallet_by_id,
-        stores::update_wallet,
-        stores::delete_wallet,
-        stores::export_wallet_xpub,
-        stores::list_wallet_addresses,
-        stores::get_store_webhook,
-        stores::configure_store_webhook,
-        stores::delete_store_webhook,
-        // Payment Methods
-        stores::list_payment_methods,
-        stores::create_payment_method,
-        stores::get_payment_method,
-        stores::update_payment_method,
-        stores::delete_payment_method,
-        // Invoices
-        invoices::list_invoices,
-        invoices::create_invoice,
-        invoices::get_invoice,
-        invoices::get_invoice_payments,
-        invoices::get_invoice_status,
-        invoices::cancel_invoice,
-        // Payments
-        invoices::list_payments,
-        invoices::get_payment,
-        // Dashboard
-        dashboard::get_stats,
-        dashboard::get_analytics,
-        // Rates
-        rates::get_rate,
-        // Users
-        users::list_api_keys,
-        users::create_api_key,
-        users::revoke_api_key,
-        users::update_api_key,
-        users::rotate_api_key,
-        users::list_wallet_credentials,
-        users::create_wallet_reauth_challenge,
-        users::set_primary_wallet_credential,
-        // Admin
-        admin::list_users,
-        admin::update_user_role,
-        admin::lock_user,
-        admin::unlock_user,
-        admin::get_settings,
-        admin::update_settings,
-        admin::get_safe_mode,
-        plugins::list_plugin_pages,
-        admin::plugins::list_plugins,
-        admin::plugins::install_plugin,
-        admin::plugins::enable_plugin,
-        admin::plugins::disable_plugin,
-        admin::plugins::uninstall_plugin,
-        admin::plugins::plugin_events,
-        admin::plugins::cancel_plugin_subscription,
-    ),
-    components(schemas(
-        health::HealthResponse,
-        health::ReadinessResponse,
-        health::DeepHealthResponse,
-        health::DependencyHealth,
-        health::RpcHealth,
-        health::MonitorHealth,
-        health::ChainsHealthResponse,
-        health::ChainHealthInfo,
-        stores::CreateStoreRequest,
-        stores::UpdateStoreRequest,
-        stores::StoreResponse,
-        stores::AddMemberRequest,
-        stores::UpdateMemberRequest,
-        stores::MemberResponse,
-        stores::CreateWalletRequest,
-        stores::UpdateWalletRequest,
-        stores::SetStoreWalletRequest,
-        stores::StoreWalletResponse,
-        stores::MethodWalletResponse,
-        stores::WalletResponse,
-        stores::CreateWalletResponse,
-        stores::WalletXpubResponse,
-        stores::DerivedAddressEntry,
-        stores::WalletAddressesResponse,
-        stores::ConfigureWebhookRequest,
-        stores::WebhookResponse,
-        stores::CreatePaymentMethodRequest,
-        stores::UpdatePaymentMethodRequest,
-        stores::PaymentMethodResponse,
-        stores::RotateWalletRequest,
-        stores::RotateWalletResponse,
-        stores::RotationEntry,
-        invoices::CreateInvoiceRequest,
-        invoices::InvoiceResponse,
-        invoices::InvoiceListResponse,
-        invoices::PaymentResponse,
-        invoices::PaymentListResponse,
-        invoices::PaymentOptionResponse,
-        invoices::InvoiceStatusResponse,
-        dashboard::DashboardStats,
-        dashboard::DashboardAnalytics,
-        dashboard::AssetVolume,
-        dashboard::DailyVolume,
-        rates::RateResponse,
-        users::ApiKeyListResponse,
-        users::ApiKeyInfoResponse,
-        users::CreateApiKeyPayload,
-        users::CreateApiKeyResponsePayload,
-        users::UpdateApiKeyPayload,
-        users::RotateApiKeyResponsePayload,
-        users::WalletCredentialResponse,
-        users::WalletReauthChallengeResponse,
-        users::PromoteWalletCredentialRequest,
-        admin::UserListResponse,
-        admin::AdminUserInfo,
-        admin::UpdateRoleRequest,
-        admin::ServerSettingsResponse,
-        admin::UpdateServerSettingsRequest,
-        admin::SafeModeResponse,
-        plugins::PluginPagesResponse,
-        plugins::PluginPagesInfo,
-        plugins::PluginPageInfo,
-        admin::plugins::AdminPluginInfo,
-        admin::plugins::AdminPluginListResponse,
-        admin::plugins::InstallPluginRequest,
-        admin::plugins::DisablePluginRequest,
-        admin::plugins::PluginMutationResponse,
-        admin::plugins::PluginEventInfo,
-        admin::plugins::PluginEventListResponse,
-        admin::plugins::CancelSubscriptionResponse,
-    )),
-    tags(
-        (name = "health", description = "Health check endpoints"),
-        (name = "stores", description = "Store management"),
-        (name = "invoices", description = "Invoice management"),
-        (name = "payments", description = "Payment management"),
-        (name = "tokens", description = "Token management (from EVM API)"),
-        (name = "networks", description = "Network information (from EVM API)"),
-        (name = "auth", description = "Authentication (from Auth API)"),
-        (name = "dashboard", description = "Dashboard statistics and analytics"),
-        (name = "rates", description = "Exchange rates"),
-        (name = "users", description = "User management (API keys)"),
-        (name = "admin", description = "Server administration"),
-    )
-)]
-pub struct ApiDoc;
 
 /// Create the unified API router.
 ///
@@ -473,6 +299,9 @@ where
     // Admin endpoints (ServerAdmin only)
     let admin_routes = Router::new()
         .route("/users", get(admin::list_users::<A>))
+        .route("/users/{id}", delete(admin::delete_user_account::<A>))
+        .route("/users/{id}/stores", get(admin::list_user_stores::<A>))
+        .route("/stores/{id}", delete(admin::hard_delete_store::<A>))
         .route(
             "/users/{id}/role",
             axum::routing::patch(admin::update_user_role::<A>),

@@ -1,10 +1,10 @@
-# core
+# server
 
 Main server for ETHPayServer - unified API and service orchestration.
 
 ## Overview
 
-The core crate provides the main `ethpayserver` binary that combines all other crates into a single HTTP server with a unified API.
+The `server` crate provides the main `ethpayserver` binary that combines all other crates into a single HTTP server with a unified API.
 
 ## Architecture
 
@@ -13,17 +13,19 @@ The core crate provides the main `ethpayserver` binary that combines all other c
 │                     ETHPayServer Core                       │
 ├─────────────────────────────────────────────────────────────┤
 │  API Layer (axum)                                           │
-│  ├── /health     - Health checks                            │
-│  ├── /evm        - EVM operations (tokens, networks)        │
-│  ├── /auth       - Authentication (TODO)                    │
+│  ├── /health, /metrics - Health checks, Prometheus metrics  │
+│  ├── /auth       - Passkey, wallet and BIP39 authentication │
+│  ├── /stores, /wallets, /invoices, /payments, /evm, /rates  │
+│  ├── /users, /admin, /checkout, /dashboard, /plugins        │
 │  └── /swagger-ui - API documentation                        │
 ├─────────────────────────────────────────────────────────────┤
-│  Service Layer                                              │
-│  ├── AuthService   - User authentication & sessions         │
-│  └── (PaymentService, InvoiceService - TODO)                │
+│  Service Layer                                               │
+│  ├── EventConsumer, ExpirationSvc, CleanupService            │
+│  ├── WatchRetryService, WebhookService                       │
+│  └── AuthService - User authentication & sessions            │
 ├─────────────────────────────────────────────────────────────┤
-│  Data Layer                                                 │
-│  └── PgDataService - PostgreSQL repositories                │
+│  Data Layer                                                  │
+│  └── PgDataService - PostgreSQL repositories                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -44,6 +46,14 @@ cargo run --release --bin ethpayserver
 ```
 
 ## API Endpoints
+
+A representative sample, not the full surface — stores alone has grown wallet,
+settings, webhook, payment-methods, token-policy and payouts sub-resources not
+listed here, and whole groups (`/wallets`, `/payments`, `/rates`,
+`/dashboard`, `/users`, `/admin`, `/checkout`, `/plugins`) are omitted
+entirely. See the root [README's API Endpoints section](../README.md#api-endpoints)
+for a fuller (still non-exhaustive) list, `/swagger-ui` on a running instance
+for the generated and current one, or `server/src/api/mod.rs` for the router.
 
 ### Health
 
@@ -75,7 +85,11 @@ cargo run --release --bin ethpayserver
 | `POST /invoices` | Create a new invoice |
 | `GET /invoices/{id}` | Get invoice details |
 | `POST /invoices/{id}/cancel` | Cancel a pending invoice |
-| `POST /invoices/expire` | Mark expired invoices (admin) |
+| `POST /invoices/{id}/refund` | Always refuses (501) — refunds are the merchant's job; this server holds no spending key in the shipped build (see `evm/README.md`'s `hot-wallet` feature entry) |
+
+Invoice expiration is not an endpoint — the background `ExpirationSvc`
+(see the root README's Architecture diagram) expires pending invoices on its
+own schedule.
 
 ### Auth (mounted at `/auth`)
 
@@ -117,4 +131,7 @@ When `ENABLE_SWAGGER=true`, the Swagger UI is available at `/swagger-ui`.
 - `auth` - Authentication service
 - `data-service` - PostgreSQL data access
 - `evm` - EVM blockchain operations
-- `types` - Common types
+- `types`, `api-types` - Common types and REST request/response shapes
+- `crypto`, `rates` - Cryptographic primitives, fiat/crypto exchange rates
+- `payserver-plugin-api`, `payserver-plugin-host` - Plugin manifests and the
+  wasmtime host that runs them (see the root README's [Plugins](../README.md#plugins))

@@ -1,6 +1,9 @@
 /target
 /result
-/memos
+# /memos was ignored here, next to build output. It now holds the shared
+# session memory - spec, feature list and session log - which has to be
+# tracked or the harness has no memory at all. The first attempt to commit
+# those files silently added nothing but a hint in git's output.
 .env
 .env.*
 !.env.*.example
