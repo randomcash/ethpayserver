@@ -195,3 +195,52 @@ async fn integration_analytics_groups_by_day_and_asset() {
     assert_eq!(buckets[1].payment_count, 2);
     assert_eq!(buckets[1].raw_amount, "2000000000000000000");
 }
+
+#[tokio::test]
+#[ignore]
+async fn integration_analytics_per_store_reads_nothing_for_an_empty_store_list() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+    seed_one_eth_payment(&service).await;
+
+    let buckets = service
+        .payment_volume_by_day_per_store(&last_30_days())
+        .await
+        .unwrap();
+    assert!(buckets.is_empty());
+}
+
+/// The property `payment_volume_by_day` cannot express: two stores queried
+/// together must come back as two separate buckets, not one combined sum.
+#[tokio::test]
+#[ignore]
+async fn integration_analytics_per_store_keeps_each_store_separate() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+    let (store_a, _) = seed_one_eth_payment(&service).await;
+    let (store_b, _) = seed_one_eth_payment(&service).await;
+    assert_ne!(store_a, store_b);
+
+    let query = PaymentVolumeQuery {
+        store_ids: vec![store_a, store_b],
+        ..last_30_days()
+    };
+    let mut buckets = service
+        .payment_volume_by_day_per_store(&query)
+        .await
+        .unwrap();
+    buckets.sort_by_key(|b| b.store_id.0);
+
+    assert_eq!(
+        buckets.len(),
+        2,
+        "one bucket per store, not one combined sum"
+    );
+    let mut expected = [store_a, store_b];
+    expected.sort_by_key(|s| s.0);
+    assert_eq!(buckets[0].store_id, expected[0]);
+    assert_eq!(buckets[1].store_id, expected[1]);
+    for bucket in &buckets {
+        assert_eq!(bucket.asset_symbol, "ETH");
+        assert_eq!(bucket.payment_count, 1);
+        assert_eq!(bucket.raw_amount, "1000000000000000000");
+    }
+}

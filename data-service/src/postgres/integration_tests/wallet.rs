@@ -748,6 +748,118 @@ async fn setting_a_store_override_changes_where_derivation_happens() {
     );
 }
 
+/// A pin survives a primary change elsewhere on the account - and that is
+/// exactly what makes `resolve_store_wallet` an unsafe stand-in for "the
+/// wallet this method derives from".
+///
+/// `set_store_wallet` unpins every method in its family precisely so an
+/// explicit override is not cosmetic (see the test above). Promoting a
+/// *different* wallet to primary has no such release: nothing walks the
+/// store's payment methods when `is_primary` moves, because most of them are
+/// meant to follow it. A method pinned by its own xpub is the one case that
+/// must not, and does not - which means the moment a second wallet becomes
+/// primary, the store's bare resolution and this method's actual resolution
+/// name two different wallets, indefinitely, with nothing that reconciles
+/// them again.
+#[tokio::test]
+#[ignore]
+async fn a_pin_outlives_a_primary_change_and_diverges_from_the_store() {
+    let Some(service) = create_test_service().await else {
+        return;
+    };
+    let xpub_a = unique_xpub("a");
+    let xpub_b = unique_xpub("b");
+    let user = seed_user(&service).await;
+    let store = seed_store_for(&service, user).await;
+
+    // Configured by pasting a key, same as the e2e merchant flow: the method
+    // is pinned to whatever wallet that key resolves to, which - being the
+    // account's first wallet in this family - is also the primary. Bare
+    // store resolution and the method's own resolution agree, for now.
+    let method = StorePaymentMethodWriter::create_payment_method(
+        &service,
+        store,
+        &ChainId::evm(1),
+        None,
+        "ETH",
+        18,
+        Some(&xpub_a),
+    )
+    .await
+    .unwrap();
+    let pinned_wallet = method.wallet_id.expect("resolves");
+
+    let mut seen = HashSet::new();
+    for _ in 0..3 {
+        let allocation = StorePaymentMethodWriter::allocate_derivation(&service, method.id)
+            .await
+            .unwrap();
+        assert_eq!(allocation.wallet_id, pinned_wallet);
+        assert!(seen.insert(allocation.index));
+    }
+
+    // A second wallet appears on the account - not pinned to this store, not
+    // even touching it - and is later made primary. Neither step is store
+    // configuration; both are account-level actions the store's owner can
+    // take for reasons that have nothing to do with this method.
+    let second = WalletWriter::create_wallet(&service, user, EVM, &xpub_b, Some("second"))
+        .await
+        .unwrap();
+    assert!(
+        !second.is_primary,
+        "the first wallet keeps primary until asked"
+    );
+    WalletWriter::set_primary_wallet(&service, user, second.id)
+        .await
+        .unwrap();
+
+    // The store's bare resolution followed the primary, as documented.
+    assert_eq!(
+        WalletReader::resolve_store_wallet(&service, store, EVM)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        second.id,
+        "with no override the store follows whichever wallet is primary now"
+    );
+
+    // The pinned method did not move, and must not have: it was never asked
+    // to. Re-reading it and allocating from it again both have to agree with
+    // where it always derived, not with what the store now reports.
+    let reread = StorePaymentMethodReader::get_payment_method(&service, method.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reread.wallet_id,
+        Some(pinned_wallet),
+        "a pin is not a snapshot of the primary at creation time - it must \
+         survive the primary moving to somewhere else"
+    );
+
+    let after = StorePaymentMethodWriter::allocate_derivation(&service, method.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        after.wallet_id, pinned_wallet,
+        "allocation must keep deriving from the pin, not from whatever the \
+         store now resolves to"
+    );
+    assert!(
+        seen.insert(after.index),
+        "index {} was reissued after the primary changed - the exact hazard \
+         a static-looking counter on the wrong wallet hides",
+        after.index
+    );
+
+    // The two resolutions of "this store's wallet" now genuinely disagree
+    // (`second` above, `pinned_wallet` here) - not a bug in either alone, but
+    // proof that the store's bare resolution is the wrong question to ask
+    // about a pinned method. `GET /stores/{id}/wallet?payment_method_id=...`
+    // asks the right one instead.
+}
+
 /// A method with nothing to resolve to is listed, not hidden, and refuses to
 /// allocate rather than inventing a key.
 #[tokio::test]

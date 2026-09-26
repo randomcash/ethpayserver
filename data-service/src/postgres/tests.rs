@@ -13,11 +13,16 @@ use super::PgDataService;
 
 pub(super) async fn create_test_service() -> Option<PgDataService> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
+    // `DATABASE_URL` unset means "no local DB configured" - an intentional
+    // skip. `DATABASE_URL` set but unreachable is a different failure: the
+    // gating CI job always sets it against a real Postgres, so a connect
+    // failure there means the environment is broken, not that the test
+    // should quietly report itself as passed.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
-        .ok()?;
+        .expect("DATABASE_URL is set but the database is unreachable");
     Some(PgDataService::new(pool))
 }
 

@@ -17,7 +17,9 @@ use types::{
 };
 use uuid::Uuid;
 
-use crate::analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
+use crate::analytics::{
+    PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery, StorePaymentVolumeBucket,
+};
 use crate::{UpsertDeliveryParams, WebhookDeliveryWriter};
 
 /// In-memory implementation of all repository traits for testing.
@@ -1171,6 +1173,77 @@ impl PaymentAnalyticsReader for InMemoryDataService {
                     payment_count: count,
                 },
             )
+            .collect())
+    }
+
+    async fn payment_volume_by_day_per_store(
+        &self,
+        query: &PaymentVolumeQuery,
+    ) -> RepositoryResult<Vec<StorePaymentVolumeBucket>> {
+        if query.store_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let payments = self.payments.read().unwrap();
+        let invoices = self.invoices.read().unwrap();
+        let options = self.payment_options.read().unwrap();
+
+        // Key: (store_id, day, asset_symbol, decimals) -> (raw sum, count).
+        // Identical to `payment_volume_by_day` with the store carried into
+        // the group key rather than only the filter. Keyed on the inner
+        // `Uuid` rather than `StoreId` itself, which does not derive `Ord`.
+        let mut groups: BTreeMap<(Uuid, NaiveDate, String, u8), (u128, i64)> = BTreeMap::new();
+
+        for payment in payments.values() {
+            if payment.reorged {
+                continue;
+            }
+            if payment.detected_at < query.since || payment.detected_at >= query.until {
+                continue;
+            }
+            let Some(invoice) = invoices.get(&payment.invoice_id.0) else {
+                continue;
+            };
+            if !query.store_ids.contains(&invoice.store_id) {
+                continue;
+            }
+
+            let decimals = payment
+                .payment_option_id
+                .and_then(|id| options.get(&id))
+                .map_or(18, |po| po.decimals);
+
+            let amount: u128 = payment.amount.parse().map_err(|_| {
+                RepositoryError::Database(format!(
+                    "payment {} has a non-integer amount: {}",
+                    payment.id, payment.amount
+                ))
+            })?;
+
+            let entry = groups
+                .entry((
+                    invoice.store_id.0,
+                    payment.detected_at.date_naive(),
+                    payment.asset_symbol.clone(),
+                    decimals,
+                ))
+                .or_insert((0, 0));
+            entry.0 = entry.0.saturating_add(amount);
+            entry.1 += 1;
+        }
+
+        Ok(groups
+            .into_iter()
+            .map(|((store_id, day, asset_symbol, decimals), (raw, count))| {
+                StorePaymentVolumeBucket {
+                    store_id: StoreId(store_id),
+                    day,
+                    asset_symbol,
+                    decimals,
+                    raw_amount: raw.to_string(),
+                    payment_count: count,
+                }
+            })
             .collect())
     }
 }

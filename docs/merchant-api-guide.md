@@ -10,7 +10,18 @@ ETHPayServer is a self-hosted Ethereum and EVM-chain payment processor. It is
 **non-custodial**: a merchant registers an extended public key (an **xpub**,
 never a private key), and every payment address is derived from it. The
 server can compute addresses and watch the chain for payments to them, but it
-holds no spending key for any of them.
+holds no spending key for any of them. (The `evm` crate carries a
+signing/broadcasting module behind a `hot-wallet` Cargo feature, reserved for
+a possible future opt-in mode; it is off by default, and no `Cargo.toml`,
+Dockerfile or CI workflow anywhere in this repository enables it, so no
+binary built from this repository turns it on — see `evm/README.md`'s crate
+table. That gating predates this documentation pass: it shipped, reviewed,
+in the same change that removed the module's last callers. Confirm it
+yourself rather than trusting this paragraph: `git grep -n hot-wallet` across
+every `Cargo.toml` and `.github/workflows/*.yml` in this repository turns up
+only the feature's own off-by-default declaration, the `#[cfg(...)]` gate on
+`evm::transaction`, and this paragraph — no crate depends on `evm` with that
+feature enabled, and no CI job passes it.)
 
 Two consequences that follow directly from that, not incidentally:
 
@@ -70,8 +81,9 @@ places a plausible-looking guess is wrong.
     get a display value, using integer or bignum arithmetic. Never parse
     either kind as a float: float rounding on a value that settles a payment
     is a bug, not a rounding error.
-- **The server never sends funds.** `POST /invoices/{id}/refund` and
-  `POST /stores/{id}/payouts` create ledger records only. See
+- **The server never sends funds.** `POST /invoices/{id}/refund` always
+  refuses (501) and creates nothing; `POST /stores/{id}/payouts` creates a
+  ledger record only. See
   [What ETHPayServer does not do](#10-what-ethpayserver-does-not-do).
 - **Chain IDs are [CAIP-2](https://standards.chainagnostic.org/CAIPs/caip-2)
   strings** (`"eip155:1"`), not bare integers. See
@@ -203,6 +215,12 @@ A wallet belongs to one **chain family**, named by its CAIP-2 namespace -
 `eip155` for Ethereum and every EVM chain, `tron` for Tron. `namespace`
 defaults to `eip155`, so a request that does not mention it means what it
 always meant.
+
+**`tron` is derivation and storage plumbing only.** No Tron chain is enabled
+or monitored today, so a `tron` wallet can be created but no store can add a
+`tron:` payment method against it - the API refuses those until a Tron chain
+adapter exists. Everything below that mentions `tron` describes the shape of
+that future support, not something reachable yet.
 
 ```bash
 curl -X POST https://your-instance.example.com/wallets \
@@ -906,14 +924,17 @@ reproduce it: address, amount, asset, chain.
 Restated plainly, because a model asked to fill a gap will otherwise invent
 a plausible-sounding answer:
 
-- **No custody, ever.** The server never holds a spending key for any
-  merchant funds. See [What this is](#what-this-is).
-- **No refunds are sent.** `POST /invoices/{invoice_id}/refund` validates the
-  request (invoice is paid, amount doesn't exceed what's left after prior
-  refunds, a destination address is known) and writes a `Refund` record with
-  status `Pending`. **That is all it does.** No transaction is signed or
-  broadcast — the server holds no spending key to sign one with. The record
-  exists so you have somewhere to track a refund you send yourself, from
+- **No custody in the shipped build.** The server never holds a spending key
+  for any merchant funds. See [What this is](#what-this-is) for the one
+  reserved, off-by-default exception and why it doesn't change this.
+- **No refunds are sent, and none are recorded either.** `POST
+  /invoices/{invoice_id}/refund` always returns `501 Not Implemented` and
+  writes nothing. An earlier version wrote a `Refund` record with status
+  `Pending` that nothing downstream ever moved past that status — worse than
+  refusing, since it told you a refund was in flight when none was and never
+  would be. `GET /invoices/{invoice_id}/refunds` still lists any refund
+  records left over from that era; going forward none will be created
+  through this API. To refund a customer, send funds back yourself, from
   whatever wallet actually holds the funds. Refunds are the merchant's job.
 - **No payouts are sent.** `POST /stores/{store_id}/payouts` is the same
   shape: it validates which confirmed, unclaimed invoice payments the
