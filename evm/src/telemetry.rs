@@ -276,18 +276,25 @@ pub fn resolve_environment() -> String {
 /// typed for `"0.1"`, or a negative number) is clamped into `0.0..=1.0` with
 /// the same warning, rather than handed to `ClientOptions` as-is — otherwise
 /// that exact typo silently reproduces the unbounded-cost failure this
-/// ticket exists to close.
+/// ticket exists to close. `NaN` parses successfully (`"nan"` is a valid
+/// `f32`) but compares `false` against every bound, so it would skip the
+/// range check and `f32::clamp` passes it through unchanged — it is treated
+/// as unparseable rather than trusted to `clamp`.
 #[must_use]
 pub fn resolve_traces_sample_rate() -> f32 {
     match std::env::var("SENTRY_TRACES_SAMPLE_RATE") {
         Ok(raw) => {
-            let parsed: f32 = raw.parse().unwrap_or_else(|_| {
-                tracing::warn!(
-                    value = %raw,
-                    "SENTRY_TRACES_SAMPLE_RATE is not a valid number; falling back to 0.0"
-                );
-                0.0
-            });
+            let parsed: f32 = raw
+                .parse()
+                .ok()
+                .filter(|value: &f32| !value.is_nan())
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        value = %raw,
+                        "SENTRY_TRACES_SAMPLE_RATE is not a valid number; falling back to 0.0"
+                    );
+                    0.0
+                });
             if (0.0..=1.0).contains(&parsed) {
                 parsed
             } else {
@@ -760,6 +767,16 @@ mod tests {
             resolve_traces_sample_rate(),
             0.0,
             "a negative value must clamp to 0.0, not go negative"
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "nan");
+        }
+        assert_eq!(
+            resolve_traces_sample_rate(),
+            0.0,
+            "\"nan\" parses to f32::NAN, which clamp() passes through unchanged; must fall back to 0.0 instead"
         );
     }
 }
