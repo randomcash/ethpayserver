@@ -170,6 +170,22 @@ export async function createUserWithApiKey(
  * exercises the paid-invoice rendering path, which is the one that matters
  * most to a merchant. Callers pass the same amount they gave `createInvoice`,
  * converted the same way the app converts it, so the two stay in lockstep.
+ *
+ * Two things the raw INSERT does not get for free, both of which the real
+ * pipeline (`payment_handler` + `confirmation_handler`) only does off events
+ * this fixture never produces:
+ *
+ * - `amount_received` is summed by a DB trigger from `credited_amount`, not
+ *   from `amount` - `amount` is the raw on-chain unit (wei), `credited_amount`
+ *   is the converted invoice-currency decimal a real payment gets from rate
+ *   lookup. Leaving it NULL excludes the row from the sum entirely, so
+ *   `amount_received` stays zero no matter what `amount` says.
+ * - the transition to "paid" is application logic that runs solely off a real
+ *   `PaymentConfirmed` event from the chain monitor; the trigger only ever
+ *   moves a payment to "processing".
+ *
+ * Setting `credited_amount` and `status` directly here is what gets the
+ * invoice into the fully-paid state the crawl is meant to render.
  */
 export async function seedPaymentForInvoice(
   invoiceId: string,
@@ -178,18 +194,26 @@ export async function seedPaymentForInvoice(
   const crypto = await import('node:crypto');
   const txHash = `0x${crypto.randomBytes(32).toString('hex')}`;
   const fromAddress = `0x${crypto.randomBytes(20).toString('hex')}`;
+  // ETH has 18 decimals; credited_amount is the human-readable invoice
+  // currency amount, not the raw wei `amount` column.
+  const divisor = 10n ** 18n;
+  const whole = amountWei / divisor;
+  const fraction = (amountWei % divisor).toString().padStart(18, '0').replace(/0+$/, '');
+  const creditedAmount = fraction ? `${whole}.${fraction}` : whole.toString();
 
   const client = new Client({ connectionString: DATABASE_URL });
   await client.connect();
   try {
     const { rows } = await client.query(
       `INSERT INTO payments (invoice_id, chain_id, asset_type, asset_symbol, amount,
-                              tx_hash, block_number, from_address, confirmed_at, tx_index)
+                              tx_hash, block_number, from_address, confirmed_at, tx_index,
+                              credited_amount)
        VALUES ($1, 'eip155:11155111', 'native', 'ETH', $2,
-               $3, 1, $4, NOW(), -1)
+               $3, 1, $4, NOW(), -1, $5)
        RETURNING id`,
-      [invoiceId, amountWei.toString(), txHash, fromAddress],
+      [invoiceId, amountWei.toString(), txHash, fromAddress, creditedAmount],
     );
+    await client.query(`UPDATE invoices SET status = 'paid' WHERE id = $1`, [invoiceId]);
     return rows[0].id as string;
   } finally {
     await client.end();
