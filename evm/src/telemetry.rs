@@ -418,7 +418,6 @@ pub fn report_reporting_status(dsn_configured: bool, environment: &str) -> anyho
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod reporting_tests;
-
+#[cfg(test)]
+mod tests;

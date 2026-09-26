@@ -1,5 +1,5 @@
-use super::*;
 use super::tests::captured_logs;
+use super::*;
 
 /// Companion to the test above: proves `sentry_log_event_filter`'s
 /// threshold is actually consulted when wired into a live
@@ -13,10 +13,7 @@ fn sentry_log_event_filter_suppresses_a_record_below_the_threshold_through_a_rea
     use tracing_subscriber::prelude::*;
 
     let _dispatcher = tracing_subscriber::registry()
-        .with(
-            sentry_tracing::layer()
-                .event_filter(sentry_log_event_filter(tracing::Level::ERROR)),
-        )
+        .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::ERROR)))
         .set_default();
 
     let envelopes = sentry::test::with_captured_envelopes_options(

@@ -269,9 +269,7 @@ fn scrub_log_redacts_a_secret_through_the_real_capture_pipeline() {
     use tracing_subscriber::prelude::*;
 
     let _dispatcher = tracing_subscriber::registry()
-        .with(
-            sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)),
-        )
+        .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)))
         .set_default();
 
     let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
