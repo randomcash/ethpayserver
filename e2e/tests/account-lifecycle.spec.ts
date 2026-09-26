@@ -1,7 +1,6 @@
 import { test, expect, register, login, logout } from '../fixtures/auth';
 import { resetDatabase } from '../fixtures/db';
 import { createStoreReadyForInvoices } from '../fixtures/payment-methods';
-import { createInvoice } from '../fixtures/invoices';
 
 /**
  * The whole life of a passkey account: register, use it, log back in, delete it,
@@ -37,12 +36,32 @@ test.describe('Account lifecycle (passkey)', () => {
     expect(accountId, 'a passkey-only account must surface its id: it is the only handle it has').toBeTruthy();
 
     // ---- use ----------------------------------------------------------
-    // Real state, so deletion has something to remove and the refusal rule is
-    // actually exercised rather than assumed. An unpaid invoice must NOT block
-    // deletion - only payments, payouts and refunds do.
+    // Real state, so the cascade has something to remove: the store, its
+    // payment method and its wallet all go with the account.
+    //
+    // Deliberately NO invoice. A pending invoice's address is still watched,
+    // and `delete_account` refuses with 409 while any owned store holds an
+    // actively watched address - see `server/src/api/users/deletion.rs` for
+    // why. The short version: the recorded-payment blockers cannot see a
+    // payment already broadcast against a pending invoice, so deleting through
+    // one would remove the invoice while the monitor was still watching for
+    // it, and the payment landing afterwards would have nothing to credit.
+    //
+    // This comment used to assert the opposite - that an unpaid invoice must
+    // not block deletion, only payments, payouts and refunds. That was true
+    // before the watched-address guard existed and is false now. It is
+    // corrected rather than deleted because someone meeting a 409 here will
+    // otherwise read the old sentence, conclude the guard is the bug, and
+    // weaken it.
+    //
+    // Cancelling the invoice is not a way round it either: cancel deactivates
+    // the payment options and leaves `watched_addresses.is_active = TRUE`, so
+    // the refusal stands. Whether a merchant should be unable to delete their
+    // own account while an unpaid invoice lives is a product question, and
+    // this test deliberately does not answer it - asserting the 409 here would
+    // make a green suite look like evidence for a decision nobody made.
     const store = `lifecycle-${Date.now()}`;
     await createStoreReadyForInvoices(page, store);
-    await createInvoice(page, '0.001');
 
     // ---- return -------------------------------------------------------
     // Logging out and back in is the step that proves the credential persisted,
