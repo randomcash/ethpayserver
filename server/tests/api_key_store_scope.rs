@@ -28,9 +28,9 @@ use auth::{
 use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
-use server::api::StoreScopedUser;
 use server::api::invoices::{CreateInvoiceRequest, create_invoice};
 use server::api::stores::{UpdateStoreRequest, update_store};
+use server::api::{AuthenticatedCaller, StoreScopedUser};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 
@@ -136,10 +136,11 @@ async fn a_key_scoped_to_create_invoice_reaches_past_the_permission_check() {
     let state = app_state(Arc::new(pg));
 
     let result = create_invoice(
-        StoreScopedUser(
-            user_info(owner),
-            Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
-        ),
+        AuthenticatedCaller {
+            user: user_info(owner),
+            is_operator: false,
+            key_scope: Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
+        },
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -175,10 +176,11 @@ async fn a_key_scoped_to_something_else_is_refused_invoice_creation() {
     let state = app_state(Arc::new(pg));
 
     let result = create_invoice(
-        StoreScopedUser(
-            user_info(owner),
-            Some(vec![Policies::STORE_MODIFY_SETTINGS.to_string()]),
-        ),
+        AuthenticatedCaller {
+            user: user_info(owner),
+            is_operator: false,
+            key_scope: Some(vec![Policies::STORE_MODIFY_SETTINGS.to_string()]),
+        },
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -291,7 +293,11 @@ async fn a_key_scoped_to_one_store_is_refused_on_another() {
     )];
 
     let result = create_invoice(
-        StoreScopedUser(user_info(owner), Some(scoped_to_store_a)),
+        AuthenticatedCaller {
+            user: user_info(owner),
+            is_operator: false,
+            key_scope: Some(scoped_to_store_a),
+        },
         State(state),
         Json(invoice_request(store_b.id.0)),
     )
@@ -333,7 +339,11 @@ async fn revoking_the_owners_store_access_refuses_an_unrestricted_key_too() {
     let state = app_state(Arc::new(pg));
 
     let result = create_invoice(
-        StoreScopedUser(user_info(owner), None),
+        AuthenticatedCaller {
+            user: user_info(owner),
+            is_operator: false,
+            key_scope: None,
+        },
         State(state),
         Json(invoice_request(store.id.0)),
     )
@@ -367,7 +377,11 @@ async fn a_preexisting_unscoped_key_still_creates_invoices() {
     let state = app_state(Arc::new(pg));
 
     let result = create_invoice(
-        StoreScopedUser(user_info(owner), None),
+        AuthenticatedCaller {
+            user: user_info(owner),
+            is_operator: false,
+            key_scope: None,
+        },
         State(state),
         Json(invoice_request(store.id.0)),
     )

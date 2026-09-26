@@ -330,7 +330,10 @@ async fn a_key_scoped_to_view_settings_reaches_past_get_wallet_permission_check(
         ),
         State(state),
         Path(store.id.0),
-        Query(StoreWalletQuery { namespace: None }),
+        Query(StoreWalletQuery {
+            namespace: None,
+            payment_method_id: None,
+        }),
     )
     .await;
 
@@ -367,7 +370,10 @@ async fn a_key_scoped_to_something_else_is_refused_get_wallet() {
         ),
         State(state),
         Path(store.id.0),
-        Query(StoreWalletQuery { namespace: None }),
+        Query(StoreWalletQuery {
+            namespace: None,
+            payment_method_id: None,
+        }),
     )
     .await;
 

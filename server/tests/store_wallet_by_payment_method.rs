@@ -27,7 +27,7 @@ use axum::http::StatusCode;
 use data_service::store_creation::StoreCreationWriter;
 use data_service::{PgDataService, StorePaymentMethodWriter, WalletWriter};
 use rates::NoOpRateProvider;
-use server::api::AuthenticatedUser;
+use server::api::StoreScopedUser;
 use server::api::stores::{StoreWalletQuery, StoreWalletResult, get_store_wallet};
 use server::state::PgAppState;
 use sqlx::PgPool;
@@ -118,7 +118,7 @@ async fn wallet_for_method(
     method_id: Uuid,
 ) -> Result<server::api::stores::MethodWalletResponse, StatusCode> {
     let result = get_store_wallet(
-        AuthenticatedUser(user_info(owner)),
+        StoreScopedUser(user_info(owner), None),
         State(state.clone()),
         Path(store_id),
         Query(StoreWalletQuery {
@@ -198,7 +198,7 @@ async fn a_pinned_methods_wallet_outlives_a_primary_change_through_the_endpoint(
     );
 
     let store_bare = match get_store_wallet(
-        AuthenticatedUser(user_info(owner)),
+        StoreScopedUser(user_info(owner), None),
         State(state),
         Path(store.id.0),
         Query(StoreWalletQuery {
