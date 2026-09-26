@@ -172,7 +172,11 @@ async function main() {
       findings.push(...(await reviewRoute(apiKey, route, group)));
     } catch (err) {
       const reason = `review failed: ${err instanceof Error ? err.message : err}`;
-      console.error(`${route}: ${reason}`);
+      // Not `reason` itself: writeOutputs()'s "counts only" comment applies
+      // here too, and the full API response text (up to 500 chars, per the
+      // `!resp.ok` throw above) has no reason to sit in a public job log when
+      // the route name already says which capture to look at.
+      console.error(`${route}: review failed`);
       errors.push({ route, viewport: null, reason });
     }
   }
