@@ -160,10 +160,11 @@ async fn main() -> Result<()> {
         "Redis channels configured"
     );
     let bridge = Arc::new(RedisBridge::new(redis_url, &events_channel, &commands_channel).await?);
+    let live_watches = Arc::new(data_service::RedisDataService::new(redis_url).await?);
     tracing::info!("Redis connected");
 
     // Create EVM monitor using shared bridge (concrete type for generics)
-    let evm_monitor = Arc::new(RedisEVMMonitor::new(Arc::clone(&bridge)));
+    let evm_monitor = Arc::new(RedisEVMMonitor::new(Arc::clone(&bridge), live_watches));
 
     // Create WebSocket broadcast channel (shared by services and HTTP handler)
     let ws_broadcast = Arc::new(server::api::ws::WsBroadcast::new(256));

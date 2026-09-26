@@ -10,16 +10,23 @@ use axum::{
 use evm::monitor::{ChainHealth, SourceStatus};
 use tokio::time::Instant;
 
-use crate::services::{EVMMonitor, RedisEVMMonitor};
+use crate::services::{EVMMonitor, RedisEVMMonitor, reconcile_watches};
 use crate::state::PgAppState;
 
 use super::PROBE_TIMEOUT;
-use super::models::{DeepHealthResponse, DependencyHealth, MonitorHealth, RpcHealth};
+use super::models::{
+    DeepHealthResponse, DependencyHealth, MonitorHealth, RpcHealth, WatchReconciliationHealth,
+};
 
 /// Deep health diagnostic endpoint.
 ///
 /// Returns per-dependency status with latencies. Not tied to load-balancer
 /// decisions; intended for operators and dashboards. No authentication required.
+///
+/// The response body carries one field beyond what its declared schema
+/// documents: `watch_reconciliation` (see [`WatchReconciliationHealth`]). It
+/// is not part of `api_types::DeepHealthResponse` and so is not part of the
+/// `body` schema below - see that type's docs for why.
 #[utoipa::path(
     get,
     path = "/health/deep",
@@ -31,48 +38,66 @@ use super::models::{DeepHealthResponse, DependencyHealth, MonitorHealth, RpcHeal
 #[allow(
     clippy::too_many_lines,
     clippy::cognitive_complexity,
-    reason = "deep health probe: timed Postgres + Redis + per-chain RPC checks, each with its own error mapping; splitting would obscure the HTTP response shape"
+    reason = "deep health probe: timed Postgres + Redis + per-chain RPC + watch-reconciliation checks, each with its own error mapping; splitting would obscure the HTTP response shape"
 )]
 pub async fn deep_health<A>(
     State(state): State<PgAppState<A>>,
-) -> (StatusCode, HeaderMap, Json<DeepHealthResponse>)
+) -> (StatusCode, HeaderMap, Json<DeepHealthResponseWire>)
 where
     A: Send + Sync + 'static,
 {
     let postgres = probe_dependency(state.data_service.health_check()).await;
 
-    let (redis, rpcs, monitor, evmmonitor_sentry_release) = match state.evm_monitor.as_ref() {
-        Some(evm_monitor) => probe_evm_monitor(evm_monitor).await,
-        None => (
-            DependencyHealth {
-                status: "ok".to_string(),
-                latency_ms: 0,
-                error: Some("not configured".to_string()),
-            },
-            HashMap::new(),
-            MonitorHealth {
-                status: "ok".to_string(),
-                data_fresh: false,
-            },
-            None,
-        ),
+    let (redis, rpcs, monitor, evmmonitor_sentry_release, watch_reconciliation) =
+        match state.evm_monitor.as_ref() {
+            Some(evm_monitor) => probe_evm_monitor(evm_monitor, &state.data_service).await,
+            None => (
+                DependencyHealth {
+                    status: "ok".to_string(),
+                    latency_ms: 0,
+                    error: Some("not configured".to_string()),
+                },
+                HashMap::new(),
+                MonitorHealth {
+                    status: "ok".to_string(),
+                    data_fresh: false,
+                },
+                None,
+                WatchReconciliationHealth::unknown("no monitor configured"),
+            ),
+        };
+
+    let response = DeepHealthResponse {
+        build_sha: env!("ETHPAYSERVER_BUILD_SHA").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        postgres,
+        redis,
+        rpcs,
+        monitor,
+        // The relying party this process actually resolved at startup, not
+        // whatever the environment says now.
+        webauthn: state.webauthn.clone(),
     };
 
     (
         StatusCode::OK,
         sentry_release_headers(option_env!("SENTRY_RELEASE"), evmmonitor_sentry_release),
-        Json(DeepHealthResponse {
-            build_sha: env!("ETHPAYSERVER_BUILD_SHA").to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            postgres,
-            redis,
-            rpcs,
-            monitor,
-            // The relying party this process actually resolved at startup, not
-            // whatever the environment says now.
-            webauthn: state.webauthn.clone(),
+        Json(DeepHealthResponseWire {
+            base: response,
+            watch_reconciliation,
         }),
     )
+}
+
+/// The wire shape of `/health/deep`: the shared `DeepHealthResponse` plus
+/// `watch_reconciliation` flattened alongside it - see the handler doc
+/// comment for why that field cannot live on `DeepHealthResponse` itself
+/// this side of a `payserver-commons` pin bump.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeepHealthResponseWire {
+    #[serde(flatten)]
+    base: DeepHealthResponse,
+    watch_reconciliation: WatchReconciliationHealth,
 }
 
 /// Value for the `x-sentry-release` header. Split out from [`deep_health`]
@@ -150,16 +175,18 @@ where
 }
 
 /// Probe EVM-monitor-backed dependencies (Redis health + per-chain RPC health +
-/// monitor freshness + evmmonitor's own Sentry release) and assemble the
-/// sub-sections of `DeepHealthResponse` plus the `x-evmmonitor-sentry-release`
-/// header value.
+/// monitor freshness + evmmonitor's own Sentry release + watch reconciliation)
+/// and assemble the sub-sections of `DeepHealthResponse` plus the
+/// `x-evmmonitor-sentry-release` header value.
 async fn probe_evm_monitor(
     evm_monitor: &RedisEVMMonitor,
+    data_service: &data_service::PgDataService,
 ) -> (
     DependencyHealth,
     HashMap<String, RpcHealth>,
     MonitorHealth,
     Option<String>,
+    WatchReconciliationHealth,
 ) {
     let redis = probe_dependency(evm_monitor.health_check()).await;
 
@@ -188,8 +215,34 @@ async fn probe_evm_monitor(
     };
 
     let sentry_release = probe_evmmonitor_sentry_release(evm_monitor).await;
+    let watch_reconciliation = probe_watch_reconciliation(evm_monitor, data_service).await;
 
-    (redis, rpcs, monitor, sentry_release)
+    (redis, rpcs, monitor, sentry_release, watch_reconciliation)
+}
+
+/// Diff the monitor's actual watch set against `expected_watched_addresses`
+/// and report the counts, or "unknown" if the comparison itself could not
+/// run.
+async fn probe_watch_reconciliation(
+    evm_monitor: &RedisEVMMonitor,
+    data_service: &data_service::PgDataService,
+) -> WatchReconciliationHealth {
+    match tokio::time::timeout(PROBE_TIMEOUT, reconcile_watches(data_service, evm_monitor)).await {
+        Ok(Ok(counts)) => WatchReconciliationHealth {
+            status: "ok".to_string(),
+            stale_watches: counts.stale,
+            missed_watches: counts.missed,
+            error: None,
+        },
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "deep health: failed to reconcile watch sets");
+            WatchReconciliationHealth::unknown(e.to_string())
+        }
+        Err(_) => {
+            tracing::warn!("deep health: watch reconciliation timed out");
+            WatchReconciliationHealth::unknown("timeout")
+        }
+    }
 }
 
 /// Fetch the `SENTRY_RELEASE` evmmonitor was compiled with, as relayed

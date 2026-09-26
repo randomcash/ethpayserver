@@ -5,10 +5,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use data_service::{LiveWatchedAddressReader, RedisDataService};
 use evm::Address;
 use evm::monitor::events::{MonitorCommand, UnwatchAddressCommand, WatchAddressCommand};
 use evm::monitor::{COMMANDS_CHANNEL, ChainHealth, EVENTS_CHANNEL, EventBridge, RedisBridge};
-use types::ChainId;
+use types::{ChainId, InvoiceId};
 use uuid::Uuid;
 
 /// Error type for EVM monitor operations.
@@ -19,6 +20,9 @@ pub enum EVMMonitorError {
 
     #[error("bridge error: {0}")]
     Bridge(#[from] evm::EvmError),
+
+    #[error("could not read the monitor's watch set: {0}")]
+    LiveWatchSet(#[from] data_service::RepositoryError),
 }
 
 /// Interface for EVM payment monitoring.
@@ -80,33 +84,56 @@ pub trait EVMMonitor: Send + Sync {
     async fn get_sentry_release(&self) -> Result<Option<String>, EVMMonitorError> {
         Ok(None)
     }
+
+    /// The monitor's actual watch set, as durably persisted (the state it
+    /// would resume watching from on restart) - not the same thing as what
+    /// Postgres says should be watched. See `watch_reconciler` for the
+    /// comparison this exists to feed.
+    ///
+    /// Defaults to empty: only the Redis-backed implementation can observe
+    /// this, so every test double stays unaffected by this method existing -
+    /// the same pattern as `get_sentry_release`.
+    async fn get_watched_addresses(
+        &self,
+    ) -> Result<Vec<(String, InvoiceId, ChainId, Option<String>)>, EVMMonitorError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Redis-based implementation of EVMMonitor.
 ///
-/// Communicates with evmmonitor via Redis pub/sub channels.
+/// Communicates with evmmonitor via Redis pub/sub channels for commands, and
+/// reads its persisted watch set (`evmwatch:addr:*`, written by evmmonitor
+/// itself) directly for `get_watched_addresses` - the two live in the same
+/// Redis instance, but are otherwise unrelated mechanisms.
 pub struct RedisEVMMonitor {
     bridge: Arc<RedisBridge>,
+    live_watches: Arc<RedisDataService>,
 }
 
 impl Clone for RedisEVMMonitor {
     fn clone(&self) -> Self {
         Self {
             bridge: Arc::clone(&self.bridge),
+            live_watches: Arc::clone(&self.live_watches),
         }
     }
 }
 
 impl RedisEVMMonitor {
     /// Create a new Redis-based EVM monitor.
-    pub fn new(bridge: Arc<RedisBridge>) -> Self {
-        Self { bridge }
+    pub fn new(bridge: Arc<RedisBridge>, live_watches: Arc<RedisDataService>) -> Self {
+        Self {
+            bridge,
+            live_watches,
+        }
     }
 
     /// Connect to Redis and create a new monitor.
     pub async fn connect(redis_url: &str) -> Result<Self, EVMMonitorError> {
         let bridge = RedisBridge::new(redis_url, EVENTS_CHANNEL, COMMANDS_CHANNEL).await?;
-        Ok(Self::new(Arc::new(bridge)))
+        let live_watches = RedisDataService::new(redis_url).await?;
+        Ok(Self::new(Arc::new(bridge), Arc::new(live_watches)))
     }
 }
 
@@ -222,6 +249,12 @@ impl EVMMonitor for RedisEVMMonitor {
 
         let release: Option<String> = self.bridge.get_key(SENTRY_RELEASE_KEY).await?;
         Ok(observed_sentry_release(release))
+    }
+
+    async fn get_watched_addresses(
+        &self,
+    ) -> Result<Vec<(String, InvoiceId, ChainId, Option<String>)>, EVMMonitorError> {
+        Ok(self.live_watches.get_all_watched().await?)
     }
 }
 

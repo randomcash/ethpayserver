@@ -27,6 +27,7 @@ pub mod payment_tx_index;
 pub mod payout_claims;
 pub mod reorg;
 pub mod store_creation;
+pub mod watch_reconciliation;
 pub mod webhook_delivery;
 
 pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
@@ -41,6 +42,7 @@ pub use merchant_directory::{MerchantAccount, MerchantDirectoryReader, MerchantS
 pub use payment_tx_index::{PaymentTxIndexReader, PaymentTxIndexWriter};
 pub use payout_claims::PayoutClaimReader;
 pub use reorg::{ReorgCandidateReader, ReorgWriter};
+pub use watch_reconciliation::{WatchKey, WatchReconciliation, reconcile};
 pub use webhook_delivery::{
     UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,
     WebhookDeliveryWriter,
@@ -51,8 +53,8 @@ pub mod postgres;
 
 #[cfg(feature = "postgres")]
 pub use postgres::{
-    ApiKeyAuthInfo, ApiKeyFullInfo, ApiKeyRateLimitInfo, PendingWatch, PgDataService,
-    WalletReauthChallenge, WalletRotation,
+    ApiKeyAuthInfo, ApiKeyFullInfo, ApiKeyRateLimitInfo, ExpectedWatch, PendingWatch,
+    PgDataService, WalletReauthChallenge, WalletRotation,
 };
 
 #[cfg(feature = "redis")]
