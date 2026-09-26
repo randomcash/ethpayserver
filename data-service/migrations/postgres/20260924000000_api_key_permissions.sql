@@ -1,0 +1,15 @@
+-- Per-API-key permission scope, chosen at creation.
+--
+-- NULL means "inherit the owner's role in full" - the behavior every key had
+-- before this column existed. A migration that defaulted existing rows to an
+-- empty set would silently strip capability from whatever already depends on
+-- them, so nothing changes here until an admin deliberately narrows a key.
+--
+-- Values are permission policy strings (`auth::Policies` in
+-- payserver-commons, e.g. "ethpay.server.canmanagetokens" or "unrestricted")
+-- - the same vocabulary `Role::has_permission` already speaks. The effective
+-- grant for a request is always this set intersected with whatever the key's
+-- owner currently holds: a key can never exceed its owner, and it can only
+-- gain something new if it was already scoped to ask for it - promoting the
+-- owner never widens a key that was not built to use the wider role.
+ALTER TABLE api_keys ADD COLUMN permissions TEXT[] NULL;

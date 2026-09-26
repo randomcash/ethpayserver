@@ -165,6 +165,30 @@ impl PgDataService {
             .list_user_api_keys_with_rate_limit(user_id)
             .await
     }
+
+    /// Create a new API key with an initial permission scope. See
+    /// `PostgresApiKeyRepository::create_api_key_with_permissions`.
+    pub async fn create_api_key_with_permissions(
+        &self,
+        key: &::auth::ApiKey,
+        permissions: Option<&[String]>,
+    ) -> ::auth::error::Result<()> {
+        PostgresApiKeyRepository::new(self.pool.clone())
+            .create_api_key_with_permissions(key, permissions)
+            .await
+    }
+
+    /// Update the per-key permission scope for an API key. `None` clears it
+    /// back to "inherit the owner's role in full".
+    pub async fn update_api_key_permissions(
+        &self,
+        id: ::auth::ApiKeyId,
+        permissions: Option<&[String]>,
+    ) -> ::auth::error::Result<()> {
+        PostgresApiKeyRepository::new(self.pool.clone())
+            .update_permissions(id, permissions)
+            .await
+    }
 }
 
 // === API Key Rotation / Deprecation ===
@@ -177,9 +201,15 @@ pub struct ApiKeyAuthInfo {
     pub is_active: bool,
     pub deprecated_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Per-key rate limit in requests per minute. Null = server default.
+    pub rate_limit_rpm: Option<i32>,
     /// Explicitly granted, never inherited from role or owner. See the
     /// `is_operator` column comment on `api_keys`.
     pub is_operator: bool,
+    /// Permission policy strings this key is scoped to. `None` means
+    /// "inherit the owner's role in full" - see the migration that added
+    /// this column.
+    pub permissions: Option<Vec<String>>,
 }
 
 /// Full API key info for listing.
@@ -195,6 +225,9 @@ pub struct ApiKeyFullInfo {
     pub deprecated_at: Option<DateTime<Utc>>,
     /// Per-key rate limit in requests per minute. Null = server default.
     pub rate_limit_rpm: Option<i32>,
+    /// Permission policy strings this key is scoped to. `None` means
+    /// "inherit the owner's role in full".
+    pub permissions: Option<Vec<String>>,
 }
 
 impl PgDataService {
@@ -204,7 +237,8 @@ impl PgDataService {
         key_hash: &str,
     ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyAuthInfo>(
-            "SELECT id, user_id, is_active, deprecated_at, expires_at, is_operator \
+            "SELECT id, user_id, is_active, deprecated_at, expires_at, rate_limit_rpm, \
+                    is_operator, permissions \
              FROM api_keys WHERE key_hash = $1",
         )
         .bind(key_hash)
@@ -219,7 +253,7 @@ impl PgDataService {
     ) -> Result<Vec<ApiKeyFullInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyFullInfo>(
             "SELECT id, name, key_prefix, is_active, created_at, last_used_at, \
-                    expires_at, deprecated_at, rate_limit_rpm \
+                    expires_at, deprecated_at, rate_limit_rpm, permissions \
              FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC",
         )
         .bind(user_id)
@@ -246,11 +280,16 @@ impl PgDataService {
     /// cannot end up with two active keys (new created, old still active)
     /// if the second statement fails.
     ///
+    /// `permissions` carries over the old key's permission scope (or lack
+    /// of one) to the replacement - rotation is meant to swap the secret,
+    /// not quietly widen what it can do.
+    ///
     /// Returns `Ok(())` on success. On failure the transaction rolls back
     /// and the database is left unchanged.
     pub async fn rotate_api_key_atomic(
         &self,
         new_key: &::auth::ApiKey,
+        permissions: Option<&[String]>,
         old_id: Uuid,
         deprecated_at: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
@@ -260,8 +299,8 @@ impl PgDataService {
         sqlx::query(
             "INSERT INTO api_keys \
                (id, user_id, name, key_hash, key_prefix, is_active, \
-                created_at, last_used_at, expires_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                created_at, last_used_at, expires_at, permissions) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(new_key.id.0)
         .bind(new_key.user_id.0)
@@ -272,6 +311,7 @@ impl PgDataService {
         .bind(new_key.created_at)
         .bind(new_key.last_used_at)
         .bind(new_key.expires_at)
+        .bind(permissions)
         .execute(&mut *tx)
         .await?;
 
@@ -306,7 +346,8 @@ impl PgDataService {
         id: Uuid,
     ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyAuthInfo>(
-            "SELECT id, user_id, is_active, deprecated_at, expires_at, is_operator \
+            "SELECT id, user_id, is_active, deprecated_at, expires_at, rate_limit_rpm, \
+                    is_operator, permissions \
              FROM api_keys WHERE id = $1",
         )
         .bind(id)

@@ -9,12 +9,13 @@ use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
 use crate::api::ApiErr;
-use crate::api::extractors::AuthenticatedUser;
+use crate::api::extractors::{StoreScopedUser, key_grants_store_permission};
 use crate::state::PgAppState;
 
 use super::{
-    InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, build_invoice_filter_params,
-    customer_email_of, resolve_store_names, verify_store_access_for_query,
+    InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, VIEW_INVOICES,
+    build_invoice_filter_params, customer_email_of, narrow_scope_by_key, resolve_store_names,
+    verify_store_access_for_query,
 };
 
 /// List invoices with optional filters.
@@ -35,7 +36,7 @@ use super::{
     )
 )]
 pub async fn list_invoices<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListInvoicesQuery>,
 ) -> Result<Json<InvoiceListResponse>, ApiErr>
@@ -46,6 +47,10 @@ where
     // caller's own stores, or the whole server for an admin. The distinction is
     // load-bearing - a nil-UUID sentinel here was once an authorization hole.
     let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    // Then narrow it by what the key (if any) is scoped to - the owner's
+    // membership already answered "can this user see this store", this
+    // answers "did they authenticate with a key that's allowed to".
+    let scope = narrow_scope_by_key(scope, key_scope.as_deref(), VIEW_INVOICES)?;
 
     // The same builder the CSV export uses, so the two cannot answer different
     // questions - an export that ignores a filter the list applied downloads
@@ -124,7 +129,7 @@ where
     )
 )]
 pub async fn get_invoice<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<InvoiceResponse>, StatusCode>
@@ -150,6 +155,10 @@ where
         if !is_member {
             return Err(StatusCode::FORBIDDEN);
         }
+    }
+
+    if !key_grants_store_permission(key_scope.as_deref(), VIEW_INVOICES, invoice.store_id) {
+        return Err(StatusCode::FORBIDDEN);
     }
 
     let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)

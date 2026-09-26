@@ -13,6 +13,10 @@ use chrono::{DateTime, Utc};
 
 use super::api_key_deprecation::DeprecationSlot;
 use super::api_key_hash::hash_api_key;
+pub(super) use super::api_key_scope::{
+    key_grants_store_permission, key_retains_unrestricted_access,
+};
+use super::auth_freshness::{is_grace_expired, is_reauth_stale};
 use crate::state::PgAppState;
 
 /// Carried in the shared `DeprecationSlot` that the deprecation-header
@@ -37,12 +41,37 @@ pub struct ApiKeyDeprecationInfo {
 /// - `Authorization: Bearer ak_...` → API key auth
 pub struct AuthenticatedUser(pub UserInfo);
 
-/// How long ago a session must have been created to count as a fresh proof of
-/// a passkey or wallet assertion. Matches the window `cleanup_expired_challenges`
-/// (auth crate, wallet/passkey challenge tables) treats a login challenge as
-/// live for, so "recent enough to prove you just authenticated" means the same
-/// thing everywhere in this codebase.
-const REAUTH_FRESHNESS: chrono::Duration = chrono::Duration::minutes(5);
+/// Like `AuthenticatedUser`, but also carries the store-permission scope
+/// carried by the API key that authenticated this request, if any.
+///
+/// `None` covers session auth and every key that predates or has not been
+/// narrowed by per-key store scoping - both inherit the owner's role (and
+/// every store `user_has_store_permission` would grant it) in full, same as
+/// before this existed. `Some(set)` is intersected on top of whatever
+/// `user_has_store_permission` already grants the owner, never used alone -
+/// see `key_grants_store_permission`.
+///
+/// A separate type from `AuthenticatedUser` rather than a field added to it:
+/// that struct's single-field shape is destructured by ~80 call sites across
+/// this codebase, and only the handful that gate a store permission need to
+/// know a key's scope.
+pub struct StoreScopedUser(pub UserInfo, pub Option<Vec<String>>);
+
+/// Like `AuthenticatedUser`, but also carries whether the credential used to
+/// authenticate this request has been explicitly granted the operator
+/// property, plus the same store-permission scope `StoreScopedUser` carries.
+///
+/// The operator property lives on the credential (today, only an API key's
+/// `is_operator` column), not on the requesting user's role or on any store
+/// the request names - it is decided once, at authentication time, and
+/// nothing downstream can derive it from *what* is being asked for. Use this
+/// instead of `AuthenticatedUser` only where both that distinction and the
+/// key's store scope matter - today, only `create_invoice`.
+pub struct AuthenticatedCaller {
+    pub user: UserInfo,
+    pub is_operator: bool,
+    pub key_scope: Option<Vec<String>>,
+}
 
 /// Extractor for endpoints that must not trust a merely-valid session -
 /// changing the account's recovery email being the case this exists for.
@@ -126,18 +155,31 @@ fn extract_bearer_token(parts: &Parts) -> Result<String, (StatusCode, &'static s
     Ok(token.to_string())
 }
 
-/// Validate session and return user info, plus whether the credential used
-/// has been explicitly granted the operator property (see
-/// `AuthenticatedCaller`). A session login never carries it - only an API key
-/// row can, and only when set directly on that row - so this is `false` on
-/// every path except a successful API-key lookup.
+/// Validate session and return user info.
 ///
 /// Takes `&mut Parts` so the API-key branch can stamp `ApiKeyDeprecationInfo`
 /// into request extensions when a deprecated-but-still-valid key is used.
 async fn validate_session<A>(
     parts: &mut Parts,
     state: &PgAppState<A>,
-) -> Result<(UserInfo, bool), (StatusCode, &'static str)>
+) -> Result<UserInfo, (StatusCode, &'static str)>
+where
+    A: SessionService + 'static,
+{
+    validate_session_with_scope(parts, state)
+        .await
+        .map(|(user_info, _is_operator, _scope)| user_info)
+}
+
+/// Same as `validate_session`, but also returns whether the credential is
+/// explicitly granted the operator property (see `AuthenticatedCaller`) and
+/// the API key's stored store-permission scope (`None` for session auth).
+/// Split out so the ~80 call sites that only ever want `UserInfo` don't have
+/// to carry data they never look at - see `StoreScopedUser`.
+async fn validate_session_with_scope<A>(
+    parts: &mut Parts,
+    state: &PgAppState<A>,
+) -> Result<(UserInfo, bool, Option<Vec<String>>), (StatusCode, &'static str)>
 where
     A: SessionService + 'static,
 {
@@ -160,11 +202,14 @@ where
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
 
-    Ok((user_info, false))
+    // A session carries no operator property or key scope of its own - the
+    // caller is bound only by their role and store membership, same as
+    // before either existed.
+    Ok((user_info, false, None))
 }
 
 /// Validate an API key and return the associated user info, plus the key's
-/// own `is_operator` flag.
+/// own `is_operator` flag and stored store-permission scope.
 ///
 /// When the key is deprecated but within its grace window, stamps an
 /// `ApiKeyDeprecationInfo` into `parts.extensions` so the response-header
@@ -173,7 +218,7 @@ async fn validate_api_key<A>(
     raw_key: &str,
     parts: &mut Parts,
     state: &PgAppState<A>,
-) -> Result<(UserInfo, bool), (StatusCode, &'static str)>
+) -> Result<(UserInfo, bool, Option<Vec<String>>), (StatusCode, &'static str)>
 where
     A: SessionService + 'static,
 {
@@ -234,7 +279,25 @@ where
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to resolve user"))?
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "User not found"))?;
-    let user = UserInfo::from(&user);
+    let mut user = UserInfo::from(&user);
+
+    // Narrow the in-memory role to what this specific key is actually scoped
+    // to do. `Role` has exactly two levels, and every ServerAdmin gate in
+    // this codebase (there are over a dozen, from plugin install to user
+    // role management) is a bare `role == Role::ServerAdmin` comparison, not
+    // a per-`Permission` one - so "scoped below ServerAdmin" can only mean
+    // "this request runs as a regular User", and setting that once here
+    // makes all of those checks respect the key's scope for free, without
+    // threading a wider permission type through every call site. A key
+    // authenticates as its owner's full role only when its stored
+    // `permissions` is null (never narrowed - every key that predates this
+    // column, and any key an admin has not deliberately scoped) or
+    // explicitly includes `unrestricted`.
+    if user.role == Role::ServerAdmin
+        && !key_retains_unrestricted_access(key_info.permissions.as_deref())
+    {
+        user.role = Role::User;
+    }
 
     // Fire-and-forget: update last_used_at
     let ds = state.data_service.clone();
@@ -246,7 +309,7 @@ where
             .await;
     });
 
-    Ok((user, key_info.is_operator))
+    Ok((user, key_info.is_operator, key_info.permissions))
 }
 
 /// Get the deprecation grace period in seconds (default: 48 hours).
@@ -272,23 +335,24 @@ where
         parts: &mut Parts,
         state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
-        let (user_info, _is_operator) = validate_session(parts, state).await?;
+        let user_info = validate_session(parts, state).await?;
         Ok(AuthenticatedUser(user_info))
     }
 }
 
-/// Like `AuthenticatedUser`, but also carries whether the credential used to
-/// authenticate this request has been explicitly granted the operator
-/// property.
-///
-/// The property lives on the credential (today, only an API key's
-/// `is_operator` column), not on the requesting user's role or on any store
-/// the request names - it is decided once, at authentication time, and
-/// nothing downstream can derive it from *what* is being asked for. Use this
-/// instead of `AuthenticatedUser` only where that distinction matters.
-pub struct AuthenticatedCaller {
-    pub user: UserInfo,
-    pub is_operator: bool,
+impl<A> FromRequestParts<PgAppState<A>> for StoreScopedUser
+where
+    A: SessionService + 'static,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &PgAppState<A>,
+    ) -> Result<Self, Self::Rejection> {
+        let (user_info, _is_operator, scope) = validate_session_with_scope(parts, state).await?;
+        Ok(StoreScopedUser(user_info, scope))
+    }
 }
 
 impl<A> FromRequestParts<PgAppState<A>> for AuthenticatedCaller
@@ -301,8 +365,12 @@ where
         parts: &mut Parts,
         state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
-        let (user, is_operator) = validate_session(parts, state).await?;
-        Ok(AuthenticatedCaller { user, is_operator })
+        let (user, is_operator, key_scope) = validate_session_with_scope(parts, state).await?;
+        Ok(AuthenticatedCaller {
+            user,
+            is_operator,
+            key_scope,
+        })
     }
 }
 
@@ -333,7 +401,7 @@ where
         // caller is the expected case on a public route.
         let is_admin = validate_session(parts, state)
             .await
-            .is_ok_and(|(user, _is_operator)| user.role == Role::ServerAdmin);
+            .is_ok_and(|user| user.role == Role::ServerAdmin);
         Ok(MaybeAdmin(is_admin))
     }
 }
@@ -348,7 +416,7 @@ where
         parts: &mut Parts,
         state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
-        let (user_info, _is_operator) = validate_session(parts, state).await?;
+        let user_info = validate_session(parts, state).await?;
 
         // Check for ServerAdmin role
         if user_info.role != Role::ServerAdmin {
@@ -383,100 +451,7 @@ impl AdminAuth {
     }
 }
 
-/// Pure predicate: is a session's login assertion too old to count as a
-/// fresh re-authentication at `now`?
-///
-/// Extracted so the freshness window `FreshlyAuthenticatedUser` enforces can
-/// be unit-tested without booting a database or a `SessionService`. Matches
-/// the live check in `FreshlyAuthenticatedUser::from_request_parts` exactly.
-pub(super) fn is_reauth_stale(session_created_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    now - session_created_at > REAUTH_FRESHNESS
-}
-
-/// Pure predicate: is a deprecated key past its grace window at `now`?
-///
-/// Extracted so the grace-expiry rule can be unit-tested without booting a
-/// database or touching the extractor wiring. Matches the live check in
-/// `validate_api_key` exactly.
-pub(super) fn is_grace_expired(
-    deprecated_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    grace_secs: i64,
-) -> bool {
-    now > deprecated_at + chrono::Duration::seconds(grace_secs)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::{Duration, TimeZone};
-
-    fn at(hour: i64) -> DateTime<Utc> {
-        // Fixed base date so tests are deterministic; chrono's Utc::now drift
-        // would otherwise race the grace-window arithmetic.
-        Utc.with_ymd_and_hms(2026, 4, 23, 0, 0, 0).unwrap() + Duration::hours(hour)
-    }
-
-    const GRACE_48H: i64 = 48 * 3600;
-
-    #[test]
-    fn fresh_session_is_not_stale() {
-        // logged in at hour 0, asking at hour 0 plus a couple minutes
-        assert!(!is_reauth_stale(at(0), at(0) + Duration::minutes(2)));
-    }
-
-    #[test]
-    fn exactly_at_freshness_boundary_is_not_stale() {
-        assert!(!is_reauth_stale(at(0), at(0) + Duration::minutes(5)));
-    }
-
-    #[test]
-    fn past_freshness_window_is_stale() {
-        assert!(is_reauth_stale(
-            at(0),
-            at(0) + Duration::minutes(5) + Duration::seconds(1)
-        ));
-    }
-
-    #[test]
-    fn hours_old_session_is_stale() {
-        assert!(is_reauth_stale(at(0), at(6)));
-    }
-
-    #[test]
-    fn in_grace_is_not_expired() {
-        // deprecated at hour 0, now at hour 24, 48h grace → still valid
-        assert!(!is_grace_expired(at(0), at(24), GRACE_48H));
-    }
-
-    #[test]
-    fn exactly_at_deadline_is_not_expired() {
-        // at the exact boundary we're still inside; strictly > means at == not expired
-        assert!(!is_grace_expired(at(0), at(48), GRACE_48H));
-    }
-
-    #[test]
-    fn past_deadline_is_expired() {
-        // 1 second past the 48h grace
-        let deadline = at(0) + Duration::hours(48);
-        assert!(is_grace_expired(
-            at(0),
-            deadline + Duration::seconds(1),
-            GRACE_48H
-        ));
-    }
-
-    #[test]
-    fn zero_grace_means_immediate_expiry_next_moment() {
-        assert!(!is_grace_expired(at(0), at(0), 0));
-        assert!(is_grace_expired(at(0), at(0) + Duration::seconds(1), 0));
-    }
-
-    #[test]
-    fn long_grace_keeps_key_valid() {
-        // 30-day grace
-        let grace = 30 * 24 * 3600;
-        assert!(!is_grace_expired(at(0), at(24 * 20), grace));
-        assert!(is_grace_expired(at(0), at(24 * 31), grace));
-    }
-}
+#[path = "extractors_reachability_tests.rs"]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test-only setup")]
+mod reachability_tests;

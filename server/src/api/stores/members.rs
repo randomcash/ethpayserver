@@ -10,7 +10,7 @@ use uuid::Uuid;
 use auth::repository::{StoreRepository, StoreRoleRepository, UserStoreRepository};
 use auth::{SessionService, StoreId, UserId, UserStore};
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::{StoreScopedUser, key_grants_store_permission};
 use crate::state::PgAppState;
 pub use api_types::{AddMemberRequest, MemberResponse, UpdateMemberRequest};
 
@@ -33,7 +33,7 @@ pub use api_types::{AddMemberRequest, MemberResponse, UpdateMemberRequest};
     )
 )]
 pub async fn list_store_members<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<Vec<MemberResponse>>, StatusCode>
@@ -41,11 +41,13 @@ where
     A: SessionService + 'static,
 {
     // Check permission
+    const VIEW_USERS: &str = "ethpay.store.canviewstoreusers";
     let has_permission = state
         .data_service
-        .user_has_store_permission(user.id, StoreId(store_id), "ethpay.store.canviewstoreusers")
+        .user_has_store_permission(user.id, StoreId(store_id), VIEW_USERS)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        && key_grants_store_permission(key_scope.as_deref(), VIEW_USERS, StoreId(store_id));
 
     if !has_permission {
         return Err(StatusCode::FORBIDDEN);
@@ -94,7 +96,7 @@ where
     )
 )]
 pub async fn add_store_member<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<AddMemberRequest>,
@@ -103,15 +105,13 @@ where
     A: SessionService + 'static,
 {
     // Check permission
+    const MODIFY_USERS: &str = "ethpay.store.canmodifystoreusers";
     let has_permission = state
         .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(store_id),
-            "ethpay.store.canmodifystoreusers",
-        )
+        .user_has_store_permission(user.id, StoreId(store_id), MODIFY_USERS)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        && key_grants_store_permission(key_scope.as_deref(), MODIFY_USERS, StoreId(store_id));
 
     if !has_permission {
         return Err(StatusCode::FORBIDDEN);
@@ -174,7 +174,7 @@ where
     )
 )]
 pub async fn update_store_member<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path((store_id, target_user_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateMemberRequest>,
@@ -183,15 +183,13 @@ where
     A: SessionService + 'static,
 {
     // Check permission
+    const MODIFY_USERS: &str = "ethpay.store.canmodifystoreusers";
     let has_permission = state
         .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(store_id),
-            "ethpay.store.canmodifystoreusers",
-        )
+        .user_has_store_permission(user.id, StoreId(store_id), MODIFY_USERS)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        && key_grants_store_permission(key_scope.as_deref(), MODIFY_USERS, StoreId(store_id));
 
     if !has_permission {
         return Err(StatusCode::FORBIDDEN);
@@ -243,7 +241,7 @@ where
     )
 )]
 pub async fn remove_store_member<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path((store_id, target_user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, StatusCode>
@@ -251,15 +249,13 @@ where
     A: SessionService + 'static,
 {
     // Check permission
+    const MODIFY_USERS: &str = "ethpay.store.canmodifystoreusers";
     let has_permission = state
         .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(store_id),
-            "ethpay.store.canmodifystoreusers",
-        )
+        .user_has_store_permission(user.id, StoreId(store_id), MODIFY_USERS)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        && key_grants_store_permission(key_scope.as_deref(), MODIFY_USERS, StoreId(store_id));
 
     if !has_permission {
         return Err(StatusCode::FORBIDDEN);

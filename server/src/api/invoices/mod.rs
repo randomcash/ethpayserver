@@ -10,6 +10,7 @@ mod list;
 mod lookup;
 mod payment_options;
 mod payments;
+mod scope;
 mod types;
 
 #[cfg(test)]
@@ -22,6 +23,8 @@ pub use list::*;
 pub use lookup::*;
 pub use payments::*;
 pub use types::*;
+
+pub(crate) use scope::{StoreScope, narrow_scope_by_key, verify_store_access_for_query};
 
 // Re-export pub(crate) items from sub-modules for tests.
 #[cfg(test)]
@@ -38,15 +41,22 @@ pub(crate) use payment_options::derive_payment_options;
 
 use axum::{Json, http::StatusCode};
 
-use ::types::{
-    InvoiceId, InvoiceQueryParams, InvoiceReader, PaymentQueryParams, StoreId, traits::InvoiceData,
-};
+use ::types::{InvoiceId, InvoiceReader, traits::InvoiceData};
 use auth::{SessionService, repository::UserStoreRepository};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
+use crate::api::extractors::key_grants_store_permission;
 use crate::services::EVMMonitor;
 use crate::state::PgAppState;
+
+/// `ethpay.store.canviewinvoices` - the permission that gates every read of
+/// invoice or payment data below. A key's stored scope must grant this on a
+/// store, on top of whatever the owner's own membership already allows, or a
+/// key narrowed to (say) `cancreateinvoice` alone would still be able to read
+/// every invoice and payment the owner can see - the same "key exceeds its
+/// declared scope" gap this ticket exists to close, just on the read side.
+pub(crate) const VIEW_INVOICES: &str = "ethpay.store.canviewinvoices";
 
 /// Build a JSON error response for the create-invoice endpoint.
 pub(crate) fn invoice_error(
@@ -178,11 +188,14 @@ pub(crate) fn decimal_to_integer_string(value: Decimal) -> Result<String, &'stat
     }
 }
 
-/// Fetch invoice and verify user has access (admin or store member).
-/// Returns NOT_FOUND for both missing invoices and permission denied (prevents enumeration).
+/// Fetch invoice and verify user has access (admin or store member), AND that
+/// the authenticating key (if any) was scoped to `VIEW_INVOICES` on this
+/// store. Returns NOT_FOUND for a missing invoice, a non-member, or a key
+/// that isn't scoped to read it (prevents enumeration in every case alike).
 pub(crate) async fn get_invoice_with_permission<A: SessionService>(
     state: &PgAppState<A>,
     user: &auth::UserInfo,
+    key_scope: Option<&[String]>,
     invoice_id: &InvoiceId,
 ) -> Result<InvoiceData, StatusCode> {
     let invoice = InvoiceReader::get(&*state.data_service, invoice_id)
@@ -203,101 +216,11 @@ pub(crate) async fn get_invoice_with_permission<A: SessionService>(
         }
     }
 
+    if !key_grants_store_permission(key_scope, VIEW_INVOICES, invoice.store_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     Ok(invoice)
-}
-
-/// Resolve the store scope for a list/export query, verifying access.
-///
-/// `Some(id)` is membership-checked and returned as a filter; `None` means
-/// "every store" and is permitted for server admins only.
-///
-/// The scope is deliberately an `Option` rather than a nil-UUID sentinel. A
-/// sentinel is a value a caller can also supply, and when it was one, passing
-/// `store_id=00000000-0000-0000-0000-000000000000` took the `Some` arm, skipped
-/// the admin check *and* the membership check, and then dropped the `WHERE
-/// store_id` clause - handing any authenticated user every invoice and payment
-/// in the deployment. Keep the two cases in the type; do not
-/// reintroduce an in-band marker.
-/// Which stores a listing query may read.
-///
-/// An enum rather than `Option<StoreId>` because there are three answers, and
-/// the two that mean "more than one store" are not interchangeable. Conflating
-/// them is the entire bug class here: a nil-UUID sentinel that meant "all"
-/// leaked every store, and an empty membership list silently meaning "no
-/// filter" would be the same leak wearing different clothes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StoreScope {
-    /// One store, membership already checked.
-    One(StoreId),
-    /// Every store the caller belongs to. May be empty, which matches nothing.
-    Membership(Vec<StoreId>),
-    /// Every store on the server. `ServerAdmin` only.
-    All,
-}
-
-impl StoreScope {
-    /// Apply this scope to invoice query params.
-    pub(crate) fn apply_invoice(&self, params: InvoiceQueryParams) -> InvoiceQueryParams {
-        match self {
-            StoreScope::One(id) => params.with_store_id(*id),
-            StoreScope::Membership(ids) => params.with_store_ids(ids.clone()),
-            StoreScope::All => params,
-        }
-    }
-
-    /// Apply this scope to payment query params.
-    pub(crate) fn apply_payment(&self, params: PaymentQueryParams) -> PaymentQueryParams {
-        match self {
-            StoreScope::One(id) => params.with_store_id(*id),
-            StoreScope::Membership(ids) => params.with_store_ids(ids.clone()),
-            StoreScope::All => params,
-        }
-    }
-}
-
-pub(crate) async fn verify_store_access_for_query<D>(
-    data_service: &D,
-    user: &auth::UserInfo,
-    store_id: Option<uuid::Uuid>,
-) -> Result<StoreScope, StatusCode>
-where
-    D: UserStoreRepository + ?Sized,
-{
-    match store_id {
-        Some(id) => {
-            let is_member = data_service
-                .get_user_store(user.id, StoreId(id))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .is_some();
-            if !is_member && user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::FORBIDDEN);
-            }
-            Ok(StoreScope::One(StoreId(id)))
-        }
-        // No store_id means "everything I can see". For an admin that is the
-        // whole server; for anyone else it is their own memberships.
-        //
-        // This used to be a flat 400 for non-admins, which made the "All Stores"
-        // sidebar option a dead end on Invoices and Payments - the client asked,
-        // the server refused, and the UI reported it as "pick a store".
-        // Answering with the caller's own stores is the same
-        // authorisation decision the `Some` arm makes, applied to a set.
-        None => {
-            if user.role == auth::Role::ServerAdmin {
-                return Ok(StoreScope::All);
-            }
-            let memberships = data_service
-                .get_user_stores(user.id)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            // Deliberately still a filter when empty: a user who belongs to no
-            // store sees nothing, not everything.
-            Ok(StoreScope::Membership(
-                memberships.into_iter().map(|m| m.store_id).collect(),
-            ))
-        }
-    }
 }
 
 /// Resolve store names for a page of list results.

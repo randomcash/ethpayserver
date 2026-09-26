@@ -12,70 +12,24 @@ use sha3::Digest;
 use uuid::Uuid;
 
 use auth::{
-    ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService, WalletCredential,
-    WalletCredentialId, WalletRepository,
+    ApiKey, ApiKeyId, ApiKeyRepository, Role, SessionService, WalletCredential, WalletCredentialId,
+    WalletRepository,
 };
-use data_service::ApiKeyFullInfo;
 
 use super::api_key_hash::hash_api_key;
+use super::api_key_permissions::validate_requested_permissions;
+pub use super::api_key_permissions::{UpdateApiKeyPermissionsPayload, update_api_key_permissions};
+pub use super::api_key_types::{
+    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
+    RotateApiKeyResponsePayload,
+};
+pub(crate) use super::api_key_types::{
+    api_key_info_response, api_key_info_with_rate_limit, deprecation_expires_at,
+};
 use super::extractors::{AuthenticatedUser, FreshlyAuthenticatedUser};
 use crate::services::EmailChangeVerificationData;
 use crate::state::PgAppState;
-pub use api_types::{
-    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
-    RotateApiKeyResponsePayload, UpdateApiKeyPayload,
-};
-
-/// Build from an `ApiKey` plus the ancillary rate-limit / deprecation fields
-/// not present on the auth-crate struct. Used by endpoints that already
-/// have an `ApiKey` in hand (e.g. update_api_key after a mutation).
-pub(crate) fn api_key_info_with_rate_limit(
-    key: &ApiKey,
-    rate_limit_rpm: Option<i32>,
-    deprecated_at: Option<DateTime<Utc>>,
-) -> ApiKeyInfoResponse {
-    let info = ApiKeyInfo::from(key);
-    ApiKeyInfoResponse {
-        id: info.id.0,
-        name: info.name,
-        key_prefix: info.key_prefix,
-        is_active: info.is_active,
-        created_at: info.created_at,
-        last_used_at: info.last_used_at,
-        expires_at: info.expires_at,
-        rate_limit_rpm,
-        deprecated_at,
-        deprecation_expires_at: deprecated_at.map(deprecation_expires_at),
-    }
-}
-
-/// Build the wire shape from the `auth` domain type.
-///
-/// A free function rather than a `From` impl: `ApiKeyFullInfo` belongs to `auth` and
-/// `ApiKeyInfoResponse` to `api-types`, so neither is local here. `api-types` does not
-/// depend on `auth` deliberately - it is compiled into the browser bundle and
-/// `auth` is a server-side crate.
-pub(crate) fn api_key_info_response(info: ApiKeyFullInfo) -> ApiKeyInfoResponse {
-    ApiKeyInfoResponse {
-        id: info.id,
-        name: info.name,
-        key_prefix: info.key_prefix,
-        is_active: info.is_active,
-        created_at: info.created_at,
-        last_used_at: info.last_used_at,
-        expires_at: info.expires_at,
-        rate_limit_rpm: info.rate_limit_rpm,
-        deprecated_at: info.deprecated_at,
-        deprecation_expires_at: info.deprecated_at.map(deprecation_expires_at),
-    }
-}
-
-/// Translate a `deprecated_at` into the grace-window deadline. Uses the same
-/// grace-seconds value as the auth extractor, so the client-visible expiry
-/// matches when the server actually starts rejecting the key.
-fn deprecation_expires_at(deprecated_at: DateTime<Utc>) -> DateTime<Utc> {
-    deprecated_at + chrono::Duration::seconds(super::extractors::deprecation_grace_secs())
-}
+pub use api_types::UpdateApiKeyPayload;
 
 /// List all API keys for the authenticated user.
 #[utoipa::path(
@@ -132,11 +86,13 @@ where
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    validate_requested_permissions(user.role, &payload.permissions)?;
+
     let (raw_key, api_key) = build_api_key(&name, user.id, payload.expires_at);
 
     state
         .data_service
-        .create_api_key(&api_key)
+        .create_api_key_with_permissions(&api_key, Some(&payload.permissions))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -150,6 +106,7 @@ where
             created_at: api_key.created_at,
             expires_at: api_key.expires_at,
             key: raw_key,
+            permissions: payload.permissions,
         }),
     ))
 }
@@ -254,21 +211,24 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Preserve any existing deprecation state in the response rather than
-    // always returning None — prevents a stale-UI bug where the client
-    // thinks the key was un-deprecated after a rate-limit update.
-    let deprecated_at = state
+    // Preserve any existing deprecation/permission state in the response
+    // rather than always returning None — prevents a stale-UI bug where the
+    // client thinks the key was un-deprecated, or reset to full access,
+    // after a rate-limit update.
+    let auth_info = state
         .data_service
         .get_api_key_auth_info_by_id(id)
         .await
         .ok()
-        .flatten()
-        .and_then(|info| info.deprecated_at);
+        .flatten();
+    let deprecated_at = auth_info.as_ref().and_then(|info| info.deprecated_at);
+    let permissions = auth_info.and_then(|info| info.permissions);
 
     Ok(Json(api_key_info_with_rate_limit(
         &key,
         payload.rate_limit_rpm,
         deprecated_at,
+        permissions,
     )))
 }
 
@@ -333,13 +293,16 @@ where
     // Without a transaction a partial failure (new key created, deprecation
     // fails) would leave TWO active keys on the account — the explicit
     // enemy of rotation.
+    //
+    // The new key carries over the old key's permission scope: rotation
+    // swaps the secret, it does not widen what the key can do.
     let new_name = format!("{} (rotated)", key.name);
     let (raw_key, new_api_key) = build_api_key(&new_name, user.id, key.expires_at);
     let now = Utc::now();
 
     state
         .data_service
-        .rotate_api_key_atomic(&new_api_key, id, now)
+        .rotate_api_key_atomic(&new_api_key, auth_info.permissions.as_deref(), id, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -353,6 +316,7 @@ where
             key: raw_key,
             old_key_deprecated_at: now,
             old_key_grace_expires_at: deprecation_expires_at(now),
+            permissions: auth_info.permissions,
         }),
     ))
 }

@@ -11,7 +11,7 @@ use auth::repository::{StoreRepository, UserStoreRepository};
 use auth::{SessionService, Store, StoreId};
 use data_service::store_creation::{StoreCreationError, StoreCreationWriter};
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::{AuthenticatedUser, StoreScopedUser, key_grants_store_permission};
 use crate::metrics;
 use crate::state::PgAppState;
 pub use api_types::{CreateStoreRequest, StoreResponse, UpdateStoreRequest};
@@ -196,7 +196,7 @@ where
     )
 )]
 pub async fn update_store<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<UpdateStoreRequest>,
@@ -204,16 +204,15 @@ pub async fn update_store<A>(
 where
     A: SessionService + 'static,
 {
-    // Check permission
+    // Check permission - the owner must have it, AND the key (if any) must
+    // be scoped to grant it.
+    const MODIFY_SETTINGS: &str = "ethpay.store.canmodifystoresettings";
     let has_permission = state
         .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(store_id),
-            "ethpay.store.canmodifystoresettings",
-        )
+        .user_has_store_permission(user.id, StoreId(store_id), MODIFY_SETTINGS)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        && key_grants_store_permission(key_scope.as_deref(), MODIFY_SETTINGS, StoreId(store_id));
 
     if !has_permission {
         return Err(StatusCode::FORBIDDEN);
