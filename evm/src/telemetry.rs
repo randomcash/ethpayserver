@@ -27,7 +27,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
-use sentry::protocol::{Event, Value};
+use sentry::protocol::{Context, Event, Map, Value};
 
 /// Ordered `(pattern, replacement)` redaction rules applied to every free-text
 /// field. Compiled once and reused for the life of the process.
@@ -153,6 +153,44 @@ fn is_sensitive_key(key: &str) -> bool {
     SENSITIVE.iter().any(|needle| key.contains(needle))
 }
 
+/// Redact the open-ended parts of a `contexts` map (present on both
+/// [`Event`] and `Transaction`, and untouched by either — every typed
+/// variant (`os`, `runtime`, `device`, ...) carries an `other: Map<String,
+/// Value>` catch-all for forward compatibility, `Context::Other` is fully
+/// free-form, and `Context::Response` carries HTTP response cookies/headers/
+/// body. Nothing in this codebase calls `Scope::set_context` today, so these
+/// are populated only by Sentry's own `contexts` integration (OS/runtime/
+/// device introspection) — but that integration's fixed fields (os name,
+/// runtime version, ...) are not secret-shaped, so leaving them alone here
+/// while closing the catch-alls matches the rest of this module's
+/// container-vs-field-level policy.
+fn redact_contexts(contexts: &mut Map<String, Context>) {
+    for context in contexts.values_mut() {
+        match context {
+            Context::Other(map) => redact_map(map.iter_mut()),
+            Context::Device(c) => redact_map(c.other.iter_mut()),
+            Context::Os(c) => redact_map(c.other.iter_mut()),
+            Context::Runtime(c) => redact_map(c.other.iter_mut()),
+            Context::App(c) => redact_map(c.other.iter_mut()),
+            Context::Browser(c) => redact_map(c.other.iter_mut()),
+            Context::Gpu(c) => redact_map(c.other.iter_mut()),
+            Context::Otel(c) => {
+                redact_map(c.attributes.iter_mut());
+                redact_map(c.resource.iter_mut());
+                redact_map(c.other.iter_mut());
+            }
+            Context::Response(c) => {
+                // Same reasoning as `event.request`/`transaction.request`:
+                // an HTTP response container routinely holds cookies/headers.
+                c.cookies = None;
+                c.headers.clear();
+                c.data = None;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Sentry `before_send` hook: strip PII/secrets before an event leaves the
 /// process. Returning `Some(event)` lets the (scrubbed) event through;
 /// returning `None` would drop it entirely.
@@ -166,6 +204,7 @@ pub fn scrub_event(mut event: Event<'static>) -> Option<Event<'static>> {
     event.request = None; // HTTP method/url/headers/cookies/body
     event.user = None; // id / email / ip / username
     event.server_name = None; // host identity
+    redact_contexts(&mut event.contexts);
 
     // Redact secret-shaped text from remaining free-text fields.
     for text in [
@@ -227,6 +266,7 @@ fn scrub_transaction(transaction: &mut sentry::protocol::Transaction<'static>) {
     transaction.request = None;
     transaction.user = None;
     transaction.server_name = None;
+    redact_contexts(&mut transaction.contexts);
 
     if let Some(name) = transaction.name.as_mut() {
         *name = redact_secrets(name);
@@ -750,6 +790,72 @@ mod tests {
             !span_detail.contains("supersecret"),
             "span data leaked: {span_detail}"
         );
+    }
+
+    #[test]
+    fn scrub_event_and_transaction_redact_contexts() {
+        use sentry::protocol::{Context, ResponseContext, RuntimeContext, Transaction};
+
+        fn poisoned_contexts() -> Map<String, Context> {
+            let mut contexts = Map::new();
+            let mut runtime = RuntimeContext {
+                name: Some("rustc".to_string()),
+                ..Default::default()
+            };
+            runtime
+                .other
+                .insert("token".to_string(), Value::String("sk_live_x".to_string()));
+            contexts.insert("runtime".to_string(), Context::Runtime(Box::new(runtime)));
+            contexts.insert(
+                "response".to_string(),
+                Context::Response(Box::new(ResponseContext {
+                    cookies: Some("session=abc123".to_string()),
+                    data: Some(Value::String("body".to_string())),
+                    ..Default::default()
+                })),
+            );
+            let mut other = Map::new();
+            other.insert("password".to_string(), Value::String("hunter2".to_string()));
+            contexts.insert("plugin".to_string(), Context::Other(other));
+            contexts
+        }
+
+        let event = Event {
+            contexts: poisoned_contexts(),
+            ..Default::default()
+        };
+        let scrubbed = scrub_event(event).expect("event passes through");
+        assert_context_containers_are_clean(&scrubbed.contexts);
+
+        let mut transaction = Transaction {
+            contexts: poisoned_contexts(),
+            ..Default::default()
+        };
+        scrub_transaction(&mut transaction);
+        assert_context_containers_are_clean(&transaction.contexts);
+
+        fn assert_context_containers_are_clean(contexts: &Map<String, Context>) {
+            let Context::Runtime(runtime) = &contexts["runtime"] else {
+                panic!("expected runtime context")
+            };
+            assert_eq!(
+                runtime.other.get("token").and_then(Value::as_str),
+                Some("[redacted]"),
+                "runtime.other leaked a secret key"
+            );
+            let Context::Response(response) = &contexts["response"] else {
+                panic!("expected response context")
+            };
+            assert!(response.cookies.is_none());
+            assert!(response.data.is_none());
+            let Context::Other(plugin) = &contexts["plugin"] else {
+                panic!("expected other context")
+            };
+            assert_eq!(
+                plugin.get("password").and_then(Value::as_str),
+                Some("[redacted]")
+            );
+        }
     }
 
     #[test]

@@ -16,11 +16,12 @@
 //! and nothing forced the copy to match.
 //!
 //! `server::api::with_sentry_performance_tracing` closes that gap: it is
-//! the one function `main` calls to add these layers, and this test calls
-//! the same function on the same `server::api::router` output. There is no
-//! second copy left to drift - a reordering or a dropped
-//! `tower-axum-matched-path` feature there fails this test, not just a
-//! stand-in for it.
+//! the one function `main` calls to add every outer layer (request tracing,
+//! CORS, then the Sentry pair) on top of `server::api::router`, and this
+//! test calls the same function on the same router output - the exact stack
+//! `main` serves, not a subset of it. There is no second copy left to drift -
+//! a reordering or a dropped `tower-axum-matched-path` feature there fails
+//! this test, not just a stand-in for it.
 //!
 //! Needs `DATABASE_URL`; skips (does not fail) when it's unset, the same
 //! convention the other ignored integration tests in this directory use.
@@ -86,7 +87,7 @@ fn transaction_name_is_the_route_pattern_not_the_request_uri() {
     let state = app_state(Arc::new(pg));
 
     // The exact router-building call `server.rs` makes, passed through the
-    // exact function `server.rs` calls to add the Sentry layers - so a
+    // exact function `server.rs` calls to add every outer layer - so a
     // change to either in `main` is exercised here too, not just in a copy.
     let app = server::api::with_sentry_performance_tracing(server::api::router(
         state, false, None, None, None,
