@@ -95,10 +95,20 @@ where
 /// Why it exists: the deletion path used to make orphaned watches impossible
 /// by refusing the delete while any address was watched. That refusal was
 /// broader than its purpose and is gone, so the watches are cleared after the
-/// delete commits instead - best effort rather than guaranteed. This is how we
-/// find out which of those we actually have. If it never moves, the gap is
-/// theoretical; if it does, a stale watch exists and the reconciler is not
-/// optional.
+/// delete commits instead - best effort rather than guaranteed.
+///
+/// WHAT A ZERO HERE DOES NOT MEAN. The monitor is a separate process reached
+/// over Redis pub/sub, and `unwatch_address_by_chain_id` succeeds when the
+/// command is *published*, not when the monitor has acted on it - there is no
+/// acknowledgement. So this counts "could not publish the unwatch" and cannot
+/// see a command published to a channel nobody is subscribed to, or received
+/// and then dropped. Each of those leaves exactly the stale watch this is
+/// about and increments nothing.
+///
+/// So a non-zero value is a real problem, and a zero rules out publish
+/// failures and nothing else. Only a reconciler comparing the monitor's actual
+/// watch set against the database can answer the question this counter looks
+/// like it answers.
 fn record_unwatch_failed() {
     metrics::counter!("ethpayserver_unwatch_after_delete_failures_total").increment(1);
 }
