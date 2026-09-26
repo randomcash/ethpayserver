@@ -103,8 +103,11 @@ async function reviewRoute(apiKey, route, { path: routePath, shots }) {
   });
 
   if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(`${resp.status} ${resp.statusText}: ${body.slice(0, 500)}`);
+    // Deliberately not the response body: same reasoning as the missing-
+    // tool_use case below — this message flows into `errors`, which the
+    // scheduled workflow publishes, so it must never carry API-authored
+    // text, only the status line.
+    throw new Error(`${resp.status} ${resp.statusText}`);
   }
 
   const data = await resp.json();
@@ -172,10 +175,10 @@ async function main() {
       findings.push(...(await reviewRoute(apiKey, route, group)));
     } catch (err) {
       const reason = `review failed: ${err instanceof Error ? err.message : err}`;
-      // Not `reason` itself: writeOutputs()'s "counts only" comment applies
-      // here too, and the full API response text (up to 500 chars, per the
-      // `!resp.ok` throw above) has no reason to sit in a public job log when
-      // the route name already says which capture to look at.
+      // Not `reason` itself in the console log: writeOutputs()'s "counts
+      // only" comment applies here too. `reason` is safe to publish in
+      // `errors` because both throw sites above already strip it down to a
+      // status line / block-type list, never API- or model-authored text.
       console.error(`${route}: review failed`);
       errors.push({ route, viewport: null, reason });
     }
