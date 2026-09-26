@@ -81,8 +81,8 @@ pub use boot::{
 pub use dispatch::{
     ACCOUNT_CLOSED, CANCEL_SUBSCRIPTION, CancelSubscriptionOutcome, FILTER_INVOICE_CREATION,
     PAYMENT_SETTLED, PluginAccountClosedObserver, PluginInvoiceCreationFilter,
-    PluginPaymentObserver, account_closed_observers, cancel_subscription,
-    invoice_creation_filters, own_store_payment_reporting, payment_observers,
+    PluginPaymentObserver, account_closed_observers, cancel_subscription, invoice_creation_filters,
+    own_store_payment_reporting, payment_observers,
 };
 pub use filter::{
     FilterVerdict, InvoiceCreationFilter, InvoiceCreationFilterRequest,

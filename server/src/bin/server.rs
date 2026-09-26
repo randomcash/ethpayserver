@@ -261,25 +261,17 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Turn the loaded plugins into the capability implementations the rest of
-    // the server calls. Without this, a plugin compiles, instantiates and
-    // registers - and nothing ever dispatches to it.
-    let (plugin_filters, plugin_payment_observers): (
-        Vec<Arc<dyn server::services::plugins::InvoiceCreationFilter>>,
-        Vec<Arc<dyn server::services::plugins::OwnStorePaymentObserver>>,
-    ) = match plugin_host.as_ref() {
-        Some(host) => (
-            invoice_creation_filters(host, &loaded),
-            payment_observers(host, &loaded),
-        ),
-        None => (Vec::new(), Vec::new()),
-    };
-    let plugin_account_closed_observers: Vec<
-        Arc<dyn server::services::plugins::AccountClosedObserver>,
-    > = match plugin_host.as_ref() {
-        Some(host) => account_closed_observers(host, &loaded),
-        None => Vec::new(),
-    };
+    // Turn the loaded plugins into the capability implementations the server
+    // calls - without this, a plugin registers but nothing dispatches to it.
+    let (plugin_filters, plugin_payment_observers, plugin_account_closed_observers) = plugin_host
+        .as_ref()
+        .map_or((Vec::new(), Vec::new(), Vec::new()), |host| {
+            (
+                invoice_creation_filters(host, &loaded),
+                payment_observers(host, &loaded),
+                account_closed_observers(host, &loaded),
+            )
+        });
 
     // Capability 4 needs both a store to watch and something to tell. Either
     // one missing means no dispatch at all: an instance with a billing store
@@ -401,8 +393,7 @@ async fn main() -> Result<()> {
     // installed, which is every deployment today; before this line it was
     // empty even then.
     state.invoice_creation_filters = plugin_filters;
-    // Capability 8. Empty until a plugin is installed, the same as the filter
-    // list above - see `AppState::account_closed_observers`.
+    // Capability 8, empty until a plugin is installed, same as the filter list above.
     state.account_closed_observers = plugin_account_closed_observers;
     // Never filtered: see `AppState::billing_store_id`.
     state.billing_store_id = billing_store_id;
