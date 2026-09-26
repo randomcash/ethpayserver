@@ -272,17 +272,32 @@ pub fn resolve_environment() -> String {
 /// to `0.0` rather than failing boot over it, since sending no transactions
 /// is always a safe default, but logs a warning first — otherwise a typo'd
 /// value is indistinguishable from an intentional `0.0` and can sit
-/// unnoticed indefinitely.
+/// unnoticed indefinitely. A parseable but out-of-range value (e.g. `"1"`
+/// typed for `"0.1"`, or a negative number) is clamped into `0.0..=1.0` with
+/// the same warning, rather than handed to `ClientOptions` as-is — otherwise
+/// that exact typo silently reproduces the unbounded-cost failure this
+/// ticket exists to close.
 #[must_use]
 pub fn resolve_traces_sample_rate() -> f32 {
     match std::env::var("SENTRY_TRACES_SAMPLE_RATE") {
-        Ok(raw) => raw.parse().unwrap_or_else(|_| {
-            tracing::warn!(
-                value = %raw,
-                "SENTRY_TRACES_SAMPLE_RATE is not a valid number; falling back to 0.0"
-            );
-            0.0
-        }),
+        Ok(raw) => {
+            let parsed: f32 = raw.parse().unwrap_or_else(|_| {
+                tracing::warn!(
+                    value = %raw,
+                    "SENTRY_TRACES_SAMPLE_RATE is not a valid number; falling back to 0.0"
+                );
+                0.0
+            });
+            if (0.0..=1.0).contains(&parsed) {
+                parsed
+            } else {
+                tracing::warn!(
+                    value = %raw,
+                    "SENTRY_TRACES_SAMPLE_RATE is outside 0.0..=1.0; clamping"
+                );
+                parsed.clamp(0.0, 1.0)
+            }
+        }
         Err(_) => 0.0,
     }
 }
@@ -726,5 +741,25 @@ mod tests {
             std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "0.1");
         }
         assert_eq!(resolve_traces_sample_rate(), 0.1);
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "10");
+        }
+        assert_eq!(
+            resolve_traces_sample_rate(),
+            1.0,
+            "a parseable but out-of-range value (e.g. \"10\" typed for \"0.1\") must clamp, not pass through"
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "-3");
+        }
+        assert_eq!(
+            resolve_traces_sample_rate(),
+            0.0,
+            "a negative value must clamp to 0.0, not go negative"
+        );
     }
 }

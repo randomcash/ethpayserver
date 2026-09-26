@@ -616,10 +616,15 @@ where
 /// performance page.
 ///
 /// Pulled out of `bin/server.rs::main` so the integration test in
-/// `server/tests/sentry_transaction_naming.rs` applies the exact same
-/// layers, in the exact same order, to the exact same router `main` serves —
-/// a copy-pasted pair of `.layer()` calls in the test would drift silently
-/// if this one ever changed.
+/// `server/tests/sentry_transaction_naming.rs` calls this exact function,
+/// in the exact order it adds its two layers, instead of hand-copying the
+/// `.layer()` calls — a copy-pasted pair in the test would drift silently
+/// if this one ever changed. Note this is *not* the full router `axum::serve`
+/// gets: `main` layers `TraceLayer`/`CorsLayer` onto the router before
+/// calling this function, and the test does not. Neither layer touches
+/// `MatchedPath`, so the property this guards — route-pattern transaction
+/// naming — still holds either way, but a future layer inserted between the
+/// two call sites in `main` would not be exercised by the test.
 pub fn with_sentry_performance_tracing(router: Router) -> Router {
     // Axum runs middleware in the reverse order it's `.layer()`-ed, so
     // `NewSentryLayer` must be added last to end up outermost of
