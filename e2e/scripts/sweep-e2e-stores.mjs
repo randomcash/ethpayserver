@@ -18,16 +18,14 @@
  *
  * - `GET /stores` returns only the stores the token's own user can see, so this
  *   can never reach another account's stores however wrong the pattern goes.
- * - This calls `DELETE /admin/stores/{id}` — `hard_delete_store` in
- *   `server/src/api/admin/mod.rs` — not the self-service `DELETE /stores/{id}`,
- *   which only archives. The admin route actually removes the row, its
- *   invoices and its payments, which is the point: an archived store is still
- *   a row the daily count keeps growing by. `E2E_API_TOKEN` must be a
- *   `server_admin` token for this to work, same requirement as
- *   `sweep-e2e-accounts.mjs`. The endpoint independently refuses any store
- *   whose name is not this exact `e2e-synthetic-<ISO timestamp>` shape, so a
- *   loose pattern here can widen what this script *lists* but never what it
- *   can actually delete.
+ * - `DELETE /stores/{id}` *archives* — `archive_store` in
+ *   `server/src/api/stores/crud.rs` is `UPDATE stores SET archived = true`. The
+ *   row, its payment methods, webhook and invoices all stay in the database;
+ *   the store drops out of the UI's store list (which hides archived by
+ *   default) but `GET /stores` still returns it. So a second run of this script
+ *   sees the same stores again, already archived, and reports them as done
+ *   rather than deleting them twice. Reclaiming the rows themselves needs
+ *   database access, not this script.
  */
 
 /**
@@ -56,10 +54,7 @@ const apiUrl = requireEnv(
   'E2E_API_URL',
   'the server to sweep, e.g. https://testnet.random.cash',
 ).replace(/\/$/, '');
-const token = requireEnv(
-  'E2E_API_TOKEN',
-  'server_admin API key (ak_...) — hard-deleting a store is an admin action',
-);
+const token = requireEnv('E2E_API_TOKEN', 'API key (ak_...) owning the stores to remove');
 // Same rule as fixtures/api.ts: the deployed client's nginx proxies /api/ to the
 // backend and strips the prefix, so a remote base URL needs it and a direct one
 // does not. Getting it wrong 404s loudly rather than silently finding nothing.
@@ -86,32 +81,35 @@ console.log(execute ? 'MODE: execute\n' : 'MODE: dry run (pass --execute to dele
 
 const stores = await api('/stores');
 
-// Every matching store is residue, archived or not — an archive from a run
-// before this script hard-deleted is exactly the pile this backfill exists
-// to clear, not something to treat as already handled.
 const matched = stores.filter((s) => SYNTHETIC_STORE_NAME.test(s.name));
 const nearMisses = stores.filter(
   (s) => !SYNTHETIC_STORE_NAME.test(s.name) && s.name.startsWith(NEAR_MISS_PREFIX),
 );
 
-for (const store of matched) {
+const live = matched.filter((s) => !s.archived);
+const alreadyArchived = matched.length - live.length;
+
+for (const store of live) {
   console.log(`  ${execute ? 'delete' : 'would delete'}  ${store.id}  ${store.name}`);
 }
 
 let failed = 0;
 if (execute) {
-  for (const store of matched) {
+  for (const store of live) {
     try {
-      await api(`/admin/stores/${store.id}`, 'DELETE');
+      await api(`/stores/${store.id}`, 'DELETE');
     } catch (err) {
-      // Keep going and fail at the end: one 403/409 must not strand the rest.
+      // Keep going and fail at the end: one 403 must not strand the rest.
       console.error(`  FAILED  ${store.id}  ${store.name} — ${err.message}`);
       failed++;
     }
   }
 }
 
-console.log(`\n${stores.length} store(s) visible to this token, ${matched.length} matching ${SYNTHETIC_STORE_NAME}.`);
+console.log(
+  `\n${stores.length} store(s) visible to this token, ${matched.length} matching ` +
+    `${SYNTHETIC_STORE_NAME}, ${alreadyArchived} of those already archived.`,
+);
 if (nearMisses.length > 0) {
   console.log(
     `\n${nearMisses.length} store(s) start with "${NEAR_MISS_PREFIX}" but do not match the ` +
@@ -119,7 +117,7 @@ if (nearMisses.length > 0) {
   );
   for (const s of nearMisses) console.log(`  skipped  ${s.id}  ${s.name}`);
 }
-if (!execute && matched.length > 0) console.log('\nRe-run with --execute to delete.');
+if (!execute && live.length > 0) console.log('\nRe-run with --execute to delete.');
 if (failed > 0) {
   console.error(`\n${failed} deletion(s) failed.`);
   process.exit(1);
