@@ -472,12 +472,23 @@ mod tests {
         const AUDITED_ALLOY_TRANSPORT_WS_VERSION: &str = "1.8.3";
 
         let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"));
-        let resolved = lock
+        let matches: Vec<&str> = lock
             .split("\n\n")
-            .find(|pkg| pkg.contains("name = \"alloy-transport-ws\"\n"))
-            .and_then(|pkg| pkg.lines().find(|l| l.starts_with("version = ")))
+            .filter(|pkg| pkg.contains("name = \"alloy-transport-ws\"\n"))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "Cargo.lock must resolve exactly one `alloy-transport-ws` entry, found {}. A \
+             second resolved version means an unaudited release is also linked into the \
+             binary, which this test cannot see past a single `find`.",
+            matches.len()
+        );
+        let resolved = matches[0]
+            .lines()
+            .find(|l| l.starts_with("version = "))
             .and_then(|l| l.split('"').nth(1))
-            .expect("Cargo.lock must resolve exactly one `alloy-transport-ws` entry");
+            .expect("alloy-transport-ws entry in Cargo.lock has no version field");
         assert_eq!(
             resolved, AUDITED_ALLOY_TRANSPORT_WS_VERSION,
             "alloy-transport-ws moved from the version sentry_event_filter's target match was \
