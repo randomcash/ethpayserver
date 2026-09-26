@@ -229,7 +229,16 @@ async fn probe_watch_reconciliation(
 ) -> WatchReconciliationHealth {
     match tokio::time::timeout(PROBE_TIMEOUT, reconcile_watches(data_service, evm_monitor)).await {
         Ok(Ok(counts)) => WatchReconciliationHealth {
-            status: "ok".to_string(),
+            // The comparison running cleanly and finding a fault are two
+            // different things - a stale or, worse, a missed watch is
+            // exactly what this probe exists to surface, so `status` must
+            // not read "ok" while either count is nonzero.
+            status: if counts.stale == 0 && counts.missed == 0 {
+                "ok"
+            } else {
+                "error"
+            }
+            .to_string(),
             stale_watches: counts.stale,
             missed_watches: counts.missed,
             error: None,
