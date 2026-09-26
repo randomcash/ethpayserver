@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod auth;
 mod conversions;
 mod email_change;
+mod expected_watch;
 mod installed_plugins;
 mod invoice;
 mod invoice_creation;
@@ -30,6 +31,7 @@ mod watched_address_deletion;
 mod webhook_delivery;
 
 pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository, WalletReauthChallenge};
+pub use expected_watch::ExpectedWatch;
 pub use wallet_rotation::WalletRotation;
 pub use watched_address::PendingWatch;
 
