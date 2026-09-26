@@ -12,20 +12,49 @@
 #
 # Failing on all 47 existing files the day this lands is how a gate gets
 # switched off in its first week - see CLAUDE.md's account of exactly that
-# happening to other checks. So the backlog is left alone: what fails is a
-# file getting WORSE in this change, either by crossing the limit for the
-# first time or by growing further while already over it. A file that shrinks
-# - even while still over the limit - always passes. That is a direct answer
-# to "doubled in nine days": the doubling was entirely new and modified code,
-# and this refuses exactly that pattern from here on without demanding the
-# backlog be fixed first.
+# happening to other checks. So the backlog is left alone: what it FLAGS is a
+# file getting worse in this change, either by crossing the limit for the first
+# time or by growing further while already over it. A file that shrinks - even
+# while still over the limit - is never flagged.
+#
+# ENFORCEMENT IS OFF, DELIBERATELY, AS OF 2026-09-26.
+# -------------------------------------------------
+# The limit is a readability rule, and the decision was that this code's only
+# readers are agents, so the rule is not worth blocking merges for. Nine open
+# pull requests could not pass it, and unblocking them by hand meant splitting
+# eight production files - metrics.rs, wallet.rs, admin/mod.rs, config.rs among
+# them - several of which sit on money paths, purely to satisfy a line count.
+# That is a large surgery with real risk to buy a property nobody was reading.
+#
+# What is lost, stated plainly rather than waved away: the measurement that
+# prompted this gate was 26 oversized files growing to 47 in nine days, while
+# a series of split tickets was landing. The growth outpaced the splitting
+# because nothing checked. Enforcement off returns to that condition, and the
+# expected consequence is that these files keep growing. THE REPORT BELOW IS
+# THEREFORE THE POINT NOW, not a preamble to the failure: it is the only thing
+# that will show the curve.
+#
+# Set ENFORCE_FILE_SIZE=1 to arm it again. It is one variable rather than a
+# deleted script so re-arming does not mean rebuilding the rename handling, the
+# ratchet, or the measurement-failure guards below - all of which took real
+# debugging and none of which are about the limit itself.
+#
+# Measurement failures still fail the build even with enforcement off. "Could
+# not look" is not "nothing found", and that conflation is a different bug from
+# the one this gate was arguing about.
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
 LINE_LIMIT="${LINE_LIMIT:-400}"
 BASE_REF="${BASE_REF:-origin/testnet}"
+# Per-file ceilings for files that predate this gate but are new to the base.
+# See the file's own header for why an entry is a debt rather than an exemption.
+RATCHET_FILE="${RATCHET_FILE:-scripts/file-size-ratchet.txt}"
+# Off by default - see the header. 1 arms the growth check again.
+ENFORCE="${ENFORCE_FILE_SIZE:-0}"
 status=0
+grew=0
 
 # Report: every .rs file over the limit right now, worst first, independent of
 # the ratchet below. This is what a human audit reads instead of hand-running
@@ -132,7 +161,20 @@ while IFS=$'\t' read -r dstatus path1 path2; do
     A*)
       # A genuinely new path has nothing to look up at base - 0 is the
       # correct answer here, not a swallowed failure standing in for one.
+      #
+      # Unless it is enrolled in the ratchet. A file arriving from a branch that
+      # predates this gate is new to the BASE but not new to the project, and
+      # treating it as growth from zero blocks it outright rather than holding it
+      # where it is. An entry gives it what the files already over the limit get
+      # for free: it may not grow, and it is not blocked.
       before=0
+      if [ -f "$RATCHET_FILE" ]; then
+        enrolled="$(awk -v want="$f" '$1 == want { print $2; exit }' "$RATCHET_FILE")"
+        if [ -n "$enrolled" ]; then
+          before="$enrolled"
+          echo "note: $f is enrolled in the ratchet at $enrolled lines - it may not grow past that" >&2
+        fi
+      fi
       ;;
     *)
       # `$?` here, not PIPESTATUS: the pipe runs inside this command
@@ -150,16 +192,28 @@ while IFS=$'\t' read -r dstatus path1 path2; do
   over_after=$(( after > LINE_LIMIT ? after - LINE_LIMIT : 0 ))
   over_before=$(( before > LINE_LIMIT ? before - LINE_LIMIT : 0 ))
   if [ "$over_after" -gt "$over_before" ]; then
-    status=1
-    echo "::error::$f grew from $before to $after lines, past the ${LINE_LIMIT}-line limit ($over_before -> $over_after lines over)" >&2
+    grew=$((grew + 1))
+    if [ "$ENFORCE" = "1" ]; then
+      status=1
+      echo "::error::$f grew from $before to $after lines, past the ${LINE_LIMIT}-line limit ($over_before -> $over_after lines over)" >&2
+    else
+      echo "::warning::$f grew from $before to $after lines, past the ${LINE_LIMIT}-line limit ($over_before -> $over_after lines over)" >&2
+    fi
   fi
 done <<< "$changed"
 
-if [ "$status" -eq 0 ]; then
+if [ "$grew" -eq 0 ]; then
   echo "no .rs file grew past the ${LINE_LIMIT}-line limit in this change"
-else
+elif [ "$ENFORCE" = "1" ]; then
   echo "  Split the file rather than growing it further. Along the behaviours" >&2
   echo "  it covers, not by arbitrary halves - see CLAUDE.md." >&2
+else
+  # Says "not enforced" rather than nothing, so a green run is never mistaken
+  # for "nothing grew". Reporting a pass as though it were a clean measurement
+  # is the failure mode every other check here was written to avoid.
+  echo "$grew file(s) grew past the ${LINE_LIMIT}-line limit; NOT ENFORCED (ENFORCE_FILE_SIZE=0)"
+  echo "  Splitting along the behaviours a file covers is still the right move" >&2
+  echo "  when you are already in one - this just no longer blocks the merge." >&2
 fi
 
 exit "$status"

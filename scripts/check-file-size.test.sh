@@ -8,17 +8,36 @@
 set -uo pipefail
 
 GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-file-size.sh"
+
+# Every case below asserts the GROWTH-REFUSAL logic, so it arms enforcement
+# explicitly. That logic still exists and still has to be correct - it is off by
+# default in real runs (see the guard's header), and a default is not a reason to
+# stop testing the mechanism it disables. Without this the suite fails three
+# cases for the reason it is supposed to be proving.
+#
+# The default itself is covered by the last case in this file. Testing only the
+# armed path would leave the behaviour that actually runs in CI unverified -
+# which is the shape of every defect this repository keeps rediscovering.
+export ENFORCE_FILE_SIZE=1
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# Own file, not a fixed /tmp path. `/tmp` here is shared and sticky, so a fixed
+# name is owned by whichever user ran the suite first - on this box CI (a
+# different user) had left one behind, and every later local run got
+# "Permission denied" on the redirect. The redirect's own failure then became
+# the exit status `check` compared against, so the suite reported the GUARD
+# failing a case it had actually passed. A test that misattributes its own
+# plumbing failure to the thing under test is worse than no test.
+OUT="$(mktemp)"
+trap 'rm -rf "$TMP" "$OUT"' EXIT
 
 fail=0
 check() { # name expected_rc
   local name="$1" want="$2" got
-  ( cd "$TMP" && LINE_LIMIT=5 BASE_REF=base "$GUARD" ) >/tmp/check-file-size.test.out 2>&1
+  ( cd "$TMP" && LINE_LIMIT=5 BASE_REF=base "$GUARD" ) >"$OUT" 2>&1
   got=$?
   if [ "$got" -ne "$want" ]; then
     echo "FAIL: $name - expected exit $want, got $got"
-    cat /tmp/check-file-size.test.out
+    cat "$OUT"
     fail=1
   else
     echo "ok: $name (exit $got)"
@@ -308,6 +327,68 @@ else
   echo "FAIL: a failed git show for a modified file should fail closed, not read as before=0"
   printf '%s\n' "$out"
   fail=1
+fi
+
+# An entry in the ratchet file must hold a file WHERE IT IS, not exempt it. The
+# second of these is the load-bearing one: if an enrolled file can grow freely,
+# the entry is a dispensation rather than a debt and the gate has a hole in it
+# shaped exactly like the thing it was added to avoid.
+RATCHET_T="$(mktemp -d)"
+(
+  cd "$RATCHET_T" && git init -q . && git config user.email t@t && git config user.name t
+  : > .keep && git add -A && git commit -qm "empty base"
+  git branch base
+  mkdir -p scripts
+  printf 'big.rs 8\n' > scripts/file-size-ratchet.txt
+  lines 8 > big.rs
+  git add -A && git commit -qm "add an oversized file, enrolled at its size"
+)
+out="$(cd "$RATCHET_T" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "ok: a new file enrolled at its own size is held, not blocked"
+else
+  echo "FAIL: an enrolled file at its ceiling should pass"; printf '%s\n' "$out"; fail=1
+fi
+
+( cd "$RATCHET_T" && lines 12 > big.rs && git commit -qam "grow past the enrolled ceiling" )
+out="$(cd "$RATCHET_T" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'big.rs grew from 8 to 12'; then
+  echo "ok: an enrolled file that GROWS past its ceiling is still refused"
+else
+  echo "FAIL: enrolment must not become exemption - growth past the ceiling must fail"
+  printf '%s\n' "$out"; fail=1
+fi
+
+( cd "$RATCHET_T" && rm scripts/file-size-ratchet.txt && lines 8 > other.rs && git add -A && git commit -qm "an unenrolled new oversized file" )
+out="$(cd "$RATCHET_T" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"; rc=$?
+rm -rf "$RATCHET_T"
+if [ "$rc" -eq 1 ]; then
+  echo "ok: a new oversized file with no entry is still refused"
+else
+  echo "FAIL: absence of a ratchet file must not exempt anything"; printf '%s\n' "$out"; fail=1
+fi
+
+# THE DEFAULT, which is what actually runs in CI: growth is reported and warned
+# about, and the build passes. Asserted on all three of exit code, the warning,
+# and the NOT ENFORCED line - because "exits 0" alone would also be satisfied by
+# a guard that had silently stopped measuring, and the whole argument for
+# relaxing rather than deleting was that the measurement survives.
+DEFAULT_T="$(mktemp -d)"
+(
+  cd "$DEFAULT_T" && git init -q . && git config user.email t@t && git config user.name t
+  lines 8 > already_over.rs && git add -A && git commit -qm "base commit"
+  git branch base
+  lines 12 > already_over.rs && git commit -qam "grow it further"
+)
+out="$(cd "$DEFAULT_T" && LINE_LIMIT=5 BASE_REF=base ENFORCE_FILE_SIZE=0 "$GUARD" 2>&1)"; rc=$?
+rm -rf "$DEFAULT_T"
+if [ "$rc" -eq 0 ] \
+  && printf '%s\n' "$out" | grep -q 'already_over.rs grew from 8 to 12' \
+  && printf '%s\n' "$out" | grep -q 'NOT ENFORCED'; then
+  echo "ok: with enforcement off, growth is reported and warned about but passes"
+else
+  echo "FAIL: the default must report the growth, say NOT ENFORCED, and exit 0"
+  printf '%s\n' "$out"; fail=1
 fi
 
 [ "$fail" -eq 0 ] && echo "check-file-size.sh behaves as documented"
