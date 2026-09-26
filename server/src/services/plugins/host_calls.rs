@@ -138,7 +138,7 @@ struct StatementResult {
 /// could do that could redirect where invoices are issued.
 ///
 /// Unpublished reads as "this host does not issue invoices", which is the
-/// same answer an instance with no billing store gives, and the right one:
+/// same answer an instance with no operator store gives, and the right one:
 /// in both cases there is no store this host would be willing to issue on.
 #[derive(Clone, Default)]
 pub struct DeferredIssuer(Arc<std::sync::OnceLock<Arc<dyn super::HostInvoiceIssuer>>>);
@@ -174,7 +174,7 @@ impl std::fmt::Debug for DeferredIssuer {
 /// Separate from [`DeferredIssuer`] rather than one cell holding both,
 /// because the two are available under different conditions: issuing needs
 /// the instance's own store and reading a merchant's volume does not. Sharing
-/// a cell would make an instance with no billing store silently unable to
+/// a cell would make an instance with no operator store silently unable to
 /// answer a question it can answer perfectly well.
 #[derive(Clone, Default)]
 pub struct DeferredVolume(Arc<std::sync::OnceLock<Arc<dyn super::MerchantVolumeReader>>>);

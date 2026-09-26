@@ -106,24 +106,26 @@ pub struct AppState<D, A, E> {
     /// installed, in which case invoice creation is never filtered at all.
     pub invoice_creation_filters: Vec<Arc<dyn InvoiceCreationFilter>>,
 
-    /// The store this instance bills its own subscriptions through, and the
-    /// one store `invoice_creation_filters` is never consulted for.
+    /// The operator's own store: where this instance issues its own
+    /// invoices, and the one store `invoice_creation_filters` is never
+    /// consulted for.
     ///
-    /// Without this exemption a billing plugin can deadlock the thing that
-    /// pays it: the plugin refuses invoice creation for a lapsed merchant,
-    /// the invoice that would renew a subscription is itself created on this
-    /// store, and a plugin bug - or simply a plugin that fails closed while
-    /// it is down - refuses the renewal that would have fixed it. The only
-    /// way out of that state is editing the database by hand.
+    /// Without this exemption a plugin watching this store can deadlock the
+    /// thing that pays it: the plugin refuses invoice creation for a lapsed
+    /// merchant, the invoice that would renew that merchant is itself
+    /// created on this store, and a plugin bug - or simply a plugin that
+    /// fails closed while it is down - refuses the renewal that would have
+    /// fixed it. The only way out of that state is editing the database by
+    /// hand.
     ///
-    /// `None` on any instance that sells nothing to itself, which exempts
-    /// nothing.
-    pub billing_store_id: Option<types::StoreId>,
+    /// `None` on any instance that issues no invoices to itself, which
+    /// exempts nothing.
+    pub operator_store_id: Option<types::StoreId>,
 
-    /// The account `billing_store_id` must be owned by, per `Config`.
+    /// The account `operator_store_id` must be owned by, per `Config`.
     ///
-    /// Carried on the state the same way `billing_store_id` is: resolved once
-    /// at boot and never re-read from the environment, since an admin
+    /// Carried on the state the same way `operator_store_id` is: resolved
+    /// once at boot and never re-read from the environment, since an admin
     /// settings save must be checked against the value this process actually
     /// started with, not a fresh guess at what the environment currently
     /// says.
@@ -191,7 +193,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             webhook_sink: self.webhook_sink.clone(),
             webauthn: self.webauthn.clone(),
             invoice_creation_filters: self.invoice_creation_filters.clone(),
-            billing_store_id: self.billing_store_id,
+            operator_store_id: self.operator_store_id,
             operator_account_id: self.operator_account_id,
             email_sender: Arc::clone(&self.email_sender),
             plugin_pages: Arc::clone(&self.plugin_pages),
@@ -222,7 +224,7 @@ impl<D, A, E> AppState<D, A, E> {
             webhook_sink: None,
             webauthn: None,
             invoice_creation_filters: Vec::new(),
-            billing_store_id: None,
+            operator_store_id: None,
             operator_account_id: None,
             email_sender,
             plugin_pages: Arc::new(PageHost::new()),

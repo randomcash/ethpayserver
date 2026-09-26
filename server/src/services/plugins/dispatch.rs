@@ -308,13 +308,13 @@ pub fn payment_observers(
 /// and every test still passes.
 #[must_use]
 pub fn own_store_payment_reporting(
-    billing_store_id: Option<types::StoreId>,
+    operator_store_id: Option<types::StoreId>,
     observers: Vec<Arc<dyn OwnStorePaymentObserver>>,
 ) -> Option<(types::StoreId, Vec<Arc<dyn OwnStorePaymentObserver>>)> {
     if observers.is_empty() {
         return None;
     }
-    billing_store_id.map(|store_id| (store_id, observers))
+    operator_store_id.map(|store_id| (store_id, observers))
 }
 
 #[cfg(test)]
