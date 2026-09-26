@@ -4,8 +4,8 @@
 #
 # The failure mode this guards against is a check that stays green through the
 # outage it was written to catch (monitor.data_fresh false, an RPC gone quiet,
-# a stalled last_block, or its own state-tracking erroring) - so "it passed on
-# a healthy body" is not evidence it works.
+# a stalled last_block, a stale or missed watch, or its own state-tracking
+# erroring) - so "it passed on a healthy body" is not evidence it works.
 set -uo pipefail
 
 GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-health-deep.sh"
@@ -26,7 +26,7 @@ healthy_body() {
   cat <<'JSON'
 {"postgres":{"status":"ok"},"redis":{"status":"ok"},
  "monitor":{"status":"ok","data_fresh":true},
- "rpcs":{"1":{"status":"ok","last_block":100}}}
+ "rpcs":{"1":{"status":"ok","last_block":100}},"watch_reconciliation":{"status":"ok"}}
 JSON
 }
 
@@ -126,7 +126,7 @@ echo 200 > "$STATUS_FILE"
 cat > "$BODY_FILE" <<'JSON'
 {"postgres":{"status":"ok"},"redis":{"status":"ok"},
  "monitor":{"status":"ok","data_fresh":false},
- "rpcs":{"1":{"status":"ok","last_block":100}}}
+ "rpcs":{"1":{"status":"ok","last_block":100}},"watch_reconciliation":{"status":"ok"}}
 JSON
 check "monitor.data_fresh false is refused" 1
 checkin_sent "error"
@@ -134,23 +134,39 @@ checkin_sent "error"
 cat > "$BODY_FILE" <<'JSON'
 {"postgres":{"status":"ok"},"redis":{"status":"ok"},
  "monitor":{"status":"ok","data_fresh":true},
- "rpcs":{"1":{"status":"error","last_block":100}}}
+ "rpcs":{"1":{"status":"error","last_block":100}},"watch_reconciliation":{"status":"ok"}}
 JSON
 check "an unhealthy rpc is refused" 1
 
 cat > "$BODY_FILE" <<'JSON'
 {"postgres":{"status":"error"},"redis":{"status":"ok"},
  "monitor":{"status":"ok","data_fresh":true},
- "rpcs":{"1":{"status":"ok","last_block":100}}}
+ "rpcs":{"1":{"status":"ok","last_block":100}},"watch_reconciliation":{"status":"ok"}}
 JSON
 check "postgres not ok is refused" 1
 
 cat > "$BODY_FILE" <<'JSON'
 {"postgres":{"status":"ok"},"redis":{"status":"error"},
  "monitor":{"status":"ok","data_fresh":true},
- "rpcs":{"1":{"status":"ok","last_block":100}}}
+ "rpcs":{"1":{"status":"ok","last_block":100}},"watch_reconciliation":{"status":"ok"}}
 JSON
 check "redis not ok is refused" 1
+
+cat > "$BODY_FILE" <<'JSON'
+{"postgres":{"status":"ok"},"redis":{"status":"ok"},
+ "monitor":{"status":"ok","data_fresh":true},
+ "rpcs":{"1":{"status":"ok","last_block":100}},
+ "watch_reconciliation":{"status":"error","stale_watches":1,"missed_watches":0}}
+JSON
+check "a stale watch (watch_reconciliation not ok) is refused" 1
+
+cat > "$BODY_FILE" <<'JSON'
+{"postgres":{"status":"ok"},"redis":{"status":"ok"},
+ "monitor":{"status":"ok","data_fresh":true},
+ "rpcs":{"1":{"status":"ok","last_block":100}},
+ "watch_reconciliation":{"status":"error","stale_watches":0,"missed_watches":1}}
+JSON
+check "a missed watch (watch_reconciliation not ok) is refused" 1
 
 # A stalled last_block only shows up after enough consecutive checks that
 # report the same block - the failure the ticket calls out as distinct from
@@ -165,13 +181,13 @@ rm -f "$STATE_FILE"
 cat > "$BODY_FILE" <<'JSON'
 {"postgres":{"status":"ok"},"redis":{"status":"ok"},
  "monitor":{"status":"ok","data_fresh":true},
- "rpcs":{"1":{"status":"ok","last_block":100}}}
+ "rpcs":{"1":{"status":"ok","last_block":100}},"watch_reconciliation":{"status":"ok"}}
 JSON
 check "1st check seeds state" 0 env STALL_THRESHOLD=2 HEALTH_STATE_FILE="$STATE_FILE"
 cat > "$BODY_FILE" <<'JSON'
 {"postgres":{"status":"ok"},"redis":{"status":"ok"},
  "monitor":{"status":"ok","data_fresh":true},
- "rpcs":{"1":{"status":"ok","last_block":200}}}
+ "rpcs":{"1":{"status":"ok","last_block":200}},"watch_reconciliation":{"status":"ok"}}
 JSON
 check "an advancing block never trips the stall threshold" 0 env STALL_THRESHOLD=2 HEALTH_STATE_FILE="$STATE_FILE"
 

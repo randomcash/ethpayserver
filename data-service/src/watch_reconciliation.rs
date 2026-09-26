@@ -13,11 +13,29 @@ use std::collections::HashSet;
 ///
 /// Deliberately excludes the invoice id: the same `(chain, address, token)`
 /// triple is the unique key on both sides (Redis keys on exactly this, and
-/// `watched_addresses` has a matching unique constraint), and comparing on
-/// it is what makes "stale" and "missed" well-defined even when the two
-/// sides would name different invoices for a reused address. Address and
-/// token are lower-cased so a checksum mismatch between the two sources
-/// never manufactures a false stale/missed pair.
+/// `watched_addresses` carries `CONSTRAINT unique_watched_address UNIQUE
+/// (address, chain_id, token_address)` with no `is_active` qualifier - so a
+/// second invoice can never claim the same triple in Postgres while an
+/// earlier row for it still exists, live or not; the earlier row has to be
+/// gone first).
+///
+/// That ordering is what makes dropping the invoice id safe rather than
+/// merely convenient: the moment an address is legitimately rewatched for a
+/// new invoice, the application issues the same `watch_address` call that
+/// created the original watch, and `RedisDataService::watch_address` does an
+/// unconditional `SET` on that exact key - not `SETNX`, not an append to a
+/// list - so the new invoice id replaces whatever was there, including a
+/// stale one this reconciler had not yet caught. By the time both sides can
+/// agree the key is "expected" again, Redis is already holding the new
+/// invoice, not the old one; there is no window where the key matches but
+/// the value behind it is wrong. `server/tests/watch_reconciliation.rs`
+/// proves this end to end: a stale watch is seeded, reported, then the same
+/// address is legitimately rewatched for a second invoice, and the
+/// reconciler reports nothing while the Redis value has in fact moved to the
+/// new invoice.
+///
+/// Address and token are lower-cased so a checksum mismatch between the two
+/// sources never manufactures a false stale/missed pair.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WatchKey {
     chain_id: types::ChainId,
