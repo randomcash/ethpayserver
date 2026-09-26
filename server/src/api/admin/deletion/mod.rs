@@ -85,7 +85,7 @@ where
 /// `delete_account` both refuse outright on a still-watched address rather
 /// than unwatching and proceeding, so `addresses` is never non-empty by the
 /// time either of them would reach a call here.
-async fn unwatch_after_delete<A>(state: &PgAppState<A>, addresses: Vec<CleanupAddressInfo>)
+pub(crate) async fn unwatch_after_delete<A>(state: &PgAppState<A>, addresses: Vec<CleanupAddressInfo>)
 where
     A: SessionService + 'static,
 {
@@ -103,6 +103,12 @@ where
                  address(es) after delete - if a separate process is watching \
                  them via Redis, the monitor may keep polling a deleted invoice",
             );
+            // Counted, not just logged. This branch leaves exactly the stale
+            // watch the counter exists to detect, and a warning nobody greps
+            // is not detection.
+            for _ in 0..addresses.len() {
+                crate::metrics::record_unwatch_after_delete_failed();
+            }
         }
         return;
     };
@@ -123,6 +129,7 @@ where
                 "could not unwatch address after delete - the monitor may keep \
                  polling a deleted invoice",
             );
+            crate::metrics::record_unwatch_after_delete_failed();
         }
     }
 }
