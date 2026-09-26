@@ -101,24 +101,20 @@ where
             })?;
     let store_ids: Vec<uuid::Uuid> = owned_stores.iter().map(|s| s.id.0).collect();
 
-    // This refuses outright below rather than unwatching and proceeding (see
-    // the docstring above), so this read only ever needs to answer "any?" -
-    // same as `admin::deletion::delete_user_account`, which this mirrors.
+    // Read, but no longer refuse on. These addresses are cleared after the
+    // delete commits instead - see the call at the end of this function.
+    //
+    // This used to return 409 whenever the list was non-empty, which blocked a
+    // merchant from deleting their own account while ANY unpaid invoice lived.
+    // That is broader than the reason for it: the case worth refusing is a
+    // payment already broadcast, and `account_deletion_blockers` below already
+    // catches that, because detection writes a `payments` row with
+    // `confirmed_at = NULL` and that count has no `confirmed_at` filter. The
+    // old refusal also told the merchant to cancel the invoice, which does not
+    // help - cancelling deactivates the payment options and leaves
+    // `watched_addresses.is_active` true.
     let addresses =
         crate::api::admin::deletion::active_watched_addresses(&state, &store_ids).await?;
-
-    if !addresses.is_empty() {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "This account has {} still-watched address(es) for a pending invoice. \
-                 A payment broadcast to one of them may not have confirmed yet, and \
-                 deleting now would stop watching it with nothing left to credit it to. \
-                 Refused until the invoice resolves (paid, cancelled or expired).",
-                addresses.len()
-            ),
-        ));
-    }
 
     let blockers = data_service::AccountDeletionReader::account_deletion_blockers(
         &*state.data_service,
@@ -154,9 +150,19 @@ where
             )
         })?;
 
-    // No `unwatch_after_delete` call here: this function already returned
-    // above if `addresses` was non-empty, so by construction there is
-    // nothing left to unwatch by the time the delete runs.
+    // Only now, with the account actually gone. This cannot run any earlier:
+    // unwatching is an external side effect with no rollback, so doing it
+    // before a delete that then failed would stop watching a still-live
+    // invoice. Run after a commit, the worst case is the opposite and much
+    // cheaper - the monitor polls a deleted invoice a little longer.
+    //
+    // This replaces the refusal that used to stand above. That refusal made
+    // orphaned watches impossible; this makes them unlikely, and the counter
+    // inside is how we learn which. The general fix is a reconciler against
+    // the monitor's watch set, because Postgres cannot see a stale watch at
+    // all: `watched_addresses` cascades from both `invoices` and
+    // `payment_options`, so the rows are gone and the monitor's are not.
+    crate::api::admin::deletion::unwatch_after_delete(&state, addresses).await;
 
     // After the account is actually gone, not before: a plugin holding data
     // for it must never be told "closed" for an account that a later failure
