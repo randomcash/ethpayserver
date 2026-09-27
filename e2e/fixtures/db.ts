@@ -151,3 +151,76 @@ export async function createUserWithApiKey(
     await client.end();
   }
 }
+
+/**
+ * A payment row inserted directly, tied to an existing invoice.
+ *
+ * A real payment only exists once evmmonitor observes an on-chain transfer,
+ * which needs a funded wallet and a live RPC endpoint - `synthetic-payment.ts`
+ * exists precisely because producing one honestly needs its own chain fixture,
+ * and that suite runs on its own schedule for that reason, not on every push.
+ * Payment detail is otherwise unreachable the way store/invoice/wallet detail
+ * are seeded: no scan of the DOM ever finds a route backed by a record this
+ * account doesn't have. Inserting the row `PgDataService::upsert` would have
+ * written skips the ceremony, not the schema - the same trade
+ * `createUserWithApiKey` above already makes for a credential.
+ *
+ * `amountWei` must equal the invoice's own amount in base units - a mismatch
+ * leaves the invoice permanently "underpaid" and the crawl this feeds never
+ * exercises the paid-invoice rendering path, which is the one that matters
+ * most to a merchant. Callers pass the same amount they gave `createInvoice`,
+ * converted the same way the app converts it, so the two stay in lockstep.
+ *
+ * Two things the raw INSERT does not get for free, both of which the real
+ * pipeline (`payment_handler` + `confirmation_handler`) only does off events
+ * this fixture never produces:
+ *
+ * - `amount_received` is summed by a DB trigger from `credited_amount`, not
+ *   from `amount` - `amount` is the raw on-chain unit (wei), `credited_amount`
+ *   is the converted invoice-currency decimal a real payment gets from rate
+ *   lookup. Leaving it NULL excludes the row from the sum entirely, so
+ *   `amount_received` stays zero no matter what `amount` says.
+ * - the transition to "paid" is application logic that runs solely off a real
+ *   `PaymentConfirmed` event from the chain monitor; the trigger only ever
+ *   moves a payment to "processing".
+ *
+ * Setting `credited_amount` and `status` directly here is what gets the
+ * invoice into the fully-paid state the crawl is meant to render.
+ */
+export async function seedPaymentForInvoice(
+  invoiceId: string,
+  amountWei: bigint,
+): Promise<string> {
+  const crypto = await import('node:crypto');
+  const txHash = `0x${crypto.randomBytes(32).toString('hex')}`;
+  const fromAddress = `0x${crypto.randomBytes(20).toString('hex')}`;
+  // ETH has 18 decimals; credited_amount is the human-readable invoice
+  // currency amount, not the raw wei `amount` column.
+  const divisor = 10n ** 18n;
+  const whole = amountWei / divisor;
+  const fraction = (amountWei % divisor).toString().padStart(18, '0').replace(/0+$/, '');
+  const creditedAmount = fraction ? `${whole}.${fraction}` : whole.toString();
+
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rows } = await client.query(
+      // tx_index -1 is not a placeholder: it's the fixed sentinel the schema
+      // itself assigns every native-asset payment (see the column comment
+      // added by the tx_index migration and payment_handler.rs), chosen so
+      // it can never collide with a real ERC20 log index. Matches the
+      // 'native' asset_type above.
+      `INSERT INTO payments (invoice_id, chain_id, asset_type, asset_symbol, amount,
+                              tx_hash, block_number, from_address, confirmed_at, tx_index,
+                              credited_amount)
+       VALUES ($1, 'eip155:11155111', 'native', 'ETH', $2,
+               $3, 1, $4, NOW(), -1, $5)
+       RETURNING id`,
+      [invoiceId, amountWei.toString(), txHash, fromAddress, creditedAmount],
+    );
+    await client.query(`UPDATE invoices SET status = 'paid' WHERE id = $1`, [invoiceId]);
+    return rows[0].id as string;
+  } finally {
+    await client.end();
+  }
+}
