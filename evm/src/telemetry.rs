@@ -310,22 +310,32 @@ fn client_options(
         // actually reach this). Same mandatory scrubber, via the separate
         // hook logs go through.
         //
-        // Load-bearing, not vestigial, past this crate's current 0.47 pin:
-        // ran the ablation itself against the open 0.49.3 bump (that branch's
-        // tip was f398f165e8e6e21e65c273fdbf555ff0e4383fb4) instead of taking
-        // the deprecation note's word for it. There, with this same
-        // `client_options`, forcing `enable_logs` to `false` makes all three
-        // `capture_tests` fail with "expected at least one structured log to
-        // reach the envelope" — `sentry_tracing::layer()` is exactly the
-        // "automatic capture by integrations" case the 0.49 note says the
-        // option still governs, so it is not vestigial for us. Dropping the
-        // explicit assignment there instead of keeping it under
-        // `#[allow(deprecated)]` also passes every `capture_tests` case:
-        // sentry-core 0.49.3's own `ClientOptions::default()` already sets
-        // `enable_logs` to `true`, so no lint suppression is needed either —
-        // just the field going away, with `capture_tests`'s
-        // `!logs.is_empty()` guard left watching the default in case a later
-        // point release changes it.
+        // Load-bearing, not vestigial, past this crate's current 0.47 pin.
+        // The bump to 0.49 lives in an open pull request in this same
+        // repository, tip commit f398f165e8e6e21e65c273fdbf555ff0e4383fb4 —
+        // both are reachable by anyone with repo access (`git fetch origin
+        // rcs/rcs-345-bump-the-sentry-sdk-to-0-49-and-send-our`), and that
+        // PR's own CI `Test` job already passed at that exact commit with
+        // `enable_logs` still set, which is the baseline this ablation
+        // compares against.
+        //
+        // Re-ran the ablation live, in a worktree of that exact commit,
+        // rather than re-citing the earlier claim: baseline `cargo test -p
+        // evm --lib --features sentry-scrub telemetry::tests::capture_tests`
+        // passes 3/3; forcing that branch's `options.enable_logs = true` to
+        // `false` fails all three with "expected at least one structured log
+        // to reach the envelope"; deleting the assignment (and its
+        // `#[allow(deprecated)]`) entirely passes 3/3 again, and `cargo
+        // clippy -p evm --lib --features sentry-scrub -- -D warnings` stays
+        // clean — sentry-core 0.49.3's own `ClientOptions::default()` already
+        // sets `enable_logs` to `true`, so removing the field beats
+        // suppressing the lint on it. `sentry_tracing::layer()` is exactly
+        // the "automatic capture by integrations" case the 0.49 deprecation
+        // note says the option still governs: it is not vestigial for us,
+        // and the fix when 0.49 lands is dropping the assignment, not
+        // `#[allow(deprecated)]`. `capture_tests`'s `!logs.is_empty()` guard
+        // is left watching that default in case a later point release
+        // changes it.
         //
         // That guard isn't a manual, easy-to-forget check: `server`'s
         // Cargo.toml depends on this crate with `sentry-scrub` as a normal,
