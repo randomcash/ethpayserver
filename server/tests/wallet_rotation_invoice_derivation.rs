@@ -91,6 +91,27 @@ async fn seed_user(pool: &PgPool) -> Uuid {
     id
 }
 
+/// `create_invoice` takes an `AuthenticatedCaller`: the base separates "who is
+/// calling" from "is this credential the operator's", and `is_operator` is a
+/// property of the credential decided at authentication time rather than
+/// anything implied by role.
+///
+/// `false` is behaviourally inert in this file - `create_invoice` consults it
+/// only when invoice-creation filters are installed, and these tests install
+/// none. It is `false` rather than `true` because the caller here IS a
+/// merchant: if a filter is ever added to these tests they should exercise the
+/// merchant path rather than silently bypass it.
+///
+/// A helper rather than the struct inline at each call site: inline, the
+/// explanation pushed a test function past clippy's line limit, and deleting the
+/// explanation to fit would have left a bare `false` that reads as arbitrary.
+fn merchant_caller(owner: uuid::Uuid) -> AuthenticatedCaller {
+    AuthenticatedCaller {
+        user: user_info(owner),
+        is_operator: false,
+    }
+}
+
 fn user_info(id: Uuid) -> UserInfo {
     UserInfo {
         id: UserId(id),
@@ -159,15 +180,7 @@ async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
 
     // Invoice created before the rotation - the one that must NOT move.
     let (status, Json(pending_invoice)) = create_invoice(
-        AuthenticatedCaller {
-            user: user_info(owner),
-            // Behaviourally inert here - `create_invoice` only consults this
-            // when invoice-creation filters are installed, and this test
-            // installs none. `false` because the caller IS a merchant: if a
-            // filter is ever added to this test it should exercise the
-            // merchant path rather than silently bypass it.
-            is_operator: false,
-        },
+        merchant_caller(owner),
         State(app_state(Arc::clone(&ds))),
         Json(invoice_request(store.id.0)),
     )
@@ -202,15 +215,7 @@ async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
 
     // A new invoice after rotation must derive from the new key.
     let (status, Json(new_invoice)) = create_invoice(
-        AuthenticatedCaller {
-            user: user_info(owner),
-            // Behaviourally inert here - `create_invoice` only consults this
-            // when invoice-creation filters are installed, and this test
-            // installs none. `false` because the caller IS a merchant: if a
-            // filter is ever added to this test it should exercise the
-            // merchant path rather than silently bypass it.
-            is_operator: false,
-        },
+        merchant_caller(owner),
         State(app_state(Arc::clone(&ds))),
         Json(invoice_request(store.id.0)),
     )
