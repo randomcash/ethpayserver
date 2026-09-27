@@ -1,8 +1,8 @@
 //! Capability 3: create an invoice, on the instance's own store
 //! only.
 //!
-//! SENSITIVE: this is a write to the money path, granted to a plugin. The
-//! instance sells subscriptions to itself, so the billing plugin has to
+//! SENSITIVE: this is a write to the money path, granted to a plugin. A
+//! plugin can invoice the instance's own store, so it has to
 //! *issue* the invoice the merchant pays - an ordinary payment, to an
 //! ordinary invoice, on our store, settled to our xpub. The non-custodial
 //! guarantee a merchant relies on is unchanged either way: this never derives
