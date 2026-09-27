@@ -101,11 +101,12 @@ fn from_existing_preserves_leading_and_trailing_passphrase_whitespace() {
     );
 }
 
-/// `generate` takes no stdin and must still succeed and print an
-/// `xpub`-prefixed key - the argv dispatch branch `from-existing` above
-/// doesn't exercise.
+/// `generate` takes no stdin and must still succeed, print an
+/// `xpub`-prefixed key, and - the part format-only checks would miss - that
+/// key must actually derive from the mnemonic printed in the same
+/// invocation, not just look like a plausible xpub next to it.
 #[test]
-fn generate_prints_an_xpub_prefixed_key() {
+fn generate_prints_an_xpub_matching_its_own_mnemonic() {
     let output = Command::new(env!("CARGO_BIN_EXE_derive-xpub"))
         .arg("generate")
         .output()
@@ -116,10 +117,14 @@ fn generate_prints_an_xpub_prefixed_key() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    assert!(
-        stdout.contains("xpub:"),
-        "expected an xpub line in output, got:\n{stdout}"
-    );
+
+    let mnemonic = stdout
+        .lines()
+        .nth(2)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .expect("mnemonic printed on the third line");
+
     let xpub_line = stdout
         .lines()
         .find(|line| line.trim_start().starts_with("xpub:"))
@@ -132,6 +137,16 @@ fn generate_prints_an_xpub_prefixed_key() {
     assert!(
         key.starts_with("xpub"),
         "printed key doesn't look like an xpub-prefixed key: {xpub_line}"
+    );
+
+    let expected_xpub = HdWallet::from_mnemonic(mnemonic, "")
+        .expect("generated mnemonic must be valid")
+        .account_xpub_string_for(ChainFamily::Evm)
+        .expect("derive xpub");
+    assert_eq!(
+        key, expected_xpub,
+        "printed xpub does not derive from the printed mnemonic \
+         (mnemonic: {mnemonic})"
     );
 }
 
