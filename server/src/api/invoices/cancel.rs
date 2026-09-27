@@ -77,7 +77,8 @@ where
             cancelled.store_id.0,
             payload,
         )
-        .await;
+        .await
+        .warn_on_failure(cancelled.id.as_str(), "invoice_cancelled");
     }
 
     let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
