@@ -45,7 +45,7 @@ fn generate() -> ExitCode {
     };
     println!(
         "New mnemonic - write it down somewhere offline and never type it into a \
-         website:\n\n  {mnemonic}\n"
+         website:\n\nmnemonic: {mnemonic}\n"
     );
     println!(
         "This wallet exists to receive payments and nothing else. Don't reuse it \
