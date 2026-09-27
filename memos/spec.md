@@ -86,7 +86,25 @@ payment already *detected* still blocks deletion, via the payments-row check,
 and that is the case worth refusing. "Unpaid" and "in flight" are different
 things.
 
-**ANSWERED 2026-09-26: the overseeing session owns it.** Not the feature
+**ANSWERED 2026-09-26, then SUPERSEDED the same day: the gate no longer
+blocks.** Measurement is what settled it — nine of sixteen open pull requests
+could not pass the line limit, and clearing them by hand meant splitting eight
+production files, several on money paths, to satisfy a line count. The decision
+was that this code's only readers are agents, so a readability rule is not worth
+blocking merges for. `scripts/check-file-size.sh` now reports and warns instead
+of failing; `ENFORCE_FILE_SIZE=1` arms it again.
+
+**So the report is the whole mechanism now.** The curve that prompted the gate
+was 26 oversized files becoming 47 in nine days while split tickets were
+landing — the splitting happened and the growth outpaced it, because nothing
+checked. Expect that to resume. Whoever reads a green `check.sh` should read its
+file-size line rather than the exit code.
+
+The ownership answer below still stands for the backlog itself, and its
+reasoning is why the sequencing question was the hard part rather than the
+limit:
+
+**The overseeing session owns it.** Not the feature
 sessions, and not whoever happens to trip the gate next — sequencing it is the
 owner's job, because the cost is in the order the splits land rather than in any
 single split.

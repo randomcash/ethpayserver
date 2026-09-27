@@ -19,8 +19,8 @@ pub use plugins::{
     FilterOutcome, PageElement, PageError, PageHost, PageRenderer, PluginArtifacts,
     PluginBootReport, PluginCallError, PluginEngine, PluginHost, PluginHostError, PluginInstance,
     PluginLoadError, PluginPools, PluginRegistry, PluginSchema, PluginStatusSnapshot,
-    PluginStorage, PluginStorageError, PluginWasmError, Viewer, host_version,
-    invoice_creation_filters, load_installed_plugins, own_store_payment_reporting,
+    PluginStorage, PluginStorageError, PluginWasmError, Viewer, account_closed_observers,
+    host_version, invoice_creation_filters, load_installed_plugins, own_store_payment_reporting,
     payment_observers, report_boot,
 };
 pub use watch_retry::{WatchRetryConfig, WatchRetryService};

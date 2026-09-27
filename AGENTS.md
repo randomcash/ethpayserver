@@ -5,6 +5,14 @@ You are one session working on one feature. Read this, then
 
 ## The loop
 
+0. **Search the open pull requests for your feature's subject before writing
+   anything.** Search the subject, not a ticket id - a harness feature does not
+   have one. A feature already in flight looks exactly like a feature nobody has
+   started, and the difference is a day of work. This step exists because the
+   mistake has been made: one feature here was built and merged while an open
+   pull request had been implementing the same thing since that morning, and the
+   duplicate is the version that shipped. One listing is cheaper than
+   rediscovering that.
 1. Run `scripts/check.sh`. **If it fails, fix that first and do nothing else.**
    You did not break it, and leaving it broken makes the next session unable to
    tell their failure from yours.
