@@ -62,7 +62,7 @@ use evm::monitor::{
 use secrecy::ExposeSecret;
 use tokio::signal;
 use tracing::{error, info};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use chain::create_chain_monitor;
 use commands::{handle_commands, restore_watched_addresses};
@@ -96,9 +96,12 @@ async fn main() -> anyhow::Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();
 
-    // Initialize Sentry (no-op when SENTRY_DSN is unset)
+    // Initialize Sentry (no-op when SENTRY_DSN is unset). SENTRY_RELEASE is
+    // set by the CI build step from GITHUB_SHA — option_env! reads it at
+    // compile time, so it must be a real env var at `cargo build`, not
+    // something exported at deploy/run time.
     let (_sentry_guard, sentry_dsn_configured, sentry_environment) =
-        evm::telemetry::init_sentry(option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from));
+        evm::telemetry::init_sentry(option_env!("SENTRY_RELEASE").map(Cow::from));
 
     // Parse CLI args
     let args = Args::parse();
@@ -213,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
     let command_coordinator = coordinator.clone();
     let command_bridge = bridge.clone();
     let command_persistence = persistence.clone();
-    let command_handle = tokio::spawn(async move {
+    let mut command_handle = tokio::spawn(async move {
         handle_commands(
             commands_stream,
             command_coordinator,
@@ -227,16 +230,51 @@ async fn main() -> anyhow::Result<()> {
     let health_coordinator = coordinator.clone();
     let health_redis_url = redis_url.clone();
     let health_handle = tokio::spawn(async move {
-        publish_health_loop(&health_coordinator, &health_redis_url).await;
+        publish_health_loop(
+            &health_coordinator,
+            &health_redis_url,
+            option_env!("SENTRY_RELEASE").unwrap_or_default(),
+        )
+        .await;
     });
 
     // Wait for shutdown signal
     shutdown_signal().await;
     info!("shutdown signal received");
 
-    // Abort background tasks
-    command_handle.abort();
+    // Mark the bridge as shutting down before anything else, so a
+    // subscription that ends while we tear down (the compose network can
+    // drop out from under a still-running container) logs as expected
+    // rather than as a fault.
+    bridge.begin_shutdown();
+
+    // Give the command subscription a moment to notice its connection ending
+    // on its own and log itself as a shutdown before we forcibly cancel it.
+    // Aborting immediately would race the stream's own end-of-stream tail:
+    // `abort()` only takes effect on the task's next poll, so if the task
+    // isn't already mid-poll when we call it, the task is dropped before
+    // that tail (and its shutdown-vs-fault log line) ever runs.
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut command_handle).await {
+        Err(_) => {
+            tracing::debug!(
+                "command handler task did not exit within the shutdown grace period, aborting"
+            );
+            command_handle.abort();
+        }
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "command handler task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
     health_handle.abort();
+
+    // No equivalent handle exists here for the *events* subscription
+    // (`redis.rs`'s `subscribe`, as opposed to `subscribe_commands` above):
+    // evmmonitor never consumes that stream, only publishes to it via
+    // `BridgeHandler`. Its one consumer is the server's `EventConsumer`,
+    // which gets this same begin_shutdown-then-bounded-wait-then-abort
+    // treatment for its own handle in `server/src/bin/server.rs` before that
+    // process exits.
 
     // Graceful shutdown
     coordinator.stop().await?;
@@ -248,19 +286,43 @@ async fn main() -> anyhow::Result<()> {
 fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
     let filter = EnvFilter::try_new(level)?;
 
+    // Gates which levels become Sentry *structured logs* specifically, so
+    // testnet can ship INFO there while mainnet ships WARN and above. Applied
+    // as the Sentry layer's own per-layer filter (below) rather than folded
+    // into `filter`, because a bare `.with(filter)` layer sits in the same
+    // `Layered` stack as every other layer and `Layered::enabled` ANDs across
+    // all of them — an event `filter` (LOG_LEVEL) rejects never reaches the
+    // Sentry layer's `on_event` at all, so `SENTRY_LOG_LEVEL` could only ever
+    // be a *further* restriction on top of LOG_LEVEL, never independent of
+    // it. Per-layer filtering (`.with_filter` on each layer instead of a
+    // shared `.with(filter)`) is what actually decouples them.
+    let sentry_log_level = evm::telemetry::resolve_sentry_log_level();
+    // Floor for the Sentry layer's own callsite interest, independent of
+    // LOG_LEVEL. Fixed at INFO because `sentry_tracing`'s event/span
+    // classification never does anything below INFO regardless of
+    // `sentry_log_level` (DEBUG/TRACE are always `EventFilter::Ignore`), so
+    // this can't suppress anything `sentry_event_filter` would keep.
+    let sentry_filter = tracing_subscriber::filter::LevelFilter::INFO;
+
     match format {
         "json" => {
             tracing_subscriber::registry()
-                .with(filter)
-                .with(sentry_tracing::layer().event_filter(evm::telemetry::sentry_event_filter))
-                .with(tracing_subscriber::fmt::layer().json())
+                .with(
+                    sentry_tracing::layer()
+                        .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
+                        .with_filter(sentry_filter),
+                )
+                .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
                 .init();
         }
         _ => {
             tracing_subscriber::registry()
-                .with(filter)
-                .with(sentry_tracing::layer().event_filter(evm::telemetry::sentry_event_filter))
-                .with(tracing_subscriber::fmt::layer())
+                .with(
+                    sentry_tracing::layer()
+                        .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
+                        .with_filter(sentry_filter),
+                )
+                .with(tracing_subscriber::fmt::layer().with_filter(filter))
                 .init();
         }
     }

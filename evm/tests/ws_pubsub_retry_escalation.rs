@@ -34,7 +34,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
         if *event.metadata().level() != tracing::Level::ERROR {
             return;
         }
-        let filter = evm::telemetry::sentry_event_filter(event.metadata());
+        let filter = evm::telemetry::sentry_event_filter(tracing::Level::WARN)(event.metadata());
         self.0
             .lock()
             .expect("lock poisoned")

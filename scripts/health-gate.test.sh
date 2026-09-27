@@ -22,27 +22,36 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"; kill "${SRV:-}" 2>/dev/null' EXIT
 
 BODY_FILE="$TMP/body.json"
+HEADER_FILE="$TMP/sentry_release"
+EVMMONITOR_HEADER_FILE="$TMP/evmmonitor_sentry_release"
 PORT=$((9000 + RANDOM % 900))
 
 cat > "$TMP/server.py" <<'PY'
 import http.server, sys
-body_file = sys.argv[2]
+body_file, header_file, evmmonitor_header_file = sys.argv[2], sys.argv[3], sys.argv[4]
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(s):
         body = open(body_file, "rb").read()
+        release = open(header_file).read().strip()
+        evmmonitor_release = open(evmmonitor_header_file).read().strip()
         s.send_response(200)
         s.send_header("Content-Type", "application/json")
         s.send_header("Content-Length", str(len(body)))
+        s.send_header("X-Sentry-Release", release)
+        if evmmonitor_release:
+            s.send_header("X-Evmmonitor-Sentry-Release", evmmonitor_release)
         s.end_headers()
         s.wfile.write(body)
     def log_message(s, *a): pass
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
 
-python3 "$TMP/server.py" "$PORT" "$BODY_FILE" &
+python3 "$TMP/server.py" "$PORT" "$BODY_FILE" "$HEADER_FILE" "$EVMMONITOR_HEADER_FILE" &
 SRV=$!
 for _ in $(seq 1 50); do
   echo '{}' > "$BODY_FILE"
+  echo 'abc1234' > "$HEADER_FILE"
+  echo 'abc1234' > "$EVMMONITOR_HEADER_FILE"
   curl -fsS -o /dev/null "http://127.0.0.1:$PORT/" 2>/dev/null && break
   sleep 0.1
 done
@@ -65,6 +74,8 @@ healthy() {
  "monitor":{"status":"ok","data_fresh":true},
  "rpcs":{"eip155:11155111":{"status":"ok","last_block":100}}}
 JSON
+  echo 'abc1234' > "$HEADER_FILE"
+  echo 'abc1234' > "$EVMMONITOR_HEADER_FILE"
 }
 
 healthy
@@ -85,6 +96,63 @@ cat > "$BODY_FILE" <<'JSON'
  "rpcs":{}}
 JSON
 check "an empty rpcs map with data_fresh false is refused, not passed vacuously" 1
+
+# build_sha and the Sentry release are set by two separate CI steps from the
+# same commit sha, so a rename, typo, or a rebuild stage that drops
+# SENTRY_RELEASE lets them drift apart silently - a healthy body with a
+# build_sha that matches EXPECTED_SHA is not enough on its own.
+healthy
+echo '9999999' > "$HEADER_FILE"
+check "a build_sha/sentry-release mismatch is refused" 1
+
+echo '' > "$HEADER_FILE"
+check "a missing x-sentry-release header is refused" 1
+
+# The vacuous pass this comparison could produce: a malformed response with no
+# build_sha at all, paired with a missing header, satisfies "" == "" unless
+# the empty header is rejected outright regardless of what build_sha says.
+cat > "$BODY_FILE" <<'JSON'
+{"postgres":{"status":"ok"},"redis":{"status":"ok"},
+ "monitor":{"status":"ok","data_fresh":true},
+ "rpcs":{"eip155:11155111":{"status":"ok","last_block":100}}}
+JSON
+echo '' > "$HEADER_FILE"
+check "a missing build_sha and a missing header is refused, not passed vacuously" 1
+
+# evmmonitor is a second binary tagging its own Sentry events from its own
+# compiled SENTRY_RELEASE, built in a separate CI step from the same commit
+# sha - the same drift is just as possible there, and it has no HTTP
+# endpoint of its own to check directly, so this is the only place it's
+# observed.
+healthy
+echo '9999999' > "$EVMMONITOR_HEADER_FILE"
+check "a build_sha/evmmonitor-sentry-release mismatch is refused" 1
+
+healthy
+echo '' > "$EVMMONITOR_HEADER_FILE"
+check "a missing x-evmmonitor-sentry-release header is refused when data_fresh is true" 1
+
+# Gated on data_fresh: when evmmonitor isn't reporting at all, that already
+# fails the gate on its own - a missing evmmonitor release header shouldn't
+# also need to be reported as a second, redundant failure. Checked by log
+# content, not just exit code: both branches refuse with exit 1, so only the
+# logged reason proves which check actually fired.
+cat > "$BODY_FILE" <<'JSON'
+{"build_sha":"abc1234","postgres":{"status":"ok"},"redis":{"status":"ok"},
+ "monitor":{"status":"ok","data_fresh":false},
+ "rpcs":{}}
+JSON
+echo 'abc1234' > "$HEADER_FILE"
+echo '' > "$EVMMONITOR_HEADER_FILE"
+LOG=$(env HEALTH_URL="http://127.0.0.1:$PORT/health/deep" HEALTH_TIMEOUT=1 bash "$GATE" 2>&1)
+if echo "$LOG" | grep -q "monitor.data_fresh=False" && ! echo "$LOG" | grep -q "x-evmmonitor-sentry-release mismatch"; then
+  echo "ok: data_fresh false fails on its own check, without reaching the evmmonitor release check"
+else
+  echo "FAIL: expected only the data_fresh check to fire, got:"; echo "$LOG"; fail=1
+fi
+
+# Restore before the remaining cases, which are not testing this header.
+healthy
 
 # ... and the same shape with a missing monitor key entirely, which is what an
 # older server or a partial response looks like. The extractor defaults to

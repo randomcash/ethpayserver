@@ -25,6 +25,8 @@ import {
   FIXTURE_PLUGIN_ID,
   FIXTURE_PLUGIN_SLUG,
   FIXTURE_PLUGIN_WASM_BASE64,
+  INCOMPATIBLE_MANIFEST_TOML,
+  INCOMPATIBLE_PLUGIN_ID,
   SECOND_MANIFEST_TOML,
   SECOND_PLUGIN_ID,
   SECOND_PLUGIN_SLUG,
@@ -138,8 +140,21 @@ test.describe('what is refused', () => {
     }
   };
 
-  test('an unknown page, plugin or malformed slug is a 404', async () => {
-    expect(await refused(`/plugins/${FIXTURE_PLUGIN_SLUG}/pages/nosuchpage`)).toBe(404);
+  test('an unknown plugin or malformed slug is a 404', async () => {
+    // An unknown PAGE on a known plugin is deliberately not asserted here.
+    //
+    // The fixture module answers every path with the same page and reads
+    // nothing - see `fixtures/plugin/README.md`, which makes that a design
+    // decision rather than an omission: "a fixture that computed its answer
+    // would be a second implementation to debug whenever a test failed". So it
+    // cannot say "no page here", and a request for `nosuchpage` correctly
+    // returns 200. Asserting 404 tested the fixture's imagination, not the
+    // server.
+    //
+    // The behaviour itself is not left uncovered. A renderer answering `None`
+    // becomes `PageError::PageNotFound` in the plugin host, and that mapping
+    // has its own unit test there; the line below covers the host's own 404
+    // for a plugin it has never heard of.
     expect(await refused(`/plugins/nosuchplugin/pages/${FIXTURE_PAGE_PATH}`)).toBe(404);
     // Uppercase is not the same slug: two that differ only by case would be
     // indistinguishable wherever something compares them case-insensitively.
@@ -181,5 +196,31 @@ test.describe('installing one while the server runs', () => {
       listing.plugins.map((p) => p.slug),
       'an unloaded plugin must not be offered — its page would 404 on arrival',
     ).not.toContain(SECOND_PLUGIN_SLUG);
+  });
+
+  /**
+   * The other half of the same gate: an admin cannot install past it either.
+   * `com.example.e2efixture` and `e2elate` above only prove the gate accepts
+   * a *compatible* manifest — this proves it still refuses one that is not,
+   * so the check stays load-bearing rather than turning into "accepts
+   * anything" without any test here going red.
+   */
+  test('an incompatible ethpayserver dependency is refused, not installed', async () => {
+    await expect(
+      api('/admin/plugins', {
+        method: 'POST',
+        token: admin.apiKey,
+        body: {
+          manifest_toml: INCOMPATIBLE_MANIFEST_TOML,
+          wasm_base64: FIXTURE_PLUGIN_WASM_BASE64,
+          migrations: {},
+        },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+
+    const installed = await api<{ plugins: { id: string }[] }>('/admin/plugins', {
+      token: admin.apiKey,
+    });
+    expect(installed.plugins.map((p) => p.id)).not.toContain(INCOMPATIBLE_PLUGIN_ID);
   });
 });

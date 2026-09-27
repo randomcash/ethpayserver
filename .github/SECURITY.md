@@ -25,10 +25,10 @@ There is no bug bounty. This is a small project.
 
 ## Scope
 
-ETHPayServer is a **non-custodial** payment processor. Payments derive to the
-merchant's own extended public key, held outside this system — so a compromise
-here does not put a float at risk. What it *can* put at risk is more subtle and
-just as serious:
+This release of ETHPayServer is a **non-custodial** payment processor.
+Payments derive to the merchant's own extended public key, held outside this
+system — so a compromise here does not put a float at risk. What it *can* put
+at risk is more subtle and just as serious:
 
 - **Cross-tenant access** — reading or modifying another merchant's stores,
   invoices, payments, API keys or settings.
