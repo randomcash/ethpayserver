@@ -543,4 +543,157 @@ mod tests {
              not mark it dispatched and lose it"
         );
     }
+
+    /// A transient failure reading the invoice a payment's obligation is
+    /// about must retry, not silently disappear the same way the ticket's
+    /// original unchecked `if let Ok(Some(...))` did.
+    #[tokio::test]
+    async fn a_transient_invoice_read_failure_leaves_the_obligation_for_retry() {
+        let data_service = Arc::new(InMemoryDataService::new());
+        let invoice = test_invoice(StoreId::new());
+        InvoiceWriter::upsert(&*data_service, &invoice)
+            .await
+            .expect("insert invoice");
+        data_service.set_webhook(invoice.store_id.0, "https://example.com/hook", "secret");
+
+        let payment = test_payment(&invoice.id);
+        data_service::PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+            &*data_service,
+            &payment,
+            0,
+            WebhookEventType::PaymentDetected.as_str(),
+        )
+        .await
+        .expect("obligation recorded");
+
+        data_service.fail_invoice_reads();
+
+        let sink = Arc::new(RecordingSink::default());
+        let config = WebhookOutboxDrainConfig {
+            claim_visibility: Duration::ZERO,
+            ..WebhookOutboxDrainConfig::default()
+        };
+        let service = WebhookOutboxDrainService::new(
+            Arc::clone(&data_service),
+            Arc::clone(&sink) as Arc<dyn WebhookSink>,
+            config,
+        );
+
+        service.drain_once().await;
+
+        assert!(
+            sink.jobs.lock().unwrap().is_empty(),
+            "nothing should be queued when the invoice lookup fails"
+        );
+        let remaining = data_service
+            .claim_undispatched_obligations(10, 0)
+            .await
+            .expect("read outbox");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "a transient invoice read failure must leave the obligation for the next \
+             drain tick, not mark it dispatched and lose it"
+        );
+    }
+
+    /// Same property as above, one lookup later: a transient failure reading
+    /// the payment itself must also retry rather than lose the obligation.
+    #[tokio::test]
+    async fn a_transient_payment_read_failure_leaves_the_obligation_for_retry() {
+        let data_service = Arc::new(InMemoryDataService::new());
+        let invoice = test_invoice(StoreId::new());
+        InvoiceWriter::upsert(&*data_service, &invoice)
+            .await
+            .expect("insert invoice");
+        data_service.set_webhook(invoice.store_id.0, "https://example.com/hook", "secret");
+
+        let payment = test_payment(&invoice.id);
+        data_service::PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+            &*data_service,
+            &payment,
+            0,
+            WebhookEventType::PaymentDetected.as_str(),
+        )
+        .await
+        .expect("obligation recorded");
+
+        data_service.fail_payment_reads();
+
+        let sink = Arc::new(RecordingSink::default());
+        let config = WebhookOutboxDrainConfig {
+            claim_visibility: Duration::ZERO,
+            ..WebhookOutboxDrainConfig::default()
+        };
+        let service = WebhookOutboxDrainService::new(
+            Arc::clone(&data_service),
+            Arc::clone(&sink) as Arc<dyn WebhookSink>,
+            config,
+        );
+
+        service.drain_once().await;
+
+        assert!(
+            sink.jobs.lock().unwrap().is_empty(),
+            "nothing should be queued when the payment lookup fails"
+        );
+        let remaining = data_service
+            .claim_undispatched_obligations(10, 0)
+            .await
+            .expect("read outbox");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "a transient payment read failure must leave the obligation for the next \
+             drain tick, not mark it dispatched and lose it"
+        );
+    }
+
+    /// Invoices are never deleted in this system, so this is believed
+    /// unreachable in production - but the guard exists precisely to handle
+    /// it if that belief is ever wrong, so it should behave as documented:
+    /// give up rather than retry forever, since a missing invoice cannot
+    /// become present.
+    #[tokio::test]
+    async fn an_obligation_whose_invoice_no_longer_exists_is_marked_dispatched_without_queuing() {
+        let data_service = Arc::new(InMemoryDataService::new());
+        let invoice = test_invoice(StoreId::new());
+        // Deliberately never written: `upsert_with_tx_index_and_obligation`
+        // only requires the payment, so this reproduces "obligation outlived
+        // its invoice" without needing a delete path this double doesn't have.
+        data_service.set_webhook(invoice.store_id.0, "https://example.com/hook", "secret");
+
+        let payment = test_payment(&invoice.id);
+        data_service::PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+            &*data_service,
+            &payment,
+            0,
+            WebhookEventType::PaymentDetected.as_str(),
+        )
+        .await
+        .expect("obligation recorded");
+
+        let sink = Arc::new(RecordingSink::default());
+        let service = WebhookOutboxDrainService::new(
+            Arc::clone(&data_service),
+            Arc::clone(&sink) as Arc<dyn WebhookSink>,
+            WebhookOutboxDrainConfig::default(),
+        );
+
+        service.drain_once().await;
+
+        assert!(
+            sink.jobs.lock().unwrap().is_empty(),
+            "nothing should be queued for an invoice that no longer exists"
+        );
+        let remaining = data_service
+            .claim_undispatched_obligations(10, 30)
+            .await
+            .expect("read outbox");
+        assert!(
+            remaining.is_empty(),
+            "an obligation whose invoice is gone for good must be marked dispatched, \
+             not retried forever"
+        );
+    }
 }

@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -46,11 +47,30 @@ pub struct InMemoryDataService {
     /// `claim_undispatched_obligations` enforces the same "invisible until
     /// the claim expires" rule a real concurrent-drain test would need.
     webhook_outbox_claims: RwLock<HashMap<Uuid, DateTime<Utc>>>,
+    /// When set, `InvoiceReader::get`/`PaymentReader::get` return a transient
+    /// error instead of consulting their maps, standing in for a database
+    /// that is temporarily unreachable - there is no other way to exercise a
+    /// caller's "retry rather than give up" branch against this double,
+    /// since every other method here only ever returns `Ok`.
+    fail_invoice_reads: AtomicBool,
+    fail_payment_reads: AtomicBool,
 }
 
 impl InMemoryDataService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make every subsequent `InvoiceReader::get` call fail with a transient
+    /// error (for testing).
+    pub fn fail_invoice_reads(&self) {
+        self.fail_invoice_reads.store(true, Ordering::SeqCst);
+    }
+
+    /// Make every subsequent `PaymentReader::get` call fail with a transient
+    /// error (for testing).
+    pub fn fail_payment_reads(&self) {
+        self.fail_payment_reads.store(true, Ordering::SeqCst);
     }
 
     /// Set up a webhook for a store (for testing).
@@ -95,6 +115,11 @@ fn search_contains(haystack: Option<&str>, term: &str) -> bool {
 #[async_trait]
 impl InvoiceReader for InMemoryDataService {
     async fn get(&self, id: &InvoiceId) -> RepositoryResult<Option<InvoiceData>> {
+        if self.fail_invoice_reads.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated transient invoice read failure".to_string(),
+            ));
+        }
         let invoices = self.invoices.read().unwrap();
         Ok(invoices.get(&id.0).cloned())
     }
@@ -223,6 +248,11 @@ impl InvoiceWriter for InMemoryDataService {
 #[async_trait]
 impl PaymentReader for InMemoryDataService {
     async fn get(&self, id: Uuid) -> RepositoryResult<Option<PaymentData>> {
+        if self.fail_payment_reads.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated transient payment read failure".to_string(),
+            ));
+        }
         let payments = self.payments.read().unwrap();
         Ok(payments.get(&id).cloned())
     }
