@@ -7,7 +7,10 @@ use evm::monitor::events::PaymentDetected;
 use evm::{Address, B256, U256};
 use std::sync::Arc;
 use types::ChainId;
-use types::{InvoiceData, InvoiceId, InvoiceStatus, InvoiceWriter, PaymentReader, StoreId};
+use types::{
+    InvoiceData, InvoiceId, InvoiceStatus, InvoiceWriter, PaymentReader, StoreId, TokenData,
+    TokenWriter,
+};
 
 use super::helpers::{MockEVMMonitor, create_test_consumer, create_test_invoice};
 use crate::services::event_consumer::EventConsumer;
@@ -269,4 +272,61 @@ async fn test_handle_payment_detected_native_and_log_index_zero_both_survive() {
     let amounts: std::collections::HashSet<_> = payments.iter().map(|p| p.amount.clone()).collect();
     assert!(amounts.contains(&native_amount.to_string()));
     assert!(amounts.contains(&erc20_amount.to_string()));
+}
+
+/// Same chain, address, symbol and decimals as the zkSync Era USDC row the
+/// tokens-seed migration inserts. This is the entry point a real payment
+/// actually takes - `handle_payment_detected` calling `TokenReader::
+/// get_by_address` - rather than a query against `tokens` on its own, so a
+/// seeded row that only matched its own checksummed casing back would show up
+/// here as the "ERC20" fallback instead of "USDC".
+#[tokio::test]
+async fn test_handle_payment_detected_erc20_resolves_seeded_token_symbol() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    let store_id = StoreId::new();
+    create_test_invoice(&ds, &invoice_id, store_id).await;
+
+    let zksync_era = ChainId::evm(324);
+    let checksummed_usdc = "0x1d17CBcF0D6D143135aE902365D2E5e2A16538D4";
+    TokenWriter::insert(
+        &*ds,
+        &TokenData::new("erc20", checksummed_usdc, zksync_era)
+            .with_symbol("USDC")
+            .with_decimals(6),
+    )
+    .await
+    .unwrap();
+
+    let event = PaymentDetected {
+        chain_id: 324,
+        invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+        payment_address: Address::repeat_byte(0x09),
+        amount: U256::from(1_000_000u64), // 1 USDC, 6 decimals
+        tx_hash: B256::repeat_byte(0x11),
+        block_number: 1,
+        block_hash: B256::ZERO,
+        log_index: Some(0),
+        is_native: false,
+        token_address: Some(checksummed_usdc.parse().unwrap()),
+        from_address: Address::repeat_byte(0xab),
+        confirmations: 1,
+        required_confirmations: 12,
+        detected_at: Utc::now(),
+    };
+
+    consumer.handle_payment_detected(event).await.unwrap();
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert_eq!(payments.len(), 1);
+    assert_eq!(
+        payments[0].asset_symbol, "USDC",
+        "a seeded token must resolve to its symbol, not the ERC20 fallback \
+         recorded for a contract the tokens table has no row for"
+    );
 }

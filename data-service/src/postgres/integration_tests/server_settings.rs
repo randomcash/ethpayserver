@@ -96,11 +96,11 @@ async fn a_written_settings_row_can_be_read_back() {
     without_a_settings_row(&service).await;
 }
 
-/// Clearing the billing store is how an instance stops selling to itself, and
+/// Clearing the operator store is how an instance stops invoicing itself, and
 /// it has to be distinguishable from never having set one.
 #[tokio::test]
 #[ignore]
-async fn the_billing_store_can_be_set_and_cleared() {
+async fn the_operator_store_can_be_set_and_cleared() {
     let Some(service) = service().await else {
         return;
     };

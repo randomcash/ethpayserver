@@ -7,6 +7,11 @@
 # file in this suite.
 id = "com.example.e2efixture"
 version = "0.1.0"
+# `^0.1.0` is the plugin host crate's own version, which is what it presents
+# for this dependency check - not the server's. A caret on a 0.x version only
+# matches that exact minor line, so this is a real constraint the host can
+# fail, not a permissive one it never would.
+dependencies = ["ethpayserver:^0.1.0"]
 kind = "action"
 slug = "e2efixture"
 ui_schema = 1

@@ -11,9 +11,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::TcpListener;
+use tokio::signal;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use auth::{AuthConfig, AuthService, captcha::CloudflareTurnstile};
 use data_service::PgDataService;
@@ -30,8 +31,8 @@ use server::{
 };
 use server::{
     DEFAULT_CALL_DEADLINE, DEFAULT_MAX_FAILURES, DEFAULT_MAX_IN_FLIGHT, PluginArtifacts,
-    PluginHost, PluginPools, host_version, invoice_creation_filters, load_installed_plugins,
-    own_store_payment_reporting, payment_observers, report_boot,
+    PluginHost, PluginPools, account_closed_observers, host_version, invoice_creation_filters,
+    load_installed_plugins, own_store_payment_reporting, payment_observers, report_boot,
 };
 
 #[tokio::main]
@@ -40,9 +41,12 @@ async fn main() -> Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();
 
-    // Initialize Sentry (no-op when SENTRY_DSN is unset)
+    // Initialize Sentry (no-op when SENTRY_DSN is unset). SENTRY_RELEASE is
+    // set by the CI build step from GITHUB_SHA — option_env! reads it at
+    // compile time, so it must be a real env var at `cargo build`, not
+    // something exported at deploy/run time.
     let (_sentry_guard, sentry_dsn_configured, sentry_environment) =
-        evm::telemetry::init_sentry(option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from));
+        evm::telemetry::init_sentry(option_env!("SENTRY_RELEASE").map(Cow::from));
 
     // Load configuration
     let config = Config::from_env()?;
@@ -195,26 +199,30 @@ async fn main() -> Result<()> {
         DEFAULT_MAX_IN_FLIGHT,
     ));
 
-    // The billing store: the stored setting wins, the environment is the
+    // The operator store: the stored setting wins, the environment is the
     // fallback.
     //
     // That precedence and not the reverse. An admin who sets this in the UI
     // must see it take effect - if an environment variable silently overrode
-    // it, the settings page would show one store while the server billed on
-    // another, and nothing would say so. The environment stays supported
-    // because instances configured before this setting existed are still
-    // configured that way, and because a fresh database has no settings row
-    // to read.
-    let billing_store_id =
+    // it, the settings page would show one store while the server issued
+    // invoices on another, and nothing would say so. The environment stays
+    // supported because instances configured before this setting existed are
+    // still configured that way, and because a fresh database has no
+    // settings row to read.
+    //
+    // `s.billing_store_id` reads the shared `auth::ServerSettings` field
+    // from payserver-commons, which still carries the old name - renaming it
+    // there is a separate, coordinated change that has not landed yet.
+    let operator_store_id =
         match auth::ServerSettingsRepository::get_server_settings(&*data_service).await {
             Ok(settings) => settings.and_then(|s| s.billing_store_id).or_else(|| {
-                if config.billing_store_id.is_some() {
+                if config.operator_store_id.is_some() {
                     tracing::info!(
-                        "billing store taken from ETHPAY_BILLING_STORE_ID; setting it in \
+                        "operator store taken from ETHPAY_OPERATOR_STORE_ID; setting it in \
                      the admin settings takes precedence from then on"
                     );
                 }
-                config.billing_store_id
+                config.operator_store_id
             }),
             // Not fatal. Falling back to the environment is the behaviour this
             // server had before the setting existed, and refusing to start over
@@ -223,9 +231,9 @@ async fn main() -> Result<()> {
             Err(e) => {
                 tracing::error!(
                     error = %e,
-                    "could not read server settings; falling back to ETHPAY_BILLING_STORE_ID"
+                    "could not read server settings; falling back to ETHPAY_OPERATOR_STORE_ID"
                 );
-                config.billing_store_id
+                config.operator_store_id
             }
         };
 
@@ -258,26 +266,24 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Turn the loaded plugins into the capability implementations the rest of
-    // the server calls. Without this, a plugin compiles, instantiates and
-    // registers - and nothing ever dispatches to it.
-    let (plugin_filters, plugin_payment_observers): (
-        Vec<Arc<dyn server::services::plugins::InvoiceCreationFilter>>,
-        Vec<Arc<dyn server::services::plugins::OwnStorePaymentObserver>>,
-    ) = match plugin_host.as_ref() {
-        Some(host) => (
-            invoice_creation_filters(host, &loaded),
-            payment_observers(host, &loaded),
-        ),
-        None => (Vec::new(), Vec::new()),
-    };
+    // Turn the loaded plugins into the capability implementations the server
+    // calls - without this, a plugin registers but nothing dispatches to it.
+    let (plugin_filters, plugin_payment_observers, plugin_account_closed_observers) = plugin_host
+        .as_ref()
+        .map_or((Vec::new(), Vec::new(), Vec::new()), |host| {
+            (
+                invoice_creation_filters(host, &loaded),
+                payment_observers(host, &loaded),
+                account_closed_observers(host, &loaded),
+            )
+        });
 
     // Capability 4 needs both a store to watch and something to tell. Either
-    // one missing means no dispatch at all: an instance with a billing store
-    // but no plugin has nobody to notify, and observers without a configured
-    // store must never be handed a guess at which store is ours.
+    // one missing means no dispatch at all: an instance with an operator
+    // store but no plugin has nobody to notify, and observers without a
+    // configured store must never be handed a guess at which store is ours.
     let own_store_payments =
-        own_store_payment_reporting(billing_store_id, plugin_payment_observers);
+        own_store_payment_reporting(operator_store_id, plugin_payment_observers);
     match own_store_payments.as_ref() {
         Some((store_id, observers)) => tracing::info!(
             %store_id,
@@ -285,7 +291,7 @@ async fn main() -> Result<()> {
             "own-store payments will be reported to plugins"
         ),
         None => tracing::info!(
-            "no own-store payment reporting: ETHPAY_BILLING_STORE_ID unset or no plugin loaded"
+            "no own-store payment reporting: ETHPAY_OPERATOR_STORE_ID unset or no plugin loaded"
         ),
     }
 
@@ -298,8 +304,15 @@ async fn main() -> Result<()> {
         redis_url,
         webhook_config,
     )?);
-    tokio::spawn(Arc::clone(&webhook_service).run());
+    let mut webhook_handle = tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
+
+    // Cloned here rather than where they're used below (the shutdown-signal
+    // race near the bottom of `main`) because `webhook_service` is moved
+    // into `state.webhook_sink` in the meantime and `bridge` would otherwise
+    // need a clone at that call site anyway.
+    let bridge_for_shutdown = Arc::clone(&bridge);
+    let webhook_service_for_shutdown = Arc::clone(&webhook_service);
 
     // 2. Invoice cleanup service - expires invoices and unwatches addresses
     //    Also queues webhook notifications when invoices expire
@@ -333,7 +346,7 @@ async fn main() -> Result<()> {
         Some((store_id, observers)) => event_consumer.with_own_store_payments(store_id, observers),
         None => event_consumer,
     };
-    tokio::spawn(event_consumer.run());
+    let mut event_consumer_handle = tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
 
     // 4. Watch retry service - retries failed WatchAddress commands
@@ -392,15 +405,20 @@ async fn main() -> Result<()> {
     // installed, which is every deployment today; before this line it was
     // empty even then.
     state.invoice_creation_filters = plugin_filters;
-    // Never filtered: see `AppState::billing_store_id`.
-    state.billing_store_id = billing_store_id;
+    // Capability 8, empty until a plugin is installed, same as the filter list above.
+    state.account_closed_observers = plugin_account_closed_observers;
+    // Never filtered: see `AppState::operator_store_id`.
+    state.operator_store_id = operator_store_id;
+    // Checked against every nomination of a new operator store: see
+    // `AppState::operator_account_id`.
+    state.operator_account_id = config.operator_account_id;
 
-    // Capability 3, published. An instance with no configured billing store
+    // Capability 3, published. An instance with no configured operator store
     // publishes nothing, and its plugins are told invoicing is unavailable -
     // which is the truth: there is no store this host would issue on, and
     // guessing at one is how a plugin ends up invoicing a merchant's
     // customers.
-    match billing_store_id {
+    match operator_store_id {
         Some(store_id) => {
             let api = Arc::new(server::services::plugins::PluginHostApi::new(
                 state.clone(),
@@ -433,19 +451,24 @@ async fn main() -> Result<()> {
             }
         }
         None => tracing::info!(
-            "plugins cannot issue invoices: ETHPAY_BILLING_STORE_ID is unset, so this \
-             instance has no store of its own to bill on"
+            "plugins cannot issue invoices: ETHPAY_OPERATOR_STORE_ID is unset, so this \
+             instance has no store of its own to issue on"
         ),
     }
 
-    // Capability 6, published unconditionally. Unlike capability 3 it needs
-    // no own store: an instance that sells nothing still has merchants with
-    // volume, and a plugin asking what one settled deserves the real answer
-    // rather than silence that reads as zero.
-    if plugin_capabilities.volume.publish(Arc::new(
-        server::services::plugins::PluginMerchantVolume::new(state.clone()),
-    )) {
+    // Capability 6, published unconditionally, batched form included. Unlike
+    // capability 3 it needs no own store: an instance that sells nothing
+    // still has merchants with volume, and a plugin asking what one settled
+    // deserves the real answer rather than silence that reads as zero. One
+    // reader answers both forms, published under each capability's own cell.
+    let volume_reader = Arc::new(server::services::plugins::PluginMerchantVolume::new(
+        state.clone(),
+    ));
+    if plugin_capabilities.volume.publish(volume_reader.clone()) {
         tracing::info!("plugins may read what an account settled over a window");
+    }
+    if plugin_capabilities.bulk_volume.publish(volume_reader) {
+        tracing::info!("plugins may read what many accounts settled in one call");
     }
 
     // Capability 5. `PageHost` is built empty by `AppState::new` and has
@@ -522,9 +545,121 @@ async fn main() -> Result<()> {
     }
 
     let listener = TcpListener::bind(&bind_addr).await?;
-    axum::serve(listener, app).await?;
+
+    // Races the server against the stop signal rather than wrapping it in
+    // axum's `with_graceful_shutdown`: that drains in-flight HTTP requests
+    // for as long as they take, and `shutting_down` would have to flip before
+    // the drain starts to cover the redis/webhook paths below — leaving it
+    // true for that whole open-ended window, during which an unrelated real
+    // fault would also log as shutdown noise. Racing keeps the flag's "we
+    // asked to stop" window bounded to the same order as evmmonitor's below.
+    tokio::select! {
+        result = axum::serve(listener, app) => {
+            result?;
+        }
+        () = shutdown_signal() => {
+            tracing::info!("shutdown signal received");
+            bridge_for_shutdown.begin_shutdown();
+        }
+    }
+
+    // Give the events subscription the same chance evmmonitor's command
+    // subscription gets: a moment to notice its own connection ending and
+    // log itself as a shutdown (see redis.rs's `subscribe` tail) before the
+    // process exits out from under it. Without this wait, `main` could
+    // return before the compose network teardown actually breaks the redis
+    // connection, so the task is simply dropped mid-poll and its tail — the
+    // info/error decision this whole change is about — never runs at all.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        &mut event_consumer_handle,
+    )
+    .await
+    {
+        Err(_) => {
+            tracing::debug!(
+                "event consumer task did not exit within the shutdown grace period, aborting"
+            );
+            event_consumer_handle.abort();
+        }
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "event consumer task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
+
+    // The webhook worker's loop never returns on its own (see `run()` in
+    // service.rs) — it keeps draining the queue for as long as it's alive,
+    // which is the point, so this wait always ends in the timeout branch,
+    // with the task still running completely normally for the whole second.
+    // What it buys is the same thing as the event consumer's wait: a moment
+    // for `process_next_job`'s in-flight call to finish and log itself as
+    // shutdown noise before the task is torn down, rather than being dropped
+    // mid-poll by process exit with no handle ever joined on it at all.
+    //
+    // `begin_shutdown()` is deliberately *not* set before this wait. Nothing
+    // about this task's own teardown has started yet during it — the loop is
+    // still polling Redis and delivering webhooks exactly as it would outside
+    // a shutdown — so a real fault landing in that ~1s would otherwise log as
+    // shutdown noise for no reason. It's set right before `abort()` instead,
+    // which is the point past which a Redis error actually is teardown
+    // fallout rather than a coincidence.
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut webhook_handle).await {
+        Err(_) => {
+            tracing::debug!(
+                "webhook worker task did not exit within the shutdown grace period, aborting"
+            );
+            webhook_service_for_shutdown.begin_shutdown();
+            webhook_handle.abort();
+        }
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "webhook worker task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
 
     Ok(())
+}
+
+/// Resolves once the process receives a stop signal (Ctrl+C or SIGTERM).
+///
+/// Raced against `axum::serve(...)` — this process has no other way to learn
+/// its container was asked to stop, and installing these handlers replaces
+/// the OS's default terminate-on-SIGTERM action, so something has to make
+/// the process actually exit afterward.
+async fn shutdown_signal() {
+    // Installing these handlers only fails if the OS refuses to let the
+    // process register a signal handler at all, which would mean nothing
+    // else in this process can be trusted to work either.
+    #[allow(
+        clippy::expect_used,
+        reason = "handler registration failure is unrecoverable at startup"
+    )]
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    #[allow(
+        clippy::expect_used,
+        reason = "handler registration failure is unrecoverable at startup"
+    )]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 /// Whether `log_format` selects JSON output, and a warning to log for a value
@@ -552,17 +687,41 @@ fn init_tracing(log_level: &str, log_format: &str) {
     // other value keeps the human-readable format for local/dev use.
     let (json, warning) = resolve_log_format(log_format);
 
+    // Gates which levels become Sentry *structured logs* specifically, so
+    // testnet can ship INFO there while mainnet ships WARN and above. Applied
+    // as the Sentry layer's own per-layer filter (below) rather than folded
+    // into `filter`, because a bare `.with(filter)` layer sits in the same
+    // `Layered` stack as every other layer and `Layered::enabled` ANDs across
+    // all of them — an event `filter` (LOG_LEVEL) rejects never reaches the
+    // Sentry layer's `on_event` at all, so `SENTRY_LOG_LEVEL` could only ever
+    // be a *further* restriction on top of LOG_LEVEL, never independent of
+    // it. Per-layer filtering (`.with_filter` on each layer instead of a
+    // shared `.with(filter)`) is what actually decouples them.
+    let sentry_log_level = evm::telemetry::resolve_sentry_log_level();
+    // Floor for the Sentry layer's own callsite interest, independent of
+    // LOG_LEVEL. Fixed at INFO because `sentry_tracing`'s event/span
+    // classification never does anything below INFO regardless of
+    // `sentry_log_level` (DEBUG/TRACE are always `EventFilter::Ignore`), so
+    // this can't suppress anything `sentry_log_event_filter` would keep.
+    let sentry_filter = tracing_subscriber::filter::LevelFilter::INFO;
+
     if json {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(sentry_tracing::layer().event_filter(evm::telemetry::sentry_event_filter))
-            .with(tracing_subscriber::fmt::layer().json())
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .with_filter(sentry_filter),
+            )
+            .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
             .init();
     } else {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(sentry_tracing::layer().event_filter(evm::telemetry::sentry_event_filter))
-            .with(tracing_subscriber::fmt::layer())
+            .with(
+                sentry_tracing::layer()
+                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .with_filter(sentry_filter),
+            )
+            .with(tracing_subscriber::fmt::layer().with_filter(filter))
             .init();
     }
 

@@ -2,7 +2,11 @@
 
 use std::collections::HashMap;
 
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, HeaderValue, StatusCode},
+};
 use evm::monitor::{ChainHealth, SourceStatus};
 use tokio::time::Instant;
 
@@ -31,13 +35,13 @@ use super::models::{DeepHealthResponse, DependencyHealth, MonitorHealth, RpcHeal
 )]
 pub async fn deep_health<A>(
     State(state): State<PgAppState<A>>,
-) -> (StatusCode, Json<DeepHealthResponse>)
+) -> (StatusCode, HeaderMap, Json<DeepHealthResponse>)
 where
     A: Send + Sync + 'static,
 {
     let postgres = probe_dependency(state.data_service.health_check()).await;
 
-    let (redis, rpcs, monitor) = match state.evm_monitor.as_ref() {
+    let (redis, rpcs, monitor, evmmonitor_sentry_release) = match state.evm_monitor.as_ref() {
         Some(evm_monitor) => probe_evm_monitor(evm_monitor).await,
         None => (
             DependencyHealth {
@@ -50,11 +54,13 @@ where
                 status: "ok".to_string(),
                 data_fresh: false,
             },
+            None,
         ),
     };
 
     (
         StatusCode::OK,
+        sentry_release_headers(option_env!("SENTRY_RELEASE"), evmmonitor_sentry_release),
         Json(DeepHealthResponse {
             build_sha: env!("ETHPAYSERVER_BUILD_SHA").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -67,6 +73,52 @@ where
             webauthn: state.webauthn.clone(),
         }),
     )
+}
+
+/// Value for the `x-sentry-release` header. Split out from [`deep_health`]
+/// so the empty-vs-present behaviour is unit-testable without booting a
+/// server - `option_env!` itself resolves at compile time and can't be
+/// varied from a test.
+pub(super) fn sentry_release_header(compiled: Option<&'static str>) -> &'static str {
+    compiled.unwrap_or_default()
+}
+
+/// Build the `/health/deep` response headers carrying both processes'
+/// compiled `SENTRY_RELEASE`. Split out from [`deep_health`] so the
+/// presence/absence behaviour is unit-testable without booting a server.
+///
+/// `SENTRY_RELEASE` and `ETHPAYSERVER_BUILD_SHA` are set by two separate CI
+/// steps from the same commit sha, so they can drift apart without either
+/// build step failing - a later stage that rebuilds from source without
+/// re-exporting `SENTRY_RELEASE` would ship a binary with a correct
+/// `build_sha` and an empty Sentry release, silently. Putting the compiled
+/// value on the response as a header (rather than trusting the build log)
+/// lets a deploy check compare it against `build_sha` from the same running
+/// process.
+///
+/// evmmonitor is a second binary that tags its own Sentry events from the
+/// same `SENTRY_RELEASE`, compiled in a separate CI build step from the same
+/// commit sha - and it has no HTTP surface of its own to observe directly.
+/// Its release is relayed here from the health channel it already reports
+/// through, rather than trusted from the build that produced it. Absent (not
+/// configured, or not yet observed) rather than an empty string, so a deploy
+/// check can tell "no evmmonitor to check" from "evmmonitor reported an
+/// empty release".
+pub(super) fn sentry_release_headers(
+    compiled: Option<&'static str>,
+    evmmonitor_release: Option<String>,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-sentry-release",
+        HeaderValue::from_static(sentry_release_header(compiled)),
+    );
+    if let Some(release) = evmmonitor_release
+        && let Ok(value) = HeaderValue::from_str(&release)
+    {
+        headers.insert("x-evmmonitor-sentry-release", value);
+    }
+    headers
 }
 
 /// Timeout a health-check future and convert the outcome into `DependencyHealth`.
@@ -98,10 +150,17 @@ where
 }
 
 /// Probe EVM-monitor-backed dependencies (Redis health + per-chain RPC health +
-/// monitor freshness) and assemble the three sub-sections of `DeepHealthResponse`.
+/// monitor freshness + evmmonitor's own Sentry release) and assemble the
+/// sub-sections of `DeepHealthResponse` plus the `x-evmmonitor-sentry-release`
+/// header value.
 async fn probe_evm_monitor(
     evm_monitor: &RedisEVMMonitor,
-) -> (DependencyHealth, HashMap<String, RpcHealth>, MonitorHealth) {
+) -> (
+    DependencyHealth,
+    HashMap<String, RpcHealth>,
+    MonitorHealth,
+    Option<String>,
+) {
     let redis = probe_dependency(evm_monitor.health_check()).await;
 
     let chains_start = Instant::now();
@@ -128,7 +187,26 @@ async fn probe_evm_monitor(
         data_fresh,
     };
 
-    (redis, rpcs, monitor)
+    let sentry_release = probe_evmmonitor_sentry_release(evm_monitor).await;
+
+    (redis, rpcs, monitor, sentry_release)
+}
+
+/// Fetch the `SENTRY_RELEASE` evmmonitor was compiled with, as relayed
+/// through its own health channel. `None` on timeout or fetch error, same as
+/// an evmmonitor that never observed one.
+async fn probe_evmmonitor_sentry_release(evm_monitor: &RedisEVMMonitor) -> Option<String> {
+    match tokio::time::timeout(PROBE_TIMEOUT, evm_monitor.get_sentry_release()).await {
+        Ok(Ok(release)) => release,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "deep health: failed to get evmmonitor sentry release");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("deep health: evmmonitor sentry release fetch timed out");
+            None
+        }
+    }
 }
 
 /// Whether a chain-health snapshot represents fresh monitor data.
