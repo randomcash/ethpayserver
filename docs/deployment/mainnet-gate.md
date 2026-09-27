@@ -53,7 +53,7 @@ not that anything deployed — which is what the health gate below is for.
 For **testnet**, the `Verify testnet deploy` job runs
 `scripts/health-gate.sh` against
 `https://testnet.random.cash/api/health/deep` after the dispatch, polling
-for up to 600 seconds (`HEALTH_TIMEOUT`).
+for up to 900 seconds (`HEALTH_TIMEOUT`).
 
 The `/api` prefix matters: `testnet.random.cash` serves the client, whose
 SPA fallback answers `/health/deep` with HTTP 200 and a page of HTML. A
@@ -76,7 +76,7 @@ To check a mainnet deploy by hand:
 ```bash
 HEALTH_URL=https://pay.random.cash/api/health/deep \
 EXPECTED_SHA=$(git rev-parse --short=7 HEAD) \
-HEALTH_TIMEOUT=600 ./scripts/health-gate.sh
+HEALTH_TIMEOUT=900 ./scripts/health-gate.sh
 ```
 
 The gate passes when ALL of the following are true:
@@ -98,6 +98,14 @@ If the gate does not pass within the timeout, the job fails. Because
 Docker Compose keeps the old container running until the new one passes
 its own health check, a failed gate means the old version is still
 serving traffic — no rollback is needed in this case.
+
+A SHA-mismatch timeout logs which of three situations it saw, since they
+call for opposite responses: no response ever reported a `build_sha`
+(endpoint unreachable, or the deploy hasn't started responding at all — wait
+and check again), the sha never moved from what was running before the
+poll started (the new build hasn't landed yet — wait), or the sha changed
+but to something other than `EXPECTED_SHA` (something is actually wrong —
+investigate). Only the last of these means the deploy itself is broken.
 
 ### Post-deploy smoke test
 
