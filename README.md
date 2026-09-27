@@ -233,6 +233,8 @@ ethpayserver/
 ├── server/            # Main API server (ethpayserver binary)
 ├── evm/               # EVM blockchain interaction (evmmonitor binary)
 ├── data-service/      # PostgreSQL + Redis data access layer
+├── mcp-server/        # MCP tools for AI agents (ethpay-mcp binary)
+├── loadtest/          # Goose-based load test scenarios
 ├── e2e/               # Playwright suite, against the server + the client image
 └── memos/             # Project documentation and notes
 ```

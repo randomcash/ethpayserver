@@ -101,8 +101,9 @@ serving traffic — no rollback is needed in this case.
 
 ### Post-deploy smoke test
 
-After the health gate passes, `post-deploy:smoke` runs the full smoke
-test suite (`scripts/smoke-prod.sh`) against the deployed instance:
+There is no automated smoke job in `ci.yml` — after the health gate passes,
+an operator runs `scripts/smoke-prod.sh` by hand against the deployed
+instance:
 
 - `/health/live` — process is running
 - `/health/ready` — DB, Redis, and all RPC chains reachable
@@ -110,14 +111,15 @@ test suite (`scripts/smoke-prod.sh`) against the deployed instance:
 - Invoice create/read cycle via API key
 - Checkout page load for the created invoice
 
-### Required CI variables
+### Environment variables for the scripts above
 
-| Variable | Description |
-|----------|-------------|
-| `DEPLOY_HEALTH_URL` | Full URL to `/health/deep` on the target env |
-| `DEPLOY_SMOKE_URL` | Base URL for smoke tests (e.g. `https://pay.random.cash`) |
-| `DEPLOY_SMOKE_API_KEY` | API key with invoice create/read permissions |
-| `DEPLOY_SMOKE_STORE_ID` | Store UUID the smoke API key is scoped to |
+| Variable | Used by | Description |
+|----------|---------|-------------|
+| `HEALTH_URL` | `health-gate.sh` | Full URL to `/health/deep` on the target env |
+| `HEALTH_TIMEOUT` | `health-gate.sh` | Seconds to poll before failing (default 60) |
+| `SMOKE_BASE_URL` | `smoke-prod.sh` | Base URL for smoke tests (e.g. `https://pay.random.cash`) |
+| `SMOKE_API_KEY` | `smoke-prod.sh` | API key with invoice create/read permissions |
+| `SMOKE_STORE_ID` | `smoke-prod.sh` | Store UUID the smoke API key is scoped to |
 
 ## Container registry tagging
 

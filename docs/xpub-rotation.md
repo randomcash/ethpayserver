@@ -71,7 +71,7 @@ Content-Type: application/json
     {
       "id": "uuid",
       "payment_method_id": "uuid",
-      "chain_id": 11155111,
+      "chain_id": "eip155:11155111",
       "asset_symbol": "ETH",
       "previous_xpub_masked": "xpub6D4B...cLW5",
       "previous_derivation_index": 42,
@@ -124,11 +124,11 @@ curl -X POST https://pay.random.cash/api/stores/<STORE_ID>/wallet/rotate \
 
 ## Reversal
 
-Rotation is reversible: call the same endpoint with the original xpub. The
-derivation index resets to zero, which means previously-used indices will be
-re-derived. This is safe because address reuse in a receive-only context does
-not leak funds, but it may confuse payment reconciliation. Only reverse if the
-rotation was a mistake.
+Rotation is reversible: call the same endpoint with the original xpub. As with
+any rotation, the derivation index is **not** reset — the wallet for that xpub
+already exists (it's the one just rotated off), and it resumes counting from
+wherever it left off rather than re-deriving indices already handed out. Only
+reverse if the rotation was a mistake.
 
 ## Audit trail
 
