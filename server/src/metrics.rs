@@ -736,15 +736,22 @@ mod tests {
         handle
     }
 
-    // Nothing in this test binary calls the real, unscoped `sentry::init` -
-    // every Sentry-touching test below goes through
-    // `sentry::test::with_captured_envelopes`, which binds a client to a
-    // scoped `Hub` for the duration of its closure only and restores the
-    // previous (clientless) `Hub` afterwards, on any thread. So outside such
-    // a closure the process `Hub` reliably has no client bound, the same as
-    // in a fresh process that hasn't called `evm::telemetry::init_sentry`
-    // yet - which is what makes the next two tests meaningful rather than
-    // order-dependent.
+    // This test's own process has not called the real, unscoped
+    // `sentry::init` - it relies on nextest running every `#[test]` as its
+    // own process (the same isolation
+    // `init_metrics_installs_a_working_recorder_once_sentry_is_ready` below
+    // depends on), not on nothing in this binary calling it: that test does
+    // call `evm::telemetry::init_sentry` a few tests down, which binds a real
+    // client to *its* process's Hub. Every Sentry-touching test above that
+    // line instead goes through `sentry::test::with_captured_envelopes`,
+    // which binds a client to a scoped `Hub` for the duration of its closure
+    // only and restores the previous (clientless) `Hub` afterwards. So in
+    // this test's own process the `Hub` reliably has no client bound, the
+    // same as in a fresh process that hasn't called
+    // `evm::telemetry::init_sentry` yet - which is what makes the next two
+    // tests meaningful rather than order-dependent. Under a runner that
+    // doesn't isolate tests by process (plain `cargo test`, or a future
+    // harness change), this would become order-dependent for real.
     #[test]
     fn sentry_hub_has_client_is_false_before_sentry_init() {
         assert!(
