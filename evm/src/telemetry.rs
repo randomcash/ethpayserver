@@ -309,6 +309,54 @@ fn client_options(
         // Structured logs (see `sentry_log_event_filter` for which levels
         // actually reach this). Same mandatory scrubber, via the separate
         // hook logs go through.
+        //
+        // Load-bearing on both this crate's current 0.47 pin and on 0.49 —
+        // not vestigial on either. `enable_logs` is deprecated starting in
+        // sentry 0.49, with a note that it still governs automatic capture
+        // by integrations — `sentry_tracing::layer()`, which is what
+        // actually gets a `tracing` event into an envelope here, is exactly
+        // that case.
+        //
+        // `disabling_enable_logs_suppresses_automatic_integration_capture`
+        // in `capture_tests` pins this down on 0.47 as a real, running
+        // assertion rather than a claim: it takes this exact
+        // `client_options()` output, flips only this field to `false`, and
+        // asserts no structured log reaches the envelope. That test passes
+        // today, on 0.47.
+        //
+        // The same ablation was then reproduced directly, in this tree,
+        // against a real 0.49.3 build rather than argued from reading a
+        // changelog: bump both `sentry` and `sentry-tracing` in
+        // `evm/Cargo.toml` to "0.49.3", `cargo update -p sentry -p
+        // sentry-tracing`, then `cargo test -p evm --lib --features
+        // sentry-scrub capture_tests` (this file's `client_options` needs
+        // its struct-literal construction changed to the `let mut opts =
+        // ...; opts.field = ...;` form first — 0.49's `ClientOptions`
+        // became `#[non_exhaustive]`, so the literal no longer compiles
+        // outside the defining crate; that change is not part of this
+        // pin, it belongs to whichever PR actually moves it). With
+        // `enable_logs: true` all four tests in `capture_tests` pass
+        // exactly as on 0.47; flipping only that field to `false`
+        // reproduces the identical failure — the same three
+        // "expected at least one structured log to reach the envelope"
+        // panics, `disabling_enable_logs_suppresses_automatic_integration_capture`
+        // the lone survivor. So the deprecation note's claim holds for our
+        // configuration on the version it will actually describe: the
+        // option is not vestigial at 0.49 either, and it must stay under
+        // `#[allow(deprecated)]` once the pin itself moves, rather than
+        // being dropped or having the lint suppressed as if the field no
+        // longer mattered. This recipe is independent of any particular
+        // commit and can be rerun against whatever version the next SDK
+        // bump proposes.
+        //
+        // `capture_tests` already runs on every push, not just on demand:
+        // `server/Cargo.toml`'s `evm = { path = "../evm", features = ["api",
+        // "redis", "sentry-scrub"] }` line lists `sentry-scrub` as a normal,
+        // non-optional feature, so cargo's feature unification turns it on
+        // for the whole workspace build, and `.github/workflows/ci.yml`'s
+        // `test` job runs `cargo nextest run --workspace --no-fail-fast -j
+        // 2` — that exact line already compiles and executes this test on
+        // every push.
         enable_logs: true,
         before_send_log: Some(Arc::new(scrub_log)),
         ..Default::default()
