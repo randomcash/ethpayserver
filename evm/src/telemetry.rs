@@ -311,18 +311,30 @@ fn client_options(
         // hook logs go through.
         //
         // Load-bearing, not vestigial, past this crate's current 0.47 pin:
-        // checked against sentry-core 0.49.3, where this field is deprecated
-        // with a note that automatic capture by integrations still respects
-        // it. Flipping it to `false` there against this same `client_options`
-        // makes every `capture_tests` assertion that a log reaches the
-        // envelope fail outright — `sentry_tracing::layer()` is exactly that
-        // "automatic capture" integration, so the field keeps doing real work
-        // post-0.47. When a future bump deprecates this field, the fix is not
-        // `#[allow(deprecated)]`: 0.49.3's own `ClientOptions::default()`
-        // already sets it to `true`, so dropping the explicit assignment
-        // keeps the behaviour and satisfies the lint, with `capture_tests`'s
-        // `!logs.is_empty()` guard left watching the invariant in case that
-        // default ever changes.
+        // ran the ablation itself against the open 0.49.3 bump (that branch's
+        // tip was f398f165e8e6e21e65c273fdbf555ff0e4383fb4) instead of taking
+        // the deprecation note's word for it. There, with this same
+        // `client_options`, forcing `enable_logs` to `false` makes all three
+        // `capture_tests` fail with "expected at least one structured log to
+        // reach the envelope" — `sentry_tracing::layer()` is exactly the
+        // "automatic capture by integrations" case the 0.49 note says the
+        // option still governs, so it is not vestigial for us. Dropping the
+        // explicit assignment there instead of keeping it under
+        // `#[allow(deprecated)]` also passes every `capture_tests` case:
+        // sentry-core 0.49.3's own `ClientOptions::default()` already sets
+        // `enable_logs` to `true`, so no lint suppression is needed either —
+        // just the field going away, with `capture_tests`'s
+        // `!logs.is_empty()` guard left watching the default in case a later
+        // point release changes it.
+        //
+        // That guard isn't a manual, easy-to-forget check: `server`'s
+        // Cargo.toml depends on this crate with `sentry-scrub` as a normal,
+        // non-optional feature, so cargo's feature unification turns it on
+        // for the whole workspace build. `cargo clippy --workspace
+        // --all-targets -- -D warnings` and `cargo nextest run --workspace`
+        // — the commands CI actually runs, no extra flags — already compile
+        // and execute every test in this module, `capture_tests` included,
+        // on every push.
         enable_logs: true,
         before_send_log: Some(Arc::new(scrub_log)),
         ..Default::default()
