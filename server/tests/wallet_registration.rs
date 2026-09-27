@@ -21,13 +21,16 @@
 //! mandated "register the resulting key against a real instance" step, so an
 //! unset variable earning a bare pass with zero assertions run is exactly
 //! the failure mode it exists to catch. This is not a claim taken on faith:
-//! `.github/workflows/ci.yml`'s "Integration tests" step (currently around
-//! line 294) runs `cargo nextest run -p data-service -p server --run-ignored
-//! only` with `DATABASE_URL` exported two lines above it, which is `-p
-//! server`, i.e. this crate, i.e. this file - and running this exact test
-//! locally against a live Postgres (outside CI, by hand) passes. A
-//! contributor who runs `--ignored` locally without `DATABASE_URL` set gets
-//! a clear panic instead of a silent no-op.
+//! `.github/workflows/ci.yml`'s "Integration tests" step runs `cargo nextest
+//! run -p data-service -p server --no-fail-fast --run-ignored only -j 1`
+//! with `DATABASE_URL` exported two lines above it, which is `-p server`,
+//! i.e. this crate, i.e. this file - and running this exact test locally
+//! against a live Postgres (outside CI, by hand) passes. A contributor who
+//! runs `--ignored` locally without `DATABASE_URL` set gets a clear panic
+//! instead of a silent no-op. (Deliberately not citing a line number here:
+//! one was quoted in an earlier revision of this comment, drifted the next
+//! time the workflow file changed, and read as evidence of a stale claim
+//! rather than a typo.)
 
 use std::sync::Arc;
 
