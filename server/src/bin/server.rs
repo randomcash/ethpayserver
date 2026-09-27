@@ -209,13 +209,9 @@ async fn main() -> Result<()> {
     // supported because instances configured before this setting existed are
     // still configured that way, and because a fresh database has no
     // settings row to read.
-    //
-    // `s.billing_store_id` reads the shared `auth::ServerSettings` field
-    // from payserver-commons, which still carries the old name - renaming it
-    // there is a separate, coordinated change that has not landed yet.
     let operator_store_id =
         match auth::ServerSettingsRepository::get_server_settings(&*data_service).await {
-            Ok(settings) => settings.and_then(|s| s.billing_store_id).or_else(|| {
+            Ok(settings) => settings.and_then(|s| s.operator_store_id).or_else(|| {
                 if config.operator_store_id.is_some() {
                     tracing::info!(
                         "operator store taken from ETHPAY_OPERATOR_STORE_ID; setting it in \
