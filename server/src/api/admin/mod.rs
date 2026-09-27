@@ -312,6 +312,9 @@ where
     };
     let settings = row.unwrap_or_default();
 
+    // The response fields below are still named after `api_types::admin`'s
+    // shared DTO, which is pinned by rev from payserver-commons and has not
+    // yet picked up the matching rename - see that repository's own commit.
     Ok(Json(ServerSettingsResponse {
         default_confirmations: settings.default_confirmations,
         invoice_expiry_minutes: settings.invoice_expiry_minutes,
@@ -321,8 +324,8 @@ where
         // What this process resolved at boot, compared with what is stored.
         // They differ after a change nobody has restarted into, and an admin
         // needs to be able to tell - otherwise the page shows a store the
-        // server is not actually billing on.
-        billing_store_id_active: state.billing_store_id == settings.billing_store_id,
+        // server is not actually using.
+        billing_store_id_active: state.operator_store_id == settings.billing_store_id,
     }))
 }
 
@@ -369,17 +372,17 @@ where
 
     // Absent leaves it alone; `Some(None)` clears it. A plain `Option` could
     // not tell those apart, and every client that saves the other four
-    // settings without knowing about this field would switch billing off.
-    let billing_store_id = match body.billing_store_id {
+    // settings without knowing about this field would clear it.
+    let operator_store_id = match body.billing_store_id {
         Some(next) => next,
         None => current.billing_store_id,
     };
 
-    if let Some(store_id) = billing_store_id
-        && billing_store_id != current.billing_store_id
+    if let Some(store_id) = operator_store_id
+        && operator_store_id != current.billing_store_id
     {
-        validate_billing_store(&state, store_id).await?;
-        // `error`, not `info`: this field is `Config::billing_store_id`, and
+        validate_operator_store(&state, store_id).await?;
+        // `error`, not `info`: this field is `Config::operator_store_id`, and
         // that doc comment already explains why no value here is safely
         // wrong. A change to it must reach Sentry as an event - which is
         // what turns into a ticket - and not sit as a log line nobody was
@@ -389,7 +392,7 @@ where
         tracing::error!(
             actor = %admin.id,
             store_id = %store_id,
-            "billing store changed; it takes effect on the next restart"
+            "operator store changed; it takes effect on the next restart"
         );
     }
 
@@ -405,7 +408,7 @@ where
         invoice_expiry_minutes: body.invoice_expiry_minutes,
         rate_limit_rpm: body.rate_limit_rpm,
         enabled_chain_ids,
-        billing_store_id,
+        billing_store_id: operator_store_id,
     };
 
     state
@@ -417,20 +420,20 @@ where
     Ok(StatusCode::OK)
 }
 
-/// Refuse a billing store that is not the operator's own, or that could not
-/// actually be billed on.
+/// Refuse an operator store that is not the operator's own, or that could not
+/// actually be invoiced on.
 ///
 /// Checked here rather than at boot because here there is a human to tell.
 /// Every one of these failures is silent otherwise: the setting saves, the
 /// server restarts, and the first sign of trouble is a merchant clicking Pay
 /// and getting nothing - by which point nobody connects it to a settings
-/// change made days earlier. Ownership and billability are independent
+/// change made days earlier. Ownership and invoiceability are independent
 /// properties of the nominated store, checked one after the other, and
 /// neither stands in for the other.
 ///
 /// Not a foreign key, for the reason the migration gives: a settings row must
 /// not be what stops a store being deleted.
-async fn validate_billing_store<A>(
+async fn validate_operator_store<A>(
     state: &PgAppState<A>,
     store_id: types::StoreId,
 ) -> Result<(), StatusCode>
@@ -442,7 +445,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Err(reason) = owned_by_operator(store.as_ref(), state.operator_account_id) {
-        tracing::warn!(%store_id, reason, "refused a billing store nomination");
+        tracing::warn!(%store_id, reason, "refused an operator store nomination");
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
@@ -454,14 +457,15 @@ where
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Err(reason) = billable(&methods) {
-        tracing::warn!(%store_id, reason, "refused a billing store that cannot be invoiced on");
+        tracing::warn!(%store_id, reason, "refused an operator store that cannot be invoiced on");
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     Ok(())
 }
 
-/// Who may be nominated as the store this instance bills itself through.
+/// Who may be nominated as the store this instance issues its own invoices
+/// through.
 ///
 /// Its own function so the rule is testable without a database, the same
 /// reason `billable` below is split out. `operator_account_id` absent refuses
@@ -642,7 +646,7 @@ mod tests {
         }
     }
 
-    /// A billing store is checked when it is set, because that is the only
+    /// An operator store is checked when it is set, because that is the only
     /// moment a human is present. Every one of these failures is otherwise
     /// silent until a merchant clicks Pay and gets nothing, days later.
     #[test]
@@ -669,7 +673,7 @@ mod tests {
     }
 
     /// Ownership is its own property, independent of whether the store can
-    /// be billed on.
+    /// be invoiced on.
     #[test]
     fn a_store_not_owned_by_the_operator_is_refused() {
         let operator = UserId::new();
@@ -692,7 +696,7 @@ mod tests {
 
     /// No configured operator account must refuse every nomination, not let
     /// every store through - the same "no value is safely wrong" reasoning
-    /// as `Config::billing_store_id` itself.
+    /// as `Config::operator_store_id` itself.
     #[test]
     fn no_operator_account_configured_refuses_every_store() {
         let any_store = types::Store::new("any store", UserId::new());
@@ -831,21 +835,21 @@ mod tests {
             if *event.metadata().level() != tracing::Level::ERROR {
                 return;
             }
-            struct FindsBillingStoreChanged(bool);
-            impl tracing::field::Visit for FindsBillingStoreChanged {
+            struct FindsOperatorStoreChanged(bool);
+            impl tracing::field::Visit for FindsOperatorStoreChanged {
                 fn record_debug(
                     &mut self,
                     field: &tracing::field::Field,
                     value: &dyn std::fmt::Debug,
                 ) {
                     if field.name() == "message"
-                        && format!("{value:?}").contains("billing store changed")
+                        && format!("{value:?}").contains("operator store changed")
                     {
                         self.0 = true;
                     }
                 }
             }
-            let mut visitor = FindsBillingStoreChanged(false);
+            let mut visitor = FindsOperatorStoreChanged(false);
             event.record(&mut visitor);
             if visitor.0 {
                 self.0.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -855,13 +859,14 @@ mod tests {
 
     /// The alarm (`tracing::error!`, which Sentry turns into an event and
     /// this deployment's pipeline turns into a ticket) must fire exactly when
-    /// the billing store actually changes, not on every settings save - or it
-    /// becomes noise nobody reads. The `Some(None)` versus absent distinction
-    /// on `UpdateServerSettingsRequest::billing_store_id` is what makes a
-    /// resave of the same value distinguishable from a real change at all.
+    /// the operator store actually changes, not on every settings save - or
+    /// it becomes noise nobody reads. The `Some(None)` versus absent
+    /// distinction on `UpdateServerSettingsRequest::billing_store_id` is what
+    /// makes a resave of the same value distinguishable from a real change
+    /// at all.
     #[tokio::test]
     #[ignore]
-    async fn the_billing_store_alarm_fires_only_on_an_actual_change() {
+    async fn the_operator_store_alarm_fires_only_on_an_actual_change() {
         use tracing_subscriber::prelude::*;
 
         let Some(service) = settings_test_service().await else {
@@ -905,7 +910,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(
             saw_error.load(std::sync::atomic::Ordering::SeqCst),
-            "an actual billing store change must raise the alarm"
+            "an actual operator store change must raise the alarm"
         );
 
         saw_error.store(false, std::sync::atomic::Ordering::SeqCst);

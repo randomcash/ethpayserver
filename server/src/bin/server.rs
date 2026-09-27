@@ -199,26 +199,30 @@ async fn main() -> Result<()> {
         DEFAULT_MAX_IN_FLIGHT,
     ));
 
-    // The billing store: the stored setting wins, the environment is the
+    // The operator store: the stored setting wins, the environment is the
     // fallback.
     //
     // That precedence and not the reverse. An admin who sets this in the UI
     // must see it take effect - if an environment variable silently overrode
-    // it, the settings page would show one store while the server billed on
-    // another, and nothing would say so. The environment stays supported
-    // because instances configured before this setting existed are still
-    // configured that way, and because a fresh database has no settings row
-    // to read.
-    let billing_store_id =
+    // it, the settings page would show one store while the server issued
+    // invoices on another, and nothing would say so. The environment stays
+    // supported because instances configured before this setting existed are
+    // still configured that way, and because a fresh database has no
+    // settings row to read.
+    //
+    // `s.billing_store_id` reads the shared `auth::ServerSettings` field
+    // from payserver-commons, which still carries the old name - renaming it
+    // there is a separate, coordinated change that has not landed yet.
+    let operator_store_id =
         match auth::ServerSettingsRepository::get_server_settings(&*data_service).await {
             Ok(settings) => settings.and_then(|s| s.billing_store_id).or_else(|| {
-                if config.billing_store_id.is_some() {
+                if config.operator_store_id.is_some() {
                     tracing::info!(
-                        "billing store taken from ETHPAY_BILLING_STORE_ID; setting it in \
+                        "operator store taken from ETHPAY_OPERATOR_STORE_ID; setting it in \
                      the admin settings takes precedence from then on"
                     );
                 }
-                config.billing_store_id
+                config.operator_store_id
             }),
             // Not fatal. Falling back to the environment is the behaviour this
             // server had before the setting existed, and refusing to start over
@@ -227,9 +231,9 @@ async fn main() -> Result<()> {
             Err(e) => {
                 tracing::error!(
                     error = %e,
-                    "could not read server settings; falling back to ETHPAY_BILLING_STORE_ID"
+                    "could not read server settings; falling back to ETHPAY_OPERATOR_STORE_ID"
                 );
-                config.billing_store_id
+                config.operator_store_id
             }
         };
 
@@ -275,11 +279,11 @@ async fn main() -> Result<()> {
         });
 
     // Capability 4 needs both a store to watch and something to tell. Either
-    // one missing means no dispatch at all: an instance with a billing store
-    // but no plugin has nobody to notify, and observers without a configured
-    // store must never be handed a guess at which store is ours.
+    // one missing means no dispatch at all: an instance with an operator
+    // store but no plugin has nobody to notify, and observers without a
+    // configured store must never be handed a guess at which store is ours.
     let own_store_payments =
-        own_store_payment_reporting(billing_store_id, plugin_payment_observers);
+        own_store_payment_reporting(operator_store_id, plugin_payment_observers);
     match own_store_payments.as_ref() {
         Some((store_id, observers)) => tracing::info!(
             %store_id,
@@ -287,7 +291,7 @@ async fn main() -> Result<()> {
             "own-store payments will be reported to plugins"
         ),
         None => tracing::info!(
-            "no own-store payment reporting: ETHPAY_BILLING_STORE_ID unset or no plugin loaded"
+            "no own-store payment reporting: ETHPAY_OPERATOR_STORE_ID unset or no plugin loaded"
         ),
     }
 
@@ -403,18 +407,18 @@ async fn main() -> Result<()> {
     state.invoice_creation_filters = plugin_filters;
     // Capability 8, empty until a plugin is installed, same as the filter list above.
     state.account_closed_observers = plugin_account_closed_observers;
-    // Never filtered: see `AppState::billing_store_id`.
-    state.billing_store_id = billing_store_id;
-    // Checked against every nomination of a new billing store: see
+    // Never filtered: see `AppState::operator_store_id`.
+    state.operator_store_id = operator_store_id;
+    // Checked against every nomination of a new operator store: see
     // `AppState::operator_account_id`.
     state.operator_account_id = config.operator_account_id;
 
-    // Capability 3, published. An instance with no configured billing store
+    // Capability 3, published. An instance with no configured operator store
     // publishes nothing, and its plugins are told invoicing is unavailable -
     // which is the truth: there is no store this host would issue on, and
     // guessing at one is how a plugin ends up invoicing a merchant's
     // customers.
-    match billing_store_id {
+    match operator_store_id {
         Some(store_id) => {
             let api = Arc::new(server::services::plugins::PluginHostApi::new(
                 state.clone(),
@@ -447,8 +451,8 @@ async fn main() -> Result<()> {
             }
         }
         None => tracing::info!(
-            "plugins cannot issue invoices: ETHPAY_BILLING_STORE_ID is unset, so this \
-             instance has no store of its own to bill on"
+            "plugins cannot issue invoices: ETHPAY_OPERATOR_STORE_ID is unset, so this \
+             instance has no store of its own to issue on"
         ),
     }
 
@@ -556,7 +560,6 @@ async fn main() -> Result<()> {
         () = shutdown_signal() => {
             tracing::info!("shutdown signal received");
             bridge_for_shutdown.begin_shutdown();
-            webhook_service_for_shutdown.begin_shutdown();
         }
     }
 
@@ -587,17 +590,26 @@ async fn main() -> Result<()> {
 
     // The webhook worker's loop never returns on its own (see `run()` in
     // service.rs) — it keeps draining the queue for as long as it's alive,
-    // which is the point, so this wait always ends in the timeout branch.
+    // which is the point, so this wait always ends in the timeout branch,
+    // with the task still running completely normally for the whole second.
     // What it buys is the same thing as the event consumer's wait: a moment
     // for `process_next_job`'s in-flight call to finish and log itself as
-    // shutdown noise (via `begin_shutdown()`, set above) before the task is
-    // torn down, rather than being dropped mid-poll by process exit with no
-    // handle ever joined on it at all.
+    // shutdown noise before the task is torn down, rather than being dropped
+    // mid-poll by process exit with no handle ever joined on it at all.
+    //
+    // `begin_shutdown()` is deliberately *not* set before this wait. Nothing
+    // about this task's own teardown has started yet during it — the loop is
+    // still polling Redis and delivering webhooks exactly as it would outside
+    // a shutdown — so a real fault landing in that ~1s would otherwise log as
+    // shutdown noise for no reason. It's set right before `abort()` instead,
+    // which is the point past which a Redis error actually is teardown
+    // fallout rather than a coincidence.
     match tokio::time::timeout(std::time::Duration::from_secs(1), &mut webhook_handle).await {
         Err(_) => {
             tracing::debug!(
                 "webhook worker task did not exit within the shutdown grace period, aborting"
             );
+            webhook_service_for_shutdown.begin_shutdown();
             webhook_handle.abort();
         }
         Ok(Err(join_error)) => {
