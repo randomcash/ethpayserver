@@ -8,6 +8,7 @@ pub mod invoice_cleanup;
 pub mod plugins;
 pub mod watch_retry;
 pub mod webhook;
+pub mod webhook_outbox_drain;
 
 pub use chain_health_metrics::{ChainHealthMetricsConfig, ChainHealthMetricsService};
 pub use email::{EmailChangeVerificationData, EmailSender, create_email_sender};
@@ -25,3 +26,4 @@ pub use plugins::{
 };
 pub use watch_retry::{WatchRetryConfig, WatchRetryService};
 pub use webhook::{WebhookConfig, WebhookService, WebhookSink};
+pub use webhook_outbox_drain::{WebhookOutboxDrainConfig, WebhookOutboxDrainService};

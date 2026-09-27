@@ -273,17 +273,28 @@ impl PaymentReader for PgDataService {
 /// transfer's position (everything reaching this through the plain
 /// `PaymentWriter::upsert` trait method) pass 0, which is correct for the
 /// overwhelming majority of payments: one transfer per transaction.
-async fn upsert_payment_row(
-    pool: &sqlx::PgPool,
+/// Upsert one payment row, returning the id of the row that now exists.
+///
+/// That id is not always `payment.id`: `ON CONFLICT (chain_id, tx_hash,
+/// tx_index) DO UPDATE` updates the existing row in place without touching
+/// `id`, so a redelivered event (delivery is documented as at-least-once)
+/// carries a freshly generated `payment.id` that the conflict path never
+/// writes anywhere. A caller that needs the row's real id - the webhook
+/// outbox insert below does, for its `payment_id` foreign key - must read it
+/// back with `RETURNING` rather than trust the value it upserted with.
+///
+/// Generic over the executor so the same query can run against a bare pool
+/// or inside a transaction: [`PaymentTxIndexWriter::upsert_with_tx_index_and_obligation`]
+/// needs this and the outbox insert to commit or fail together.
+async fn upsert_payment_row<'e, E>(
+    executor: E,
     payment: &PaymentData,
     tx_index: i32,
-) -> RepositoryResult<()> {
-    // ON CONFLICT (chain_id, tx_hash, tx_index) handles a redelivered
-    // PaymentDetected for a transfer already on file (tx_index is
-    // recomputed the same way both times, so the same transfer always maps
-    // to the same key) rather than inserting a second row for it. This is
-    // the unique constraint in the DB.
-    sqlx::query(
+) -> RepositoryResult<Uuid>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let (id,): (Uuid,) = sqlx::query_as(
         r#"
         INSERT INTO payments (
             id, invoice_id, payment_option_id, chain_id, asset_type, amount, asset_symbol,
@@ -301,6 +312,7 @@ async fn upsert_payment_row(
             credited_amount = COALESCE(EXCLUDED.credited_amount, payments.credited_amount),
             rate_used = COALESCE(EXCLUDED.rate_used, payments.rate_used),
             rate_applied_at = COALESCE(EXCLUDED.rate_applied_at, payments.rate_applied_at)
+        RETURNING id
         "#,
     )
     .bind(payment.id)
@@ -321,17 +333,18 @@ async fn upsert_payment_row(
     .bind(&payment.credited_amount)
     .bind(&payment.rate_used)
     .bind(payment.rate_applied_at)
-    .execute(pool)
+    .fetch_one(executor)
     .await
     .map_err(sqlx_to_repo_error)?;
 
-    Ok(())
+    Ok(id)
 }
 
 #[async_trait]
 impl PaymentWriter for PgDataService {
     async fn upsert(&self, payment: &PaymentData) -> RepositoryResult<()> {
-        upsert_payment_row(&self.pool, payment, 0).await
+        upsert_payment_row(&self.pool, payment, 0).await?;
+        Ok(())
     }
 
     async fn mark_confirmed(&self, id: Uuid, confirmed_at: DateTime<Utc>) -> RepositoryResult<()> {
@@ -673,7 +686,41 @@ impl PaymentTxIndexWriter for PgDataService {
         payment: &PaymentData,
         tx_index: i32,
     ) -> RepositoryResult<()> {
-        upsert_payment_row(&self.pool, payment, tx_index).await
+        upsert_payment_row(&self.pool, payment, tx_index).await?;
+        Ok(())
+    }
+
+    async fn upsert_with_tx_index_and_obligation(
+        &self,
+        payment: &PaymentData,
+        tx_index: i32,
+        event_type: &str,
+    ) -> RepositoryResult<()> {
+        let mut tx = self.pool.begin().await.map_err(sqlx_to_repo_error)?;
+
+        let payment_id = upsert_payment_row(&mut *tx, payment, tx_index).await?;
+
+        // `ON CONFLICT DO NOTHING` on the same key a redelivered event would
+        // upsert onto: an obligation for this payment and event either
+        // already sits in the outbox undispatched, or was already drained,
+        // and a redelivery must not requeue a second notification for it.
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_outbox (id, payment_id, invoice_id, event_type)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (payment_id, event_type) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(payment_id)
+        .bind(payment.invoice_id.as_str())
+        .bind(event_type)
+        .execute(&mut *tx)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        tx.commit().await.map_err(sqlx_to_repo_error)?;
+        Ok(())
     }
 }
 

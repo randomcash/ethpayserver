@@ -307,6 +307,20 @@ async fn main() -> Result<()> {
     let mut webhook_handle = tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
 
+    // Drains the transactional outbox `payment_handler` writes a webhook
+    // notification obligation into alongside the payment row it is about -
+    // see `data_service::webhook_outbox` for why that write is atomic and
+    // this one is not. Shares `webhook_service` as its delivery sink, so a
+    // drained obligation goes through the exact same queue, retry, and
+    // `webhook_deliveries` bookkeeping as one queued synchronously.
+    let outbox_drain_service = server::WebhookOutboxDrainService::new(
+        Arc::clone(&data_service),
+        Arc::clone(&webhook_service) as Arc<dyn server::services::WebhookSink>,
+        server::WebhookOutboxDrainConfig::from_env(),
+    );
+    tokio::spawn(outbox_drain_service.run());
+    tracing::info!("Webhook outbox drain service started");
+
     // Cloned here rather than where they're used below (the shutdown-signal
     // race near the bottom of `main`) because `webhook_service` is moved
     // into `state.webhook_sink` in the meantime and `bridge` would otherwise

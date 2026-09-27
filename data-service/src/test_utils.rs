@@ -40,6 +40,7 @@ pub struct InMemoryDataService {
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
+    webhook_outbox: RwLock<Vec<crate::WebhookObligation>>,
 }
 
 impl InMemoryDataService {
@@ -437,6 +438,36 @@ impl crate::payment_tx_index::PaymentTxIndexWriter for InMemoryDataService {
         } else {
             index.insert(key, payment.id);
             payments.insert(payment.id, payment.clone());
+        }
+
+        Ok(())
+    }
+
+    async fn upsert_with_tx_index_and_obligation(
+        &self,
+        payment: &PaymentData,
+        tx_index: i32,
+        event_type: &str,
+    ) -> RepositoryResult<()> {
+        // Not a real transaction - this double has no rollback to offer -
+        // but the two writes below are the same two the Postgres
+        // implementation makes atomic, so a test against this double still
+        // exercises "both writes happen together" for the payment_handler
+        // call site, just not "or neither does".
+        self.upsert_with_tx_index(payment, tx_index).await?;
+
+        let mut outbox = self.webhook_outbox.write().unwrap();
+        if !outbox
+            .iter()
+            .any(|o| o.payment_id == payment.id && o.event_type == event_type)
+        {
+            outbox.push(crate::WebhookObligation {
+                id: Uuid::new_v4(),
+                payment_id: payment.id,
+                invoice_id: payment.invoice_id.as_str().to_string(),
+                event_type: event_type.to_string(),
+                created_at: Utc::now(),
+            });
         }
 
         Ok(())
@@ -1028,6 +1059,29 @@ impl PaymentEventWriter for InMemoryDataService {
 #[async_trait]
 impl WebhookDeliveryWriter for InMemoryDataService {
     async fn upsert_delivery(&self, _params: UpsertDeliveryParams) -> RepositoryResult<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::WebhookOutboxReader for InMemoryDataService {
+    async fn get_undispatched_obligations(
+        &self,
+        limit: i64,
+    ) -> RepositoryResult<Vec<crate::WebhookObligation>> {
+        let outbox = self.webhook_outbox.read().unwrap();
+        let mut undispatched: Vec<_> = outbox.clone();
+        undispatched.sort_by_key(|o| o.created_at);
+        undispatched.truncate(limit.max(0) as usize);
+        Ok(undispatched)
+    }
+}
+
+#[async_trait]
+impl crate::WebhookOutboxWriter for InMemoryDataService {
+    async fn mark_obligation_dispatched(&self, id: Uuid) -> RepositoryResult<()> {
+        let mut outbox = self.webhook_outbox.write().unwrap();
+        outbox.retain(|o| o.id != id);
         Ok(())
     }
 }

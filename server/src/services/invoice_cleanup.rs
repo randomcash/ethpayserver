@@ -259,7 +259,8 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
             store_id,
             payload,
         )
-        .await;
+        .await
+        .warn_on_failure(invoice_id.as_str(), "invoice_expired");
     }
 
     /// Cleanup addresses for completed invoices.

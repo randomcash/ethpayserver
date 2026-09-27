@@ -3,7 +3,7 @@
 use chrono::Utc;
 use types::{InvoiceWriter, PaymentQueryParams, PaymentReader, PaymentWriter};
 
-use crate::PaymentTxIndexWriter;
+use crate::{PaymentTxIndexWriter, WebhookOutboxReader, WebhookOutboxWriter};
 
 use super::{assert_amount_eq, create_test_service, seeded_test_invoice, test_payment};
 
@@ -392,5 +392,130 @@ async fn integration_payment_upsert_keeps_two_transfers_in_one_tx() {
         &fetched_second.amount,
         &second.amount,
         "second transfer's amount",
+    );
+}
+
+/// The payment row and its webhook notification obligation are written in
+/// one transaction. Verified here as "both exist together against a real
+/// Postgres", which a unit test against the in-memory double cannot prove.
+#[tokio::test]
+#[ignore]
+async fn integration_upsert_with_tx_index_and_obligation_writes_both_rows() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let invoice = seeded_test_invoice(&service).await;
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    let payment = test_payment(&invoice.id);
+    PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+        &service,
+        &payment,
+        0,
+        "payment_detected",
+    )
+    .await
+    .unwrap();
+
+    let fetched = PaymentReader::get(&service, payment.id)
+        .await
+        .unwrap()
+        .expect("payment row must exist");
+    assert_eq!(fetched.id, payment.id);
+
+    let obligations = WebhookOutboxReader::get_undispatched_obligations(&service, 10)
+        .await
+        .unwrap();
+    let obligation = obligations
+        .iter()
+        .find(|o| o.payment_id == payment.id)
+        .expect("obligation for this payment must be recorded");
+    assert_eq!(obligation.invoice_id, invoice.id.as_str());
+    assert_eq!(obligation.event_type, "payment_detected");
+
+    WebhookOutboxWriter::mark_obligation_dispatched(&service, obligation.id)
+        .await
+        .unwrap();
+    let remaining = WebhookOutboxReader::get_undispatched_obligations(&service, 10)
+        .await
+        .unwrap();
+    assert!(
+        !remaining.iter().any(|o| o.id == obligation.id),
+        "a dispatched obligation must not be read again"
+    );
+}
+
+/// A redelivered `PaymentDetected` (delivery is documented as at-least-once)
+/// re-runs this same call with a fresh `payment.id` but the same
+/// `(chain_id, tx_hash, tx_index)`. The upsert updates the *existing* payment
+/// row rather than inserting a new one, so the obligation's `payment_id`
+/// foreign key must point at that existing row's real id - not the fresh,
+/// never-persisted one the second call generated - or the insert would
+/// violate the foreign key. The unique constraint on `(payment_id,
+/// event_type)` must also stop the redelivery from queuing a second
+/// obligation for a payment already on file.
+#[tokio::test]
+#[ignore]
+async fn integration_redelivered_payment_reuses_the_original_row_id_and_does_not_duplicate_the_obligation()
+ {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let invoice = seeded_test_invoice(&service).await;
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    let first = test_payment(&invoice.id);
+    PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+        &service,
+        &first,
+        0,
+        "payment_detected",
+    )
+    .await
+    .unwrap();
+
+    // Same transfer, redelivered: same tx_hash/chain_id/tx_index, but a fresh
+    // random id - exactly what a second delivery of the same monitor event
+    // produces.
+    let mut redelivered = test_payment(&invoice.id);
+    redelivered.tx_hash = first.tx_hash.clone();
+    redelivered.chain_id = first.chain_id.clone();
+    assert_ne!(
+        redelivered.id, first.id,
+        "the redelivery must generate its own fresh id, as a real redelivery does"
+    );
+
+    PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+        &service,
+        &redelivered,
+        0,
+        "payment_detected",
+    )
+    .await
+    .expect("a redelivery must not violate the obligation's foreign key");
+
+    let payments = PaymentReader::get_for_invoice(&service, &invoice.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        payments.len(),
+        1,
+        "a redelivery of the same transfer must update the existing row, not add one"
+    );
+    let real_id = payments[0].id;
+
+    let obligations = WebhookOutboxReader::get_undispatched_obligations(&service, 10)
+        .await
+        .unwrap();
+    let matching: Vec<_> = obligations
+        .iter()
+        .filter(|o| o.invoice_id == invoice.id.as_str())
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "a redelivery must not queue a second obligation for the same payment"
+    );
+    assert_eq!(
+        matching[0].payment_id, real_id,
+        "the obligation must name the real, persisted payment row"
     );
 }
