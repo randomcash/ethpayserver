@@ -560,7 +560,6 @@ async fn main() -> Result<()> {
         () = shutdown_signal() => {
             tracing::info!("shutdown signal received");
             bridge_for_shutdown.begin_shutdown();
-            webhook_service_for_shutdown.begin_shutdown();
         }
     }
 
@@ -594,9 +593,17 @@ async fn main() -> Result<()> {
     // which is the point, so this wait always ends in the timeout branch.
     // What it buys is the same thing as the event consumer's wait: a moment
     // for `process_next_job`'s in-flight call to finish and log itself as
-    // shutdown noise (via `begin_shutdown()`, set above) before the task is
-    // torn down, rather than being dropped mid-poll by process exit with no
-    // handle ever joined on it at all.
+    // shutdown noise before the task is torn down, rather than being dropped
+    // mid-poll by process exit with no handle ever joined on it at all.
+    //
+    // `begin_shutdown()` is set here, immediately before this task's own
+    // grace window, rather than up in the `shutdown_signal()` branch above:
+    // that branch fires before the event consumer's grace period runs too,
+    // and setting the flag that early would downgrade a real fault in this
+    // service to shutdown noise for the ~1s the event consumer is still
+    // being drained — a window in which nothing about this task's own
+    // teardown has actually started yet.
+    webhook_service_for_shutdown.begin_shutdown();
     match tokio::time::timeout(std::time::Duration::from_secs(1), &mut webhook_handle).await {
         Err(_) => {
             tracing::debug!(
