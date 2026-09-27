@@ -131,8 +131,12 @@ curl -X POST https://pay.random.cash/api/stores/<STORE_ID>/wallet/rotate \
 Rotation is reversible: call the same endpoint with the original xpub. As with
 any rotation, the derivation index is **not** reset — the wallet for that xpub
 already exists (it's the one just rotated off), and it resumes counting from
-wherever it left off rather than re-deriving indices already handed out. Only
-reverse if the rotation was a mistake.
+wherever it left off rather than re-deriving indices already handed out.
+`upsert_wallet`'s `ON CONFLICT (user_id, namespace, xpub) DO UPDATE` only ever
+touches `name` (`data-service/src/postgres/wallet.rs`); the same find-or-create
+path a forward rotation uses, so a reversal cannot zero the counter any more
+than a forward rotation onto an already-seen key can. Only reverse if the
+rotation was a mistake.
 
 ## Audit trail
 
