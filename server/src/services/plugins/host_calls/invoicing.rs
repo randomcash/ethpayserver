@@ -21,7 +21,7 @@ use super::PluginCalls;
 /// could do that could redirect where invoices are issued.
 ///
 /// Unpublished reads as "this host does not issue invoices", which is the
-/// same answer an instance with no billing store gives, and the right one:
+/// same answer an instance with no operator store gives, and the right one:
 /// in both cases there is no store this host would be willing to issue on.
 #[derive(Clone, Default)]
 pub struct DeferredIssuer(

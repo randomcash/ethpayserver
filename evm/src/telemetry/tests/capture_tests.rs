@@ -194,3 +194,39 @@ fn scrub_log_redacts_a_debug_formatted_secret_attribute_through_the_real_capture
         );
     }
 }
+
+/// Direct ablation of `client_options()`'s `enable_logs` field, rather than
+/// a claim about what a note in a dependency's changelog implies: takes the
+/// exact options this crate ships, flips only `enable_logs`, and asserts
+/// that `sentry_tracing::layer()` — the "automatic capture by an
+/// integration" case — stops delivering structured logs. Passing today
+/// establishes the field is load-bearing on this crate's current sentry
+/// version; it keeps running unchanged across any future version bump, so
+/// it (not a comment) is what would go red if a later release ever quietly
+/// changed this behaviour.
+#[test]
+fn disabling_enable_logs_suppresses_automatic_integration_capture() {
+    use tracing_subscriber::prelude::*;
+
+    let _dispatcher = tracing_subscriber::registry()
+        .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)))
+        .set_default();
+
+    let mut options = client_options(None, None, "test".to_string());
+    options.enable_logs = false;
+
+    let envelopes = sentry::test::with_captured_envelopes_options(
+        || {
+            tracing::info!("disabled enable_logs should suppress this");
+        },
+        options,
+    );
+
+    let logs = captured_logs(&envelopes);
+    assert!(
+        logs.is_empty(),
+        "expected enable_logs = false to suppress automatic integration \
+         capture entirely, but a structured log still reached the \
+         envelope: {logs:?}"
+    );
+}

@@ -37,6 +37,19 @@
 # If the gate does not pass within the timeout, exit 1 — the previous
 # container image stays live (Docker Compose health-check prevents cutover).
 #
+# A timeout caused by a build_sha mismatch is reported as one of three
+# distinct situations, not a single generic failure: no response ever
+# reported a build_sha at all (the endpoint may be unreachable, or the deploy
+# just hasn't started answering yet), the sha reported has not changed at any
+# point during the poll (the new build hasn't landed yet), or the sha changed
+# but to something other than EXPECTED_SHA (the running build is neither the
+# old one nor the one that was deployed - the only case of the three that
+# actually means something is wrong). The first two call for waiting and
+# re-checking; the third calls for investigating. A flat "SHA mismatch"
+# timeout message cannot tell a reader which one they are looking at, and a
+# deploy that was simply slower than the budget reads identically to a
+# deploy that never happened.
+#
 # Required env vars:
 #   HEALTH_URL       — full URL to the /health/deep endpoint
 #
@@ -56,6 +69,23 @@ ELAPSED=0
 HEADERS_FILE=$(mktemp)
 trap 'rm -f "$HEADERS_FILE"' EXIT
 
+# Set under `set -u` so a timeout where curl never once succeeds (nothing
+# below ever assigns these) reports the "no response" case on exit instead of
+# dying on an unbound variable.
+BUILD_SHA=""
+SENTRY_RELEASE_HDR=""
+EVMMONITOR_SENTRY_RELEASE_HDR=""
+PG_STATUS="error"
+REDIS_STATUS="error"
+MONITOR_FRESH="False"
+RPC_BAD="unknown"
+
+# Tracks whether the reported build_sha ever changed during the poll, so a
+# timeout can distinguish "stuck on the old build" from "moved to a third,
+# unexpected build" instead of reporting both as the same "SHA mismatch".
+FIRST_SEEN_SHA=""
+SHA_EVER_CHANGED=false
+
 log() { printf '[health-gate] %s\n' "$*"; }
 
 while [[ $ELAPSED -lt $HEALTH_TIMEOUT ]]; do
@@ -73,6 +103,14 @@ while [[ $ELAPSED -lt $HEALTH_TIMEOUT ]]; do
   PG_STATUS=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['postgres']['status'])" 2>/dev/null || echo "error")
   REDIS_STATUS=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['redis']['status'])" 2>/dev/null || echo "error")
   MONITOR_FRESH=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['monitor']['data_fresh'])" 2>/dev/null || echo "False")
+
+  if [[ -n "$BUILD_SHA" ]]; then
+    if [[ -z "$FIRST_SEEN_SHA" ]]; then
+      FIRST_SEEN_SHA="$BUILD_SHA"
+    elif [[ "$BUILD_SHA" != "$FIRST_SEEN_SHA" ]]; then
+      SHA_EVER_CHANGED=true
+    fi
+  fi
 
   # Check RPC chains — all must be "ok"
   RPC_BAD=$(echo "$BODY" | python3 -c "
@@ -153,6 +191,16 @@ print(','.join(bad) if bad else '')
   exit 0
 done
 
-log "TIMEOUT after ${HEALTH_TIMEOUT}s — deploy health gate FAILED"
+if [[ -n "$EXPECTED_SHA" && "$BUILD_SHA" != "$EXPECTED_SHA" ]]; then
+  if [[ -z "$FIRST_SEEN_SHA" ]]; then
+    log "TIMEOUT after ${HEALTH_TIMEOUT}s — no response ever reported a build_sha; cannot tell whether the deploy hasn't landed yet or the endpoint is unreachable"
+  elif [[ "$SHA_EVER_CHANGED" == false ]]; then
+    log "TIMEOUT after ${HEALTH_TIMEOUT}s — sha stayed at $FIRST_SEEN_SHA for the whole poll; the new build hasn't landed yet"
+  else
+    log "TIMEOUT after ${HEALTH_TIMEOUT}s — sha changed during the poll (from $FIRST_SEEN_SHA, last seen $BUILD_SHA) but never reached the expected $EXPECTED_SHA; investigate"
+  fi
+else
+  log "TIMEOUT after ${HEALTH_TIMEOUT}s — deploy health gate FAILED"
+fi
 log "Last response: pg=$PG_STATUS redis=$REDIS_STATUS rpc_bad=$RPC_BAD monitor_fresh=$MONITOR_FRESH sha=$BUILD_SHA sentry_release=$SENTRY_RELEASE_HDR evmmonitor_sentry_release=$EVMMONITOR_SENTRY_RELEASE_HDR"
 exit 1

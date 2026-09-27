@@ -953,7 +953,7 @@ jobs:
   deploy-verify-testnet:
     name: Verify testnet deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     needs: [notify-deploy-testnet]
     if: github.ref == 'refs/heads/testnet'
     permissions: {}
@@ -969,8 +969,12 @@ jobs:
           HEALTH_URL: https://testnet.random.cash/api/health/deep
           # Long enough for the dispatch to be picked up, the image pulled and
           # migrations to run. Short enough that a deploy which never lands is
-          # reported on the same run that should have produced it.
-          HEALTH_TIMEOUT: "600"
+          # reported on the same run that should have produced it. Four
+          # testnet deploys measured 380-488s to verify; 600s left as little
+          # as 112s of headroom and one of those four timed out despite the
+          # deploy succeeding seconds later. 900s keeps real headroom over the
+          # observed worst case.
+          HEALTH_TIMEOUT: "900"
         run: |
           set -e
           export EXPECTED_SHA="${GITHUB_SHA::7}"
