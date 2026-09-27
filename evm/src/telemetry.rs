@@ -315,24 +315,27 @@ fn client_options(
         // that it still governs automatic capture by integrations —
         // `sentry_tracing::layer()`, which is what actually gets a
         // `tracing` event into an envelope here, is exactly that case.
-        // Verified this against the note rather than trusting it: on a
-        // 0.49.3 checkout, forcing this field to `false` makes every
-        // `capture_tests` assertion that `!logs.is_empty()` fail with
-        // "expected at least one structured log to reach the envelope";
-        // deleting the assignment entirely (relying on
-        // `ClientOptions::default()`, which is `true` in sentry-core 0.49.3)
-        // passes again and stays clippy-clean. So when the 0.49 bump lands,
-        // the fix is dropping this line, not wrapping it in
-        // `#[allow(deprecated)]` — and `capture_tests`'s `!logs.is_empty()`
-        // guard is what catches it if a later point release changes that
-        // default.
         //
-        // That guard already runs on every push, not just on demand:
+        // `disabling_enable_logs_suppresses_automatic_integration_capture`
+        // in `capture_tests` pins this down as a real, running assertion
+        // rather than a claim about a version this crate doesn't build
+        // against: it takes this exact `client_options()` output, flips
+        // only this field to `false`, and asserts no structured log
+        // reaches the envelope. That test passes today, on 0.47, proving
+        // the field is load-bearing here and now; the same ablation
+        // re-run on a 0.49.3 checkout gets the same result, so the note's
+        // claim holds there too. When the 0.49 bump lands, the fix is
+        // dropping this line rather than `#[allow(deprecated)]` — 0.49.3's
+        // own `ClientOptions::default()` is already `true` — and that same
+        // test keeps running unchanged afterward to confirm it, instead of
+        // needing to be re-derived.
+        //
+        // `capture_tests` already runs on every push, not just on demand:
         // `server`'s Cargo.toml depends on this crate with `sentry-scrub` as
         // a normal, non-optional feature, so cargo's feature unification
         // turns it on for the whole workspace build. `cargo nextest run
         // --workspace` — the command CI actually runs, no extra flags —
-        // already compiles and executes `capture_tests` on every push.
+        // already compiles and executes it on every push.
         enable_logs: true,
         before_send_log: Some(Arc::new(scrub_log)),
         ..Default::default()
