@@ -314,7 +314,10 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
 /// reset stays a breadcrumb, and a connection that never recovers pages
 /// within one stall window regardless of what the WS layer's own retry logic
 /// happens to be doing underneath it. `our_own_errors_still_page` below
-/// covers that target generically.
+/// covers that target generically, and
+/// `evm/tests/stalled_stream_still_pages.rs` drives a real stall through a
+/// real `ChainMonitor` to confirm `resubscribe_if_stalled`'s own `error!`
+/// resolves to a paging event, not just a hand-typed target string.
 ///
 /// An earlier version of this filter argued instead that `alloy_pubsub`'s own
 /// service loop (`alloy_pubsub::service`) always logs a paging `error!` when
