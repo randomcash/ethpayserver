@@ -26,15 +26,12 @@ pub use wallets::{
     create_wallet_reauth_challenge, list_wallet_credentials, set_primary_wallet_credential,
 };
 
-// `ApiKeyInfoResponse`/`CreateApiKeyPayload`/`CreateApiKeyResponsePayload`/
-// `RotateApiKeyResponsePayload` come from `crate::api::api_key_types`
-// (hand-mirrored from the pinned `api-types` crate, plus a `permissions`
-// field that crate does not have yet - see that module's doc comment) rather
-// than from `api_types` directly. `ApiKeyListResponse` follows since it
-// wraps `ApiKeyInfoResponse`. `UpdateApiKeyPayload` carries no permissions
-// and is unaffected, so it still comes straight from `api_types`.
-pub use crate::api::api_key_types::{
-    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
-    RotateApiKeyResponsePayload,
+// `ApiKeyInfoResponse` and `CreateApiKeyPayload` now carry `permissions` in
+// the pinned `api-types` crate itself, so both come straight from there.
+// `CreateApiKeyResponsePayload`/`RotateApiKeyResponsePayload` still don't -
+// see `api_keys`'s hand-mirrored versions for why - so those two come from
+// this repo instead.
+pub use api_keys::{CreateApiKeyResponsePayload, RotateApiKeyResponsePayload};
+pub use api_types::{
+    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, UpdateApiKeyPayload,
 };
-pub use api_types::UpdateApiKeyPayload;

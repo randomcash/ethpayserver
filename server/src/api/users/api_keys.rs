@@ -5,23 +5,114 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use auth::{ApiKeyId, ApiKeyRepository, Role, SessionService};
+use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService};
+use data_service::ApiKeyFullInfo;
 
 use super::key_material::build_api_key;
+use super::{ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, UpdateApiKeyPayload};
 use crate::api::api_key_permissions::validate_requested_permissions;
-use crate::api::api_key_types::{
-    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
-    RotateApiKeyResponsePayload,
-};
-pub(crate) use crate::api::api_key_types::{
-    api_key_info_response, api_key_info_with_rate_limit, deprecation_expires_at,
-};
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
-use api_types::UpdateApiKeyPayload;
+
+/// Response after creating an API key (includes plaintext key).
+///
+/// Hand-mirrored from the pinned `api-types` crate rather than imported from
+/// it: that crate's `CreateApiKeyResponsePayload` predates per-key scoping and
+/// carries no `permissions` field, and adding one there is the three-step
+/// dance (merge in `payserver-commons`, bump the pinned rev, `cargo update`)
+/// this repo's `CLAUDE.md` describes - a cross-repo change this pass cannot
+/// complete alone. Hand-mirroring only grows the wire shape by a field, so a
+/// client still built against the pinned type keeps working unchanged.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct CreateApiKeyResponsePayload {
+    pub id: Uuid,
+    pub name: String,
+    pub key_prefix: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    /// The plaintext API key. Store this securely — it cannot be retrieved again.
+    pub key: String,
+    /// The scope actually granted, echoing back what was requested.
+    pub permissions: Vec<String>,
+}
+
+/// Response after rotating an API key. See `CreateApiKeyResponsePayload` for
+/// why this is hand-mirrored rather than extending the pinned type.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct RotateApiKeyResponsePayload {
+    /// The new API key's ID.
+    pub id: Uuid,
+    pub name: String,
+    pub key_prefix: String,
+    pub created_at: DateTime<Utc>,
+    /// The new plaintext API key. Store this securely.
+    pub key: String,
+    /// When the old key was deprecated (grace window starts here).
+    pub old_key_deprecated_at: DateTime<Utc>,
+    /// When the old key's grace window ends and it stops authenticating.
+    /// Clients should show this directly instead of hardcoding "48 hours".
+    pub old_key_grace_expires_at: DateTime<Utc>,
+    /// Permission scope carried over from the key being rotated.
+    pub permissions: Option<Vec<String>>,
+}
+
+/// Build from an `ApiKey` plus the ancillary rate-limit / deprecation /
+/// permission fields not present on the auth-crate struct. Used by
+/// endpoints that already have an `ApiKey` in hand (e.g. update_api_key
+/// after a mutation).
+pub(crate) fn api_key_info_with_rate_limit(
+    key: &ApiKey,
+    rate_limit_rpm: Option<i32>,
+    deprecated_at: Option<DateTime<Utc>>,
+    permissions: Option<Vec<String>>,
+) -> ApiKeyInfoResponse {
+    let info = ApiKeyInfo::from(key);
+    ApiKeyInfoResponse {
+        id: info.id.0,
+        name: info.name,
+        key_prefix: info.key_prefix,
+        is_active: info.is_active,
+        created_at: info.created_at,
+        last_used_at: info.last_used_at,
+        expires_at: info.expires_at,
+        rate_limit_rpm,
+        deprecated_at,
+        deprecation_expires_at: deprecated_at.map(deprecation_expires_at),
+        permissions,
+    }
+}
+
+/// Build the wire shape from the `auth` domain type.
+///
+/// A free function rather than a `From` impl: `ApiKeyFullInfo` belongs to
+/// `data_service` and `ApiKeyInfoResponse` to `api-types`, so neither owns
+/// the other.
+pub(crate) fn api_key_info_response(info: ApiKeyFullInfo) -> ApiKeyInfoResponse {
+    ApiKeyInfoResponse {
+        id: info.id,
+        name: info.name,
+        key_prefix: info.key_prefix,
+        is_active: info.is_active,
+        created_at: info.created_at,
+        last_used_at: info.last_used_at,
+        expires_at: info.expires_at,
+        rate_limit_rpm: info.rate_limit_rpm,
+        deprecated_at: info.deprecated_at,
+        deprecation_expires_at: info.deprecated_at.map(deprecation_expires_at),
+        permissions: info.permissions,
+    }
+}
+
+/// Translate a `deprecated_at` into the grace-window deadline. Uses the same
+/// grace-seconds value as the auth extractor, so the client-visible expiry
+/// matches when the server actually starts rejecting the key.
+pub(crate) fn deprecation_expires_at(deprecated_at: DateTime<Utc>) -> DateTime<Utc> {
+    deprecated_at + chrono::Duration::seconds(crate::api::extractors::deprecation_grace_secs())
+}
 
 /// List all API keys for the authenticated user.
 #[utoipa::path(
