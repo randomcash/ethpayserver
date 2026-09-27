@@ -784,6 +784,39 @@ mod tests {
         );
     }
 
+    // The test above pins the fail-closed path; nothing before this pinned
+    // the success path, which is the one that actually runs in production.
+    // Binds a real (disabled, since no `SENTRY_DSN` is set in a test
+    // process) client via `evm::telemetry::init_sentry` - the exact
+    // precondition `init_metrics` checks for - then drives a metric through
+    // the recorder that call installs and confirms it reaches `render()`,
+    // the same function `/metrics` calls in production. Safe to run as its
+    // own process under nextest, same as `test_recorder()` and the guard
+    // test above: each gets `metrics::set_global_recorder`'s one shot per
+    // process to itself.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn init_metrics_installs_a_working_recorder_once_sentry_is_ready() {
+        let _guard = evm::telemetry::init_sentry(None);
+        assert!(
+            sentry_hub_has_client(),
+            "init_sentry should have bound a client (disabled, since no DSN) to the process Hub"
+        );
+
+        init_metrics().expect(
+            "init_metrics should succeed once init_sentry has bound a client to the process Hub",
+        );
+
+        counter!("test_init_metrics_end_to_end").increment(1);
+        let output = render().expect("init_metrics should have stored a handle for render()");
+        assert!(
+            output.contains("test_init_metrics_end_to_end"),
+            "the recorder init_metrics actually installs in production should render a value \
+             recorded through it, not just the pieces exercised in isolation elsewhere in this \
+             file: {output}"
+        );
+    }
+
     // Exercises `FanoutRecorder` directly, without going through
     // `metrics::set_global_recorder` (a process-wide singleton other tests
     // in this module also touch). Proves the Prometheus side - the
