@@ -190,17 +190,8 @@ impl<D: OutboxDrainDataService + 'static> WebhookOutboxDrainService<D> {
             return;
         };
 
-        let invoice = match self.load_invoice(&obligation).await {
-            Lookup::Found(invoice) => invoice,
-            Lookup::GiveUp => {
-                self.mark_dispatched(obligation.id).await;
-                return;
-            }
-            Lookup::Retry => return,
-        };
-
-        let payment = match self.load_payment(&obligation).await {
-            Lookup::Found(payment) => payment,
+        let (invoice, payment) = match self.load_obligation_subject(&obligation).await {
+            Lookup::Found(subject) => subject,
             Lookup::GiveUp => {
                 self.mark_dispatched(obligation.id).await;
                 return;
@@ -227,6 +218,42 @@ impl<D: OutboxDrainDataService + 'static> WebhookOutboxDrainService<D> {
                 );
             }
         }
+    }
+
+    /// Load the invoice and payment an obligation is about, giving up if
+    /// either row is gone for good or the payment has since been reorged
+    /// out. The obligation was recorded when the payment was first detected,
+    /// but delivery is asynchronous and can lag behind a reorg by however
+    /// long the drain was backlogged - sending a stale `payment_detected`
+    /// for a payment already retracted would tell a merchant they were paid
+    /// for money that isn't there, so the current row is re-checked rather
+    /// than trusting the obligation's intent.
+    async fn load_obligation_subject(
+        &self,
+        obligation: &WebhookObligation,
+    ) -> Lookup<(types::InvoiceData, types::PaymentData)> {
+        let invoice = match self.load_invoice(obligation).await {
+            Lookup::Found(invoice) => invoice,
+            Lookup::GiveUp => return Lookup::GiveUp,
+            Lookup::Retry => return Lookup::Retry,
+        };
+
+        let payment = match self.load_payment(obligation).await {
+            Lookup::Found(payment) => payment,
+            Lookup::GiveUp => return Lookup::GiveUp,
+            Lookup::Retry => return Lookup::Retry,
+        };
+
+        if payment.reorged {
+            tracing::info!(
+                obligation_id = %obligation.id,
+                payment_id = %payment.id,
+                "Webhook obligation's payment was reorged out before delivery; marking dispatched without sending"
+            );
+            return Lookup::GiveUp;
+        }
+
+        Lookup::Found((invoice, payment))
     }
 
     /// Look up the invoice an obligation is about.
@@ -694,6 +721,57 @@ mod tests {
             remaining.is_empty(),
             "an obligation whose invoice is gone for good must be marked dispatched, \
              not retried forever"
+        );
+    }
+
+    /// The drain is asynchronous, so an obligation can sit undelivered long
+    /// enough for a reorg to retract the payment it's about. Sending
+    /// `payment_detected` anyway would tell a merchant they were paid for
+    /// money the chain no longer has - the obligation must be dropped, not
+    /// delivered stale.
+    #[tokio::test]
+    async fn an_obligation_for_a_reorged_payment_is_marked_dispatched_without_sending() {
+        let data_service = Arc::new(InMemoryDataService::new());
+        let invoice = test_invoice(StoreId::new());
+        InvoiceWriter::upsert(&*data_service, &invoice)
+            .await
+            .expect("insert invoice");
+        data_service.set_webhook(invoice.store_id.0, "https://example.com/hook", "secret");
+
+        let payment = test_payment(&invoice.id);
+        data_service::PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+            &*data_service,
+            &payment,
+            0,
+            WebhookEventType::PaymentDetected.as_str(),
+        )
+        .await
+        .expect("obligation recorded");
+
+        data_service::ReorgWriter::mark_payment_reorged(&*data_service, payment.id)
+            .await
+            .expect("mark reorged");
+
+        let sink = Arc::new(RecordingSink::default());
+        let service = WebhookOutboxDrainService::new(
+            Arc::clone(&data_service),
+            Arc::clone(&sink) as Arc<dyn WebhookSink>,
+            WebhookOutboxDrainConfig::default(),
+        );
+
+        service.drain_once().await;
+
+        assert!(
+            sink.jobs.lock().unwrap().is_empty(),
+            "a payment_detected webhook must never be sent for a payment that was reorged out"
+        );
+        let remaining = data_service
+            .claim_undispatched_obligations(10, 30)
+            .await
+            .expect("read outbox");
+        assert!(
+            remaining.is_empty(),
+            "a reorged payment's obligation must be marked dispatched, not retried forever"
         );
     }
 }

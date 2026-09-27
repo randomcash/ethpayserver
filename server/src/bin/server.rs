@@ -318,7 +318,7 @@ async fn main() -> Result<()> {
         Arc::clone(&webhook_service) as Arc<dyn server::services::WebhookSink>,
         server::WebhookOutboxDrainConfig::from_env(),
     );
-    tokio::spawn(outbox_drain_service.run());
+    let mut outbox_drain_handle = tokio::spawn(outbox_drain_service.run());
     tracing::info!("Webhook outbox drain service started");
 
     // Cloned here rather than where they're used below (the shutdown-signal
@@ -628,6 +628,24 @@ async fn main() -> Result<()> {
         }
         Ok(Err(join_error)) => {
             tracing::error!(error = %join_error, "webhook worker task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
+
+    // Same reasoning as the event consumer's wait above: the drain's loop
+    // never returns on its own, so if it ever did - a panic, a poisoned lock
+    // - that is exactly the kind of silent stop this service exists to
+    // prevent one layer down (a written obligation with nothing left polling
+    // for it), so it must be joined and logged rather than dropped bare.
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut outbox_drain_handle).await {
+        Err(_) => {
+            tracing::debug!(
+                "webhook outbox drain task did not exit within the shutdown grace period, aborting"
+            );
+            outbox_drain_handle.abort();
+        }
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "webhook outbox drain task ended unexpectedly during shutdown");
         }
         Ok(Ok(())) => {}
     }
