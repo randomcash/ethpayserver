@@ -590,25 +590,26 @@ async fn main() -> Result<()> {
 
     // The webhook worker's loop never returns on its own (see `run()` in
     // service.rs) — it keeps draining the queue for as long as it's alive,
-    // which is the point, so this wait always ends in the timeout branch.
+    // which is the point, so this wait always ends in the timeout branch,
+    // with the task still running completely normally for the whole second.
     // What it buys is the same thing as the event consumer's wait: a moment
     // for `process_next_job`'s in-flight call to finish and log itself as
     // shutdown noise before the task is torn down, rather than being dropped
     // mid-poll by process exit with no handle ever joined on it at all.
     //
-    // `begin_shutdown()` is set here, immediately before this task's own
-    // grace window, rather than up in the `shutdown_signal()` branch above:
-    // that branch fires before the event consumer's grace period runs too,
-    // and setting the flag that early would downgrade a real fault in this
-    // service to shutdown noise for the ~1s the event consumer is still
-    // being drained — a window in which nothing about this task's own
-    // teardown has actually started yet.
-    webhook_service_for_shutdown.begin_shutdown();
+    // `begin_shutdown()` is deliberately *not* set before this wait. Nothing
+    // about this task's own teardown has started yet during it — the loop is
+    // still polling Redis and delivering webhooks exactly as it would outside
+    // a shutdown — so a real fault landing in that ~1s would otherwise log as
+    // shutdown noise for no reason. It's set right before `abort()` instead,
+    // which is the point past which a Redis error actually is teardown
+    // fallout rather than a coincidence.
     match tokio::time::timeout(std::time::Duration::from_secs(1), &mut webhook_handle).await {
         Err(_) => {
             tracing::debug!(
                 "webhook worker task did not exit within the shutdown grace period, aborting"
             );
+            webhook_service_for_shutdown.begin_shutdown();
             webhook_handle.abort();
         }
         Ok(Err(join_error)) => {
