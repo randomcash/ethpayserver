@@ -56,7 +56,7 @@ fn settings_with(chains: Vec<types::ChainId>, store: Option<StoreId>) -> ServerS
         invoice_expiry_minutes: 45,
         rate_limit_rpm: 250,
         enabled_chain_ids: chains,
-        billing_store_id: store,
+        operator_store_id: store,
     }
 }
 
@@ -91,7 +91,7 @@ async fn a_written_settings_row_can_be_read_back() {
         read.enabled_chain_ids, chains,
         "the chain ids must survive the caip2[] column intact"
     );
-    assert_eq!(read.billing_store_id, Some(store));
+    assert_eq!(read.operator_store_id, Some(store));
 
     without_a_settings_row(&service).await;
 }
@@ -117,7 +117,7 @@ async fn the_operator_store_can_be_set_and_cleared() {
             .await
             .unwrap()
             .unwrap()
-            .billing_store_id,
+            .operator_store_id,
         Some(store)
     );
 
@@ -131,7 +131,7 @@ async fn the_operator_store_can_be_set_and_cleared() {
             .await
             .unwrap()
             .unwrap()
-            .billing_store_id,
+            .operator_store_id,
         None,
         "clearing must actually clear, not leave the previous store in place"
     );
