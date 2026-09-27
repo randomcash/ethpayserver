@@ -322,20 +322,26 @@ fn client_options(
         // against: it takes this exact `client_options()` output, flips
         // only this field to `false`, and asserts no structured log
         // reaches the envelope. That test passes today, on 0.47, proving
-        // the field is load-bearing here and now; the same ablation
-        // re-run on a 0.49.3 checkout gets the same result, so the note's
-        // claim holds there too. When the 0.49 bump lands, the fix is
-        // dropping this line rather than `#[allow(deprecated)]` — 0.49.3's
-        // own `ClientOptions::default()` is already `true` — and that same
-        // test keeps running unchanged afterward to confirm it, instead of
-        // needing to be re-derived.
+        // the field is load-bearing here and now. This crate cannot build
+        // against 0.49 to re-run that same assertion there — the pin move
+        // is a separate, dependency-wide change this comment is not the
+        // vehicle for — so the 0.49 outcome is left unasserted rather than
+        // extrapolated from the 0.47 result: this same test starts
+        // exercising 0.49's actual code path the moment the pin moves, and
+        // goes red then if the deprecation note's claim turns out not to
+        // hold. What's already settled independent of that pin, by reading
+        // sentry-core 0.49.3's published source rather than running it:
+        // its own `ClientOptions::default()` sets `enable_logs` to `true`,
+        // so the fix at that pin move is dropping this line, not adding
+        // `#[allow(deprecated)]`.
         //
         // `capture_tests` already runs on every push, not just on demand:
-        // `server`'s Cargo.toml depends on this crate with `sentry-scrub` as
-        // a normal, non-optional feature, so cargo's feature unification
-        // turns it on for the whole workspace build. `cargo nextest run
-        // --workspace` — the command CI actually runs, no extra flags —
-        // already compiles and executes it on every push.
+        // `server/Cargo.toml`'s `evm = { path = "../evm", features = ["api",
+        // "redis", "sentry-scrub"] }` line lists `sentry-scrub` as a normal,
+        // non-optional feature, so cargo's feature unification turns it on
+        // for the whole workspace build. `cargo nextest run --workspace` —
+        // the command CI actually runs, no extra flags — already compiles
+        // and executes it on every push.
         enable_logs: true,
         before_send_log: Some(Arc::new(scrub_log)),
         ..Default::default()
