@@ -3,7 +3,7 @@
 use chrono::Utc;
 use types::{InvoiceWriter, PaymentQueryParams, PaymentReader, PaymentWriter};
 
-use crate::PaymentTxIndexWriter;
+use crate::{PaymentTxIndexWriter, WebhookOutboxReader, WebhookOutboxWriter};
 
 use super::{assert_amount_eq, create_test_service, seeded_test_invoice, test_payment};
 
@@ -392,5 +392,283 @@ async fn integration_payment_upsert_keeps_two_transfers_in_one_tx() {
         &fetched_second.amount,
         &second.amount,
         "second transfer's amount",
+    );
+}
+
+/// The payment row and its webhook notification obligation are written in
+/// one transaction. Verified here as "both exist together against a real
+/// Postgres", which a unit test against the in-memory double cannot prove.
+#[tokio::test]
+#[ignore]
+async fn integration_upsert_with_tx_index_and_obligation_writes_both_rows() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let invoice = seeded_test_invoice(&service).await;
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    let payment = test_payment(&invoice.id);
+    PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+        &service,
+        &payment,
+        0,
+        "payment_detected",
+    )
+    .await
+    .unwrap();
+
+    let fetched = PaymentReader::get(&service, payment.id)
+        .await
+        .unwrap()
+        .expect("payment row must exist");
+    assert_eq!(fetched.id, payment.id);
+
+    let obligations = WebhookOutboxReader::claim_undispatched_obligations(&service, 10, 30)
+        .await
+        .unwrap();
+    let obligation = obligations
+        .iter()
+        .find(|o| o.payment_id == payment.id)
+        .expect("obligation for this payment must be recorded");
+    assert_eq!(obligation.invoice_id, invoice.id.as_str());
+    assert_eq!(obligation.event_type, "payment_detected");
+
+    WebhookOutboxWriter::mark_obligation_dispatched(&service, obligation.id)
+        .await
+        .unwrap();
+    let remaining = WebhookOutboxReader::claim_undispatched_obligations(&service, 10, 30)
+        .await
+        .unwrap();
+    assert!(
+        !remaining.iter().any(|o| o.id == obligation.id),
+        "a dispatched obligation must not be read again"
+    );
+}
+
+/// A redelivered `PaymentDetected` (delivery is documented as at-least-once)
+/// re-runs this same call with a fresh `payment.id` but the same
+/// `(chain_id, tx_hash, tx_index)`. The upsert updates the *existing* payment
+/// row rather than inserting a new one, so the obligation's `payment_id`
+/// foreign key must point at that existing row's real id - not the fresh,
+/// never-persisted one the second call generated - or the insert would
+/// violate the foreign key. The unique constraint on `(payment_id,
+/// event_type)` must also stop the redelivery from queuing a second
+/// obligation for a payment already on file.
+#[tokio::test]
+#[ignore]
+async fn integration_redelivered_payment_reuses_the_original_row_id_and_does_not_duplicate_the_obligation()
+ {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let invoice = seeded_test_invoice(&service).await;
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    let first = test_payment(&invoice.id);
+    PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+        &service,
+        &first,
+        0,
+        "payment_detected",
+    )
+    .await
+    .unwrap();
+
+    // Same transfer, redelivered: same tx_hash/chain_id/tx_index, but a fresh
+    // random id - exactly what a second delivery of the same monitor event
+    // produces.
+    let mut redelivered = test_payment(&invoice.id);
+    redelivered.tx_hash = first.tx_hash.clone();
+    redelivered.chain_id = first.chain_id.clone();
+    assert_ne!(
+        redelivered.id, first.id,
+        "the redelivery must generate its own fresh id, as a real redelivery does"
+    );
+
+    PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+        &service,
+        &redelivered,
+        0,
+        "payment_detected",
+    )
+    .await
+    .expect("a redelivery must not violate the obligation's foreign key");
+
+    let payments = PaymentReader::get_for_invoice(&service, &invoice.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        payments.len(),
+        1,
+        "a redelivery of the same transfer must update the existing row, not add one"
+    );
+    let real_id = payments[0].id;
+
+    let obligations = WebhookOutboxReader::claim_undispatched_obligations(&service, 10, 30)
+        .await
+        .unwrap();
+    let matching: Vec<_> = obligations
+        .iter()
+        .filter(|o| o.invoice_id == invoice.id.as_str())
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "a redelivery must not queue a second obligation for the same payment"
+    );
+    assert_eq!(
+        matching[0].payment_id, real_id,
+        "the obligation must name the real, persisted payment row"
+    );
+}
+
+/// The atomicity claim is the entire point of the transactional outbox: if
+/// the obligation insert fails, the payment insert in the same transaction
+/// must not survive. A trigger that unconditionally fails every insert into
+/// `webhook_outbox` stands in for that failure, so this exercises the real
+/// production function end to end rather than a hand-rolled mimic of it - a
+/// regression that split the two writes across separate connections or
+/// separate `execute()` calls against the pool (instead of sharing one
+/// `&mut *tx`) would still commit the payment row here and fail this test.
+#[tokio::test]
+#[ignore]
+async fn integration_obligation_insert_failure_rolls_back_the_payment_row() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let invoice = seeded_test_invoice(&service).await;
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION integration_test_fail_webhook_outbox_insert()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'fault injected by atomicity integration test';
+        END;
+        $$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(&service.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER integration_test_fail_webhook_outbox_insert_trigger
+        BEFORE INSERT ON webhook_outbox
+        FOR EACH ROW EXECUTE FUNCTION integration_test_fail_webhook_outbox_insert()
+        "#,
+    )
+    .execute(&service.pool)
+    .await
+    .unwrap();
+
+    let payment = test_payment(&invoice.id);
+    let result = PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+        &service,
+        &payment,
+        0,
+        "payment_detected",
+    )
+    .await;
+
+    // Undo the fault injection before asserting, so a failed assertion below
+    // does not leave every other test in this suite unable to insert into
+    // webhook_outbox.
+    sqlx::query(
+        "DROP TRIGGER integration_test_fail_webhook_outbox_insert_trigger ON webhook_outbox",
+    )
+    .execute(&service.pool)
+    .await
+    .unwrap();
+    sqlx::query("DROP FUNCTION integration_test_fail_webhook_outbox_insert()")
+        .execute(&service.pool)
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_err(),
+        "the injected fault must surface as an error, not be swallowed"
+    );
+
+    let fetched = PaymentReader::get(&service, payment.id).await.unwrap();
+    assert!(
+        fetched.is_none(),
+        "a failed obligation insert must roll back the payment row written in the same \
+         transaction, not leave a committed payment with no obligation"
+    );
+}
+
+/// The property the drain's `FOR UPDATE SKIP LOCKED` claim exists for: this
+/// server runs more than one instance for availability, and a plain read of
+/// `webhook_outbox` would let two of them claim and act on the same
+/// obligation, queuing the same webhook twice. A claimed-but-not-yet-expired
+/// obligation must be invisible to another claim call, and an expired one
+/// must become claimable again so a claimant that dies mid-dispatch does not
+/// lose the obligation permanently.
+#[tokio::test]
+#[ignore]
+async fn integration_claim_undispatched_obligations_hides_claimed_rows_until_expiry() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+    let invoice = seeded_test_invoice(&service).await;
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    // First obligation: claimed with a long visibility window, standing in
+    // for one drain instance that has picked it up and is still working on
+    // it.
+    let held = test_payment(&invoice.id);
+    PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+        &service,
+        &held,
+        0,
+        "payment_detected",
+    )
+    .await
+    .unwrap();
+    let first_claim = WebhookOutboxReader::claim_undispatched_obligations(&service, 10, 60)
+        .await
+        .unwrap();
+    assert_eq!(
+        first_claim
+            .iter()
+            .filter(|o| o.payment_id == held.id)
+            .count(),
+        1,
+        "the obligation must be claimable the first time"
+    );
+
+    let second_claim = WebhookOutboxReader::claim_undispatched_obligations(&service, 10, 60)
+        .await
+        .unwrap();
+    assert!(
+        !second_claim.iter().any(|o| o.payment_id == held.id),
+        "a second claimant must not see an obligation still inside its visibility window - \
+         seeing it would mean two drain instances can queue the same webhook twice"
+    );
+
+    // Second obligation, claimed with zero visibility: the deadline is
+    // already in the past by the time the next call runs, simulating a
+    // claimant that died before it could mark the obligation dispatched.
+    let abandoned = test_payment(&invoice.id);
+    PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+        &service,
+        &abandoned,
+        0,
+        "payment_detected",
+    )
+    .await
+    .unwrap();
+    let claimed_briefly = WebhookOutboxReader::claim_undispatched_obligations(&service, 10, 0)
+        .await
+        .unwrap();
+    assert!(
+        claimed_briefly.iter().any(|o| o.payment_id == abandoned.id),
+        "the obligation must be claimable before its (immediately-expiring) deadline passes"
+    );
+
+    let reclaimed = WebhookOutboxReader::claim_undispatched_obligations(&service, 10, 60)
+        .await
+        .unwrap();
+    assert!(
+        reclaimed.iter().any(|o| o.payment_id == abandoned.id),
+        "an obligation whose claim has expired must become claimable again, or an abandoned \
+         obligation is lost rather than retried"
     );
 }

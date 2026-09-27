@@ -4,7 +4,7 @@ use chrono::Utc;
 use data_service::{PaymentOptionReader, PaymentTxIndexWriter};
 use evm::get_any_chain_config;
 use evm::monitor::events::PaymentDetected;
-use types::{AssetType, InvoiceId, InvoiceReader, PaymentData, TokenReader, WatchedAddressReader};
+use types::{AssetType, InvoiceId, PaymentData, TokenReader, WatchedAddressReader};
 use uuid::Uuid;
 
 use crate::api::ws::StatusUpdate;
@@ -249,7 +249,20 @@ impl<
                 event.tx_hash
             ))
         })?;
-        PaymentTxIndexWriter::upsert_with_tx_index(&*self.data_service, &payment, tx_index).await?;
+        // The payment row and its webhook notification obligation are
+        // written in one database transaction, so a crash between the two
+        // cannot happen: either both are on file or neither is. Delivery
+        // itself is not in this call - a background drain reads undispatched
+        // obligations and turns each into an actual queued webhook, so a slow
+        // or unavailable Redis cannot block event processing racing to keep
+        // up with the chain.
+        PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+            &*self.data_service,
+            &payment,
+            tx_index,
+            WebhookEventType::PaymentDetected.as_str(),
+        )
+        .await?;
 
         // Broadcast payment detected via WebSocket
         if let Some(ref ws) = self.ws_broadcast {
@@ -259,13 +272,6 @@ impl<
                 status: "detected".to_string(),
                 amount: payment.credited_amount.clone(),
             });
-        }
-
-        // Queue webhook notification
-        let invoice_id = InvoiceId::from_string(event.invoice_id.to_string());
-        if let Ok(Some(invoice)) = InvoiceReader::get(&*self.data_service, &invoice_id).await {
-            self.queue_webhook(WebhookEventType::PaymentDetected, &invoice, Some(&payment))
-                .await;
         }
 
         Ok(())

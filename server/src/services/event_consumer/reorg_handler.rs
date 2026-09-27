@@ -176,7 +176,9 @@ impl<
 
         let store_id = invoice.store_id.0;
         let payload = WebhookPayload::payment_reorged(&invoice, retracted);
-        self.queue_payload(store_id, payload).await;
+        self.queue_payload(store_id, payload)
+            .await
+            .warn_on_failure(invoice_id.as_str(), "payment_reorged");
     }
     /// Write the post-reorg invoice status, unless the invoice is closed.
     ///
