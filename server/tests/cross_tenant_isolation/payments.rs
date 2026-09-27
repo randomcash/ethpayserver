@@ -150,7 +150,10 @@ async fn list_payments_with_no_store_id_as_server_admin_sees_every_tenant() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::list_payments(
-        StoreScopedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin), None),
+        StoreScopedUser(
+            user_info_with_role(a.user_id, auth::Role::ServerAdmin),
+            None,
+        ),
         State(state),
         Query(server::api::invoices::ListPaymentsQuery {
             store_id: None,

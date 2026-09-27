@@ -162,7 +162,10 @@ async fn list_invoices_with_no_store_id_as_server_admin_sees_every_tenant() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::list_invoices(
-        StoreScopedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin), None),
+        StoreScopedUser(
+            user_info_with_role(a.user_id, auth::Role::ServerAdmin),
+            None,
+        ),
         State(state),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: None,
@@ -240,7 +243,10 @@ async fn get_invoice_across_tenants_is_permitted_for_a_server_admin() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::get_invoice(
-        StoreScopedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin), None),
+        StoreScopedUser(
+            user_info_with_role(a.user_id, auth::Role::ServerAdmin),
+            None,
+        ),
         State(state),
         Path(b.invoice.id.0.clone()),
     )

@@ -12,12 +12,12 @@ use auth::{ApiKeyId, ApiKeyRepository, Role, SessionService};
 
 use super::key_material::build_api_key;
 use crate::api::api_key_permissions::validate_requested_permissions;
-pub(crate) use crate::api::api_key_types::{
-    api_key_info_response, api_key_info_with_rate_limit, deprecation_expires_at,
-};
 use crate::api::api_key_types::{
     ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
     RotateApiKeyResponsePayload,
+};
+pub(crate) use crate::api::api_key_types::{
+    api_key_info_response, api_key_info_with_rate_limit, deprecation_expires_at,
 };
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;

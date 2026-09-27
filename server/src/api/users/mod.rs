@@ -12,10 +12,10 @@ mod email;
 mod key_material;
 pub(crate) mod wallets;
 
-pub use api_keys::{create_api_key, list_api_keys, revoke_api_key, rotate_api_key, update_api_key};
 pub use crate::api::api_key_permissions::{
     UpdateApiKeyPermissionsPayload, update_api_key_permissions,
 };
+pub use api_keys::{create_api_key, list_api_keys, revoke_api_key, rotate_api_key, update_api_key};
 pub use deletion::{DeleteAccountQuery, delete_account};
 pub use email::{
     ConfirmEmailChangePayload, RequestEmailChangePayload, confirm_email_change, remove_email,
