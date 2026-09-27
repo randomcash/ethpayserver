@@ -117,6 +117,7 @@ instance:
 |----------|---------|-------------|
 | `HEALTH_URL` | `health-gate.sh` | Full URL to `/health/deep` on the target env |
 | `HEALTH_TIMEOUT` | `health-gate.sh` | Seconds to poll before failing (default 60) |
+| `EXPECTED_SHA` | `health-gate.sh` | Commit the deploy should be serving, first 7 of the sha. Unset means gate condition 2 is skipped, so the gate passes against a server that never restarted — set it |
 | `SMOKE_BASE_URL` | `smoke-prod.sh` | Base URL for smoke tests (e.g. `https://pay.random.cash`) |
 | `SMOKE_API_KEY` | `smoke-prod.sh` | API key with invoice create/read permissions |
 | `SMOKE_STORE_ID` | `smoke-prod.sh` | Store UUID the smoke API key is scoped to |
