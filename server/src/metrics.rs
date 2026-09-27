@@ -39,7 +39,11 @@
 //! real Sentry project creates the two rules and watches one fire. That
 //! check has been split out into its own follow-up for whoever has that
 //! access, rather than left to be rediscovered here on every future change
-//! to this module.
+//! to this module. It is deliberately not cited by ticket ID here - this
+//! is a public repository, and this codebase's convention (see the repo's
+//! own contributor docs) is that tracker references never go in source,
+//! only in commit messages and PR titles. The absence of an ID in this
+//! comment is that policy applied, not an unlinked or forgotten follow-up.
 //!
 //! ## Volume cost before mainnet
 //!
