@@ -149,7 +149,8 @@ impl<
                             &updated_invoice,
                             Some(payment),
                         )
-                        .await;
+                        .await
+                        .warn_on_failure(&event.invoice_id.to_string(), "payment_confirmed");
                     }
 
                     // Send customer receipt email (best-effort, never blocks payment flow)
@@ -200,7 +201,8 @@ impl<
                             &updated_invoice,
                             Some(payment),
                         )
-                        .await;
+                        .await
+                        .warn_on_failure(&event.invoice_id.to_string(), "late_paid");
                     }
 
                     // A late payment is still money received - a subscription
