@@ -14,6 +14,7 @@ use rates::RateProvider;
 
 use crate::api::ws::WsBroadcast;
 use crate::services::email::EmailSender;
+use crate::services::plugins::AccountClosedObserver;
 use crate::services::plugins::InvoiceCreationFilter;
 use crate::services::plugins::PageHost;
 use crate::services::plugins::PluginHost;
@@ -106,6 +107,12 @@ pub struct AppState<D, A, E> {
     /// installed, in which case invoice creation is never filtered at all.
     pub invoice_creation_filters: Vec<Arc<dyn InvoiceCreationFilter>>,
 
+    /// Plugins told when an account is deleted (host capability 8). Empty
+    /// when no plugin is installed, in which case a deleted account's rows in
+    /// a plugin's own schema simply outlive it - nothing else is watching for
+    /// this today.
+    pub account_closed_observers: Vec<Arc<dyn AccountClosedObserver>>,
+
     /// The store this instance bills its own subscriptions through, and the
     /// one store `invoice_creation_filters` is never consulted for.
     ///
@@ -191,6 +198,7 @@ impl<D, A, E> Clone for AppState<D, A, E> {
             webhook_sink: self.webhook_sink.clone(),
             webauthn: self.webauthn.clone(),
             invoice_creation_filters: self.invoice_creation_filters.clone(),
+            account_closed_observers: self.account_closed_observers.clone(),
             billing_store_id: self.billing_store_id,
             operator_account_id: self.operator_account_id,
             email_sender: Arc::clone(&self.email_sender),
@@ -222,6 +230,7 @@ impl<D, A, E> AppState<D, A, E> {
             webhook_sink: None,
             webauthn: None,
             invoice_creation_filters: Vec::new(),
+            account_closed_observers: Vec::new(),
             billing_store_id: None,
             operator_account_id: None,
             email_sender,

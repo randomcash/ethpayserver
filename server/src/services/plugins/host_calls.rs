@@ -88,7 +88,7 @@ mod sql;
 mod volume;
 
 pub use invoicing::DeferredIssuer;
-pub use volume::DeferredVolume;
+pub use volume::{DeferredBulkVolume, DeferredVolume};
 
 /// The late-bound host capabilities a plugin's imports resolve through.
 ///
@@ -103,6 +103,10 @@ pub struct DeferredCapabilities {
     pub issuer: DeferredIssuer,
     /// Capability 6: reading what an account settled over a window.
     pub volume: DeferredVolume,
+    /// Capability 6, batched. Published independently of `volume`: nothing
+    /// requires an instance that can answer for one account to answer for
+    /// many, even though in practice one implies the other.
+    pub bulk_volume: DeferredBulkVolume,
 }
 
 /// One plugin's host imports: its database, and whether it may invoice.
@@ -122,6 +126,10 @@ pub struct PluginCalls {
     /// anything does. Unpublished means the plugin is told so, rather than
     /// being handed a zero it would read as "this merchant sold nothing".
     volume: DeferredVolume,
+    /// The batched form of the above, with the same rule: unpublished is
+    /// reported as unavailable rather than answered with an empty list, which
+    /// a plugin would read as "none of these merchants sold anything".
+    bulk_volume: DeferredBulkVolume,
     /// The runtime to drive the async database work on.
     ///
     /// [`PluginHostCalls`] is sync because the runtime calls plugins from
@@ -142,6 +150,7 @@ impl PluginCalls {
             pools,
             issuer: DeferredIssuer::default(),
             volume: DeferredVolume::default(),
+            bulk_volume: DeferredBulkVolume::default(),
             handle: tokio::runtime::Handle::current(),
         }
     }
@@ -152,6 +161,7 @@ impl PluginCalls {
     pub fn with_capabilities(mut self, capabilities: &DeferredCapabilities) -> Self {
         self.issuer = capabilities.issuer.clone();
         self.volume = capabilities.volume.clone();
+        self.bulk_volume = capabilities.bulk_volume.clone();
         self
     }
 }
@@ -163,6 +173,10 @@ impl PluginHostCalls for PluginCalls {
 
     fn merchant_volume(&self, request: &[u8]) -> Result<Vec<u8>, String> {
         self.merchant_volume_impl(request)
+    }
+
+    fn merchant_volumes(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        self.merchant_volumes_impl(request)
     }
 
     fn storage_query(&self, request: &[u8]) -> Result<Vec<u8>, String> {
