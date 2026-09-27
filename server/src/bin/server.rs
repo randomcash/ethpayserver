@@ -730,14 +730,14 @@ fn init_tracing(log_level: &str, log_format: &str) {
     // LOG_LEVEL. Fixed at INFO because `sentry_tracing`'s event/span
     // classification never does anything below INFO regardless of
     // `sentry_log_level` (DEBUG/TRACE are always `EventFilter::Ignore`), so
-    // this can't suppress anything `sentry_log_event_filter` would keep.
+    // this can't suppress anything `sentry_event_filter` would keep.
     let sentry_filter = tracing_subscriber::filter::LevelFilter::INFO;
 
     if json {
         tracing_subscriber::registry()
             .with(
                 sentry_tracing::layer()
-                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
                     .with_filter(sentry_filter),
             )
             .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
@@ -746,7 +746,7 @@ fn init_tracing(log_level: &str, log_format: &str) {
         tracing_subscriber::registry()
             .with(
                 sentry_tracing::layer()
-                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
                     .with_filter(sentry_filter),
             )
             .with(tracing_subscriber::fmt::layer().with_filter(filter))
