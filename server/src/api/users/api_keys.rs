@@ -8,7 +8,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService};
+use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Policies, Role, SessionService};
 use data_service::ApiKeyFullInfo;
 
 use super::key_material::build_api_key;
@@ -39,6 +39,10 @@ pub(crate) fn api_key_info_with_rate_limit(
         rate_limit_rpm,
         deprecated_at,
         deprecation_expires_at: deprecated_at.map(deprecation_expires_at),
+        // No per-key scoping is stored here: a key carries its owner's role in
+        // full, which is what `None` means on the wire. `Some(vec![])` would
+        // claim the opposite - a key that can do nothing.
+        permissions: None,
     }
 }
 
@@ -60,6 +64,10 @@ pub(crate) fn api_key_info_response(info: ApiKeyFullInfo) -> ApiKeyInfoResponse 
         rate_limit_rpm: info.rate_limit_rpm,
         deprecated_at: info.deprecated_at,
         deprecation_expires_at: info.deprecated_at.map(deprecation_expires_at),
+        // No per-key scoping is stored here: a key carries its owner's role in
+        // full, which is what `None` means on the wire. `Some(vec![])` would
+        // claim the opposite - a key that can do nothing.
+        permissions: None,
     }
 }
 
@@ -99,6 +107,22 @@ where
     Ok(Json(ApiKeyListResponse { keys }))
 }
 
+/// Whether a create request asks for a key narrower than this server can make.
+///
+/// No per-key permission scoping is stored here, so every key carries its
+/// owner's role in full. An empty list is accepted for callers written before
+/// the field existed, and an explicit `["unrestricted"]` asks for exactly what
+/// this server does. Anything else is a narrowing request that cannot be
+/// honoured - and ignoring it would hand back a key wider than the caller
+/// asked for, so it is refused instead.
+fn asks_to_narrow_the_key(permissions: &[String]) -> bool {
+    match permissions {
+        [] => false,
+        [only] => only != Policies::UNRESTRICTED,
+        _ => true,
+    }
+}
+
 /// Create a new API key for the authenticated user.
 #[utoipa::path(
     post,
@@ -122,6 +146,10 @@ where
 {
     let name = payload.name.trim().to_string();
     if name.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    if asks_to_narrow_the_key(&payload.permissions) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -349,3 +377,7 @@ where
         }),
     ))
 }
+
+#[cfg(test)]
+#[path = "api_keys_tests.rs"]
+mod tests;
