@@ -16,7 +16,11 @@ developer machine is breached, or as part of a scheduled key rotation policy.
 2. **Derivation indices are not reset.** The destination wallet carries the
    only correct position for its own key. If the account has used that xpub
    before, rotation resumes where it left off; if the key is new, it starts at
-   zero because a new key has issued nothing.
+   zero because a new key has issued nothing. `rotate_methods` repoints a
+   payment method at the wallet `upsert_wallet` finds-or-creates
+   (`data-service/src/postgres/wallet.rs`, `wallet_rotation.rs`) and never
+   touches a counter on that wallet — there is no code path left that zeroes
+   one.
 
    This changed when wallets moved to the account. Rotation used to write the
    new xpub onto each
