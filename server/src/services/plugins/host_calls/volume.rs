@@ -9,7 +9,7 @@ use super::PluginCalls;
 /// Separate from [`DeferredIssuer`](super::DeferredIssuer) rather than one cell holding both,
 /// because the two are available under different conditions: issuing needs
 /// the instance's own store and reading a merchant's volume does not. Sharing
-/// a cell would make an instance with no billing store silently unable to
+/// a cell would make an instance with no operator store silently unable to
 /// answer a question it can answer perfectly well.
 #[derive(Clone, Default)]
 pub struct DeferredVolume(
