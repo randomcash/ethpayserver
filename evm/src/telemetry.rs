@@ -437,6 +437,80 @@ pub fn sentry_log_event_filter(
     }
 }
 
+/// Sentry event filter for the `sentry_tracing` layer installed by the
+/// `server` and `evmmonitor` binaries.
+///
+/// `alloy_transport_ws` logs at `error!` for every ordinary WebSocket hiccup a
+/// long-lived RPC connection sees - a proxy resetting an idle socket, a
+/// missed keepalive pong - and `sentry_tracing`'s default filter turns any
+/// `error!` into a full Sentry event regardless of which crate logged it. So
+/// every blip the library logs was paging as if nothing were handling it.
+/// Built on top of [`sentry_log_event_filter`] rather than
+/// `default_event_filter` directly, so the WS-target demotion and the
+/// `SENTRY_LOG_LEVEL` gate compose through one filter instead of the two
+/// binaries needing to install two separate `event_filter` layers.
+///
+/// This filter only ever needs to swallow an *isolated* blip, never a
+/// persistent failure, because it is not the backstop for a connection that
+/// stays down: `ChainMonitor::resubscribe_if_stalled`
+/// (`evm/src/monitor/chain/lifecycle.rs`) already watches for that on its own
+/// clock, independent of anything `alloy_transport_ws` or `alloy_pubsub` logs
+/// or doesn't log. It resubscribes and logs its own `error!` under
+/// `evm::monitor::chain::lifecycle` - a target this filter never touches -
+/// once a block stream has gone silent for `stall_timeout`. So a transient
+/// reset stays a breadcrumb, and a connection that never recovers pages
+/// within one stall window regardless of what the WS layer's own retry logic
+/// happens to be doing underneath it. `our_own_errors_still_page` covers that
+/// target generically, and `evm/tests/stalled_stream_still_pages.rs` drives a
+/// real stall through a real `ChainMonitor` to confirm
+/// `resubscribe_if_stalled`'s own `error!` resolves to a paging event, not
+/// just a hand-typed target string.
+///
+/// An earlier version of this filter argued instead that `alloy_pubsub`'s own
+/// service loop (`alloy_pubsub::service`) always logs a paging `error!` when
+/// *it* gives up retrying, and used that as the backstop. That turned out not
+/// to hold in general: `evm/tests/ws_pubsub_retry_escalation.rs` runs the
+/// real `alloy_pubsub`/`alloy_transport_ws` retry loop (pinned to `alloy =
+/// "1.0"`, resolved in `Cargo.lock` to 1.8.3) against a WS server that
+/// completes the handshake and then resets every connection, including
+/// retries, and `alloy_pubsub::service` never logs at all - it just
+/// reconnects, dies, and reconnects again, forever. Traced against that
+/// pinned source: `reconnect_with_retries`
+/// (`alloy-pubsub-1.8.3/src/service.rs:195`) only counts a `reconnect()` call
+/// as a failed attempt if establishing the connection itself errors; a
+/// connection that establishes fine and then dies immediately after counts as
+/// a *successful* reconnect, so `max_retries` is never approached and the
+/// give-up log at `service.rs:205` is never reached. That is a real gap in
+/// `alloy_pubsub`, not a defect in this filter - it just means this filter
+/// cannot lean on it, which is why the actual backstop is our own
+/// `resubscribe_if_stalled` instead.
+///
+/// `alloy_pubsub_giving_up_still_pages` documents the narrower case where
+/// `alloy_pubsub`'s give-up log does still apply - the connection attempt
+/// itself fails outright (DNS, refused, TLS) rather than flapping - which
+/// still pages correctly since this filter never touches that target either.
+/// It is not relied on as the general backstop.
+///
+/// Only `error!`-level `alloy_transport_ws` events are demoted: the noise
+/// this exists to quiet is specifically the `error!` call sites in
+/// `alloy_transport_ws::native`, not `debug!`/`trace!` chatter the same
+/// target might log, so this filter does not touch those.
+pub fn sentry_event_filter(
+    min_level: tracing::Level,
+) -> impl Fn(&tracing::Metadata<'_>) -> sentry_tracing::EventFilter + Send + Sync + 'static {
+    let log_gate = sentry_log_event_filter(min_level);
+    move |metadata| {
+        let filter = log_gate(metadata);
+        if *metadata.level() == tracing::Level::ERROR
+            && metadata.target().starts_with("alloy_transport_ws")
+        {
+            (filter - sentry_tracing::EventFilter::Event) | sentry_tracing::EventFilter::Breadcrumb
+        } else {
+            filter
+        }
+    }
+}
+
 /// Log whether error reporting is on, at INFO, always — never the DSN itself
 /// — and refuse to continue when [`reporting_status`] says this environment
 /// must not run disabled.
