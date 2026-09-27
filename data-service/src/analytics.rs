@@ -56,6 +56,29 @@ pub struct PaymentVolumeBucket {
     pub payment_count: i64,
 }
 
+/// One `(store, UTC day, asset, decimals)` group of payments.
+///
+/// The same shape as [`PaymentVolumeBucket`] with the store the payments
+/// belong to left in, rather than summed away — what a caller needs to
+/// answer for many accounts (each backed by one or more stores) from a
+/// single query instead of one `payment_volume_by_day` call per account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorePaymentVolumeBucket {
+    /// The store the payments were made to.
+    pub store_id: StoreId,
+    /// UTC calendar day the payments were detected on.
+    pub day: NaiveDate,
+    /// Asset symbol as recorded on the payment (e.g. `ETH`, `USDC`).
+    pub asset_symbol: String,
+    /// Decimals the summed amount is denominated in.
+    pub decimals: u8,
+    /// Sum of `payments.amount` in smallest units, as a decimal integer
+    /// string — the column is `numeric(78, 0)`, wider than any Rust integer.
+    pub raw_amount: String,
+    /// Number of payments in the group.
+    pub payment_count: i64,
+}
+
 /// Aggregate reads over payments, for dashboard analytics.
 #[async_trait]
 pub trait PaymentAnalyticsReader: Send + Sync {
@@ -70,4 +93,18 @@ pub trait PaymentAnalyticsReader: Send + Sync {
         &self,
         query: &PaymentVolumeQuery,
     ) -> RepositoryResult<Vec<PaymentVolumeBucket>>;
+
+    /// Same rows as [`Self::payment_volume_by_day`], broken out per store
+    /// rather than summed across the whole set.
+    ///
+    /// A caller that needs a per-store or per-account answer for many stores
+    /// at once has to start here, not from `payment_volume_by_day`: that
+    /// method's group key has no store in it, so nothing downstream of it can
+    /// tell one store's volume from another's once they have been queried
+    /// together. Ordering is `(store_id, day, asset_symbol, decimals)`
+    /// ascending.
+    async fn payment_volume_by_day_per_store(
+        &self,
+        query: &PaymentVolumeQuery,
+    ) -> RepositoryResult<Vec<StorePaymentVolumeBucket>>;
 }
