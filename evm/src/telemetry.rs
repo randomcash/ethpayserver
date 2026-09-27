@@ -309,6 +309,20 @@ fn client_options(
         // Structured logs (see `sentry_log_event_filter` for which levels
         // actually reach this). Same mandatory scrubber, via the separate
         // hook logs go through.
+        //
+        // Load-bearing, not vestigial, past this crate's current 0.47 pin:
+        // checked against sentry-core 0.49.3, where this field is deprecated
+        // with a note that automatic capture by integrations still respects
+        // it. Flipping it to `false` there against this same `client_options`
+        // makes every `capture_tests` assertion that a log reaches the
+        // envelope fail outright — `sentry_tracing::layer()` is exactly that
+        // "automatic capture" integration, so the field keeps doing real work
+        // post-0.47. When a future bump deprecates this field, the fix is not
+        // `#[allow(deprecated)]`: 0.49.3's own `ClientOptions::default()`
+        // already sets it to `true`, so dropping the explicit assignment
+        // keeps the behaviour and satisfies the lint, with `capture_tests`'s
+        // `!logs.is_empty()` guard left watching the invariant in case that
+        // default ever changes.
         enable_logs: true,
         before_send_log: Some(Arc::new(scrub_log)),
         ..Default::default()
