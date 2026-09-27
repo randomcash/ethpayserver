@@ -105,6 +105,17 @@ fn from_existing_preserves_leading_and_trailing_passphrase_whitespace() {
 /// `xpub`-prefixed key, and - the part format-only checks would miss - that
 /// key must actually derive from the mnemonic printed in the same
 /// invocation, not just look like a plausible xpub next to it.
+///
+/// The "expected" value below is computed with the same
+/// `account_xpub_string_for` call the binary itself makes, because `generate`
+/// mints a fresh random mnemonic every run and there is no fixed vector to
+/// compare against. That call's own correctness - the derivation path, not
+/// just the CLI's plumbing - is pinned independently in
+/// `evm/src/wallet/xpub_encoding_tests.rs`'s
+/// `account_xpub_string_matches_what_a_real_wallet_exports`, which checks it
+/// against a published address for a fixed test mnemonic. This test's job is
+/// narrower: prove the binary prints the key it actually derived, not
+/// re-prove that the derivation itself is correct.
 #[test]
 fn generate_prints_an_xpub_matching_its_own_mnemonic() {
     let output = Command::new(env!("CARGO_BIN_EXE_derive-xpub"))
