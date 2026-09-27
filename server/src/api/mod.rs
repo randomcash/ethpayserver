@@ -32,7 +32,7 @@ pub mod health;
 pub mod http_metrics;
 pub mod idempotency;
 pub mod invoices;
-pub mod openapi;
+mod openapi;
 pub mod payouts;
 pub mod plugins;
 pub mod rate_limit;
@@ -46,6 +46,7 @@ pub mod ws;
 pub use extractors::{
     AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser, StoreScopedUser,
 };
+pub use openapi::ApiDoc;
 
 /// A status, optionally with a reason the caller can read.
 ///
@@ -90,8 +91,6 @@ impl From<(StatusCode, String)> for ApiErr {
         Self(status, reason)
     }
 }
-
-pub use openapi::ApiDoc;
 
 /// Create the unified API router.
 ///
@@ -272,7 +271,7 @@ where
         // `users` cascades through `stores` into `invoices` and `payments`, so
         // deleting a merchant who traded would erase their financial history.
         .route("/me", delete(users::delete_account::<A>))
-        // Email change (sensitive - see server/src/api/users.rs).
+        // Email change (sensitive - see server/src/api/users/email.rs).
         // Set/change and remove require a fresh passkey or wallet login
         // (`FreshlyAuthenticatedUser`); confirm is unauthenticated by design
         // and gated on the verification token alone.
@@ -310,6 +309,9 @@ where
     // Admin endpoints (ServerAdmin only)
     let admin_routes = Router::new()
         .route("/users", get(admin::list_users::<A>))
+        .route("/users/{id}", delete(admin::delete_user_account::<A>))
+        .route("/users/{id}/stores", get(admin::list_user_stores::<A>))
+        .route("/stores/{id}", delete(admin::hard_delete_store::<A>))
         .route(
             "/users/{id}/role",
             axum::routing::patch(admin::update_user_role::<A>),

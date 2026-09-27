@@ -1,8 +1,8 @@
-//! OpenAPI documentation for the whole unified API.
+//! OpenAPI documentation for the entire API.
 //!
-//! Split out of `api::mod` - this derive-macro block is the single largest
-//! source of that file's line count, and it grows by exactly one line per
-//! new endpoint or DTO regardless of which module the endpoint lives in.
+//! Split out of `api::mod` (which was crossing the repo's 400-line file
+//! limit): this is pure declaration - every path, schema and tag the rest of
+//! the module already wires into routes - with no logic of its own.
 
 use utoipa::OpenApi;
 
@@ -10,7 +10,6 @@ use super::{
     admin, api_key_permissions, dashboard, health, invoices, plugins, rates, stores, users,
 };
 
-/// OpenAPI documentation for the entire API.
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -73,17 +72,20 @@ use super::{
         // Rates
         rates::get_rate,
         // Users
-        users::list_api_keys,
-        users::create_api_key,
-        users::revoke_api_key,
-        users::update_api_key,
+        users::api_keys::list_api_keys,
+        users::api_keys::create_api_key,
+        users::api_keys::revoke_api_key,
+        users::api_keys::update_api_key,
         api_key_permissions::update_api_key_permissions,
-        users::rotate_api_key,
-        users::list_wallet_credentials,
-        users::create_wallet_reauth_challenge,
-        users::set_primary_wallet_credential,
+        users::api_keys::rotate_api_key,
+        users::wallets::list_wallet_credentials,
+        users::wallets::create_wallet_reauth_challenge,
+        users::wallets::set_primary_wallet_credential,
         // Admin
         admin::list_users,
+        admin::deletion::account::list_user_stores,
+        admin::deletion::account::delete_user_account,
+        admin::deletion::store::hard_delete_store,
         admin::update_user_role,
         admin::lock_user,
         admin::unlock_user,

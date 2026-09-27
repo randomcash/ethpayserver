@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use auth::{ApiKeyId, ApiKeyRepository, Permission, Policies, Role, SessionService, UserId};
 
+use super::api_key_types::{ApiKeyInfoResponse, api_key_info_with_rate_limit};
 use super::extractors::AuthenticatedUser;
-use super::users::{ApiKeyInfoResponse, api_key_info_with_rate_limit};
 use crate::state::PgAppState;
 
 /// Body for `PATCH /users/api-keys/{id}/permissions`.

@@ -330,7 +330,7 @@ pub fn create_email_sender() -> Arc<dyn EmailSender> {
 mod tests {
     use super::*;
 
-    /// The property `request_email_change` (server/src/api/users.rs) relies
+    /// The property `request_email_change` (server/src/api/users/email.rs) relies
     /// on to fail loudly instead of queuing a change nobody can confirm: a
     /// no-op sender must say so, unlike its `Ok(())` from `send_receipt`.
     #[test]
