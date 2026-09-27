@@ -45,9 +45,15 @@ use types::{ChainId, InvoiceId, PaymentOptionReader, StorePaymentMethodWriter};
 /// not because of what it derives from.
 const OLD_XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
 
-/// The standard BIP-39 test mnemonic's account key at `m/44'/60'/0'` -
-/// a second, distinct valid xpub to rotate onto.
-const NEW_XPUB: &str = "xpub6DCoCpSuQZB2jawqnGMEPS63ePKWkwWPH4TU45Q7LPXWuNd8TMtVxRrgjtEshuqpK3mdhaWHPFsBngh5GFZaM6si3yZdUsT8ddYM3PwnATt";
+/// The standard BIP-39 test mnemonic's account key at `m/44'/60'/0'` with the
+/// passphrase `"secret"` - `evm::wallet`'s own
+/// `EVM_ACCOUNT_XPUB_WITH_PASSPHRASE`, deterministic and publicly
+/// re-derivable from `TEST_MNEMONIC`, but distinct from that mnemonic's
+/// empty-passphrase key. That empty-passphrase key is *not* usable here: it
+/// is `plugin_invoice_issuer.rs`'s `TEST_XPUB`, deliberately registered to
+/// one fixed account for the whole shared-Postgres test run, and rotating a
+/// second store onto it would rightly be refused as already claimed.
+const NEW_XPUB: &str = "xpub6Bmqz11Kt5qtj3xbXZkzEyYw43EDFGCon5GzC4udf7DPugyKjVppdX2amQZrGs4rqAJH79pDtge2UDENZzjz9DgcV3WmfbwYAXj2epC5cgz";
 
 struct UnusedSessionService;
 
