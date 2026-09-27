@@ -447,7 +447,6 @@ pub fn sentry_log_event_filter(
 /// this exists to quiet is specifically the `error!` call sites in
 /// `alloy_transport_ws::native`, not `debug!`/`trace!` chatter the same
 /// target might log, so this filter does not touch those.
-#[must_use]
 pub fn sentry_event_filter(
     min_level: tracing::Level,
 ) -> impl Fn(&tracing::Metadata<'_>) -> sentry_tracing::EventFilter + Send + Sync + 'static {
