@@ -35,11 +35,20 @@ pub struct WebhookObligation {
 /// Read the outbox for the drain step.
 #[async_trait]
 pub trait WebhookOutboxReader: Send + Sync {
-    /// Undispatched obligations, oldest first, capped at `limit` per call so
-    /// one drain tick cannot be swamped by a backlog.
-    async fn get_undispatched_obligations(
+    /// Atomically claim up to `limit` undispatched obligations, oldest
+    /// first, so one drain tick cannot be swamped by a backlog.
+    ///
+    /// A claimed obligation is invisible to another `claim_undispatched_obligations`
+    /// call for `visibility_secs`, the same shape as the Redis job queue's
+    /// claim/reclaim: this codebase runs more than one drain instance for
+    /// availability, and without a claim, two instances polling concurrently
+    /// can both read and act on the same row - queuing the same webhook
+    /// twice. A claimant that dies before marking a row dispatched leaves it
+    /// reclaimable once the deadline passes rather than lost or stuck.
+    async fn claim_undispatched_obligations(
         &self,
         limit: i64,
+        visibility_secs: i64,
     ) -> RepositoryResult<Vec<WebhookObligation>>;
 }
 

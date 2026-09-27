@@ -8,6 +8,11 @@
 //! from "recorded" to "delivery attempted". Polling on a timer rather than
 //! reacting inline to the write means a slow or unavailable Redis cannot
 //! block the event consumer racing to keep up with the chain.
+//!
+//! This server typically runs more than one instance for availability, so
+//! each poll claims its batch (`WebhookOutboxReader::claim_undispatched_obligations`)
+//! rather than merely reading it - a plain read would let two instances'
+//! timers both pick up the same obligation and queue the same webhook twice.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,6 +59,14 @@ pub struct WebhookOutboxDrainConfig {
     /// Maximum obligations read in one pass, so a large backlog cannot make
     /// a single pass run unboundedly long.
     pub batch_size: i64,
+    /// How long a claimed obligation stays invisible to another drain
+    /// instance's claim before it is treated as abandoned and reclaimed.
+    ///
+    /// Must comfortably exceed how long a real dispatch attempt takes (an
+    /// invoice/payment lookup plus handing the job to the sink), or a
+    /// still-in-flight obligation would be reclaimed and dispatched twice by
+    /// another instance while the first is still working on it.
+    pub claim_visibility: Duration,
 }
 
 impl Default for WebhookOutboxDrainConfig {
@@ -61,6 +74,7 @@ impl Default for WebhookOutboxDrainConfig {
         Self {
             poll_interval: Duration::from_secs(5),
             batch_size: 100,
+            claim_visibility: Duration::from_secs(30),
         }
     }
 }
@@ -70,6 +84,7 @@ impl WebhookOutboxDrainConfig {
     ///
     /// - `WEBHOOK_OUTBOX_DRAIN_INTERVAL_SECS` - poll interval in seconds (default: 5)
     /// - `WEBHOOK_OUTBOX_DRAIN_BATCH_SIZE` - obligations read per pass (default: 100)
+    /// - `WEBHOOK_OUTBOX_CLAIM_VISIBILITY_SECS` - claimed-obligation visibility timeout (default: 30)
     pub fn from_env() -> Self {
         Self {
             poll_interval: Duration::from_secs(
@@ -82,6 +97,12 @@ impl WebhookOutboxDrainConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(100),
+            claim_visibility: Duration::from_secs(
+                std::env::var("WEBHOOK_OUTBOX_CLAIM_VISIBILITY_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(30),
+            ),
         }
     }
 }
@@ -134,11 +155,14 @@ impl<D: OutboxDrainDataService + 'static> WebhookOutboxDrainService<D> {
         }
     }
 
-    /// Read one batch of undispatched obligations and dispatch each.
+    /// Claim one batch of undispatched obligations and dispatch each.
     async fn drain_once(&self) {
         let obligations = match self
             .data_service
-            .get_undispatched_obligations(self.config.batch_size)
+            .claim_undispatched_obligations(
+                self.config.batch_size,
+                self.config.claim_visibility.as_secs() as i64,
+            )
             .await
         {
             Ok(o) => o,
@@ -403,7 +427,7 @@ mod tests {
 
         assert_eq!(sink.jobs.lock().unwrap().len(), 1, "job should be queued");
         let remaining = data_service
-            .get_undispatched_obligations(10)
+            .claim_undispatched_obligations(10, 30)
             .await
             .expect("read outbox");
         assert!(
@@ -447,12 +471,76 @@ mod tests {
             "nothing should be queued with no webhook configured"
         );
         let remaining = data_service
-            .get_undispatched_obligations(10)
+            .claim_undispatched_obligations(10, 30)
             .await
             .expect("read outbox");
         assert!(
             remaining.is_empty(),
             "an obligation with nothing to deliver must still be marked dispatched"
+        );
+    }
+
+    /// A [`WebhookSink`] that always fails, standing in for a Redis that is
+    /// down or refusing writes.
+    struct FailingSink;
+
+    #[async_trait]
+    impl WebhookSink for FailingSink {
+        async fn queue(&self, _job: WebhookJob) -> Result<(), WebhookError> {
+            Err(WebhookError::Redis("simulated queue failure".to_string()))
+        }
+    }
+
+    /// The one behavior standing between a transient failure and a lost
+    /// notification: `QueueOutcome::Failed` must leave the obligation
+    /// undispatched so the next drain tick retries it, not mark it done and
+    /// let the failure disappear the same way the ticket's original
+    /// swallowed `if let Ok(Some(...))` did.
+    #[tokio::test]
+    async fn a_failed_queue_attempt_leaves_the_obligation_undispatched_for_retry() {
+        let data_service = Arc::new(InMemoryDataService::new());
+        let invoice = test_invoice(StoreId::new());
+        InvoiceWriter::upsert(&*data_service, &invoice)
+            .await
+            .expect("insert invoice");
+        data_service.set_webhook(invoice.store_id.0, "https://example.com/hook", "secret");
+
+        let payment = test_payment(&invoice.id);
+        data_service::PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
+            &*data_service,
+            &payment,
+            0,
+            WebhookEventType::PaymentDetected.as_str(),
+        )
+        .await
+        .expect("obligation recorded");
+
+        let sink = Arc::new(FailingSink);
+        // Zero visibility: the claim `drain_once` takes below expires the
+        // instant it is set, so the assertion's own claim call - a stand-in
+        // for the next drain tick - can immediately observe whether the
+        // obligation is still there to retry, without an artificial sleep.
+        let config = WebhookOutboxDrainConfig {
+            claim_visibility: Duration::ZERO,
+            ..WebhookOutboxDrainConfig::default()
+        };
+        let service = WebhookOutboxDrainService::new(
+            Arc::clone(&data_service),
+            sink as Arc<dyn WebhookSink>,
+            config,
+        );
+
+        service.drain_once().await;
+
+        let remaining = data_service
+            .claim_undispatched_obligations(10, 0)
+            .await
+            .expect("read outbox");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "a failed queue attempt must leave the obligation for the next drain tick, \
+             not mark it dispatched and lose it"
         );
     }
 }

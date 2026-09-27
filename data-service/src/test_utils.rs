@@ -41,6 +41,11 @@ pub struct InMemoryDataService {
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
     webhook_outbox: RwLock<Vec<crate::WebhookObligation>>,
+    /// Obligation id -> claim deadline, mirroring the Postgres
+    /// implementation's `claimed_until` column so this double's
+    /// `claim_undispatched_obligations` enforces the same "invisible until
+    /// the claim expires" rule a real concurrent-drain test would need.
+    webhook_outbox_claims: RwLock<HashMap<Uuid, DateTime<Utc>>>,
 }
 
 impl InMemoryDataService {
@@ -1065,15 +1070,29 @@ impl WebhookDeliveryWriter for InMemoryDataService {
 
 #[async_trait]
 impl crate::WebhookOutboxReader for InMemoryDataService {
-    async fn get_undispatched_obligations(
+    async fn claim_undispatched_obligations(
         &self,
         limit: i64,
+        visibility_secs: i64,
     ) -> RepositoryResult<Vec<crate::WebhookObligation>> {
+        let now = Utc::now();
         let outbox = self.webhook_outbox.read().unwrap();
-        let mut undispatched: Vec<_> = outbox.clone();
-        undispatched.sort_by_key(|o| o.created_at);
-        undispatched.truncate(limit.max(0) as usize);
-        Ok(undispatched)
+        let mut claims = self.webhook_outbox_claims.write().unwrap();
+
+        let mut claimable: Vec<_> = outbox
+            .iter()
+            .filter(|o| claims.get(&o.id).is_none_or(|until| *until < now))
+            .cloned()
+            .collect();
+        claimable.sort_by_key(|o| o.created_at);
+        claimable.truncate(limit.max(0) as usize);
+
+        let claimed_until = now + chrono::Duration::seconds(visibility_secs);
+        for obligation in &claimable {
+            claims.insert(obligation.id, claimed_until);
+        }
+
+        Ok(claimable)
     }
 }
 
@@ -1082,6 +1101,7 @@ impl crate::WebhookOutboxWriter for InMemoryDataService {
     async fn mark_obligation_dispatched(&self, id: Uuid) -> RepositoryResult<()> {
         let mut outbox = self.webhook_outbox.write().unwrap();
         outbox.retain(|o| o.id != id);
+        self.webhook_outbox_claims.write().unwrap().remove(&id);
         Ok(())
     }
 }
