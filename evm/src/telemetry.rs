@@ -333,7 +333,10 @@ pub fn resolve_environment() -> String {
 /// `error!()` call sites and move that test's pinned version forward.
 #[must_use]
 pub fn sentry_event_filter(metadata: &Metadata<'_>) -> sentry_tracing::EventFilter {
-    if *metadata.level() == Level::ERROR && metadata.target().starts_with("alloy_transport_ws") {
+    let target = metadata.target();
+    let is_audited_crate =
+        target == "alloy_transport_ws" || target.starts_with("alloy_transport_ws::");
+    if *metadata.level() == Level::ERROR && is_audited_crate {
         return sentry_tracing::EventFilter::Breadcrumb;
     }
     sentry_tracing::default_event_filter(metadata)

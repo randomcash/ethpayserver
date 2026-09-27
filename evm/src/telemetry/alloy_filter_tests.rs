@@ -84,6 +84,26 @@ fn alloy_ws_submodule_targets_are_also_a_breadcrumb() {
     );
 }
 
+/// The match is on the crate name at a `::` boundary, not a bare string
+/// prefix — otherwise an unrelated crate that merely starts with the same
+/// characters (`alloy_transport_wsx`, say) would also get silently
+/// downgraded, which is a wider blast radius than the audit above actually
+/// covers.
+#[test]
+fn alloy_ws_lookalike_crate_name_is_not_swallowed() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+
+    tracing::subscriber::with_default(RecordingSubscriber(seen.clone()), || {
+        tracing::error!(target: "alloy_transport_wsx", "unrelated crate, same prefix");
+    });
+
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen[0].contains(sentry_tracing::EventFilter::Event),
+        "a crate that only shares a string prefix with alloy_transport_ws must still page: {seen:?}"
+    );
+}
+
 /// `sentry_event_filter` treats every `error!` from `alloy_transport_ws`
 /// as retried-underneath noise, on the strength of an audit of that
 /// crate's specific call sites — not on the message. `alloy` is pinned by
