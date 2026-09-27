@@ -6,25 +6,21 @@
 //! up, every distinct id mints its own transaction name - unbounded
 //! cardinality and an unreadable performance page.
 //!
-//! Review finding, fixed for real this time: two earlier versions of this
-//! test proved only that sentry-tower behaves as documented when wired a
-//! particular way - first by rebuilding a small router of its own, then by
-//! calling the real `server::api::router` but hand-copying the two
-//! `.layer()` calls `bin/server.rs::main` makes inline. Both left a
-//! reordering or a dropped layer in `main` free to regress unnoticed,
-//! because `server/tests/` links the library crate, not the `main` binary,
-//! and nothing forced the copy to match.
-//!
-//! `server::api::with_sentry_performance_tracing` closes that gap: it is
-//! the one function `main` calls to add every outer layer (request tracing,
-//! CORS, then the Sentry pair) on top of `server::api::router`, and this
-//! test calls the same function on the same router output - the exact stack
-//! `main` serves, not a subset of it. There is no second copy left to drift -
-//! a reordering or a dropped `tower-axum-matched-path` feature there fails
-//! this test, not just a stand-in for it.
+//! `server::api::with_sentry_performance_tracing` is the one function `main`
+//! calls to add every outer layer (request tracing, CORS, then the Sentry
+//! pair) on top of `server::api::router`, and this test calls that same
+//! function on the same router output - the exact stack `main` serves, not a
+//! hand-copied subset of it. `server/tests/` links the library crate, not
+//! the `main` binary, so a hand-copied `.layer()` sequence here would leave
+//! a reordering or a dropped layer in `main` free to regress unnoticed;
+//! calling the shared function closes that gap.
 //!
 //! Needs `DATABASE_URL`; skips (does not fail) when it's unset, the same
-//! convention the other ignored integration tests in this directory use.
+//! convention the other ignored integration tests in this directory use -
+//! and, like those, is not just a local convenience: `.github/workflows/ci.yml`
+//! runs `cargo nextest run -p data-service -p server --no-fail-fast
+//! --run-ignored only` with `DATABASE_URL` set, so this test is part of the
+//! CI gate, not merely available to run by hand.
 
 use std::sync::Arc;
 
