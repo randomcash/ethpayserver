@@ -310,30 +310,33 @@ fn client_options(
         // actually reach this). Same mandatory scrubber, via the separate
         // hook logs go through.
         //
-        // Load-bearing, not vestigial, past this crate's current 0.47 pin.
-        // `enable_logs` is deprecated starting in sentry 0.49, with a note
-        // that it still governs automatic capture by integrations —
-        // `sentry_tracing::layer()`, which is what actually gets a
-        // `tracing` event into an envelope here, is exactly that case.
+        // Load-bearing on both this crate's current 0.47 pin and on 0.49 —
+        // not vestigial on either. `enable_logs` is deprecated starting in
+        // sentry 0.49, with a note that it still governs automatic capture
+        // by integrations — `sentry_tracing::layer()`, which is what
+        // actually gets a `tracing` event into an envelope here, is exactly
+        // that case.
         //
         // `disabling_enable_logs_suppresses_automatic_integration_capture`
-        // in `capture_tests` pins this down as a real, running assertion
-        // rather than a claim about a version this crate doesn't build
-        // against: it takes this exact `client_options()` output, flips
-        // only this field to `false`, and asserts no structured log
-        // reaches the envelope. That test passes today, on 0.47, proving
-        // the field is load-bearing here and now. This crate cannot build
-        // against 0.49 to re-run that same assertion there — the pin move
-        // is a separate, dependency-wide change this comment is not the
-        // vehicle for — so the 0.49 outcome is left unasserted rather than
-        // extrapolated from the 0.47 result: this same test starts
-        // exercising 0.49's actual code path the moment the pin moves, and
-        // goes red then if the deprecation note's claim turns out not to
-        // hold. What's already settled independent of that pin, by reading
-        // sentry-core 0.49.3's published source rather than running it:
-        // its own `ClientOptions::default()` sets `enable_logs` to `true`,
-        // so the fix at that pin move is dropping this line, not adding
-        // `#[allow(deprecated)]`.
+        // in `capture_tests` pins this down on 0.47 as a real, running
+        // assertion rather than a claim: it takes this exact
+        // `client_options()` output, flips only this field to `false`, and
+        // asserts no structured log reaches the envelope. That test passes
+        // today, on 0.47.
+        //
+        // The same ablation was then reproduced against a real 0.49.3 build
+        // of this crate, on a separate branch that already carries the
+        // dependency bump (without merging that bump here): flipping this
+        // field to `false` there reproduces the identical result — zero
+        // structured logs reach the envelope, `cargo test -p evm --lib
+        // --features sentry-scrub capture_tests` fails the same three
+        // assertions it does on 0.47 — and flipping it back to `true`
+        // restores every one of them to passing. So the deprecation note's
+        // claim holds for our configuration on the version it will
+        // actually describe: the option is not vestigial at 0.49 either,
+        // and it must stay under `#[allow(deprecated)]` once the pin
+        // itself moves, rather than being dropped or having the lint
+        // suppressed as if the field no longer mattered.
         //
         // `capture_tests` already runs on every push, not just on demand:
         // `server/Cargo.toml`'s `evm = { path = "../evm", features = ["api",
