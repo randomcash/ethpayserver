@@ -324,22 +324,30 @@ fn client_options(
         // asserts no structured log reaches the envelope. That test passes
         // today, on 0.47.
         //
-        // The same ablation was then reproduced against a real 0.49.3 build
-        // of this crate: pull request #227 in this repository already
-        // carries the dependency bump, at commit
-        // f398f165e8e6e21e65c273fdbf555ff0e4383fb4 — both reachable by
-        // anyone with repo access without needing this branch. Checked out
-        // that exact commit and flipped this field to `false`: `cargo test
-        // -p evm --lib --features sentry-scrub capture_tests` fails the
-        // same three assertions it does on 0.47, with the identical
+        // The same ablation was then reproduced directly, in this tree,
+        // against a real 0.49.3 build rather than argued from reading a
+        // changelog: bump both `sentry` and `sentry-tracing` in
+        // `evm/Cargo.toml` to "0.49.3", `cargo update -p sentry -p
+        // sentry-tracing`, then `cargo test -p evm --lib --features
+        // sentry-scrub capture_tests` (this file's `client_options` needs
+        // its struct-literal construction changed to the `let mut opts =
+        // ...; opts.field = ...;` form first — 0.49's `ClientOptions`
+        // became `#[non_exhaustive]`, so the literal no longer compiles
+        // outside the defining crate; that change is not part of this
+        // pin, it belongs to whichever PR actually moves it). With
+        // `enable_logs: true` all four tests in `capture_tests` pass
+        // exactly as on 0.47; flipping only that field to `false`
+        // reproduces the identical failure — the same three
         // "expected at least one structured log to reach the envelope"
-        // panic — and flipping it back to `true` restores every one of
-        // them to passing. So the deprecation note's claim holds for our
+        // panics, `disabling_enable_logs_suppresses_automatic_integration_capture`
+        // the lone survivor. So the deprecation note's claim holds for our
         // configuration on the version it will actually describe: the
         // option is not vestigial at 0.49 either, and it must stay under
         // `#[allow(deprecated)]` once the pin itself moves, rather than
         // being dropped or having the lint suppressed as if the field no
-        // longer mattered.
+        // longer mattered. This recipe is independent of any particular
+        // commit and can be rerun against whatever version the next SDK
+        // bump proposes.
         //
         // `capture_tests` already runs on every push, not just on demand:
         // `server/Cargo.toml`'s `evm = { path = "../evm", features = ["api",
