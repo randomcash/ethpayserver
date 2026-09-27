@@ -46,7 +46,7 @@
     "desc": "A merchant can rotate a store's extended public key through the interface rather than only by hand-crafted request.",
     "test": "rotation via the documented endpoint updates derivation and leaves existing invoices resolvable",
     "passes": false,
-    "notes": "SENSITIVE: key derivation. Existing addresses must remain resolvable after rotation or funds already in flight become uncreditable."
+    "notes": "DO NOT START THIS: IT IS ALREADY IMPLEMENTED AND OPEN AS A PULL REQUEST. Check the open pull requests for xpub rotation before writing anything - the branch carries a rotation endpoint, documentation, and an integration test named for invoice derivation after rotation, which is this feature's stated test. It is open rather than merged because it was behind its base, not because it is unfinished. Help it land instead of rebuilding it. THIS ROW EXISTS AS A WARNING BECAUSE THE MISTAKE ALREADY HAPPENED ONCE: F001 was built and merged while an open pull request had been implementing the same reconciler since that morning, and the duplicate is the version now on the branch. BEFORE STARTING ANY FEATURE HERE, SEARCH THE OPEN PULL REQUESTS FOR ITS SUBJECT - not for its ticket id, which a harness feature does not have. One listing is cheaper than a day of duplicated work. SENSITIVE: key derivation. Existing addresses must remain resolvable after rotation or funds already in flight become uncreditable."
   },
   {
     "id": "F008",
