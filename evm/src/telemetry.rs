@@ -450,6 +450,19 @@ pub fn resolve_traces_sample_rate() -> f32 {
 /// so the mainnet boot-gate and the PII scrubber live in exactly one place
 /// each, instead of two copies that can quietly diverge.
 ///
+/// `traces_sample_rate` is one of those shared settings, so both binaries
+/// sample once an environment opts in — but the route-pattern transaction
+/// naming (`with_sentry_performance_tracing` in `server/src/api/mod.rs`) is
+/// only needed by `server`. `evmmonitor`'s `[[bin]]` in `evm/Cargo.toml`
+/// requires `monitor-bin`, a feature list that does not include `api`, so
+/// `axum` is never compiled into that binary: it has no `Router`, no
+/// `.route()`, no listener, nothing for `sentry-tower` to name transactions
+/// from in the first place. It talks to `server` over Redis pub/sub instead
+/// (see `evm/src/bin/evmmonitor/health.rs`). Sampling `evmmonitor` cannot
+/// reproduce the per-id-transaction cardinality problem this ticket exists to
+/// close, because there is no HTTP surface for a transaction name to be
+/// per-id about.
+///
 /// Returns the init guard, whether a DSN was actually configured, and the
 /// resolved environment tag — pass the latter two to
 /// [`report_reporting_status`].
