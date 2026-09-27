@@ -61,11 +61,17 @@ run() {
 echo "== repository checks =="
 # Each of these exists because something got through once. Losing one of them
 # from this list is how that thing gets through again.
+#
+# One exception, named rather than left to be discovered: the file-size check
+# REPORTS and does not fail, as of 2026-09-26. It stays in this list because the
+# report is now the only thing tracking a curve that doubled in nine days the
+# last time nothing watched it. A green run here does not mean no file grew -
+# read its line.
 run "no ticket ids in source"   ./scripts/check-no-ticket-refs.sh
 run "no session urls"           ./scripts/check-no-session-urls.sh
 run "migration versions unique" ./scripts/check-migrations.sh
 run "commons pin matches lock"  ./scripts/check-commons-pin.sh
-run "no file grows past limit"  ./scripts/check-file-size.sh
+run "file sizes (report only)"   ./scripts/check-file-size.sh
 
 echo "== compiler =="
 run "cargo fmt"                 cargo fmt --all -- --check

@@ -10,6 +10,10 @@ name = "evmmonitor"
 path = "src/bin/evmmonitor/main.rs"
 required-features = ["monitor-bin"]
 
+[[bin]]
+name = "derive-xpub"
+path = "src/bin/derive-xpub.rs"
+
 [features]
 default = []
 api = ["axum", "utoipa", "types", "data-service", "auth"]
@@ -121,4 +125,6 @@ sentry = { version = "0.47", default-features = false, features = ["test"] }
 # `env-filter` builds the same `LOG_LEVEL` filter `server.rs` and
 # `evmmonitor/main.rs` do, so a test can construct their real layer stack
 # instead of a lookalike missing the filter that caused the independence bug.
+# It also backs test-only capture of what the redis-bridge shutdown log tails
+# actually emit; the production `monitor-bin` feature depends on it separately.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

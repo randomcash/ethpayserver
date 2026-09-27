@@ -276,6 +276,40 @@ jobs:
             echo "::warning::ops/client-image.pin is $AHEAD_BY commits behind payserver-client main (pinned sha-$PIN_SHA, current $CURRENT_TAG) - past $MAX_COMMITS_BEHIND, e2e may no longer exercise what the client actually ships. Bump it: sed -i '\$ s|.*|ghcr.io/randomcash/payserver-client:$CURRENT_TAG|' ops/client-image.pin"
           fi
 
+  # The full `e2e` job below needs a built server, a live Postgres/Redis and a
+  # trunk-served frontend, so it only runs once a branch actually lands (see
+  # its own `if:`) - a regression in e2e/tests/*.spec.ts's pure logic is
+  # otherwise invisible until then, not at PR time. Some of that logic needs
+  # none of that: route-coverage.spec.ts only reads scout.spec.ts as text,
+  # visual-review-report.spec.ts only exercises plain functions, and
+  # visual-review-main.spec.ts spawns visual-review.mjs as a subprocess
+  # against a stand-in HTTP server in place of the Anthropic API - none of the
+  # three touches a browser or the server/DB stack. Running them here, with
+  # E2E_REMOTE=true so playwright.config.ts skips its `webServer` entries
+  # entirely, catches a regression before merge without paying for what none
+  # of them touches.
+  e2e-static-checks:
+    name: E2E static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: npm ci
+
+      - name: Run static e2e tests
+        working-directory: e2e
+        env:
+          E2E_REMOTE: "true"
+        run: npx playwright test tests/route-coverage.spec.ts tests/visual-review-report.spec.ts tests/visual-review-main.spec.ts
+
   test:
     name: Test
     runs-on: ubuntu-latest
