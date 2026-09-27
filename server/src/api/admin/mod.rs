@@ -320,12 +320,12 @@ where
         invoice_expiry_minutes: settings.invoice_expiry_minutes,
         rate_limit_rpm: settings.rate_limit_rpm,
         enabled_chain_ids,
-        billing_store_id: settings.billing_store_id,
+        operator_store_id: settings.operator_store_id,
         // What this process resolved at boot, compared with what is stored.
         // They differ after a change nobody has restarted into, and an admin
         // needs to be able to tell - otherwise the page shows a store the
         // server is not actually using.
-        billing_store_id_active: state.operator_store_id == settings.billing_store_id,
+        operator_store_id_active: state.operator_store_id == settings.operator_store_id,
     }))
 }
 
@@ -373,13 +373,13 @@ where
     // Absent leaves it alone; `Some(None)` clears it. A plain `Option` could
     // not tell those apart, and every client that saves the other four
     // settings without knowing about this field would clear it.
-    let operator_store_id = match body.billing_store_id {
+    let operator_store_id = match body.operator_store_id {
         Some(next) => next,
-        None => current.billing_store_id,
+        None => current.operator_store_id,
     };
 
     if let Some(store_id) = operator_store_id
-        && operator_store_id != current.billing_store_id
+        && operator_store_id != current.operator_store_id
     {
         validate_operator_store(&state, store_id).await?;
         // `error`, not `info`: this field is `Config::operator_store_id`, and
@@ -408,7 +408,7 @@ where
         invoice_expiry_minutes: body.invoice_expiry_minutes,
         rate_limit_rpm: body.rate_limit_rpm,
         enabled_chain_ids,
-        billing_store_id: operator_store_id,
+        operator_store_id,
     };
 
     state
@@ -565,8 +565,8 @@ mod tests {
             invoice_expiry_minutes: 60,
             rate_limit_rpm: 100,
             enabled_chain_ids: vec![ChainId::evm(1), ChainId::evm(137)],
-            billing_store_id: None,
-            billing_store_id_active: true,
+            operator_store_id: None,
+            operator_store_id_active: true,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["default_confirmations"], 3);
@@ -810,14 +810,14 @@ mod tests {
     }
 
     fn settings_body(
-        billing_store_id: Option<Option<types::StoreId>>,
+        operator_store_id: Option<Option<types::StoreId>>,
     ) -> UpdateServerSettingsRequest {
         UpdateServerSettingsRequest {
             default_confirmations: 3,
             invoice_expiry_minutes: 60,
             rate_limit_rpm: 100,
             enabled_chain_ids: None,
-            billing_store_id,
+            operator_store_id,
         }
     }
 
@@ -861,7 +861,7 @@ mod tests {
     /// this deployment's pipeline turns into a ticket) must fire exactly when
     /// the operator store actually changes, not on every settings save - or
     /// it becomes noise nobody reads. The `Some(None)` versus absent
-    /// distinction on `UpdateServerSettingsRequest::billing_store_id` is what
+    /// distinction on `UpdateServerSettingsRequest::operator_store_id` is what
     /// makes a resave of the same value distinguishable from a real change
     /// at all.
     #[tokio::test]

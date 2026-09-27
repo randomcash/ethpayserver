@@ -71,10 +71,7 @@ impl ServerSettingsRepository for PgDataService {
                     }
                 })
                 .collect(),
-            // Field name still `billing_store_id`: it comes from
-            // `auth::ServerSettings` in payserver-commons, pinned by rev and
-            // not yet renamed there - see that repository's own commit.
-            billing_store_id: r
+            operator_store_id: r
                 .get::<Option<uuid::Uuid>, _>("operator_store_id")
                 .map(types::StoreId),
         }))
@@ -107,7 +104,7 @@ impl ServerSettingsRepository for PgDataService {
                 .map(|c| c.to_string())
                 .collect::<Vec<_>>(),
         )
-        .bind(settings.billing_store_id.map(|s| s.0))
+        .bind(settings.operator_store_id.map(|s| s.0))
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_auth_error)?;

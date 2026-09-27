@@ -29,6 +29,7 @@ mod watch_reconciliation;
 mod watched_address;
 mod watched_address_deletion;
 mod webhook_delivery;
+mod webhook_outbox;
 
 pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository, WalletReauthChallenge};
 pub use wallet_rotation::WalletRotation;
