@@ -44,12 +44,16 @@ fn process_error_is_fault(error: &WebhookError, shutting_down: bool) -> bool {
 /// that gap. Returns 1 if this call claimed the job, 0 if it was already
 /// gone (another worker claimed it first, matching the old ZREM-based
 /// claim's `removed == 0` case).
+///
+/// The processing-set member (`ARGV[2]`) is not the bare job JSON (`ARGV[1]`,
+/// used to find and remove the *ready-queue* entry) — see `claim_job` for why
+/// it carries a claim id.
 const CLAIM_JOB_SCRIPT: &str = r"
 if redis.call('ZSCORE', KEYS[1], ARGV[1]) == false then
     return 0
 end
 redis.call('ZREM', KEYS[1], ARGV[1])
-redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+redis.call('ZADD', KEYS[2], ARGV[3], ARGV[2])
 return 1
 ";
 
@@ -171,8 +175,51 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// A job lives here, scored by its visibility deadline, from the moment
     /// it's claimed until delivery is either recorded as delivered or
     /// rescheduled — see [`CLAIM_JOB_SCRIPT`] and `reclaim_expired_jobs`.
+    ///
+    /// Members here are *not* the bare job JSON: each is `"{claim_id}:{json}"`
+    /// (see `claim_job`), so two claims of the same content — the original
+    /// claimant and whoever reclaims and re-claims it after a visibility
+    /// timeout — never collide on the same member.
     fn processing_key(&self) -> String {
         format!("{}:processing", self.config.queue_key)
+    }
+
+    /// Claim a ready job by atomically moving it into the processing set.
+    ///
+    /// Returns the processing-set member on success, `None` if another
+    /// worker claimed it first (`CLAIM_JOB_SCRIPT` returned 0).
+    ///
+    /// The member is `"{claim_id}:{json}"`, not the bare job JSON. Keying by
+    /// content alone let a stalled claim's *own* eventual `clear_processing`
+    /// call delete a different worker's active claim: worker A claims job J,
+    /// stalls past `visibility_timeout`, gets reclaimed (J goes back to the
+    /// ready queue under the same JSON), worker C claims that same JSON
+    /// fresh, and then A finally finishes and clears "J" — which, keyed by
+    /// content, is now C's live entry, not A's already-reclaimed one.
+    /// Deleting C's entry that way leaves nothing to redeliver from if C is
+    /// then killed mid-delivery — the exact loss this claim/reclaim scheme
+    /// exists to prevent, just shifted one cycle later. A fresh claim id per
+    /// claim makes A's and C's members distinct strings, so A's belated
+    /// `ZREM` of its own member is a no-op once that member has already been
+    /// reclaimed, and never touches C's.
+    async fn claim_job(
+        &self,
+        conn: &mut redis::aio::ConnectionManager,
+        json: &str,
+        deadline: f64,
+    ) -> Result<Option<String>, WebhookError> {
+        let claim_id = uuid::Uuid::new_v4();
+        let processing_member = format!("{claim_id}:{json}");
+        let claimed: i64 = redis::Script::new(CLAIM_JOB_SCRIPT)
+            .key(&self.config.queue_key)
+            .key(self.processing_key())
+            .arg(json)
+            .arg(&processing_member)
+            .arg(deadline)
+            .invoke_async(conn)
+            .await
+            .map_err(|e| WebhookError::Redis(e.to_string()))?;
+        Ok((claimed == 1).then_some(processing_member))
     }
 
     /// Return jobs whose visibility deadline has passed to the ready queue.
@@ -202,8 +249,9 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             }
         };
 
-        for json in expired {
-            self.reclaim_one_expired_job(conn, &json, now).await;
+        for processing_member in expired {
+            self.reclaim_one_expired_job(conn, &processing_member, now)
+                .await;
         }
     }
 
@@ -212,12 +260,23 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     /// Split out of `reclaim_expired_jobs` purely to keep that loop's
     /// cognitive complexity down; the two-step requeue-then-clear it does is
     /// unchanged.
+    ///
+    /// `processing_member` is `"{claim_id}:{json}"` (see `claim_job`); the
+    /// claim id is stripped before the job's plain JSON goes back onto the
+    /// ready queue, since that queue matches by content alone. A member with
+    /// no `:` would mean something else wrote to this set — there is no other
+    /// writer — so it's dropped with a warning rather than requeued
+    /// malformed.
     async fn reclaim_one_expired_job(
         &self,
         conn: &mut redis::aio::ConnectionManager,
-        json: &str,
+        processing_member: &str,
         now: f64,
     ) {
+        let Some((_claim_id, json)) = processing_member.split_once(':') else {
+            tracing::warn!("Abandoned webhook processing entry has no claim id, dropping it");
+            return;
+        };
         tracing::warn!("Reclaiming abandoned webhook job for redelivery");
         let requeued = redis::cmd("ZADD")
             .arg(&self.config.queue_key)
@@ -229,21 +288,30 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             tracing::warn!(error = %e, "Failed to requeue abandoned webhook job");
             return;
         }
-        self.clear_processing(conn, json).await;
+        self.clear_processing(conn, processing_member).await;
     }
 
-    /// Remove a job from the processing set once its delivery outcome —
+    /// Remove a claim from the processing set once its delivery outcome —
     /// delivered, permanently failed, or rescheduled — has been recorded.
+    ///
+    /// `processing_member` must be the exact `"{claim_id}:{json}"` string
+    /// this claim was given by `claim_job` (or reclaimed with), not the bare
+    /// job JSON — see `claim_job` for why the id matters: a `ZREM` by content
+    /// alone can hit a different, later claim of the same job.
     ///
     /// Best-effort like `write_delivery_record`: the delivery outcome is
     /// already decided and (for a retry) already back on the ready queue, so
     /// a failure here only risks a duplicate reclaim-triggered redelivery
     /// once the visibility deadline passes, not data loss — the same
     /// at-least-once shape this service already documents for retries.
-    async fn clear_processing(&self, conn: &mut redis::aio::ConnectionManager, json: &str) {
+    async fn clear_processing(
+        &self,
+        conn: &mut redis::aio::ConnectionManager,
+        processing_member: &str,
+    ) {
         if let Err(e) = redis::cmd("ZREM")
             .arg(self.processing_key())
-            .arg(json)
+            .arg(processing_member)
             .query_async::<i64>(conn)
             .await
         {
@@ -365,26 +433,20 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         // Atomically move the job we just read into the processing set,
         // rather than removing it outright: this is the claim, and until
         // delivery is recorded one way or another the job stays visible
-        // there, redeliverable if this worker is killed mid-delivery. Safe
-        // to read `claimed == 0` as "another worker claimed it" rather than
-        // "our own claim got replayed": `ConnectionManager` reconnects in
-        // the background on a dropped connection, but it returns that error
-        // to the caller rather than silently retrying the in-flight command,
-        // so this cannot execute twice for one call.
+        // there, redeliverable if this worker is killed mid-delivery.
+        // `claim_job` gives this claim its own identity so a later reclaim
+        // of the same content, and a fresh claim of it by another worker,
+        // can never be confused with this one — see its doc comment. `None`
+        // here is "another worker grabbed it first"; safe to read as that
+        // rather than "our own claim got replayed", since `ConnectionManager`
+        // reconnects in the background on a dropped connection but returns
+        // that error to the caller rather than silently retrying the
+        // in-flight command, so this cannot execute twice for one call.
         let deadline = now + self.config.visibility_timeout.as_secs_f64();
-        let claimed: i64 = redis::Script::new(CLAIM_JOB_SCRIPT)
-            .key(&self.config.queue_key)
-            .key(self.processing_key())
-            .arg(&json)
-            .arg(deadline)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| WebhookError::Redis(e.to_string()))?;
-
-        if claimed == 0 {
+        let Some(processing_member) = self.claim_job(&mut conn, &json, deadline).await? else {
             // Another worker grabbed it — try again next tick
             return Ok(false);
-        }
+        };
 
         let mut job: WebhookJob =
             serde_json::from_str(&json).map_err(|e| WebhookError::Serialization(e.to_string()))?;
@@ -419,7 +481,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     None,
                 )
                 .await;
-                self.clear_processing(&mut conn, &json).await;
+                self.clear_processing(&mut conn, &processing_member).await;
             }
             Err(e) => {
                 let error_msg = truncate_error(&e.to_string(), 500);
@@ -455,7 +517,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     .await;
                     self.record_delivery_event(&job, "webhook_permanent_failed", Some(error_msg))
                         .await;
-                    self.clear_processing(&mut conn, &json).await;
+                    self.clear_processing(&mut conn, &processing_member).await;
                 } else {
                     // Schedule retry.
                     metrics::record_webhook_delivery_status("retrying");
@@ -491,7 +553,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     // The retry is on the ready queue under its own (updated)
                     // JSON now, so the original claim can be cleared from the
                     // processing set — see `clear_processing`.
-                    self.clear_processing(&mut conn, &json).await;
+                    self.clear_processing(&mut conn, &processing_member).await;
 
                     tracing::debug!(
                         job_id = %job.id,
@@ -1119,6 +1181,7 @@ mod tests {
     /// that need real infrastructure.
     #[tokio::test]
     #[ignore = "requires a local Redis instance; set TEST_REDIS_URL, e.g. redis://127.0.0.1:6379"]
+    #[allow(clippy::too_many_lines)] // claim, poll-for-claim, abort, reclaim, and three separate Redis assertions
     async fn a_job_cancelled_mid_delivery_is_reclaimed_not_lost() {
         let redis_url = std::env::var("TEST_REDIS_URL")
             .expect("set TEST_REDIS_URL to run this test, e.g. redis://127.0.0.1:6379");
@@ -1164,14 +1227,33 @@ mod tests {
             let service = Arc::clone(&service);
             tokio::spawn(async move { service.process_next_job().await })
         };
-        // Long enough for the claim (a single fast Redis round trip) to have
-        // completed and the task to be blocked in the HTTP call; short
-        // enough to stay well under the endpoint's silence.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Poll for the claim to land instead of guessing a fixed delay: a
+        // fixed sleep short enough to stay well under the endpoint's silence
+        // could still elapse before the claim's single Redis round trip
+        // finishes under CI load, aborting the worker before it ever
+        // reaches the HTTP call this test means to interrupt — failing for
+        // the wrong reason (job never left the ready queue) rather than the
+        // one it's meant to test.
+        let mut conn = service.connection().await.expect("connection");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let still_ready: Option<f64> = redis::cmd("ZSCORE")
+                    .arg(&service.config.queue_key)
+                    .arg(&job_json)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("ZSCORE queue");
+                if still_ready.is_none() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("claim did not complete within 5s");
+
         worker.abort();
         let _ = worker.await;
-
-        let mut conn = service.connection().await.expect("connection");
 
         let still_queued: Option<f64> = redis::cmd("ZSCORE")
             .arg(&service.config.queue_key)
@@ -1184,14 +1266,11 @@ mod tests {
             "the job should have left the ready queue once claimed"
         );
 
-        let in_processing: Option<f64> = redis::cmd("ZSCORE")
-            .arg(service.processing_key())
-            .arg(&job_json)
-            .query_async(&mut conn)
+        let in_processing = processing_member_for(&mut conn, &service.processing_key(), &job_json)
             .await
-            .expect("ZSCORE processing");
+            .is_some();
         assert!(
-            in_processing.is_some(),
+            in_processing,
             "a cancelled claim must leave the job in the processing set, not delete it outright"
         );
 
@@ -1210,15 +1289,123 @@ mod tests {
             "an abandoned job must be returned to the ready queue, deliverable again"
         );
 
-        let still_in_processing: Option<f64> = redis::cmd("ZSCORE")
+        let still_in_processing =
+            processing_member_for(&mut conn, &service.processing_key(), &job_json)
+                .await
+                .is_some();
+        assert!(
+            !still_in_processing,
+            "the reclaimed job must be cleared from the processing set"
+        );
+    }
+
+    /// Finds the processing-set member for a job's plain JSON, i.e. the
+    /// entry whose content after the `"{claim_id}:"` prefix (see
+    /// `WebhookService::claim_job`) matches exactly. Members in that set are
+    /// never the bare JSON itself, so a plain `ZSCORE` lookup by content
+    /// (as used against the *ready* queue elsewhere in these tests) cannot
+    /// find them.
+    async fn processing_member_for(
+        conn: &mut redis::aio::ConnectionManager,
+        key: &str,
+        json: &str,
+    ) -> Option<String> {
+        let members: Vec<String> = redis::cmd("ZRANGE")
+            .arg(key)
+            .arg(0)
+            .arg(-1)
+            .query_async(conn)
+            .await
+            .expect("ZRANGE processing set");
+        members
+            .into_iter()
+            .find(|member| member.split_once(':').map(|(_, j)| j) == Some(json))
+    }
+
+    /// A defect this regresses: before a claim carried its own id, the
+    /// processing set keyed entries by job content alone. A claim that
+    /// stalls past its visibility timeout gets reclaimed, and the same
+    /// content is then claimed fresh by a different worker; if the stalled
+    /// claim finally finishes and clears what it still believes is its own
+    /// entry — the unmodified job JSON — that `ZREM` matched the *new*
+    /// claim's entry too, since both were keyed by identical content.
+    /// Deleting a live claim that way reintroduces total job loss if that
+    /// claim is then itself cancelled: the exact defect this claim/reclaim
+    /// scheme exists to fix, just shifted one reclaim cycle later. A fresh
+    /// claim id per claim (see `WebhookService::claim_job`) makes the two
+    /// claims distinct strings, so the stale clear can only ever remove its
+    /// own, already-reclaimed entry.
+    ///
+    /// Needs a real Redis and is `#[ignore]`d like this crate's other tests
+    /// that need real infrastructure.
+    #[tokio::test]
+    #[ignore = "requires a local Redis instance; set TEST_REDIS_URL, e.g. redis://127.0.0.1:6379"]
+    async fn a_stale_claim_completing_after_reclaim_does_not_delete_a_newer_claim() {
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .expect("set TEST_REDIS_URL to run this test, e.g. redis://127.0.0.1:6379");
+
+        let data_service = Arc::new(data_service::InMemoryDataService::new());
+        let config = WebhookConfig {
+            queue_key: format!("test:webhook-stale-claim:{}", uuid::Uuid::new_v4()),
+            ..WebhookConfig::default()
+        };
+        let service = WebhookService::new(Arc::clone(&data_service), &redis_url, config)
+            .expect("service should be constructed");
+
+        let job = WebhookJob::new(
+            uuid::Uuid::new_v4(),
+            "https://example.com/webhook".to_string(),
+            "secret".to_string(),
+            test_payload(),
+        );
+        let job_json = serde_json::to_string(&job).expect("job serializes");
+        service
+            .queue_webhook(job)
+            .await
+            .expect("queue_webhook should succeed");
+
+        let mut conn = service.connection().await.expect("connection");
+
+        // Worker A claims the job with a deadline already in the past, so
+        // it is immediately eligible for reclaim with no wait needed.
+        let claim_a = service
+            .claim_job(&mut conn, &job_json, 0.0)
+            .await
+            .expect("claim should succeed")
+            .expect("job should be claimable");
+
+        // A's delivery stalls past the deadline; a reclaim — run by any
+        // worker, possibly A itself on a later poll — returns the job to
+        // the ready queue and clears A's now-abandoned entry.
+        service.reclaim_expired_jobs(&mut conn).await;
+
+        // Worker C claims the same content fresh, with a deadline far
+        // enough out that this claim is still live.
+        let far_future = Utc::now().timestamp() as f64 + 300.0;
+        let claim_c = service
+            .claim_job(&mut conn, &job_json, far_future)
+            .await
+            .expect("claim should succeed")
+            .expect("job should be claimable again after reclaim");
+        assert_ne!(
+            claim_a, claim_c,
+            "two claims of the same content must get distinct processing-set identities"
+        );
+
+        // A, unaware it was reclaimed, finally finishes its stalled
+        // delivery and clears what it still believes is its own claim.
+        service.clear_processing(&mut conn, &claim_a).await;
+
+        // C's claim — the one actually in flight — must be untouched.
+        let c_still_claimed: Option<f64> = redis::cmd("ZSCORE")
             .arg(service.processing_key())
-            .arg(&job_json)
+            .arg(&claim_c)
             .query_async(&mut conn)
             .await
-            .expect("ZSCORE processing after reclaim");
+            .expect("ZSCORE processing");
         assert!(
-            still_in_processing.is_none(),
-            "the reclaimed job must be cleared from the processing set"
+            c_still_claimed.is_some(),
+            "a stale claim's belated clear must not delete a different, live claim of the same job"
         );
     }
 }
