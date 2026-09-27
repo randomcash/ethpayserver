@@ -36,7 +36,10 @@
 //! unconfirmed alert is the one finding that decides whether metrics also
 //! ship to a second vendor (Grafana) as a fallback alerting path - treat
 //! this as unconfirmed, not as working, until someone with access to the
-//! real Sentry project creates the two rules and watches one fire.
+//! real Sentry project creates the two rules and watches one fire. That
+//! check has been split out into its own follow-up for whoever has that
+//! access, rather than left to be rediscovered here on every future change
+//! to this module.
 //!
 //! ## Volume cost before mainnet
 //!
