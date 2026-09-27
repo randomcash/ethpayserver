@@ -1,6 +1,7 @@
 //! Webhook delivery service: queue, delivery loop, signing, and retry handling.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -11,6 +12,29 @@ use data_service::{
 use crate::metrics;
 
 use super::{WebhookConfig, WebhookError, WebhookJob};
+
+/// Whether a `process_next_job` failure is a fault worth reporting.
+///
+/// Only `WebhookError::Redis` is downgraded during shutdown: it's the shape
+/// a connection failing because the container's network dropped out takes,
+/// same as the redis-bridge subscriptions this mirrors. A `Serialization`
+/// error means a job already sitting in the queue no longer deserializes —
+/// a real bug, not a network teardown artifact — and must not go quiet just
+/// because it happened to surface in the same window as a shutdown signal.
+/// `Http` is listed here as always-a-fault for the same reason, though in
+/// practice `process_next_job` never returns it: a delivery failure is
+/// handled inline (logged via "Webhook delivery failed" or "...permanently
+/// failed", never propagated with `?`), so this match arm exists to keep
+/// the decision total rather than to gate a reachable path.
+///
+/// Split out from `log_process_error` so the shutdown/fault decision itself
+/// is unit-testable without a live Redis connection.
+fn process_error_is_fault(error: &WebhookError, shutting_down: bool) -> bool {
+    match error {
+        WebhookError::Redis(_) => !shutting_down,
+        WebhookError::Http(_) | WebhookError::Serialization(_) | WebhookError::Database(_) => true,
+    }
+}
 
 /// Trait for data service requirements in WebhookService.
 pub trait WebhookDataService: PaymentEventWriter + WebhookDeliveryWriter + Send + Sync {}
@@ -50,6 +74,12 @@ pub struct WebhookService<D: WebhookDataService> {
     redis_conn: tokio::sync::OnceCell<redis::aio::ConnectionManager>,
     http_client: reqwest::Client,
     config: WebhookConfig,
+    /// Set once the owning process has asked to stop.
+    ///
+    /// The job loop keeps polling regardless of errors, so a Redis failure
+    /// caused by the container's network dropping out during shutdown reads
+    /// identically to a real fault unless we know shutdown was asked for.
+    shutting_down: AtomicBool,
 }
 
 impl<D: WebhookDataService + 'static> WebhookService<D> {
@@ -83,6 +113,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             redis_conn: tokio::sync::OnceCell::new(),
             http_client,
             config,
+            shutting_down: AtomicBool::new(false),
         })
     }
 
@@ -116,6 +147,15 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             })
             .await?;
         Ok(conn.clone())
+    }
+
+    /// Mark this service as shutting down intentionally.
+    ///
+    /// Call this from the process's own shutdown handler. A job-loop error
+    /// logged afterwards is downgraded from `error` to `info` — it is the
+    /// expected shape of a container being torn down, not a fault.
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Relaxed);
     }
 
     /// Queue a webhook for delivery.
@@ -170,10 +210,23 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                     tokio::time::sleep(self.config.poll_interval).await;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "Error processing webhook job");
+                    self.log_process_error(&e);
                     tokio::time::sleep(self.config.poll_interval).await;
                 }
             }
+        }
+    }
+
+    /// Log a `process_next_job` failure at the level its cause deserves.
+    ///
+    /// During an intentional shutdown, the container's network can drop out
+    /// from under this loop's Redis connection, which fails identically to a
+    /// real fault. Only the unrequested case should reach Sentry.
+    fn log_process_error(&self, e: &WebhookError) {
+        if process_error_is_fault(e, self.shutting_down.load(Ordering::Relaxed)) {
+            tracing::error!(error = %e, "Error processing webhook job");
+        } else {
+            tracing::info!(error = %e, "Webhook job processing failed during shutdown");
         }
     }
 
@@ -536,6 +589,99 @@ mod tests {
         assert_eq!(truncate_error("", 500), "");
     }
 
+    #[test]
+    fn redis_error_during_shutdown_is_not_a_fault() {
+        assert!(!process_error_is_fault(
+            &WebhookError::Redis("boom".to_string()),
+            true
+        ));
+    }
+
+    #[test]
+    fn redis_error_without_shutdown_is_a_fault() {
+        assert!(process_error_is_fault(
+            &WebhookError::Redis("boom".to_string()),
+            false
+        ));
+    }
+
+    #[test]
+    fn serialization_error_during_shutdown_is_still_a_fault() {
+        // A malformed job already in the queue isn't a network-teardown
+        // artifact, so it must not go quiet just because a shutdown signal
+        // happened to arrive in the same window.
+        assert!(process_error_is_fault(
+            &WebhookError::Serialization("bad json".to_string()),
+            true
+        ));
+    }
+
+    /// Runs `log_process_error` under a subscriber that captures its output,
+    /// so the test below exercises the real `Ordering::Relaxed` load and
+    /// `tracing::error!`/`tracing::info!` call sites — not just the extracted
+    /// `process_error_is_fault` boolean.
+    fn capture_log_process_error(shutting_down: bool) -> String {
+        use std::io;
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for Buf {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::default()),
+            "redis://127.0.0.1:1",
+            WebhookConfig::default(),
+        )
+        .expect("valid redis URL");
+        if shutting_down {
+            service.begin_shutdown();
+        }
+
+        tracing::subscriber::with_default(subscriber, || {
+            service.log_process_error(&WebhookError::Redis("boom".to_string()));
+        });
+
+        String::from_utf8(buf.0.lock().unwrap().clone()).expect("utf8 log output")
+    }
+
+    #[test]
+    fn log_process_error_reports_error_when_not_shutting_down() {
+        let output = capture_log_process_error(false);
+        assert!(output.contains("ERROR"), "expected ERROR, got: {output}");
+    }
+
+    #[test]
+    fn log_process_error_reports_info_when_shutting_down() {
+        let output = capture_log_process_error(true);
+        assert!(output.contains("INFO"), "expected INFO, got: {output}");
+        assert!(
+            !output.contains("ERROR"),
+            "shutdown noise must not reach error level: {output}"
+        );
+    }
     /// A TCP listener that accepts connections but never writes a byte back,
     /// the same shape as a Redis that is up but wedged (or a firewall
     /// dropping packets silently): the client gets a connection, then
