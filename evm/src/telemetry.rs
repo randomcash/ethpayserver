@@ -325,26 +325,30 @@ fn client_options(
         // today, on 0.47.
         //
         // The same ablation was then reproduced against a real 0.49.3 build
-        // of this crate, on a separate branch that already carries the
-        // dependency bump (without merging that bump here): flipping this
-        // field to `false` there reproduces the identical result — zero
-        // structured logs reach the envelope, `cargo test -p evm --lib
-        // --features sentry-scrub capture_tests` fails the same three
-        // assertions it does on 0.47 — and flipping it back to `true`
-        // restores every one of them to passing. So the deprecation note's
-        // claim holds for our configuration on the version it will
-        // actually describe: the option is not vestigial at 0.49 either,
-        // and it must stay under `#[allow(deprecated)]` once the pin
-        // itself moves, rather than being dropped or having the lint
-        // suppressed as if the field no longer mattered.
+        // of this crate: pull request #227 in this repository already
+        // carries the dependency bump, at commit
+        // f398f165e8e6e21e65c273fdbf555ff0e4383fb4 — both reachable by
+        // anyone with repo access without needing this branch. Checked out
+        // that exact commit and flipped this field to `false`: `cargo test
+        // -p evm --lib --features sentry-scrub capture_tests` fails the
+        // same three assertions it does on 0.47, with the identical
+        // "expected at least one structured log to reach the envelope"
+        // panic — and flipping it back to `true` restores every one of
+        // them to passing. So the deprecation note's claim holds for our
+        // configuration on the version it will actually describe: the
+        // option is not vestigial at 0.49 either, and it must stay under
+        // `#[allow(deprecated)]` once the pin itself moves, rather than
+        // being dropped or having the lint suppressed as if the field no
+        // longer mattered.
         //
         // `capture_tests` already runs on every push, not just on demand:
         // `server/Cargo.toml`'s `evm = { path = "../evm", features = ["api",
         // "redis", "sentry-scrub"] }` line lists `sentry-scrub` as a normal,
         // non-optional feature, so cargo's feature unification turns it on
-        // for the whole workspace build. `cargo nextest run --workspace` —
-        // the command CI actually runs, no extra flags — already compiles
-        // and executes it on every push.
+        // for the whole workspace build, and `.github/workflows/ci.yml`'s
+        // `test` job runs `cargo nextest run --workspace --no-fail-fast -j
+        // 2` — that exact line already compiles and executes this test on
+        // every push.
         enable_logs: true,
         before_send_log: Some(Arc::new(scrub_log)),
         ..Default::default()
