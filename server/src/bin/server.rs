@@ -209,13 +209,9 @@ async fn main() -> Result<()> {
     // supported because instances configured before this setting existed are
     // still configured that way, and because a fresh database has no
     // settings row to read.
-    //
-    // `s.billing_store_id` reads the shared `auth::ServerSettings` field
-    // from payserver-commons, which still carries the old name - renaming it
-    // there is a separate, coordinated change that has not landed yet.
     let operator_store_id =
         match auth::ServerSettingsRepository::get_server_settings(&*data_service).await {
-            Ok(settings) => settings.and_then(|s| s.billing_store_id).or_else(|| {
+            Ok(settings) => settings.and_then(|s| s.operator_store_id).or_else(|| {
                 if config.operator_store_id.is_some() {
                     tracing::info!(
                         "operator store taken from ETHPAY_OPERATOR_STORE_ID; setting it in \
@@ -306,6 +302,20 @@ async fn main() -> Result<()> {
     )?);
     let mut webhook_handle = tokio::spawn(Arc::clone(&webhook_service).run());
     tracing::info!("Webhook delivery service started");
+
+    // Drains the transactional outbox `payment_handler` writes a webhook
+    // notification obligation into alongside the payment row it is about -
+    // see `data_service::webhook_outbox` for why that write is atomic and
+    // this one is not. Shares `webhook_service` as its delivery sink, so a
+    // drained obligation goes through the exact same queue, retry, and
+    // `webhook_deliveries` bookkeeping as one queued synchronously.
+    let outbox_drain_service = server::WebhookOutboxDrainService::new(
+        Arc::clone(&data_service),
+        Arc::clone(&webhook_service) as Arc<dyn server::services::WebhookSink>,
+        server::WebhookOutboxDrainConfig::from_env(),
+    );
+    let mut outbox_drain_handle = tokio::spawn(outbox_drain_service.run());
+    tracing::info!("Webhook outbox drain service started");
 
     // Cloned here rather than where they're used below (the shutdown-signal
     // race near the bottom of `main`) because `webhook_service` is moved
@@ -618,6 +628,24 @@ async fn main() -> Result<()> {
         Ok(Ok(())) => {}
     }
 
+    // Same reasoning as the event consumer's wait above: the drain's loop
+    // never returns on its own, so if it ever did - a panic, a poisoned lock
+    // - that is exactly the kind of silent stop this service exists to
+    // prevent one layer down (a written obligation with nothing left polling
+    // for it), so it must be joined and logged rather than dropped bare.
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut outbox_drain_handle).await {
+        Err(_) => {
+            tracing::debug!(
+                "webhook outbox drain task did not exit within the shutdown grace period, aborting"
+            );
+            outbox_drain_handle.abort();
+        }
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "webhook outbox drain task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
+
     Ok(())
 }
 
@@ -702,14 +730,14 @@ fn init_tracing(log_level: &str, log_format: &str) {
     // LOG_LEVEL. Fixed at INFO because `sentry_tracing`'s event/span
     // classification never does anything below INFO regardless of
     // `sentry_log_level` (DEBUG/TRACE are always `EventFilter::Ignore`), so
-    // this can't suppress anything `sentry_log_event_filter` would keep.
+    // this can't suppress anything `sentry_event_filter` would keep.
     let sentry_filter = tracing_subscriber::filter::LevelFilter::INFO;
 
     if json {
         tracing_subscriber::registry()
             .with(
                 sentry_tracing::layer()
-                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
                     .with_filter(sentry_filter),
             )
             .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
@@ -718,7 +746,7 @@ fn init_tracing(log_level: &str, log_format: &str) {
         tracing_subscriber::registry()
             .with(
                 sentry_tracing::layer()
-                    .event_filter(evm::telemetry::sentry_log_event_filter(sentry_log_level))
+                    .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
                     .with_filter(sentry_filter),
             )
             .with(tracing_subscriber::fmt::layer().with_filter(filter))
