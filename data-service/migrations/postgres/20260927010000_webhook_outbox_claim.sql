@@ -4,9 +4,10 @@
 -- nothing marks a row as being worked on until *after* delivery is attempted,
 -- so two instances polling their own timers can both queue the same webhook.
 --
--- `claimed_until` gives the drain a visibility deadline, the same shape
--- RCS-456's Redis job claim already uses: claiming an obligation sets this to
--- a near-future time, and only a row with no claim or an expired one is
+-- `claimed_until` gives the drain a visibility deadline, the same shape the
+-- webhook delivery queue's own claim already uses: claiming an obligation
+-- sets this to a near-future time, and only a row with no claim or an
+-- expired one is
 -- eligible to be claimed again (`SELECT ... FOR UPDATE SKIP LOCKED`, so two
 -- claimants racing the same query never pick the same row). A claimant that
 -- dies mid-dispatch without marking the obligation dispatched leaves it
