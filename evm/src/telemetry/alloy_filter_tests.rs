@@ -104,6 +104,54 @@ fn alloy_ws_lookalike_crate_name_is_not_swallowed() {
     );
 }
 
+/// The three tests above drive `sentry_event_filter` directly against a
+/// recording subscriber, which proves the filter's own verdicts but not
+/// that a real `sentry::Client` — built the way `server.rs` and
+/// `evmmonitor/main.rs` actually build one, via [`client_options`] and
+/// `sentry_tracing::layer().event_filter(sentry_log_event_filter(..))` —
+/// honours that verdict end to end. This drives both targets through that
+/// real construction and inspects what actually reached the client as a
+/// top-level event: `alloy_transport_ws`'s frame error must not appear as
+/// one (it was downgraded to a breadcrumb attached to whatever event
+/// follows it, never sent on its own), while `evm::monitor::source::rpc`'s
+/// genuine failure must.
+#[test]
+fn alloy_ws_frame_noise_does_not_reach_a_real_sentry_client_as_an_event() {
+    use tracing_subscriber::prelude::*;
+
+    let _dispatcher = tracing_subscriber::registry()
+        .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)))
+        .set_default();
+
+    let envelopes = sentry::test::with_captured_envelopes_options(
+        || {
+            tracing::error!(target: "alloy_transport_ws", "failed to deserialize message");
+            tracing::error!(
+                target: "evm::monitor::source::rpc",
+                "WebSocket subscription ended"
+            );
+        },
+        client_options(None, None, "test".to_string()),
+    );
+
+    let events: Vec<_> = envelopes
+        .iter()
+        .filter_map(sentry::Envelope::event)
+        .collect();
+    assert!(
+        events
+            .iter()
+            .all(|e| e.logger.as_deref() != Some("alloy_transport_ws")),
+        "alloy's own transient frame error reached a real Sentry client as an event: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.logger.as_deref() == Some("evm::monitor::source::rpc")),
+        "our own subscription-ended error must still reach a real Sentry client as an event: {events:?}"
+    );
+}
+
 /// `sentry_event_filter` treats every `error!` from `alloy_transport_ws`
 /// as retried-underneath noise, on the strength of an audit of that
 /// crate's specific call sites — not on the message. `alloy` is pinned by
