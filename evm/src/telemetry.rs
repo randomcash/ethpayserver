@@ -164,42 +164,77 @@ fn is_sensitive_key(key: &str) -> bool {
 /// (OS/runtime/device introspection — fixed, not secret-shaped fields, so
 /// left alone here) and `sentry-tower` (attaches `Context::Trace` to every
 /// transaction, which *is* closed below since it carries free text and an
-/// open map like the others).
+/// open map like the others). Any context variant not named above is dropped
+/// rather than forwarded — see the wildcard arm below.
 fn redact_contexts(contexts: &mut Map<String, Context>) {
-    for context in contexts.values_mut() {
-        match context {
-            Context::Other(map) => redact_map(map.iter_mut()),
-            Context::Device(c) => redact_map(c.other.iter_mut()),
-            Context::Os(c) => redact_map(c.other.iter_mut()),
-            Context::Runtime(c) => redact_map(c.other.iter_mut()),
-            Context::App(c) => redact_map(c.other.iter_mut()),
-            Context::Browser(c) => redact_map(c.other.iter_mut()),
-            Context::Gpu(c) => redact_map(c.other.iter_mut()),
-            Context::Otel(c) => {
-                redact_map(c.attributes.iter_mut());
-                redact_map(c.resource.iter_mut());
-                redact_map(c.other.iter_mut());
-            }
-            Context::Response(c) => {
-                // Same reasoning as `event.request`/`transaction.request`:
-                // an HTTP response container routinely holds cookies/headers.
-                c.cookies = None;
-                c.headers.clear();
-                c.data = None;
-            }
-            Context::Trace(c) => {
-                // `sentry-tower` attaches one of these to every transaction,
-                // so once tracing is on this ships on essentially every
-                // envelope. `description` is free text and `data` is an open
-                // catch-all, same shape as the other variants above.
-                if let Some(description) = c.description.as_mut() {
-                    *description = redact_secrets(description);
-                }
-                redact_map(c.data.iter_mut());
-            }
-            _ => {}
+    // `Context` is `#[non_exhaustive]` upstream, so this match can never be
+    // exhaustive over its variants and a future SDK bump can add one we've
+    // never seen. The wildcard arm can't reach into an unrecognised
+    // variant's fields to redact them — it can only see that the variant
+    // exists — so rather than pass it through unscrubbed, drop it and log
+    // which type name got dropped.
+    contexts.retain(|_, context| match context {
+        Context::Other(map) => {
+            redact_map(map.iter_mut());
+            true
         }
-    }
+        Context::Device(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Os(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Runtime(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::App(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Browser(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Gpu(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Otel(c) => {
+            redact_map(c.attributes.iter_mut());
+            redact_map(c.resource.iter_mut());
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Response(c) => {
+            // Same reasoning as `event.request`/`transaction.request`:
+            // an HTTP response container routinely holds cookies/headers.
+            c.cookies = None;
+            c.headers.clear();
+            c.data = None;
+            true
+        }
+        Context::Trace(c) => {
+            // `sentry-tower` attaches one of these to every transaction,
+            // so once tracing is on this ships on essentially every
+            // envelope. `description` is free text and `data` is an open
+            // catch-all, same shape as the other variants above.
+            if let Some(description) = c.description.as_mut() {
+                *description = redact_secrets(description);
+            }
+            redact_map(c.data.iter_mut());
+            true
+        }
+        other => {
+            tracing::warn!(
+                context_type = %other.type_name(),
+                "dropping Sentry context of a type with no redaction rule"
+            );
+            false
+        }
+    });
 }
 
 /// Sentry `before_send` hook: strip PII/secrets before an event leaves the
@@ -463,23 +498,24 @@ pub fn resolve_traces_sample_rate() -> f32 {
 /// close, because there is no HTTP surface for a transaction name to be
 /// per-id about.
 ///
-/// Returns the init guard, whether a DSN was actually configured, and the
-/// resolved environment tag — pass the latter two to
-/// [`report_reporting_status`].
-pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGuard, bool, String) {
-    let dsn = std::env::var("SENTRY_DSN")
-        .ok()
-        .and_then(|s| s.parse().ok());
-    let dsn_configured = dsn.is_some();
-    let environment = resolve_environment();
-    let guard = sentry::init(sentry::ClientOptions {
+/// Build the `ClientOptions` for [`init_sentry`], split out so a test can
+/// assert `traces_sample_rate` and the scrubbing transport both actually land
+/// on the struct `sentry::init` receives, rather than each being proven only
+/// in isolation.
+fn build_client_options(
+    dsn: Option<sentry::types::Dsn>,
+    release: Option<Cow<'static, str>>,
+    environment: String,
+    traces_sample_rate: f32,
+) -> sentry::ClientOptions {
+    sentry::ClientOptions {
         dsn,
         release,
-        environment: Some(Cow::Owned(environment.clone())),
+        environment: Some(Cow::Owned(environment)),
         // Never attach default PII (IP, cookies, request bodies). This is a
         // payment processor.
         send_default_pii: false,
-        traces_sample_rate: resolve_traces_sample_rate(),
+        traces_sample_rate,
         // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
         // API keys, emails and on-chain addresses before events leave the host.
         before_send: Some(Arc::new(scrub_event)),
@@ -489,7 +525,24 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
         // that traces_sample_rate can be nonzero.
         transport: Some(Arc::new(ScrubbingTransportFactory)),
         ..Default::default()
-    });
+    }
+}
+
+/// Returns the init guard, whether a DSN was actually configured, and the
+/// resolved environment tag — pass the latter two to
+/// [`report_reporting_status`].
+pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGuard, bool, String) {
+    let dsn = std::env::var("SENTRY_DSN")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let dsn_configured = dsn.is_some();
+    let environment = resolve_environment();
+    let guard = sentry::init(build_client_options(
+        dsn,
+        release,
+        environment.clone(),
+        resolve_traces_sample_rate(),
+    ));
     (guard, dsn_configured, environment)
 }
 
@@ -1149,6 +1202,23 @@ mod tests {
             resolve_traces_sample_rate(),
             0.0,
             "\"nan\" parses to f32::NAN, which clamp() passes through unchanged; must fall back to 0.0 instead"
+        );
+    }
+
+    #[test]
+    fn client_options_carry_the_sample_rate_and_the_scrubbing_transport() {
+        let options = build_client_options(None, None, "testnet".to_string(), 0.42);
+        assert_eq!(
+            options.traces_sample_rate, 0.42,
+            "resolved sample rate must reach the struct sentry::init actually receives"
+        );
+        assert!(
+            options.transport.is_some(),
+            "ScrubbingTransportFactory must be wired in, or performance transactions ship unscrubbed"
+        );
+        assert!(
+            options.before_send.is_some(),
+            "scrub_event must be wired in, or error events ship unscrubbed"
         );
     }
 }
