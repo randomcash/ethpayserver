@@ -828,6 +828,36 @@ mod tests {
         );
     }
 
+    // `init_metrics_refuses_to_start_before_sentry_is_initialized` and
+    // `init_metrics_installs_a_working_recorder_once_sentry_is_ready` pin the
+    // ordering guard's logic in isolation - neither one drives the actual
+    // call site the guard exists to protect. `server/src/bin/server.rs`
+    // can't be driven in a unit test (it needs a live database, env config,
+    // and a bound TCP listener before it gets anywhere near these two
+    // calls), so this checks the real entry point the same cheap way
+    // `server/src/api/invoices/tests/query.rs` checks handler wiring it
+    // can't instantiate either: read the source and confirm the ordering
+    // textually, rather than trusting the doc comment above `init_metrics`
+    // that says to keep it.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn server_main_calls_init_sentry_before_init_metrics() {
+        let src = include_str!("bin/server.rs");
+        let sentry_pos = src
+            .find("evm::telemetry::init_sentry(")
+            .expect("server.rs should still call evm::telemetry::init_sentry");
+        let metrics_pos = src
+            .find("metrics::init_metrics()")
+            .expect("server.rs should still call metrics::init_metrics()");
+        assert!(
+            sentry_pos < metrics_pos,
+            "server.rs must call init_sentry before init_metrics - init_metrics's runtime \
+             guard depends on it, and a boot that got these backwards would fail closed at \
+             startup instead of silently dropping every Sentry-forwarded metric, including \
+             payserver_chain_healthy/payserver_chain_block_lag"
+        );
+    }
+
     // Exercises `FanoutRecorder` directly, without going through
     // `metrics::set_global_recorder` (a process-wide singleton other tests
     // in this module also touch). Proves the Prometheus side - the
