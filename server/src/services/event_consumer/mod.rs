@@ -471,9 +471,11 @@ impl<
             && envelope.cursor.epoch == applied.epoch
             && envelope.cursor.seq <= applied.seq
         {
-            // Already applied. Reachable because resume uses one shared
-            // low-water mark across chains: a chain further ahead than the
-            // slowest one sees its own already-applied entries again.
+            // Defence in depth, not a path resume takes today: `seq` is one
+            // outbox-wide counter applied in order and resume starts above
+            // the highest committed `seq`, so a delivered envelope is always
+            // ahead of every chain's cursor. Redelivery after a failed
+            // cursor commit is absorbed by the idempotent apply, not here.
             return true;
         }
 
