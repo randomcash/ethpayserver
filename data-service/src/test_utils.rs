@@ -665,10 +665,16 @@ impl ChainCursorWriter for InMemoryDataService {
                 "simulated commit_chain_cursor failure".to_string(),
             ));
         }
-        self.chain_cursors
-            .write()
-            .unwrap()
-            .insert((adapter_id.to_string(), chain_id), cursor);
+        // Same guard as the Postgres upsert: within one epoch a cursor
+        // never moves backwards.
+        let mut cursors = self.chain_cursors.write().unwrap();
+        let key = (adapter_id.to_string(), chain_id);
+        let advances = cursors
+            .get(&key)
+            .is_none_or(|old| old.epoch != cursor.epoch || old.seq < cursor.seq);
+        if advances {
+            cursors.insert(key, cursor);
+        }
         Ok(())
     }
 
