@@ -535,14 +535,30 @@ impl crate::payment_tx_index::PaymentTxIndexWriter for InMemoryDataService {
         // call site, just not "or neither does".
         self.upsert_with_tx_index(payment, tx_index).await?;
 
+        // A redelivered event mints a fresh `payment.id` every call
+        // (`handle_payment_detected` calls `Uuid::new_v4()` unconditionally),
+        // so deduping on that id would never match and would requeue a
+        // second obligation on every redelivery. The real key is whichever
+        // row `(chain_id, tx_hash, tx_index)` resolved to just above -
+        // Postgres's `ON CONFLICT ... RETURNING id` returns exactly that
+        // existing row's id for the same reason. Looking it back up here is
+        // this double's equivalent.
+        let key = (payment.chain_id.clone(), payment.tx_hash.clone(), tx_index);
+        let resolved_payment_id = *self
+            .payment_tx_index
+            .read()
+            .unwrap()
+            .get(&key)
+            .unwrap_or(&payment.id);
+
         let mut outbox = self.webhook_outbox.write().unwrap();
         if !outbox
             .iter()
-            .any(|o| o.payment_id == payment.id && o.event_type == event_type)
+            .any(|o| o.payment_id == resolved_payment_id && o.event_type == event_type)
         {
             outbox.push(crate::WebhookObligation {
                 id: Uuid::new_v4(),
-                payment_id: payment.id,
+                payment_id: resolved_payment_id,
                 invoice_id: payment.invoice_id.as_str().to_string(),
                 event_type: event_type.to_string(),
                 created_at: Utc::now(),

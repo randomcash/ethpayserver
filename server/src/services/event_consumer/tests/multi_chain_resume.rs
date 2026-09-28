@@ -129,11 +129,15 @@ async fn a_chain_further_ahead_than_the_low_water_mark_does_not_double_credit_on
     // The payment row upsert is keyed on `(chain_id, tx_hash, tx_index)`, so
     // a redelivered entry is absorbed into the same row and this count would
     // read 1 whether or not the dedup guard exists - it does not, on its
-    // own, prove anything. `handle_payment_detected` mints a fresh payment id
-    // on every call, though, so the webhook obligation it writes alongside
-    // the row (deduped on that id, not the row's) is *not* idempotent under
-    // redelivery: without the guard, chain 1's two already-applied entries
-    // would each queue a second, orphaned obligation.
+    // own, prove anything. The webhook obligation is separately protected:
+    // `handle_payment_detected` mints a fresh payment id on every call, but
+    // `upsert_with_tx_index_and_obligation` resolves the obligation's
+    // `payment_id` to whichever row `(chain_id, tx_hash, tx_index)` actually
+    // owns - the same existing row a redelivery's upsert lands on - and
+    // `webhook_outbox`'s `UNIQUE (payment_id, event_type)` absorbs the
+    // second write. See `resume_after_uncommitted_cursor.rs` for a test that
+    // redelivers through that path directly, with `apply_envelope`'s own
+    // guard never in play at all.
     let chain1_first_payments = PaymentReader::get_for_invoice(&*ds, &chain1_first)
         .await
         .unwrap();

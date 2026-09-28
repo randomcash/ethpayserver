@@ -13,7 +13,10 @@ use types::{
 };
 use uuid::Uuid;
 
-use super::helpers::{MockEVMMonitor, MockEmailSender, create_test_consumer};
+use super::helpers::{
+    MockEVMMonitor, MockEmailSender, RecordingWebhookSink, create_test_consumer,
+    create_test_consumer_with_webhook,
+};
 use crate::services::event_consumer::EventConsumer;
 
 #[tokio::test]
@@ -93,6 +96,99 @@ async fn test_handle_payment_confirmed_transitions_to_paid() {
         .await
         .unwrap();
     assert!(payments[0].confirmed_at.is_some());
+}
+
+/// `handle_payment_confirmed` has no transactional outbox of its own the
+/// way `handle_payment_detected` does - it calls `queue_webhook` directly,
+/// mid-handler. A redelivery (the outbox is at-least-once by design; see
+/// `resume_after_uncommitted_cursor.rs` for the crash window that produces
+/// one) re-runs this whole function for an event already fully applied.
+/// What stops a second webhook here is not an id-keyed dedup table but the
+/// invoice status check a few lines up: once the first run has already
+/// transitioned the invoice to `Paid`, a second run reads that committed
+/// status back and falls into the "final state, skip" branch before it ever
+/// reaches `queue_webhook` again. This calls the handler twice directly,
+/// with no `apply_envelope` guard anywhere in the picture, to prove that
+/// holds rather than assume it from reading the match arms.
+#[tokio::test]
+async fn redelivering_an_already_applied_confirmation_does_not_queue_a_second_webhook() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let store_id = StoreId::new();
+    ds.set_webhook(store_id.0, "https://merchant.example/hook", "secret");
+    let sink = Arc::new(RecordingWebhookSink::new());
+    let consumer = create_test_consumer_with_webhook(ds.clone(), bridge.clone(), sink.clone());
+
+    let invoice_id = InvoiceId::new();
+    let invoice = InvoiceData {
+        id: invoice_id.clone(),
+        store_id,
+        currency: "ETH".to_string(),
+        status: InvoiceStatus::Processing,
+        amount: "1000000000000000000".to_string(),
+        amount_received: "1000000000000000000".to_string(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::hours(1),
+        metadata: None,
+        customer_email: None,
+        extra: None,
+    };
+    InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
+
+    let tx_hash = B256::repeat_byte(0xcd);
+    let payment = PaymentData {
+        id: Uuid::new_v4(),
+        invoice_id: invoice_id.clone(),
+        payment_option_id: None,
+        chain_id: ChainId::parse("eip155:1").unwrap(),
+        asset_type: types::AssetType::Native,
+        amount: "1000000000000000000".to_string(),
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        tx_hash: format!("{:#x}", tx_hash),
+        block_number: Some(12345678),
+        detected_at: Utc::now(),
+        confirmed_at: None,
+        from_address: Some("0xabababababababababababababababababababab".to_string()),
+        reorged: false,
+        extra: None,
+        credited_amount: Some("1".to_string()),
+        rate_used: None,
+        rate_applied_at: None,
+    };
+    PaymentWriter::upsert(&*ds, &payment).await.unwrap();
+
+    let event = PaymentConfirmed {
+        tx_index: 0,
+        chain_id: 1,
+        invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+        payment_address: Address::ZERO,
+        amount: U256::from(1000000000000000000u64),
+        tx_hash,
+        block_number: 12345678,
+        confirmations: 12,
+        confirmed_at: Utc::now(),
+    };
+
+    consumer
+        .handle_payment_confirmed(event.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        sink.jobs().len(),
+        1,
+        "the first apply must queue exactly one webhook"
+    );
+
+    // Redeliver the identical event - exactly what a resumed consumer would
+    // hand `apply_envelope` again if the durable cursor never advanced past
+    // it.
+    consumer.handle_payment_confirmed(event).await.unwrap();
+    assert_eq!(
+        sink.jobs().len(),
+        1,
+        "redelivering an already-confirmed payment must not queue a second webhook"
+    );
 }
 
 /// 2^96 base units - one past the largest integer `rust_decimal::Decimal`

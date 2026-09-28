@@ -10,6 +10,7 @@ mod payment_confirmed;
 mod payment_detected;
 mod reconcile_cursors;
 mod reorg;
+mod resume_after_uncommitted_cursor;
 mod resume_failure_hook;
 mod resume_uses_persisted_cursor;
 
