@@ -101,6 +101,50 @@ async fn expected_watched_addresses_excludes_a_resolved_invoices_watch() {
     );
 }
 
+/// The view's `i.status IN (...)` clause names three "still live" statuses,
+/// not one - a typo or an enum/DB string mismatch on either of the other two
+/// would silently and permanently exclude every invoice in that status from
+/// the expected set, which is exactly the "missed watch" failure the ticket
+/// calls the worse fault. `expected_watched_addresses_includes_a_still_pending_invoices_watch`
+/// only exercises `pending`; this covers the other two live branches.
+#[tokio::test]
+#[ignore]
+async fn expected_watched_addresses_includes_a_processing_or_partially_paid_invoices_watch() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    for status in [InvoiceStatus::Processing, InvoiceStatus::PartiallyPaid] {
+        let mut invoice = seeded_test_invoice(&service).await;
+        invoice.expires_at = Utc::now() + Duration::hours(2);
+        InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+        InvoiceWriter::update_status(&service, &invoice.id, status)
+            .await
+            .unwrap();
+
+        let payment_option = test_payment_option(&invoice.id, &ChainId::evm(1));
+        PaymentOptionWriter::create(&service, &payment_option)
+            .await
+            .unwrap();
+
+        let address = unique_address();
+        WatchedAddressWriter::upsert(
+            &service,
+            &address,
+            &payment_option.id,
+            &ChainId::evm(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let expected = service.get_expected_watched_addresses().await.unwrap();
+        assert!(
+            expected.iter().any(|w| w.address == address),
+            "an invoice in {status:?} must still appear as expected - the \
+             view's status list names it live"
+        );
+    }
+}
+
 /// The mirror-image lag window: an invoice whose `expires_at` has already
 /// passed, but `get_expired_for_cleanup` has not run yet, so `i.status` is
 /// still `pending`. The invoice can still be paid at this instant and the
