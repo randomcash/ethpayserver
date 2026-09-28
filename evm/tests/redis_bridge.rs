@@ -413,3 +413,66 @@ async fn a_full_keyspace_loss_mints_an_epoch_that_does_not_collide_with_the_old_
          cursor from before the loss would be silently trusted to resume into the reset outbox"
     );
 }
+
+/// An entry that cannot be read - missing fields, or a payload that is not a
+/// `MonitorEvent` - must end the stream. Skipping it would advance the
+/// reader past a payment with no gap left to detect.
+async fn assert_bad_entry_ends_stream(fields: &[(&str, &str)]) {
+    let suffix = Uuid::new_v4();
+    let events_channel = format!("test:durable_resume:{suffix}:events");
+    let bridge = RedisBridge::new(
+        &redis_url(),
+        &events_channel,
+        &format!("test:durable_resume:{suffix}:commands"),
+    )
+    .await
+    .expect("connect to REDIS_URL");
+
+    bridge
+        .publish(&make_event(B256::from([1u8; 32])))
+        .await
+        .unwrap();
+    let mut stream = bridge.subscribe_from(None).await.unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap();
+    let epoch = first.cursor.epoch;
+
+    let client = redis::Client::open(redis_url()).expect("connect to REDIS_URL");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("raw connection");
+    let mut items: Vec<(String, String)> = vec![
+        ("epoch".into(), epoch.to_string()),
+        ("seq".into(), "2".into()),
+        ("chain_id".into(), "1".into()),
+        ("block_height".into(), "100".into()),
+    ];
+    items.retain(|(k, _)| !fields.iter().any(|(fk, _)| fk == k));
+    items.extend(fields.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    let _: String = redis::AsyncCommands::xadd(&mut conn, &events_channel, "2-0", &items)
+        .await
+        .expect("raw XADD");
+
+    let next = tokio::time::timeout(std::time::Duration::from_secs(7), stream.next()).await;
+    match next {
+        Ok(None) => {}
+        Ok(Some(envelope)) => panic!("bad entry was delivered as seq {}", envelope.cursor.seq),
+        Err(_) => panic!("stream neither ended nor delivered within the timeout"),
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_malformed_entry_ends_the_stream() {
+    // No payload field at all.
+    assert_bad_entry_ends_stream(&[]).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_undeserializable_payload_ends_the_stream() {
+    assert_bad_entry_ends_stream(&[("payload", "{not a monitor event")]).await;
+}
