@@ -233,6 +233,8 @@ ethpayserver/
 ├── server/            # Main API server (ethpayserver binary)
 ├── evm/               # EVM blockchain interaction (evmmonitor binary)
 ├── data-service/      # PostgreSQL + Redis data access layer
+├── mcp-server/        # MCP tools for AI agents (ethpay-mcp binary)
+├── loadtest/          # Goose-based load test scenarios
 ├── e2e/               # Playwright suite, against the server + the client image
 └── memos/             # Project documentation and notes
 ```
@@ -307,8 +309,9 @@ everyone's build at one person's disk.
 **Landing a commons change**
 
 1. Merge it in `payserver-commons` and note the SHA.
-2. Here: `scripts/commons.sh pin <sha>` then
-   `cargo update -p types -p auth -p crypto -p rates -p ui-kit`.
+2. Here: `scripts/commons.sh pin <sha>` — it reads the crates currently
+   pinned in `Cargo.toml` and prints the matching `cargo update -p ...`
+   command to run, so the list can't drift out of sync with the manifest.
 3. Commit `Cargo.toml` and `Cargo.lock` in the PR that needs it.
 
 The bump is the same PR as the code that depends on it, so a breaking change to a

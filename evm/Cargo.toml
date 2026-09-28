@@ -26,8 +26,8 @@ test-utils = []
 # which is a deliberate product decision, not something this flag should
 # drift into on its own.
 hot-wallet = []
-# Sentry `before_send` PII scrubber. Shared by the `server` and
-# `evmmonitor` binaries so both run one audited scrubber implementation.
+# Sentry `before_send` PII scrubber and tracing event filter. Shared by the
+# `server` and `evmmonitor` binaries so both run one audited implementation.
 sentry-scrub = ["dep:sentry", "dep:sentry-tracing", "dep:regex", "dep:anyhow"]
 monitor-bin = ["redis", "types", "data-service", "data-service/redis", "dep:toml", "dep:tracing-subscriber", "dep:dotenvy", "dep:clap", "dep:anyhow", "dep:sentry", "dep:sentry-tracing", "sentry-scrub", "tokio/full"]
 
@@ -120,9 +120,18 @@ tokio = { version = "1.42", features = ["full", "test-util"] }
 # a log through the real subscriber -> sentry_tracing -> before_send_log path
 # instead of calling `scrub_log` directly, so the test proves the wiring and
 # not just the pure function. `tracing-subscriber` installs the layer that
-# hooks `tracing::info!` up to that pipeline in the first place.
+# hooks `tracing::info!` up to that pipeline in the first place, and also
+# lets `sentry_event_filter`'s tests observe a real `tracing::Event` through
+# an installed layer instead of hand-building `tracing::Metadata`.
 sentry = { version = "0.49.3", default-features = false, features = ["logs", "test"] }
 # `env-filter` builds the same `LOG_LEVEL` filter `server.rs` and
 # `evmmonitor/main.rs` do, so a test can construct their real layer stack
 # instead of a lookalike missing the filter that caused the independence bug.
+# It also backs test-only capture of what the redis-bridge shutdown log tails
+# actually emit; the production `monitor-bin` feature depends on it separately.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Test-only: the server side of a real WebSocket handshake, used to make
+# `alloy_pubsub`/`alloy_transport_ws` (pulled in transitively via `alloy`)
+# hit an actual connection reset in ws_pubsub_retry_escalation.rs. Pinned to
+# 0.28, the exact version alloy-transport-ws 1.8.3 itself depends on.
+tokio-tungstenite = "0.28"

@@ -45,6 +45,8 @@ Always returns **200** with a JSON body containing per-dependency status and lat
 
 ```json
 {
+  "build_sha": "a1b2c3d",
+  "version": "0.1.0",
   "postgres": {"status": "ok", "latency_ms": 3},
   "redis": {"status": "ok", "latency_ms": 1},
   "rpcs": {
@@ -55,8 +57,14 @@ Always returns **200** with a JSON body containing per-dependency status and lat
 }
 ```
 
+The response also carries an `x-sentry-release` header with the compiled
+`SENTRY_RELEASE`, so a deploy check can compare it against `build_sha` from
+the same running process — see `docs/deployment/mainnet-gate.md`.
+
 | Field | Description |
 |-------|-------------|
+| `build_sha` | Short commit sha baked in at compile time. What `deploy-verify-testnet` and the mainnet gate poll for to confirm a deploy landed. |
+| `version` | `CARGO_PKG_VERSION` of the running binary |
 | `postgres.latency_ms` | Round-trip time for a Postgres `SELECT 1` |
 | `redis.latency_ms` | Round-trip time for a Redis `PING` |
 | `rpcs.<chain_id>.last_block` | Latest block number reported by evmmonitor for this chain |

@@ -9,6 +9,18 @@ developer machine is breached, or as part of a scheduled key rotation policy.
 - **Personnel change**: developer who had access leaves the team.
 - **Scheduled rotation**: periodic rotation as part of security hygiene.
 
+**Rotation is API-only today.** There is no rotate control in the dashboard:
+the server exposes `POST /stores/{store_id}/wallet/rotate`
+(`server/src/api/stores/wallets.rs`), and the client has no call site for it -
+its Wallet tab can add, view and export a key, but not rotate one. So the
+`curl` form below is not merely the scriptable route, it is the only route, and
+whoever rotates a key reads the warnings in "What happens during rotation"
+here rather than being walked through them on screen.
+
+Saying so plainly because the alternative is worse than the gap: a runbook that
+describes a control the reader cannot find leaves them hunting the UI during
+exactly the incident - a compromised key - when they have least time to spare.
+
 ## What happens during rotation
 
 1. **All payment methods** for the store are repointed at the account wallet
@@ -16,7 +28,11 @@ developer machine is breached, or as part of a scheduled key rotation policy.
 2. **Derivation indices are not reset.** The destination wallet carries the
    only correct position for its own key. If the account has used that xpub
    before, rotation resumes where it left off; if the key is new, it starts at
-   zero because a new key has issued nothing.
+   zero because a new key has issued nothing. `rotate_methods` repoints a
+   payment method at the wallet `upsert_wallet` finds-or-creates
+   (`data-service/src/postgres/wallet.rs`, `wallet_rotation.rs`) and never
+   touches a counter on that wallet — there is no code path left that zeroes
+   one.
 
    This changed when wallets moved to the account. Rotation used to write the
    new xpub onto each
@@ -71,7 +87,7 @@ Content-Type: application/json
     {
       "id": "uuid",
       "payment_method_id": "uuid",
-      "chain_id": 11155111,
+      "chain_id": "eip155:11155111",
       "asset_symbol": "ETH",
       "previous_xpub_masked": "xpub6D4B...cLW5",
       "previous_derivation_index": 42,
@@ -103,7 +119,7 @@ for how to actually generate one. The key must be a valid `xpub` (base58).
 ### 2. Rotate via API
 
 ```bash
-curl -X POST https://pay.random.cash/stores/<STORE_ID>/wallet/rotate \
+curl -X POST https://pay.random.cash/api/stores/<STORE_ID>/wallet/rotate \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"xpub": "<NEW_XPUB>", "reason": "scheduled rotation"}'
@@ -124,10 +140,14 @@ curl -X POST https://pay.random.cash/stores/<STORE_ID>/wallet/rotate \
 
 ## Reversal
 
-Rotation is reversible: call the same endpoint with the original xpub. The
-derivation index resets to zero, which means previously-used indices will be
-re-derived. This is safe because address reuse in a receive-only context does
-not leak funds, but it may confuse payment reconciliation. Only reverse if the
+Rotation is reversible: call the same endpoint with the original xpub. As with
+any rotation, the derivation index is **not** reset — the wallet for that xpub
+already exists (it's the one just rotated off), and it resumes counting from
+wherever it left off rather than re-deriving indices already handed out.
+`upsert_wallet`'s `ON CONFLICT (user_id, namespace, xpub) DO UPDATE` only ever
+touches `name` (`data-service/src/postgres/wallet.rs`); the same find-or-create
+path a forward rotation uses, so a reversal cannot zero the counter any more
+than a forward rotation onto an already-seen key can. Only reverse if the
 rotation was a mistake.
 
 ## Audit trail

@@ -26,6 +26,22 @@ pub trait PaymentTxIndexWriter: Send + Sync {
         payment: &PaymentData,
         tx_index: i32,
     ) -> RepositoryResult<()>;
+
+    /// Same upsert as [`Self::upsert_with_tx_index`], but also records a
+    /// webhook notification obligation for the payment - in the same
+    /// database transaction, so a crash between "payment committed" and
+    /// "obligation recorded" cannot happen.
+    ///
+    /// `event_type` is the wire name of the event this payment should raise
+    /// (see `api_types::webhook::WebhookEventType::as_str`); this trait takes
+    /// it as a plain string so this crate need not depend on `api-types` for
+    /// one column.
+    async fn upsert_with_tx_index_and_obligation(
+        &self,
+        payment: &PaymentData,
+        tx_index: i32,
+        event_type: &str,
+    ) -> RepositoryResult<()>;
 }
 
 /// Read a payment back by the transfer it came from.
