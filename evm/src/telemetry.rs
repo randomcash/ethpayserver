@@ -29,7 +29,6 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use sentry::protocol::{Event, Log, Value};
-use tracing::{Level, Metadata};
 
 /// Ordered `(pattern, replacement)` redaction rules applied to every free-text
 /// field. Compiled once and reused for the life of the process.
@@ -287,61 +286,6 @@ pub fn resolve_environment() -> String {
     std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
 }
 
-/// `sentry-tracing` event filter: same as [`sentry_tracing::default_event_filter`]
-/// except it downgrades `alloy_transport_ws`'s own `error!` logs to
-/// breadcrumbs instead of paged Sentry events.
-///
-/// There is no defect of ours to fix here: the log this filter targets is
-/// emitted entirely inside `alloy_transport_ws`'s own source, for a
-/// malformed frame a provider sent, and this crate never sees the bytes
-/// before that library's read loop does. That makes it the environmental
-/// case — a peer sending something unexpected — and a `error!` log line
-/// that already gets a full reconnect-and-resubscribe underneath it is not
-/// a silent failure to paper over. But leaving it at the default severity
-/// and just noting "this is fine" somewhere doesn't stop the next
-/// transient frame from paging on-call again; downgrading it to a
-/// breadcrumb here is what actually stops that, and it's backed by an
-/// audit (below) and a test that the genuine failure case — reconnection
-/// exhausted, the stream actually dies — still pages. Treat this function,
-/// not a comment elsewhere, as the record of that determination.
-///
-/// This is a whole-target match, not a match on one message, because it's
-/// audited against every `error!` call site in that crate's native backend
-/// (`alloy-transport-ws` 1.8.3: a frame that doesn't parse, a close frame, a
-/// missed keepalive pong, a dropped socket), and every one of them ends the
-/// same way — the backend loop breaks and calls `close_with_error()`, handing
-/// off to `alloy_pubsub`'s own retry-with-backoff (`PubSubService`
-/// reconnects and re-subscribes on its own, 10 attempts 3s apart by default)
-/// before this crate's block stream ever sees a gap. There is no `error!` in
-/// that crate for a case that *isn't* retried underneath it, so narrowing the
-/// match to the one message this ticket happened to catch would leave the
-/// rest of the same noise — a missed pong, a dropped socket — still paging.
-///
-/// The genuine case — reconnection exhausted, the stream actually dies —
-/// still pages, and does so from two targets neither touched by this filter:
-/// `alloy_pubsub::service`'s own `error!("Reconnect failed after N attempts,
-/// shutting down")`, and, once that closes the subscription stream, this
-/// crate's `error!("WebSocket subscription ended")` in
-/// `evm::monitor::source::rpc`.
-///
-/// `alloy` is pinned by a caret (`"1.0"` in `evm/Cargo.toml`), so a routine
-/// point release can change this without bumping our version constraint. The
-/// `alloy_transport_ws_pin_matches_the_audited_release` test below fails the
-/// build the moment `Cargo.lock` resolves `alloy-transport-ws` to a release
-/// other than the one this audit covers — so this isn't just a comment asking
-/// a human to remember. Re-run the audit against the new release's
-/// `error!()` call sites and move that test's pinned version forward.
-#[must_use]
-pub fn sentry_event_filter(metadata: &Metadata<'_>) -> sentry_tracing::EventFilter {
-    let target = metadata.target();
-    let is_audited_crate =
-        target == "alloy_transport_ws" || target.starts_with("alloy_transport_ws::");
-    if *metadata.level() == Level::ERROR && is_audited_crate {
-        return sentry_tracing::EventFilter::Breadcrumb;
-    }
-    sentry_tracing::default_event_filter(metadata)
-}
-
 /// Builds the `ClientOptions` [`init_sentry`] hands to `sentry::init`. Split
 /// out so a test can construct the exact options production uses — via
 /// `sentry::test::with_captured_envelopes_options` — instead of hand-rolling
@@ -486,7 +430,11 @@ pub fn sentry_log_event_filter(
     min_level: tracing::Level,
 ) -> impl Fn(&tracing::Metadata<'_>) -> sentry_tracing::EventFilter + Send + Sync + 'static {
     move |metadata| {
-        apply_log_level_gate(sentry_event_filter(metadata), *metadata.level(), min_level)
+        apply_log_level_gate(
+            sentry_tracing::default_event_filter(metadata),
+            *metadata.level(),
+            min_level,
+        )
     }
 }
 
@@ -579,7 +527,8 @@ pub fn sentry_event_filter(
     move |metadata| {
         let filter = log_gate(metadata);
         let demote = *metadata.level() == tracing::Level::ERROR
-            && (metadata.target().starts_with("alloy_transport_ws")
+            && (metadata.target() == "alloy_transport_ws"
+                || metadata.target().starts_with("alloy_transport_ws::")
                 || metadata.target() == "server::services::webhook::merchant_delivery_failed");
         if demote {
             (filter - sentry_tracing::EventFilter::Event) | sentry_tracing::EventFilter::Breadcrumb

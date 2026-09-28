@@ -1,10 +1,15 @@
 use super::*;
 use std::sync::Mutex;
+use tracing::Metadata;
 
 /// A `tracing::Subscriber` that runs [`sentry_event_filter`] on every
 /// event it sees and records the verdict, so the filter can be tested
 /// against real `tracing::Metadata` produced by the actual macros rather
 /// than a hand-built one.
+///
+/// `min_level` is `WARN`, matching the default each binary passes. These
+/// tests only assert on `Event`/`Breadcrumb`, which the level gate cannot
+/// change, so the choice does not affect any of them.
 struct RecordingSubscriber(Arc<Mutex<Vec<sentry_tracing::EventFilter>>>);
 
 impl tracing::Subscriber for RecordingSubscriber {
@@ -20,7 +25,7 @@ impl tracing::Subscriber for RecordingSubscriber {
         self.0
             .lock()
             .unwrap()
-            .push(sentry_event_filter(event.metadata()));
+            .push(sentry_event_filter(tracing::Level::WARN)(event.metadata()));
     }
     fn enter(&self, _span: &tracing::span::Id) {}
     fn exit(&self, _span: &tracing::span::Id) {}
@@ -47,9 +52,9 @@ fn alloy_ws_frame_noise_is_a_breadcrumb_but_our_own_subscription_failure_still_p
     });
 
     let seen = seen.lock().unwrap();
-    assert_eq!(
-        seen[0].bits(),
-        sentry_tracing::EventFilter::Breadcrumb.bits(),
+    assert!(
+        seen[0].contains(sentry_tracing::EventFilter::Breadcrumb)
+            && !seen[0].contains(sentry_tracing::EventFilter::Event),
         "alloy's own transient frame error must not page: {seen:?}"
     );
     // `.contains(Event)` rather than exact equality: `default_event_filter`
@@ -77,9 +82,10 @@ fn alloy_ws_submodule_targets_are_also_a_breadcrumb() {
     });
 
     let seen = seen.lock().unwrap();
-    assert_eq!(
-        seen.iter().map(|f| f.bits()).collect::<Vec<_>>(),
-        [sentry_tracing::EventFilter::Breadcrumb.bits()],
+    assert_eq!(seen.len(), 1, "expected exactly one record: {seen:?}");
+    assert!(
+        seen[0].contains(sentry_tracing::EventFilter::Breadcrumb)
+            && !seen[0].contains(sentry_tracing::EventFilter::Event),
         "a submodule target under alloy_transport_ws must also be treated as noise: {seen:?}"
     );
 }
@@ -108,7 +114,7 @@ fn alloy_ws_lookalike_crate_name_is_not_swallowed() {
 /// recording subscriber, which proves the filter's own verdicts but not
 /// that a real `sentry::Client` — built the way `server.rs` and
 /// `evmmonitor/main.rs` actually build one, via [`client_options`] and
-/// `sentry_tracing::layer().event_filter(sentry_log_event_filter(..))` —
+/// `sentry_tracing::layer().event_filter(sentry_event_filter(..))` —
 /// honours that verdict end to end. This drives both targets through that
 /// real construction and inspects what actually reached the client as a
 /// top-level event: `alloy_transport_ws`'s frame error must not appear as
@@ -120,7 +126,7 @@ fn alloy_ws_frame_noise_does_not_reach_a_real_sentry_client_as_an_event() {
     use tracing_subscriber::prelude::*;
 
     let _dispatcher = tracing_subscriber::registry()
-        .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)))
+        .with(sentry_tracing::layer().event_filter(sentry_event_filter(tracing::Level::INFO)))
         .set_default();
 
     let envelopes = sentry::test::with_captured_envelopes_options(
