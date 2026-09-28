@@ -110,6 +110,59 @@ const PUBLISH_SCRIPT: &str = r"
     return {seq, epoch}
 ";
 
+/// Mint a new epoch on `conn` and make it this outbox's current one.
+///
+/// Unconditional SET, not `NX`: `get_or_init_epoch` uses `NX` because it must
+/// not clobber a value another caller already agreed on, but this is the one
+/// call whose entire job is to make every existing agreement stale.
+///
+/// Free-standing rather than a method so the subscription stream, which holds
+/// its own connection and no `&self`, bumps the epoch through the same code
+/// the rest of the bridge does. Two implementations of "make everyone's
+/// cursor stale" is one more than this mechanism can afford.
+async fn set_new_epoch<C: AsyncCommands>(conn: &mut C, epoch_key: &str) -> EvmResult<i64> {
+    let new_epoch = random_epoch();
+    let _: () = conn
+        .set(epoch_key, new_epoch)
+        .await
+        .map_err(|e| EvmError::Monitor(format!("redis SET failed: {}", e)))?;
+    Ok(new_epoch)
+}
+
+/// Report a live subscription skipping forward past the retention window, and
+/// make the break visible to everyone else reading this outbox.
+///
+/// The caller ends the stream immediately after. Yielding on would hand the
+/// consumer the entries that survived as though they were the next ones, and
+/// its dedup - which only rejects a *repeated* `seq` - would accept them: the
+/// payments in the gap would be lost with nothing logged and nothing red.
+///
+/// Bumping the epoch rather than only logging is what the resume-time check
+/// does, for the same reason: every other consumer sharing this outbox needs
+/// to see the lineage break the next time it checks, not just this one. A
+/// failed bump still ends the stream - this consumer's own correctness does
+/// not depend on the other consumers being told.
+async fn announce_retention_gap<C: AsyncCommands>(
+    conn: &mut C,
+    epoch_key: &str,
+    expected: i64,
+    got: i64,
+) {
+    match set_new_epoch(conn, epoch_key).await {
+        Ok(new_epoch) => error!(
+            expected,
+            got, new_epoch, "stream skipped past the retention window; ending the stream"
+        ),
+        Err(e) => error!(
+            expected,
+            got,
+            error = %e,
+            "stream skipped past the retention window and the epoch could not be bumped; \
+             ending the stream anyway"
+        ),
+    }
+}
+
 /// Redis event bridge.
 pub struct RedisBridge {
     /// Redis client for creating connections.
@@ -251,6 +304,36 @@ impl RedisBridge {
             .map_err(|e| EvmError::Monitor(format!("corrupt epoch value {epoch:?}: {e}")))
     }
 
+    /// Refuse a resume whose cursor the outbox no longer holds.
+    ///
+    /// Same epoch does not, on its own, mean `cursor.seq` is still safe to
+    /// resume from: `XADD ... MAXLEN` trims independently of the epoch key,
+    /// so a consumer that falls behind the retention window can have its
+    /// committed position trimmed out while the epoch never moved. Left
+    /// unchecked, `XREAD` would silently resume from whatever the stream
+    /// happens to retain next - exactly the "starting from wherever" failure
+    /// this whole mechanism exists to rule out. Bumping the epoch here,
+    /// rather than only reporting the gap, means every other caller sharing
+    /// this outbox also sees the lineage break the next time it checks.
+    ///
+    /// This covers a consumer that was already behind when it subscribed.
+    /// A live one can fall behind the same window without resubscribing;
+    /// [`announce_retention_gap`] covers that.
+    async fn ensure_cursor_is_still_retained(&self, from: Option<EventCursor>) -> EvmResult<()> {
+        if let Some(cursor) = from
+            && let Some(oldest) = self.oldest_retained_seq().await?
+            && oldest > cursor.seq + 1
+        {
+            let new_epoch = self.bump_epoch().await?;
+            return Err(EvmError::EventStreamOutOfRange(format!(
+                "resume at seq {} is behind the oldest retained entry (seq {oldest}); \
+                 the outbox has moved to epoch {new_epoch}",
+                cursor.seq
+            )));
+        }
+        Ok(())
+    }
+
     /// The `seq` of the oldest entry this outbox still retains, or `None` if
     /// it currently has none at all (nothing published yet, or trimmed down
     /// to nothing).
@@ -317,17 +400,7 @@ impl EventBridge for RedisBridge {
         // rule out. Bumping the epoch here, rather than only reporting the
         // gap, means every other caller sharing this outbox also sees the
         // lineage break the next time it checks, not just this one.
-        if let Some(cursor) = from
-            && let Some(oldest) = self.oldest_retained_seq().await?
-            && oldest > cursor.seq + 1
-        {
-            let new_epoch = self.bump_epoch().await?;
-            return Err(EvmError::EventStreamOutOfRange(format!(
-                "resume at seq {} is behind the oldest retained entry (seq {oldest}); \
-                 the outbox has moved to epoch {new_epoch}",
-                cursor.seq
-            )));
-        }
+        self.ensure_cursor_is_still_retained(from).await?;
 
         let client = self.client.clone();
         let stream_key = self.events_channel.clone();
@@ -341,6 +414,27 @@ impl EventBridge for RedisBridge {
             Some(cursor) => format!("{}-0", cursor.seq),
             None => "0-0".to_string(),
         };
+        let epoch_key = self.epoch_key();
+        // The `seq` this stream expects to see next.
+        //
+        // The check above runs once, before the first `XREAD`, and so only
+        // covers a consumer that was already behind when it subscribed. A
+        // live consumer can fall behind the same window without ever
+        // resubscribing: `run` only calls `.next()` again once the current
+        // envelope has fully applied, so a slow write suspends this
+        // generator while other chains keep publishing into the same shared
+        // outbox and `XADD ... MAXLEN` keeps trimming. `XREAD` reports no
+        // gap when that happens - it returns whatever now survives past
+        // `last_id` - and the consumer's dedup only rejects a *repeated*
+        // seq, never a forward jump, so the skipped events are accepted as
+        // the normal next ones and the payments in them are lost silently.
+        //
+        // `INCR` and `XADD` run in the same atomic script, so retained seqs
+        // are contiguous and a jump can only mean entries were trimmed.
+        // `None` starts with no expectation on purpose: a caller with no
+        // committed position asked for whatever is retained, so the first
+        // entry sets the expectation rather than being measured against one.
+        let mut expected_seq = from.map(|cursor| cursor.seq + 1);
 
         let s = stream! {
             let mut conn = match client.get_multiplexed_async_connection().await {
@@ -402,6 +496,14 @@ impl EventBridge for RedisBridge {
                             return;
                         };
 
+                        if let Some(expected) = expected_seq
+                            && seq > expected
+                        {
+                            announce_retention_gap(&mut conn, &epoch_key, expected, seq).await;
+                            return;
+                        }
+                        expected_seq = Some(seq + 1);
+
                         match serde_json::from_str::<MonitorEvent>(&payload) {
                             Ok(event) => yield EventEnvelope {
                                 chain_id,
@@ -426,17 +528,7 @@ impl EventBridge for RedisBridge {
     }
 
     async fn bump_epoch(&self) -> EvmResult<i64> {
-        let mut conn = self.publisher.clone();
-        let new_epoch = random_epoch();
-        // Unconditional SET, not `NX`: `get_or_init_epoch` uses `NX` because
-        // it must not clobber a value another caller already agreed on, but
-        // this is the one call whose entire job is to make every existing
-        // agreement stale.
-        let _: () = conn
-            .set(self.epoch_key(), new_epoch)
-            .await
-            .map_err(|e| EvmError::Monitor(format!("redis SET failed: {}", e)))?;
-        Ok(new_epoch)
+        set_new_epoch(&mut self.publisher.clone(), &self.epoch_key()).await
     }
 
     // =========================================================================

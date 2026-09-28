@@ -206,6 +206,86 @@ async fn resuming_past_the_retention_window_bumps_the_epoch_and_fails_out_of_ran
     );
 }
 
+/// The check above runs once, before the first `XREAD`, so it only catches a
+/// consumer that was already behind when it subscribed. A live one reaches
+/// the same loss by a different route, and this is that route.
+///
+/// `EventConsumer::run` polls again only once the current envelope has fully
+/// applied, so a single slow write leaves this stream suspended while every
+/// chain sharing the outbox keeps publishing into it and `XADD ... MAXLEN`
+/// keeps trimming. `XREAD` reports nothing unusual when the entries in
+/// between go: it simply returns what now survives past the last id. The
+/// consumer's dedup rejects a *repeated* `seq`, never a forward jump, so
+/// before this guard the skipped events were accepted as the normal next
+/// ones and the payments inside them were lost with nothing logged.
+#[tokio::test]
+#[ignore]
+async fn a_live_stream_ends_rather_than_skipping_entries_trimmed_under_it() {
+    let suffix = Uuid::new_v4();
+    let bridge = RedisBridge::new_with_maxlen(
+        &redis_url(),
+        &format!("test:durable_resume:{suffix}:events"),
+        &format!("test:durable_resume:{suffix}:commands"),
+        3,
+    )
+    .await
+    .expect("connect to REDIS_URL");
+
+    for i in 0..5u8 {
+        bridge
+            .publish(&make_event(B256::from([i; 32])))
+            .await
+            .unwrap();
+    }
+
+    let epoch_before = bridge.current_epoch().await.unwrap();
+    let cursor = EventCursor {
+        epoch: epoch_before,
+        seq: 2,
+        block_height: 0,
+    };
+
+    // Subscribing has to succeed here, and does: five entries under a
+    // `MAXLEN ~ 3` cap are all still present, because `~` only trims whole
+    // radix nodes. That is the point - the up-front check has nothing to
+    // catch, so what this test exercises is the guard inside the stream.
+    let mut stream = bridge
+        .subscribe_from(Some(cursor))
+        .await
+        .expect("nothing is trimmed yet, so this subscription must be allowed");
+
+    // Enough publishes to make `~` actually trim, by a wide margin.
+    for i in 0..300u32 {
+        bridge
+            .publish(&make_event(B256::from(U256::from(i))))
+            .await
+            .unwrap();
+    }
+
+    let next = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+        .await
+        .expect("the stream must end rather than block");
+    assert!(
+        next.is_none(),
+        "expected the stream to end on the gap; it yielded seq {:?} instead",
+        next.map(|e| e.cursor.seq)
+    );
+
+    // Proves the assertion above was not vacuous: had nothing been trimmed,
+    // seq 3 would still be there and this would return a stream.
+    match bridge.subscribe_from(Some(cursor)).await {
+        Err(EvmError::EventStreamOutOfRange(_)) => {}
+        Err(e) => panic!("expected the entries to have been trimmed; got a different error: {e}"),
+        Ok(_) => panic!("nothing was trimmed, so the test above proved nothing"),
+    }
+
+    assert_ne!(
+        epoch_before,
+        bridge.current_epoch().await.unwrap(),
+        "a gap must bump the epoch so every other consumer of this outbox sees the break too"
+    );
+}
+
 /// A total Redis data loss (restart with no AOF/RDB, an evicted keyspace)
 /// must not let the outbox mint the same epoch it had before. If it did, a
 /// cursor persisted before the loss would compare equal to the "fresh" one

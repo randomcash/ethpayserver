@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tracing::error;
 
 /// The event outbox: every retained published envelope, in publish order.
 ///
@@ -163,12 +164,47 @@ impl EventBridge for MemoryBridge {
         let outbox = Arc::clone(&self.outbox);
         let notify = Arc::clone(&self.notify);
         let mut next_seq = from.map(|c| c.seq + 1).unwrap_or(0);
+        // Whether `next_seq` is a position this stream must actually be able
+        // to reach, or merely where it happened to start. A caller with no
+        // committed position asked for whatever is retained, so it cannot
+        // have fallen behind anything.
+        let mut expect_contiguous = from.is_some();
 
         let s = stream! {
             loop {
                 // Register interest before checking, so a publish landing
                 // between the check and the await is never missed.
                 let notified = notify.notified();
+
+                // Mirrors `RedisBridge::subscribe_from`: the check before the
+                // loop only covers a consumer that was already behind when it
+                // subscribed. This one covers a live consumer that falls
+                // behind without resubscribing, which is the same loss by a
+                // different route - the generator is suspended between
+                // `.next()` calls while publishing continues, and `.max(0)`
+                // below would quietly clamp the read position up to the
+                // oldest surviving entry and yield on as if nothing were
+                // missing.
+                let gap = {
+                    let guard = outbox.lock().expect("outbox mutex poisoned");
+                    let oldest_retained = guard.next_seq - guard.entries.len() as i64;
+                    (expect_contiguous && next_seq < oldest_retained).then_some(oldest_retained)
+                };
+                if let Some(oldest_retained) = gap {
+                    let new_epoch = {
+                        let mut guard = outbox.lock().expect("outbox mutex poisoned");
+                        guard.epoch += 1;
+                        guard.epoch
+                    };
+                    error!(
+                        expected = next_seq,
+                        oldest_retained,
+                        new_epoch,
+                        "stream skipped forward past the retention window; \
+                         ending the stream rather than losing the events in the gap"
+                    );
+                    return;
+                }
 
                 let batch: Vec<EventEnvelope> = {
                     let guard = outbox.lock().expect("outbox mutex poisoned");
@@ -184,6 +220,10 @@ impl EventBridge for MemoryBridge {
 
                 for envelope in batch {
                     next_seq = envelope.cursor.seq + 1;
+                    // Whatever this stream has actually yielded, it must be
+                    // able to continue from - even when it started with no
+                    // committed position.
+                    expect_contiguous = true;
                     yield envelope;
                 }
             }
@@ -384,5 +424,118 @@ mod tests {
 
         assert!(r1.is_some());
         assert!(r2.is_some());
+    }
+
+    /// A consumer that is *already* behind when it subscribes is caught by
+    /// `subscribe_from`'s up-front check. This is the other half: a stream
+    /// that was live and well-positioned, then fell behind the retention
+    /// window while it was suspended between reads.
+    ///
+    /// That is not a hypothetical. `EventConsumer::run` only polls again once
+    /// the current envelope has fully applied, so one slow write holds this
+    /// generator still while every chain sharing the outbox keeps publishing
+    /// into it. Before the guard, the read position was clamped up to the
+    /// oldest surviving entry and the stream yielded on as though nothing had
+    /// gone missing - and the consumer's dedup, which only rejects a repeated
+    /// `seq`, accepted the jump. The payments in the gap were lost with
+    /// nothing logged.
+    #[tokio::test]
+    async fn a_live_stream_ends_rather_than_skipping_entries_trimmed_under_it() {
+        let bridge = MemoryBridge::with_max_retained(2);
+        let epoch_before = bridge.current_epoch().await.unwrap();
+
+        bridge.publish(&make_event()).await.unwrap();
+
+        // Positioned to read seq 1 next, and correctly so at this point.
+        let mut stream = bridge
+            .subscribe_from(Some(EventCursor {
+                epoch: epoch_before,
+                seq: 0,
+                block_height: 100,
+            }))
+            .await
+            .unwrap();
+
+        // Three more arrive while it is suspended. Retaining two leaves seqs
+        // 2 and 3; seq 1 - the one it was about to read - is gone.
+        for _ in 0..3 {
+            bridge.publish(&make_event()).await.unwrap();
+        }
+
+        let next = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream must end, not block");
+        assert!(
+            next.is_none(),
+            "expected the stream to end on the gap; it yielded seq {:?} instead",
+            next.map(|e| e.cursor.seq)
+        );
+        assert!(
+            bridge.current_epoch().await.unwrap() > epoch_before,
+            "the epoch must move so every other consumer of this outbox sees the break too"
+        );
+    }
+
+    /// The control for the test above. Same shape, same number of publishes,
+    /// only nothing is trimmed - so seq 1 is still there and must be
+    /// delivered. Without this, a guard that ended every stream
+    /// unconditionally would pass the gap test and break the product.
+    #[tokio::test]
+    async fn a_live_stream_that_has_not_fallen_behind_still_delivers_the_next_entry() {
+        let bridge = MemoryBridge::with_max_retained(100);
+        let epoch_before = bridge.current_epoch().await.unwrap();
+
+        bridge.publish(&make_event()).await.unwrap();
+
+        let mut stream = bridge
+            .subscribe_from(Some(EventCursor {
+                epoch: epoch_before,
+                seq: 0,
+                block_height: 100,
+            }))
+            .await
+            .unwrap();
+
+        for _ in 0..3 {
+            bridge.publish(&make_event()).await.unwrap();
+        }
+
+        let next = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream must yield, not block");
+        assert_eq!(next.map(|e| e.cursor.seq), Some(1));
+        assert_eq!(bridge.current_epoch().await.unwrap(), epoch_before);
+    }
+
+    /// Subscribing with no cursor means "whatever is retained", so such a
+    /// stream cannot be behind at the moment it starts. It can be a moment
+    /// later: once it has yielded an entry, the next one is a position it
+    /// must be able to reach, and the same guard has to apply.
+    #[tokio::test]
+    async fn a_stream_that_started_without_a_cursor_is_still_guarded_once_it_has_read() {
+        let bridge = MemoryBridge::with_max_retained(2);
+        let epoch_before = bridge.current_epoch().await.unwrap();
+
+        bridge.publish(&make_event()).await.unwrap();
+
+        let mut stream = bridge.subscribe_from(None).await.unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("the first entry must arrive");
+        assert_eq!(first.map(|e| e.cursor.seq), Some(0));
+
+        for _ in 0..3 {
+            bridge.publish(&make_event()).await.unwrap();
+        }
+
+        let next = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream must end, not block");
+        assert!(
+            next.is_none(),
+            "expected the stream to end on the gap; it yielded seq {:?} instead",
+            next.map(|e| e.cursor.seq)
+        );
+        assert!(bridge.current_epoch().await.unwrap() > epoch_before);
     }
 }
