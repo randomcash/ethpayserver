@@ -54,6 +54,8 @@ impl ChainCursorWriter for PgDataService {
                 seq = EXCLUDED.seq,
                 block_height = EXCLUDED.block_height,
                 updated_at = NOW()
+            WHERE chain_cursors.epoch <> EXCLUDED.epoch
+               OR chain_cursors.seq < EXCLUDED.seq
             "#,
         )
         .bind(adapter_id)

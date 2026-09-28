@@ -91,6 +91,39 @@ async fn committing_again_replaces_rather_than_duplicates() {
 
 #[tokio::test]
 #[ignore]
+async fn a_lagging_commit_cannot_move_a_cursor_backwards_within_an_epoch() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+    let adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
+    let chain_id = 999_888_775u64;
+    let at = |epoch, seq| ChainCursor {
+        epoch,
+        seq,
+        block_height: seq,
+    };
+
+    service
+        .commit_chain_cursor(&adapter_id, chain_id, at(1, 10))
+        .await
+        .unwrap();
+    // A slower instance committing an older position must not win.
+    service
+        .commit_chain_cursor(&adapter_id, chain_id, at(1, 5))
+        .await
+        .unwrap();
+    let cursors = service.chain_cursors(&adapter_id).await.unwrap();
+    assert_eq!(cursors.get(&chain_id), Some(&at(1, 10)));
+
+    // A new epoch restarts seq, so a lower seq there is legitimate.
+    service
+        .commit_chain_cursor(&adapter_id, chain_id, at(2, 1))
+        .await
+        .unwrap();
+    let cursors = service.chain_cursors(&adapter_id).await.unwrap();
+    assert_eq!(cursors.get(&chain_id), Some(&at(2, 1)));
+}
+
+#[tokio::test]
+#[ignore]
 async fn resetting_watch_notifications_only_touches_the_named_chain() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
