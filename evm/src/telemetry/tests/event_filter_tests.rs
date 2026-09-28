@@ -62,6 +62,29 @@ fn ws_transport_reset_is_a_breadcrumb_not_a_page() {
     );
 }
 
+/// The literal message `alloy-transport-ws` 1.8.3's native backend logs at
+/// `error!` when a keepalive ping goes unanswered
+/// (`alloy-transport-ws-1.8.3/src/native.rs:231`) - a paged Sentry event once,
+/// before this filter's target-level demotion existed. The filter matches on
+/// target and level only, so this is already covered by
+/// `ws_transport_reset_is_a_breadcrumb_not_a_page` in substance; this test
+/// pins the exact wording so a future change that starts matching on message
+/// text too can't silently stop demoting this one without a test going red.
+#[test]
+fn ws_missed_pong_is_a_breadcrumb_not_a_page() {
+    let filter = observed_filter(|| {
+        tracing::error!(target: "alloy_transport_ws::native", "WS server missed a pong");
+    });
+    assert!(
+        filter.contains(sentry_tracing::EventFilter::Breadcrumb),
+        "expected a breadcrumb, got {filter:?}"
+    );
+    assert!(
+        !filter.contains(sentry_tracing::EventFilter::Event),
+        "a missed keepalive pong the monitor already resubscribes past should not page: got {filter:?}"
+    );
+}
+
 /// `evm::monitor::chain::lifecycle` is `resubscribe_if_stalled`'s own
 /// target - the real backstop for a connection that never recovers, on a
 /// clock independent of the WS layer. This target is untouched by
