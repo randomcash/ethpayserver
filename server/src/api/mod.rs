@@ -443,3 +443,39 @@ where
 
     app
 }
+
+/// Add every outer HTTP layer `bin/server.rs::main` puts on top of
+/// [`router`]: request tracing, permissive CORS, then the Sentry
+/// performance-tracing pair (a transaction per request, named from the
+/// matched route pattern via `tower-axum-matched-path` rather than the raw
+/// request URI — without it, every distinct invoice/store/etc. id mints its
+/// own transaction name, unbounded cardinality and an unreadable performance
+/// page).
+///
+/// Pulled out of `main` so the integration test in
+/// `server/tests/sentry_transaction_naming.rs` calls this exact function, in
+/// the exact order it adds these layers, instead of hand-copying `.layer()`
+/// calls. An earlier version of this function added only the two Sentry
+/// layers and left `TraceLayer`/`CorsLayer` inline in `main`, ahead of it —
+/// so the test exercised a router `main` never actually serves, and a future
+/// layer inserted between the two call sites in `main` would have regressed
+/// route-pattern naming with nothing to catch it. There is now only one call
+/// site for the full stack, in `main` and in the test alike.
+pub fn with_sentry_performance_tracing(router: Router) -> Router {
+    let router = router
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        );
+    // Axum runs middleware in the reverse order it's `.layer()`-ed, so
+    // `NewSentryLayer` must be added last to end up outermost of
+    // `SentryHttpLayer`, per sentry-tower's documented ordering.
+    router
+        .layer(sentry::integrations::tower::SentryHttpLayer::new().enable_transaction())
+        .layer(sentry::integrations::tower::NewSentryLayer::<
+            axum::extract::Request,
+        >::new_from_top())
+}
