@@ -344,3 +344,54 @@ async fn expected_watched_addresses_includes_a_cancelled_but_not_yet_cleaned_up_
          correctly, watching it"
     );
 }
+
+/// `late_paid` gets the same unconditional inclusion as `cancelled`, for a
+/// stronger reason: no cleanup job ever selects it at all.
+/// `InvoiceCleanupService::cleanup_addresses` only runs the expired/paid/
+/// cancelled jobs, so a late-paid invoice's `watched_addresses` row never
+/// has `is_active` flipped to `FALSE` and the monitor is never told to
+/// unwatch it - Redis and `is_active` stay in agreement, correctly still
+/// watching, forever. A view that excluded `late_paid` (as an earlier pass
+/// on this ticket did, since it was simply absent from the status list)
+/// would report that permanent, correct agreement as a stale watch with no
+/// later cleanup pass to ever resolve the mismatch.
+#[tokio::test]
+#[ignore]
+async fn expected_watched_addresses_includes_a_late_paid_invoices_watch() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut invoice = seeded_test_invoice(&service).await;
+    invoice.expires_at = Utc::now() - Duration::days(2);
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+    InvoiceWriter::update_status(&service, &invoice.id, InvoiceStatus::LatePaid)
+        .await
+        .unwrap();
+
+    let payment_option = test_payment_option(&invoice.id, &ChainId::evm(1));
+    PaymentOptionWriter::create(&service, &payment_option)
+        .await
+        .unwrap();
+
+    let address = unique_address();
+    WatchedAddressWriter::upsert(
+        &service,
+        &address,
+        &payment_option.id,
+        &ChainId::evm(1),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let mut payment = test_payment(&invoice.id);
+    payment.confirmed_at = Some(Utc::now() - Duration::days(2));
+    PaymentWriter::upsert(&service, &payment).await.unwrap();
+
+    let expected = service.get_expected_watched_addresses().await.unwrap();
+    assert!(
+        expected.iter().any(|w| w.address == address),
+        "a late-paid invoice's watch must still appear as expected no \
+         matter how long ago the late payment landed - no cleanup job will \
+         ever deactivate it, so the monitor is correctly still watching it"
+    );
+}

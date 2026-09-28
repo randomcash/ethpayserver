@@ -13,7 +13,7 @@
 //! rollback, the same reasoning that keeps `unwatch_after_delete` best-effort
 //! and after-the-fact rather than eager.
 
-use data_service::{PgDataService, reconcile};
+use data_service::{PgDataService, WatchReconciliation, reconcile};
 
 use super::EVMMonitor;
 
@@ -42,11 +42,17 @@ pub enum WatchReconciliationError {
     Actual(#[source] super::EVMMonitorError),
 }
 
-/// Fetch both sides and diff them.
-pub async fn reconcile_watches(
+/// Fetch both sides and diff them, returning the full comparison.
+///
+/// Split out from [`reconcile_watches`] so a test can assert exact key
+/// membership against the same wiring `/health/deep` runs, rather than
+/// duplicating the expected/actual construction by hand and only proving a
+/// parallel copy of this logic behaves - which would miss a bug in this
+/// function itself, such as the two sides being read from the wrong source.
+pub async fn diff_watches(
     data_service: &PgDataService,
     monitor: &dyn EVMMonitor,
-) -> Result<WatchReconciliationCounts, WatchReconciliationError> {
+) -> Result<WatchReconciliation, WatchReconciliationError> {
     let expected: Vec<_> = data_service
         .get_expected_watched_addresses()
         .await?
@@ -59,12 +65,21 @@ pub async fn reconcile_watches(
         .await
         .map_err(WatchReconciliationError::Actual)?
         .into_iter()
-        .map(|(address, _invoice_id, chain_id, token_address)| {
-            data_service::WatchKey::new(chain_id, &address, token_address.as_deref())
+        .map(|(address, invoice_id, chain_id, token_address)| {
+            data_service::WatchKey::new(chain_id, &address, token_address.as_deref(), invoice_id)
         })
         .collect();
 
-    let diff = reconcile(&expected, &actual);
+    Ok(reconcile(&expected, &actual))
+}
+
+/// Fetch both sides and diff them, reduced to counts - the shape
+/// `/health/deep` reports.
+pub async fn reconcile_watches(
+    data_service: &PgDataService,
+    monitor: &dyn EVMMonitor,
+) -> Result<WatchReconciliationCounts, WatchReconciliationError> {
+    let diff = diff_watches(data_service, monitor).await?;
     Ok(WatchReconciliationCounts {
         stale: diff.stale.len(),
         missed: diff.missed.len(),

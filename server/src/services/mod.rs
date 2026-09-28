@@ -26,7 +26,7 @@ pub use plugins::{
     payment_observers, report_boot,
 };
 pub use watch_reconciler::{
-    WatchReconciliationCounts, WatchReconciliationError, reconcile_watches,
+    WatchReconciliationCounts, WatchReconciliationError, diff_watches, reconcile_watches,
 };
 pub use watch_retry::{WatchRetryConfig, WatchRetryService};
 pub use webhook::{WebhookConfig, WebhookService, WebhookSink};
