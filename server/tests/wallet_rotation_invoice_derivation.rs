@@ -14,6 +14,12 @@
 //! `AuthenticatedUser`, `AuthenticatedCaller` and `State` are plain data the
 //! extractors produce, so
 //! nothing here depends on routing or middleware.
+//!
+//! `service()` panics rather than skipping when `DATABASE_URL` is unset,
+//! matching `wallet_registration.rs`: these three tests are the entire
+//! deliverable proving the ticket's Verify criteria, so a silent `None` that
+//! lets the test report "passed" with zero assertions run would hide exactly
+//! the failure it exists to catch.
 
 use std::sync::Arc;
 
@@ -73,14 +79,16 @@ impl SessionService for UnusedSessionService {
     }
 }
 
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
+async fn service() -> PgDataService {
+    let database_url = std::env::var("DATABASE_URL").expect(
+        "DATABASE_URL must be set to run this ignored test - CI sets it before passing --ignored",
+    );
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
         .expect("DATABASE_URL is set but the database is unreachable");
-    Some(PgDataService::new(pool))
+    PgDataService::new(pool)
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -161,9 +169,7 @@ fn invoice_request(store_id: Uuid) -> CreateInvoiceRequest {
 #[tokio::test]
 #[ignore]
 async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -286,9 +292,7 @@ async fn error_status_and_message(err: ApiErr) -> (StatusCode, String) {
 #[tokio::test]
 #[ignore]
 async fn rotation_refuses_a_malformed_xpub_with_a_specific_message() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -325,9 +329,7 @@ async fn rotation_refuses_a_malformed_xpub_with_a_specific_message() {
 #[tokio::test]
 #[ignore]
 async fn rotation_refuses_an_xprv_with_a_message_naming_it_a_private_key() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
