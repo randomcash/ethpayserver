@@ -25,7 +25,8 @@
 //! build for `wasm32`, which is the whole reason there are two.
 
 use std::borrow::Cow;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use regex::Regex;
 use sentry::protocol::{Context, Event, Log, Map, Value};
@@ -350,7 +351,10 @@ impl sentry::Transport for ScrubbingTransport {
             match item {
                 sentry::protocol::EnvelopeItem::Transaction(mut transaction) => {
                     scrub_transaction(&mut transaction);
-                    scrubbed.add_item(transaction);
+                    // 0.49 holds the transaction boxed inside the variant and
+                    // no longer converts a `Box<Transaction>` on its own, so
+                    // re-wrap explicitly rather than leaning on `Into`.
+                    scrubbed.add_item(sentry::protocol::EnvelopeItem::Transaction(transaction));
                 }
                 other => scrubbed.add_item(other),
             }
@@ -374,9 +378,19 @@ impl sentry::Transport for ScrubbingTransport {
 struct ScrubbingTransportFactory;
 
 impl sentry::TransportFactory for ScrubbingTransportFactory {
-    fn create_transport(&self, options: &sentry::ClientOptions) -> Arc<dyn sentry::Transport> {
+    // `create_transport_with_options`, not the older `create_transport`: as of
+    // 0.49 this is the method the SDK actually calls, and the older one is
+    // documented as not called at all. A factory that implements only the old
+    // one still works today, through a default that round-trips the options
+    // back into a `ClientOptions` - but it is reached by a deprecated
+    // compatibility shim, and the day that shim goes, the scrubber goes with
+    // it and every performance transaction ships unscrubbed with nothing red.
+    fn create_transport_with_options(
+        &self,
+        options: sentry::TransportOptions,
+    ) -> Arc<dyn sentry::Transport> {
         Arc::new(ScrubbingTransport {
-            inner: Arc::new(sentry::transports::ReqwestHttpTransport::new(options)),
+            inner: Arc::new(sentry::transports::ReqwestHttpTransportOptions::from(options).build()),
         })
     }
 }
@@ -511,77 +525,64 @@ fn client_options(
     environment: String,
     traces_sample_rate: f32,
 ) -> sentry::ClientOptions {
-    sentry::ClientOptions {
-        dsn,
-        release,
-        environment: Some(Cow::Owned(environment)),
+    // `ClientOptions` is `#[non_exhaustive]` as of 0.49, which makes the old
+    // struct-literal (`..Default::default()` included) construction illegal
+    // from outside the crate. Built via the builder chain plus direct field
+    // mutation instead - both still allowed on an already-constructed value.
+    let mut options = sentry::ClientOptions::new()
+        .maybe_release(release)
+        .environment(environment)
         // Never attach default PII (IP, cookies, request bodies). This is a
         // payment processor.
-        send_default_pii: false,
-        traces_sample_rate,
+        .send_default_pii(false)
+        // 0.49 made this a builder method that *panics* outside 0.0..=1.0,
+        // so the clamping in `resolve_traces_sample_rate` is what keeps a
+        // malformed env var from taking the process down at startup rather
+        // than merely being tidy. Note also that 0.49 treats an explicit
+        // `0.0` as a fixed rate of zero, which is distinct from leaving
+        // sampling unset - same effect, nothing sampled, but it is a
+        // deliberate "off", not a default.
+        .traces_sample_rate(traces_sample_rate)
         // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
         // API keys, emails and on-chain addresses before events leave the host.
-        before_send: Some(Arc::new(scrub_event)),
+        .before_send(scrub_event)
         // Structured logs (see `sentry_log_event_filter` for which levels
         // actually reach this). Same mandatory scrubber, via the separate
         // hook logs go through.
-        //
-        // Load-bearing on both this crate's current 0.47 pin and on 0.49 —
-        // not vestigial on either. `enable_logs` is deprecated starting in
-        // sentry 0.49, with a note that it still governs automatic capture
-        // by integrations — `sentry_tracing::layer()`, which is what
-        // actually gets a `tracing` event into an envelope here, is exactly
-        // that case.
-        //
-        // `disabling_enable_logs_suppresses_automatic_integration_capture`
-        // in `capture_tests` pins this down on 0.47 as a real, running
-        // assertion rather than a claim: it takes this exact
-        // `client_options()` output, flips only this field to `false`, and
-        // asserts no structured log reaches the envelope. That test passes
-        // today, on 0.47.
-        //
-        // The same ablation was then reproduced directly, in this tree,
-        // against a real 0.49.3 build rather than argued from reading a
-        // changelog: bump both `sentry` and `sentry-tracing` in
-        // `evm/Cargo.toml` to "0.49.3", `cargo update -p sentry -p
-        // sentry-tracing`, then `cargo test -p evm --lib --features
-        // sentry-scrub capture_tests` (this file's `client_options` needs
-        // its struct-literal construction changed to the `let mut opts =
-        // ...; opts.field = ...;` form first — 0.49's `ClientOptions`
-        // became `#[non_exhaustive]`, so the literal no longer compiles
-        // outside the defining crate; that change is not part of this
-        // pin, it belongs to whichever PR actually moves it). With
-        // `enable_logs: true` all four tests in `capture_tests` pass
-        // exactly as on 0.47; flipping only that field to `false`
-        // reproduces the identical failure — the same three
-        // "expected at least one structured log to reach the envelope"
-        // panics, `disabling_enable_logs_suppresses_automatic_integration_capture`
-        // the lone survivor. So the deprecation note's claim holds for our
-        // configuration on the version it will actually describe: the
-        // option is not vestigial at 0.49 either, and it must stay under
-        // `#[allow(deprecated)]` once the pin itself moves, rather than
-        // being dropped or having the lint suppressed as if the field no
-        // longer mattered. This recipe is independent of any particular
-        // commit and can be rerun against whatever version the next SDK
-        // bump proposes.
-        //
-        // `capture_tests` already runs on every push, not just on demand:
-        // `server/Cargo.toml`'s `evm = { path = "../evm", features = ["api",
-        // "redis", "sentry-scrub"] }` line lists `sentry-scrub` as a normal,
-        // non-optional feature, so cargo's feature unification turns it on
-        // for the whole workspace build, and `.github/workflows/ci.yml`'s
-        // `test` job runs `cargo nextest run --workspace --no-fail-fast -j
-        // 2` — that exact line already compiles and executes this test on
-        // every push.
-        enable_logs: true,
-        before_send_log: Some(Arc::new(scrub_log)),
-        // `before_send` does not run for performance transactions in this
-        // SDK version (see `scrub_transaction`), so the transport scrubs
-        // them instead - otherwise the mandatory scrubber is only half
-        // applied once `traces_sample_rate` can be nonzero.
-        transport: Some(Arc::new(ScrubbingTransportFactory)),
-        ..Default::default()
+        .before_send_log(scrub_log);
+    options.dsn = dsn;
+    // `before_send` does not run for performance transactions in this SDK
+    // version (see `scrub_transaction`), so the transport scrubs them
+    // instead - otherwise the mandatory scrubber is only half applied once
+    // `traces_sample_rate` can be nonzero.
+    options.transport = Some(Arc::new(ScrubbingTransportFactory));
+    // `enable_logs` is deprecated as of 0.49: "logs captured manually are
+    // always sent; only automatic capture by integrations respects this
+    // option". `sentry_tracing::layer()` is exactly such an integration - it
+    // is what gets a `tracing` event into an envelope here - so the note says
+    // the option still governs us, not that it is vestigial.
+    //
+    // That is established by ablation, not read off a changelog. On 0.47,
+    // `disabling_enable_logs_suppresses_automatic_integration_capture` in
+    // `capture_tests` takes this exact `client_options()` output, flips only
+    // this field to `false`, and asserts no structured log reaches the
+    // envelope. The same ablation was then run against a real 0.49.3 build:
+    // with `enable_logs: true` all four `capture_tests` pass exactly as on
+    // 0.47, and flipping only this field to `false` reproduces the identical
+    // three "expected at least one structured log to reach the envelope"
+    // failures. That result was recorded on this file's own comment while the
+    // pin was still 0.47, by the change that established it; the recipe is
+    // above and can be re-run against whatever version the next bump proposes.
+    //
+    // This is the pull request that moves the pin, so this is where the
+    // `#[allow(deprecated)]` the ablation called for belongs. Dropping the
+    // field, or silencing the lint as though it no longer mattered, would
+    // turn off structured-log capture on the PII path.
+    #[allow(deprecated)]
+    {
+        options.enable_logs = true;
     }
+    options
 }
 
 /// Returns the init guard, whether a DSN was actually configured, and the
