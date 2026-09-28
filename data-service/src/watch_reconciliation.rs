@@ -11,28 +11,28 @@ use std::collections::HashSet;
 
 /// Identity of a watched address, independent of which side observed it.
 ///
-/// Deliberately excludes the invoice id: the same `(chain, address, token)`
-/// triple is the unique key on both sides (Redis keys on exactly this, and
-/// `watched_addresses` carries `CONSTRAINT unique_watched_address UNIQUE
-/// (address, chain_id, token_address)` with no `is_active` qualifier - so a
-/// second invoice can never claim the same triple in Postgres while an
-/// earlier row for it still exists, live or not; the earlier row has to be
-/// gone first).
+/// Includes the invoice id, deliberately. The `(chain, address, token)`
+/// triple alone is the unique key on both sides at rest - Redis keys on
+/// exactly this, and `watched_addresses` carries `CONSTRAINT
+/// unique_watched_address UNIQUE (address, chain_id, token_address)` - but
+/// "at rest" is not the state this reconciler needs to be right about. A
+/// legitimate reuse writes the two stores in two separate, non-atomic steps:
+/// `create_invoice_with_options` commits the Postgres side first, and only
+/// afterward does the application call `watch_address` to overwrite the
+/// Redis key. Between those two calls, Postgres already reports the address
+/// expected for the new invoice while Redis still holds the old one - same
+/// triple, different invoice behind it. A triple-only key cannot see that:
+/// it would report no discrepancy while a payment landing in that window
+/// would be credited to the wrong invoice. Keying on the invoice id as well
+/// turns that window into exactly the two-entry diff it should be - one
+/// `missed` (the new invoice, not yet in Redis) and one `stale` (the old
+/// invoice, still there) - rather than a silent match neither side flags.
 ///
-/// That ordering is what makes dropping the invoice id safe rather than
-/// merely convenient: the moment an address is legitimately rewatched for a
-/// new invoice, the application issues the same `watch_address` call that
-/// created the original watch, and `RedisDataService::watch_address` does an
-/// unconditional `SET` on that exact key - not `SETNX`, not an append to a
-/// list - so the new invoice id replaces whatever was there, including a
-/// stale one this reconciler had not yet caught. By the time both sides can
-/// agree the key is "expected" again, Redis is already holding the new
-/// invoice, not the old one; there is no window where the key matches but
-/// the value behind it is wrong. `server/tests/watch_reconciliation.rs`
-/// proves this end to end: a stale watch is seeded, reported, then the same
-/// address is legitimately rewatched for a second invoice, and the
-/// reconciler reports nothing while the Redis value has in fact moved to the
-/// new invoice.
+/// `server/tests/watch_reconciliation.rs` proves both ends of this: a stale
+/// watch is seeded, reported, then legitimately reused for a second invoice.
+/// Caught mid-reuse (Postgres updated, Redis not yet told), it reports the
+/// missed/stale pair above; once the Redis write lands, both sides agree on
+/// the new invoice and the reconciler goes quiet for that key.
 ///
 /// Address and token are lower-cased so a checksum mismatch between the two
 /// sources never manufactures a false stale/missed pair.
@@ -41,14 +41,21 @@ pub struct WatchKey {
     chain_id: types::ChainId,
     address: String,
     token_address: Option<String>,
+    invoice_id: types::InvoiceId,
 }
 
 impl WatchKey {
-    pub fn new(chain_id: types::ChainId, address: &str, token_address: Option<&str>) -> Self {
+    pub fn new(
+        chain_id: types::ChainId,
+        address: &str,
+        token_address: Option<&str>,
+        invoice_id: types::InvoiceId,
+    ) -> Self {
         Self {
             chain_id,
             address: address.to_lowercase(),
             token_address: token_address.map(str::to_lowercase),
+            invoice_id,
         }
     }
 }
@@ -90,7 +97,16 @@ mod tests {
     use super::*;
 
     fn key(chain: u64, address: &str) -> WatchKey {
-        WatchKey::new(types::ChainId::evm(chain), address, None)
+        keyed(chain, address, "inv-default")
+    }
+
+    fn keyed(chain: u64, address: &str, invoice_id: &str) -> WatchKey {
+        WatchKey::new(
+            types::ChainId::evm(chain),
+            address,
+            None,
+            types::InvoiceId::from_string(invoice_id.to_string()),
+        )
     }
 
     /// The vacuous case this ticket exists to avoid: two identical sets must
@@ -150,11 +166,13 @@ mod tests {
             types::ChainId::evm(1),
             "0xABCDEF1234567890ABCDEF1234567890ABCDEF12",
             None,
+            types::InvoiceId::from_string("inv-1".to_string()),
         )];
         let actual = vec![WatchKey::new(
             types::ChainId::evm(1),
             "0xabcdef1234567890abcdef1234567890abcdef12",
             None,
+            types::InvoiceId::from_string("inv-1".to_string()),
         )];
 
         let diff = reconcile(&expected, &actual);
@@ -166,11 +184,38 @@ mod tests {
     /// ERC20 watch must not be mistaken for the native-asset one.
     #[test]
     fn a_token_address_distinguishes_otherwise_identical_watches() {
-        let native = WatchKey::new(types::ChainId::evm(1), "0xabc", None);
-        let erc20 = WatchKey::new(types::ChainId::evm(1), "0xabc", Some("0xusdc"));
+        let native = WatchKey::new(
+            types::ChainId::evm(1),
+            "0xabc",
+            None,
+            types::InvoiceId::from_string("inv-1".to_string()),
+        );
+        let erc20 = WatchKey::new(
+            types::ChainId::evm(1),
+            "0xabc",
+            Some("0xusdc"),
+            types::InvoiceId::from_string("inv-1".to_string()),
+        );
 
         let diff = reconcile(&[native], &[erc20]);
         assert_eq!(diff.stale.len(), 1);
         assert_eq!(diff.missed.len(), 1);
+    }
+
+    /// The case this key design exists for: the same `(chain, address,
+    /// token)` triple, caught mid-reuse - Postgres already reassigned to a
+    /// new invoice, Redis still holding the old one. A triple-only key would
+    /// see this as a match and report nothing, silently misattributing any
+    /// payment that lands in that window. Keying on the invoice id turns it
+    /// into a visible pair instead: the new invoice is missed, the old one
+    /// is stale.
+    #[test]
+    fn a_reused_address_mid_reuse_is_one_missed_and_one_stale_not_a_silent_match() {
+        let expected = vec![keyed(1, "0xabc", "invoice-b")];
+        let actual = vec![keyed(1, "0xabc", "invoice-a")];
+
+        let diff = reconcile(&expected, &actual);
+        assert_eq!(diff.missed, vec![keyed(1, "0xabc", "invoice-b")]);
+        assert_eq!(diff.stale, vec![keyed(1, "0xabc", "invoice-a")]);
     }
 }
