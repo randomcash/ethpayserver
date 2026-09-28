@@ -157,16 +157,13 @@ mod tests {
         let (a, b) = (store(1), store(2));
         let key = [format!("{}:{}", Policies::STORE_VIEW_INVOICES, a.0)];
 
-        let got = narrow_scope_by_key(
-            StoreScope::Membership(vec![a, b]),
-            Some(&key),
-            Policies::STORE_VIEW_INVOICES,
-        )
-        .expect("membership never refuses, it filters");
-
         assert_eq!(
-            got,
-            StoreScope::Membership(vec![a]),
+            narrow_scope_by_key(
+                StoreScope::Membership(vec![a, b]),
+                Some(&key),
+                Policies::STORE_VIEW_INVOICES,
+            ),
+            Ok(StoreScope::Membership(vec![a])),
             "a key scoped to one store must not read the owner's other stores"
         );
     }
@@ -179,14 +176,14 @@ mod tests {
         let (a, b, other) = (store(1), store(2), store(9));
         let key = [format!("{}:{}", Policies::STORE_VIEW_INVOICES, other.0)];
 
-        let got = narrow_scope_by_key(
-            StoreScope::Membership(vec![a, b]),
-            Some(&key),
-            Policies::STORE_VIEW_INVOICES,
-        )
-        .expect("membership never refuses, it filters");
-
-        assert_eq!(got, StoreScope::Membership(vec![]));
+        assert_eq!(
+            narrow_scope_by_key(
+                StoreScope::Membership(vec![a, b]),
+                Some(&key),
+                Policies::STORE_VIEW_INVOICES,
+            ),
+            Ok(StoreScope::Membership(vec![])),
+        );
     }
 
     /// A key with no scope at all inherits the owner's reach, so membership
@@ -196,14 +193,14 @@ mod tests {
     fn an_unscoped_key_leaves_membership_untouched() {
         let (a, b) = (store(1), store(2));
 
-        let got = narrow_scope_by_key(
-            StoreScope::Membership(vec![a, b]),
-            None,
-            Policies::STORE_VIEW_INVOICES,
-        )
-        .expect("membership never refuses, it filters");
-
-        assert_eq!(got, StoreScope::Membership(vec![a, b]));
+        assert_eq!(
+            narrow_scope_by_key(
+                StoreScope::Membership(vec![a, b]),
+                None,
+                Policies::STORE_VIEW_INVOICES,
+            ),
+            Ok(StoreScope::Membership(vec![a, b])),
+        );
     }
 
     /// A grant written without a store suffix means "on every store the owner
@@ -215,14 +212,14 @@ mod tests {
         let (a, b) = (store(1), store(2));
         let key = [Policies::STORE_VIEW_INVOICES.to_string()];
 
-        let got = narrow_scope_by_key(
-            StoreScope::Membership(vec![a, b]),
-            Some(&key),
-            Policies::STORE_VIEW_INVOICES,
-        )
-        .expect("membership never refuses, it filters");
-
-        assert_eq!(got, StoreScope::Membership(vec![a, b]));
+        assert_eq!(
+            narrow_scope_by_key(
+                StoreScope::Membership(vec![a, b]),
+                Some(&key),
+                Policies::STORE_VIEW_INVOICES,
+            ),
+            Ok(StoreScope::Membership(vec![a, b])),
+        );
     }
 
     /// A key scoped to a *different* policy on the right store does not grant
@@ -232,13 +229,13 @@ mod tests {
         let (a, b) = (store(1), store(2));
         let key = [format!("{}:{}", Policies::STORE_MODIFY_SETTINGS, a.0)];
 
-        let got = narrow_scope_by_key(
-            StoreScope::Membership(vec![a, b]),
-            Some(&key),
-            Policies::STORE_VIEW_INVOICES,
-        )
-        .expect("membership never refuses, it filters");
-
-        assert_eq!(got, StoreScope::Membership(vec![]));
+        assert_eq!(
+            narrow_scope_by_key(
+                StoreScope::Membership(vec![a, b]),
+                Some(&key),
+                Policies::STORE_VIEW_INVOICES,
+            ),
+            Ok(StoreScope::Membership(vec![])),
+        );
     }
 }
