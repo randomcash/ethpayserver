@@ -143,6 +143,32 @@ where
     Ok(Json(ApiKeyListResponse { keys }))
 }
 
+/// An empty list is persisted as NULL - "inherits the owner's role in full" -
+/// not as `Some([])`, which means "can do nothing".
+///
+/// The wire type cannot tell the two apart. `CreateApiKeyPayload.permissions`
+/// is a `Vec<String>` with `#[serde(default)]`, so a request that omits the
+/// field entirely and one that sends `[]` both arrive here as an empty vec.
+/// Something has to be chosen for that case, and the choice decides whether
+/// existing callers keep working: the dashboard posts `{name, expires_at}`
+/// and no `permissions` at all, so persisting `Some([])` would make every key
+/// it creates authenticate and then be refused every permission check -
+/// `key_retains_unrestricted_access(Some(&[]))` and
+/// `key_grants_store_permission(Some(&[]), ..)` are both false - while the
+/// request still returned 201 and showed the user a key to save.
+///
+/// Narrowing therefore has to be asked for explicitly. Once the field can
+/// distinguish "absent" from "deliberately empty" - an `Option<Vec<String>>`
+/// in the shared type - the stricter reading becomes available for the
+/// explicitly-empty case without breaking callers that never send it.
+fn requested_scope(permissions: &[String]) -> Option<&[String]> {
+    if permissions.is_empty() {
+        None
+    } else {
+        Some(permissions)
+    }
+}
+
 /// Create a new API key for the authenticated user.
 #[utoipa::path(
     post,
@@ -173,9 +199,11 @@ where
 
     let (raw_key, api_key) = build_api_key(&name, user.id, payload.expires_at);
 
+    let requested = requested_scope(&payload.permissions);
+
     state
         .data_service
-        .create_api_key_with_permissions(&api_key, Some(&payload.permissions))
+        .create_api_key_with_permissions(&api_key, requested)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -403,3 +431,7 @@ where
         }),
     ))
 }
+
+#[cfg(test)]
+#[path = "api_keys_tests.rs"]
+mod tests;
