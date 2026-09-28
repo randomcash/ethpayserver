@@ -20,7 +20,7 @@ fn sentry_log_event_filter_suppresses_a_record_below_the_threshold_through_a_rea
         || {
             tracing::info!("should not reach Sentry logs when min_level=ERROR");
         },
-        client_options(None, None, "test".to_string()),
+        client_options(None, None, "test".to_string(), 0.0),
     );
 
     let logs = captured_logs(&envelopes);
@@ -65,7 +65,7 @@ fn sentry_log_event_filter_is_independent_of_the_log_level_filter_in_the_real_st
                 "should reach Sentry logs even though the sibling LOG_LEVEL=error filter would drop it"
             );
         },
-        client_options(None, None, "test".to_string()),
+        client_options(None, None, "test".to_string(), 0.0),
     );
 
     let logs = captured_logs(&envelopes);

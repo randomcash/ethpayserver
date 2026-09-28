@@ -12,8 +12,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 
 use auth::{AuthConfig, AuthService, captcha::CloudflareTurnstile};
 use data_service::PgDataService;
@@ -532,21 +530,16 @@ async fn main() -> Result<()> {
         "Per-API-key rate limiting configured"
     );
 
-    // Build router with middleware
-    let app = api::router(
+    // Build router with middleware. `with_sentry_performance_tracing` adds
+    // request tracing, CORS, and the Sentry transaction layers together, in
+    // the one order this binary and its test both use.
+    let app = api::with_sentry_performance_tracing(api::router(
         state,
         config.enable_swagger,
         Some(rate_limiters),
         idempotency,
         Some(api_key_rate_limiter),
-    )
-    .layer(TraceLayer::new_for_http())
-    .layer(
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any),
-    );
+    ));
 
     // Start server
     let bind_addr = config.bind_address();
