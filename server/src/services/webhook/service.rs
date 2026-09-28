@@ -83,8 +83,13 @@ const RECENT_UNREACHABLE_CAPACITY: usize = 8;
 /// fills with one id. This forces a page every `MAX_CONSECUTIVE_DEMOTIONS`th
 /// time regardless, so a persistent failure — merchant-side or
 /// payserver-side — surfaces again on its own instead of staying a
-/// breadcrumb forever.
-const MAX_CONSECUTIVE_DEMOTIONS: u32 = 20;
+/// breadcrumb forever. Kept small rather than the largest defensible number:
+/// every demotion in the run is a real, exhausted delivery that stayed
+/// silent, so the bound on how many of those a payserver-side outage can
+/// accumulate before repaging should be as tight as the isolation check
+/// (which itself needs a handful of same-merchant failures to mean anything)
+/// allows, not as loose as "eventually".
+const MAX_CONSECUTIVE_DEMOTIONS: u32 = 5;
 
 /// Whether every store webhook in `recent` is the same one.
 ///
@@ -953,6 +958,22 @@ mod tests {
         // happened to arrive in the same window.
         assert!(process_error_is_fault(
             &WebhookError::Serialization("bad json".to_string()),
+            true
+        ));
+    }
+
+    #[test]
+    fn unreachable_error_is_a_fault_regardless_of_shutdown() {
+        // This arm is unreachable in production today (see the doc comment
+        // on `process_error_is_fault`), but the decision must stay total: if
+        // it ever does get reached, a wrong answer here would silently
+        // misclassify shutdown-vs-fault with nothing to catch it.
+        assert!(process_error_is_fault(
+            &WebhookError::Unreachable("connection refused".to_string()),
+            false
+        ));
+        assert!(process_error_is_fault(
+            &WebhookError::Unreachable("connection refused".to_string()),
             true
         ));
     }
