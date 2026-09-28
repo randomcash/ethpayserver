@@ -495,15 +495,40 @@ pub fn sentry_log_event_filter(
 /// this exists to quiet is specifically the `error!` call sites in
 /// `alloy_transport_ws::native`, not `debug!`/`trace!` chatter the same
 /// target might log, so this filter does not touch those.
+///
+/// `server::services::webhook::merchant_delivery_failed` is demoted the same
+/// way, for an unrelated reason: it's logged only when a webhook job
+/// exhausts every retry because the request never reached the merchant's
+/// endpoint at all (`WebhookError::Unreachable` - DNS, refused, or timed
+/// out) *and* the caller has already checked that failure isn't isolated to
+/// payserver's own egress (see
+/// `server::services::webhook::service::log_permanent_failure` and
+/// `recent_unreachable_are_one_merchant` for that check - a DNS/refused/
+/// timeout failure alone can't tell "one merchant is down" from "we can't
+/// reach anyone", so this target is only ever chosen once the caller has
+/// ruled the latter out). The demoted case is already fully captured by the
+/// `webhook_delivery_status="permanent_failed"` metric and the
+/// `webhook_deliveries` table row the same call site writes. A non-success
+/// response, a payload that failed to serialize, or an `Unreachable` failure
+/// that isn't isolated to one store webhook keeps the module's default
+/// target instead (see
+/// `server::services::webhook::service::permanent_failure_is_merchant_unreachable`), since
+/// each of those can reflect a fault in our own signing, request
+/// construction, or network egress just as easily as one in the merchant's
+/// server, and those must keep paging the same as `log_process_error`'s
+/// "Error processing webhook job". Paging on-call for the genuinely-isolated
+/// case teaches the same lesson as the WS noise above — ignore Sentry errors
+/// — for a condition no payserver engineer can act on.
 pub fn sentry_event_filter(
     min_level: tracing::Level,
 ) -> impl Fn(&tracing::Metadata<'_>) -> sentry_tracing::EventFilter + Send + Sync + 'static {
     let log_gate = sentry_log_event_filter(min_level);
     move |metadata| {
         let filter = log_gate(metadata);
-        if *metadata.level() == tracing::Level::ERROR
-            && metadata.target().starts_with("alloy_transport_ws")
-        {
+        let demote = *metadata.level() == tracing::Level::ERROR
+            && (metadata.target().starts_with("alloy_transport_ws")
+                || metadata.target() == "server::services::webhook::merchant_delivery_failed");
+        if demote {
             (filter - sentry_tracing::EventFilter::Event) | sentry_tracing::EventFilter::Breadcrumb
         } else {
             filter
