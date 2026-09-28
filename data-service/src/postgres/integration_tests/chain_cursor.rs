@@ -124,6 +124,46 @@ async fn a_lagging_commit_cannot_move_a_cursor_backwards_within_an_epoch() {
 
 #[tokio::test]
 #[ignore]
+async fn deleting_a_cursor_removes_only_that_chain_and_adapter() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+    let adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
+    let other_adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
+    let (gone, kept) = (999_888_771u64, 999_888_772u64);
+    let cursor = ChainCursor {
+        epoch: 3,
+        seq: 7,
+        block_height: 70,
+    };
+
+    for (adapter, chain) in [
+        (&adapter_id, gone),
+        (&adapter_id, kept),
+        (&other_adapter_id, gone),
+    ] {
+        service
+            .commit_chain_cursor(adapter, chain, cursor)
+            .await
+            .unwrap();
+    }
+    service
+        .delete_chain_cursor(&adapter_id, gone)
+        .await
+        .unwrap();
+    // Deleting an absent row is not an error.
+    service
+        .delete_chain_cursor(&adapter_id, gone)
+        .await
+        .unwrap();
+
+    let cursors = service.chain_cursors(&adapter_id).await.unwrap();
+    assert_eq!(cursors.get(&gone), None);
+    assert_eq!(cursors.get(&kept), Some(&cursor));
+    let other = service.chain_cursors(&other_adapter_id).await.unwrap();
+    assert_eq!(other.get(&gone), Some(&cursor));
+}
+
+#[tokio::test]
+#[ignore]
 async fn resetting_watch_notifications_only_touches_the_named_chain() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 

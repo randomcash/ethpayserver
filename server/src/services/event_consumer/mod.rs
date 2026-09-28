@@ -506,8 +506,8 @@ impl<
     /// chain, so if the caller kept going and a *later* envelope on the same
     /// chain applied and committed, that commit would move the chain's
     /// cursor past this failed one - on any future resume (restart or
-    /// otherwise) the dedup check above would then treat the failed envelope
-    /// as already applied and it would never be redelivered. Stopping here
+    /// otherwise) resume would start above the failed envelope, treating it as
+    /// already applied, and it would never be redelivered. Stopping here
     /// instead means nothing commits past it, so it stays exactly at the
     /// resume point until a retry (in production, a process restart, since
     /// [`ApplyFailureHook`] defaults to exiting) redelivers it.
@@ -517,18 +517,6 @@ impl<
         cursors: &mut HashMap<u64, ChainCursor>,
     ) -> bool {
         let chain_id = envelope.chain_id;
-
-        if let Some(applied) = cursors.get(&chain_id)
-            && envelope.cursor.epoch == applied.epoch
-            && envelope.cursor.seq <= applied.seq
-        {
-            // Defence in depth, not a path resume takes today: `seq` is one
-            // outbox-wide counter applied in order and resume starts above
-            // the highest committed `seq`, so a delivered envelope is always
-            // ahead of every chain's cursor. Redelivery after a failed
-            // cursor commit is absorbed by the idempotent apply, not here.
-            return true;
-        }
 
         if !self.apply_or_halt(&envelope).await {
             return false;
