@@ -12,8 +12,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 
 use auth::{AuthConfig, AuthService, captcha::CloudflareTurnstile};
 use data_service::PgDataService;
