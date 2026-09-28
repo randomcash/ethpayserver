@@ -26,12 +26,13 @@ pub struct ExpectedWatch {
 
 impl ExpectedWatch {
     /// This row's identity for comparison against the monitor's actual watch
-    /// set - see `WatchKey` for why the invoice id is not part of it.
+    /// set - see `WatchKey` for why the invoice id is part of it.
     pub fn key(&self) -> WatchKey {
         WatchKey::new(
             self.chain_id.clone(),
             &self.address,
             self.token_address.as_deref(),
+            self.invoice_id.clone(),
         )
     }
 }
