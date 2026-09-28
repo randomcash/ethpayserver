@@ -302,7 +302,10 @@ impl<
 
         let mut apply_failed = false;
         while let Some(envelope) = event_stream.next().await {
-            if !self.apply_envelope(envelope, &mut cursors).await {
+            if !self
+                .apply_envelope(envelope, bridge_epoch, &mut cursors)
+                .await
+            {
                 // A failed apply already invoked `on_apply_failure` (which
                 // exits the process in production). Stopping the loop here
                 // too matters for the test hook path, where the override
@@ -514,6 +517,7 @@ impl<
     async fn apply_envelope(
         &self,
         envelope: EventEnvelope,
+        bridge_epoch: i64,
         cursors: &mut HashMap<u64, ChainCursor>,
     ) -> bool {
         let chain_id = envelope.chain_id;
@@ -522,8 +526,13 @@ impl<
             return false;
         }
 
+        // Commit the epoch this consumer resumed under, not the one stamped
+        // on the entry: after a lineage break the stream can still hold
+        // entries from the old epoch, and recording that epoch would make
+        // the next restart read a fresh mismatch and halt again, so an
+        // accepted break would never converge.
         let cursor = ChainCursor {
-            epoch: envelope.cursor.epoch,
+            epoch: bridge_epoch,
             seq: envelope.cursor.seq,
             block_height: envelope.cursor.block_height,
         };

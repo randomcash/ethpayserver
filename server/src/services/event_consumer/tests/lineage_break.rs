@@ -246,3 +246,63 @@ async fn an_unaccepted_lineage_break_halts_without_resuming_or_rearming() {
         "a refused break must not resume from the new lineage"
     );
 }
+
+#[tokio::test]
+async fn an_accepted_break_converges_even_when_old_epoch_entries_are_replayed() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let store_id = StoreId::new();
+
+    let old_invoice = InvoiceId::new();
+    create_test_invoice(&ds, &old_invoice, store_id).await;
+    bridge
+        .publish(&make_payment_detected(
+            &old_invoice,
+            1,
+            B256::from([1u8; 32]),
+        ))
+        .await
+        .unwrap();
+    let consumer1 = create_test_consumer(ds.clone(), bridge.clone());
+    let task1 = tokio::spawn(consumer1.run());
+    wait_for_payment(&ds, &old_invoice).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    task1.abort();
+    let _ = task1.await;
+
+    // A second entry is stamped with the old epoch, then the epoch changes
+    // while it is still retained, so the accepting run replays it.
+    let stale_invoice = InvoiceId::new();
+    create_test_invoice(&ds, &stale_invoice, store_id).await;
+    bridge
+        .publish(&make_payment_detected(
+            &stale_invoice,
+            2,
+            B256::from([2u8; 32]),
+        ))
+        .await
+        .unwrap();
+    bridge.bump_epoch().await.unwrap();
+
+    let consumer2 =
+        create_test_consumer(ds.clone(), bridge.clone()).with_accepted_lineage_break(true);
+    let task2 = tokio::spawn(consumer2.run());
+    wait_for_payment(&ds, &stale_invoice).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    task2.abort();
+    let _ = task2.await;
+
+    // The flag is now unset, as the runbook instructs. Cursors committed for
+    // the replayed old-epoch entries must not read as a new mismatch.
+    let reasons: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = reasons.clone();
+    let consumer3 = create_test_consumer(ds.clone(), bridge.clone()).with_resume_failure_hook(
+        Arc::new(move |reason| recorded.lock().unwrap().push(reason.to_string())),
+    );
+    let _ = tokio::time::timeout(Duration::from_millis(500), consumer3.run()).await;
+    assert!(
+        reasons.lock().unwrap().is_empty(),
+        "restart after an accepted break must not halt again: {:?}",
+        reasons.lock().unwrap()
+    );
+}
