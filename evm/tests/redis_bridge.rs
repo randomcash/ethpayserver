@@ -174,7 +174,7 @@ async fn resuming_past_the_retention_window_fails_out_of_range_without_changing_
     .await
     .expect("connect to REDIS_URL");
 
-    for i in 0..20u8 {
+    for i in 0..250u8 {
         bridge
             .publish(&make_event(B256::from([i; 32])))
             .await
@@ -183,8 +183,10 @@ async fn resuming_past_the_retention_window_fails_out_of_range_without_changing_
 
     let epoch_before = bridge.current_epoch().await.unwrap();
 
-    // seq 1 was the first entry published; with a maxlen of 3 it has long
-    // since been trimmed out by the time 20 more have landed.
+    // seq 1 was the first entry published. `MAXLEN ~` only drops whole
+    // stream nodes (up to 100 entries each by default), so 250 publishes
+    // are needed to guarantee the first node is released whatever the
+    // entry size; with a maxlen of 3 seq 1 is then long gone.
     let result = bridge
         .subscribe_from(Some(EventCursor {
             epoch: epoch_before,
@@ -246,9 +248,9 @@ async fn a_gap_that_opens_while_already_subscribed_ends_the_stream() {
 
     // While the reader is stalled (not polling `.next()`), enough publishes
     // land to trim seq 4 and beyond out of the 3-entry retention window -
-    // the same volume the sibling out-of-range test above needs to force
-    // real trimming with this maxlen.
-    for i in 3..23u8 {
+    // the same volume the sibling out-of-range test above needs: trimming
+    // is approximate and works on whole nodes of up to 100 entries.
+    for i in 3..253u8 {
         bridge
             .publish(&make_event(B256::from([i; 32])))
             .await
