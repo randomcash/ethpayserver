@@ -628,9 +628,17 @@ fn resolve_traces_sample_rate_defaults_to_zero() {
 #[test]
 fn client_options_carry_the_sample_rate_and_the_scrubbing_transport() {
     let options = client_options(None, None, "testnet".to_string(), 0.42);
-    assert_eq!(
-        options.traces_sample_rate, 0.42,
-        "resolved sample rate must reach the struct sentry::init actually receives"
+    // 0.49 keeps the rate inside a sampling *strategy* rather than a plain
+    // field, so this reads the strategy back. `FixedRate` specifically:
+    // `Disabled` and `FixedRate(0.0)` both sample nothing, and asserting only
+    // on the effect would not tell them apart.
+    assert!(
+        matches!(
+            options.traces_sampling_strategy,
+            sentry::TracesSamplingStrategy::FixedRate(rate) if rate == 0.42
+        ),
+        "resolved sample rate must reach the options sentry::init actually receives; got {:?}",
+        options.traces_sampling_strategy
     );
     assert!(
         options.transport.is_some(),

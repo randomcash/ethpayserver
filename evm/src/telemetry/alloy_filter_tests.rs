@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tracing::Metadata;
 
 /// A `tracing::Subscriber` that runs [`sentry_event_filter`] on every
