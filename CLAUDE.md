@@ -97,17 +97,23 @@ that are not in CI's path. Several people have lost an hour to this.
   **without logging anything** — so the server looks healthy while tests fail
   in no pattern. Run a local server with every `RATE_LIMIT_*` at `10000`, as
   CI does. See `e2e/README.md`.
-- Integration tests are `#[ignore]` by convention and need `DATABASE_URL`. CI
-  *does* run them — the `test` job migrates a real Postgres service and runs
-  `cargo nextest run -p data-service --no-fail-fast --run-ignored only -j 1` —
-  so a failure there gates merges same as any other test. The `-j 1` is not
-  cosmetic: these tests share one real Postgres instance, so run them locally
-  with the same flag rather than nextest's default concurrency, or you can get
-  spurious cross-test failures CI never sees. The command now covers
-  `data-service` **and** `server`, so a `server/tests/*.rs` integration test
-  does gate merges - this paragraph used to say otherwise, which is worth
-  knowing if you wrote one and assumed it never ran. Other crates' `#[ignore]`'d
-  tests are still not in it and need running locally. The gate above does not touch any of them either way, so run
+- Integration tests are `#[ignore]` by convention and need `DATABASE_URL`. A
+  few also need a real Redis and gate on `TEST_REDIS_URL` the same way,
+  skipping (not failing) when it is unset - CI sets both for the job that runs
+  `--run-ignored`, so don't take an unset `TEST_REDIS_URL` locally as proof a
+  Redis-dependent test can't fail; it's provisioned in CI even when it isn't
+  on your machine. CI *does* run them — the `test` job migrates a real
+  Postgres service, starts a Redis service, and runs
+  `cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1`
+  with both env vars set — so a failure there gates merges same as any other
+  test. The `-j 1` is not cosmetic: these tests share one real Postgres
+  instance, so run them locally with the same flag rather than nextest's
+  default concurrency, or you can get spurious cross-test failures CI never
+  sees. The command now covers `data-service` **and** `server`, so a
+  `server/tests/*.rs` integration test does gate merges - this paragraph used
+  to say otherwise, which is worth knowing if you wrote one and assumed it
+  never ran. Other crates' `#[ignore]`'d tests are still not in it and need
+  running locally. The gate above does not touch any of them either way, so run
   the `data-service` ones locally too when you touch that layer — CI will
   catch a failure regardless, but locally you see it sooner.
 - A separate `test` job step runs `evm`'s `#[ignore]`'d Redis integration
@@ -147,13 +153,14 @@ human-reviewed without exception.
   the wrong reason — an endpoint that 401s regardless of state, a duplicate-id
   case that fails at the first statement so there is nothing to roll back.
 - **A unit test does not prove the feature is reachable.** Test the thing
-  through the entry point a user or a caller actually reaches it by. Three
-  separate pieces of this repo have shipped fully tested and wired to nothing:
-  `scripts/health-gate.sh` (documented as a CI job that did not exist),
-  `api::plugins::router()` (nine passing tests, mounted in no router), and
-  `services/plugins/core_data.rs` (151 lines, referenced only by its own
-  re-export). Every one had green tests. `pub` is not reachability — Rust's
-  `dead_code` lint says nothing about an exported item nothing imports.
+  through the entry point a user or a caller actually reaches it by. This repo
+  has shipped fully tested code wired to nothing more than once:
+  `scripts/health-gate.sh` sat in the tree unreferenced by any CI job until
+  `deploy-verify-testnet` finally called it, and `services/plugins/core_data.rs`
+  (151 lines, referenced only by its own re-export) was later deleted outright
+  as dead code. `api::plugins::router()` (nine passing tests) is still mounted
+  in no router today. Every one had green tests. `pub` is not reachability —
+  Rust's `dead_code` lint says nothing about an exported item nothing imports.
 - **Two migrations must never share a version.** sqlx keys applied migrations
   by the number in the filename; the second file to claim one is refused on
   every startup from then on, not just the first, and recovering means editing

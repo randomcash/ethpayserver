@@ -57,6 +57,19 @@ pub struct InMemoryDataService {
     // happened - the one case this test double cannot otherwise reach, since
     // it is normally a no-op that always succeeds.
     fail_reset_chain_watch_notifications: AtomicBool,
+    webhook_outbox: RwLock<Vec<crate::WebhookObligation>>,
+    /// Obligation id -> claim deadline, mirroring the Postgres
+    /// implementation's `claimed_until` column so this double's
+    /// `claim_undispatched_obligations` enforces the same "invisible until
+    /// the claim expires" rule a real concurrent-drain test would need.
+    webhook_outbox_claims: RwLock<HashMap<Uuid, DateTime<Utc>>>,
+    /// When set, `InvoiceReader::get`/`PaymentReader::get` return a transient
+    /// error instead of consulting their maps, standing in for a database
+    /// that is temporarily unreachable - there is no other way to exercise a
+    /// caller's "retry rather than give up" branch against this double,
+    /// since every other method here only ever returns `Ok`.
+    fail_invoice_reads: AtomicBool,
+    fail_payment_reads: AtomicBool,
 }
 
 impl InMemoryDataService {
@@ -79,6 +92,18 @@ impl InMemoryDataService {
     pub fn set_fail_reset_chain_watch_notifications(&self, fail: bool) {
         self.fail_reset_chain_watch_notifications
             .store(fail, Ordering::SeqCst);
+    }
+
+    /// Make every subsequent `InvoiceReader::get` call fail with a transient
+    /// error (for testing).
+    pub fn fail_invoice_reads(&self) {
+        self.fail_invoice_reads.store(true, Ordering::SeqCst);
+    }
+
+    /// Make every subsequent `PaymentReader::get` call fail with a transient
+    /// error (for testing).
+    pub fn fail_payment_reads(&self) {
+        self.fail_payment_reads.store(true, Ordering::SeqCst);
     }
 
     /// Set up a webhook for a store (for testing).
@@ -123,6 +148,11 @@ fn search_contains(haystack: Option<&str>, term: &str) -> bool {
 #[async_trait]
 impl InvoiceReader for InMemoryDataService {
     async fn get(&self, id: &InvoiceId) -> RepositoryResult<Option<InvoiceData>> {
+        if self.fail_invoice_reads.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated transient invoice read failure".to_string(),
+            ));
+        }
         let invoices = self.invoices.read().unwrap();
         Ok(invoices.get(&id.0).cloned())
     }
@@ -251,6 +281,11 @@ impl InvoiceWriter for InMemoryDataService {
 #[async_trait]
 impl PaymentReader for InMemoryDataService {
     async fn get(&self, id: Uuid) -> RepositoryResult<Option<PaymentData>> {
+        if self.fail_payment_reads.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated transient payment read failure".to_string(),
+            ));
+        }
         let payments = self.payments.read().unwrap();
         Ok(payments.get(&id).cloned())
     }
@@ -471,6 +506,36 @@ impl crate::payment_tx_index::PaymentTxIndexWriter for InMemoryDataService {
         } else {
             index.insert(key, payment.id);
             payments.insert(payment.id, payment.clone());
+        }
+
+        Ok(())
+    }
+
+    async fn upsert_with_tx_index_and_obligation(
+        &self,
+        payment: &PaymentData,
+        tx_index: i32,
+        event_type: &str,
+    ) -> RepositoryResult<()> {
+        // Not a real transaction - this double has no rollback to offer -
+        // but the two writes below are the same two the Postgres
+        // implementation makes atomic, so a test against this double still
+        // exercises "both writes happen together" for the payment_handler
+        // call site, just not "or neither does".
+        self.upsert_with_tx_index(payment, tx_index).await?;
+
+        let mut outbox = self.webhook_outbox.write().unwrap();
+        if !outbox
+            .iter()
+            .any(|o| o.payment_id == payment.id && o.event_type == event_type)
+        {
+            outbox.push(crate::WebhookObligation {
+                id: Uuid::new_v4(),
+                payment_id: payment.id,
+                invoice_id: payment.invoice_id.as_str().to_string(),
+                event_type: event_type.to_string(),
+                created_at: Utc::now(),
+            });
         }
 
         Ok(())
@@ -1112,6 +1177,44 @@ impl PaymentEventWriter for InMemoryDataService {
 #[async_trait]
 impl WebhookDeliveryWriter for InMemoryDataService {
     async fn upsert_delivery(&self, _params: UpsertDeliveryParams) -> RepositoryResult<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::WebhookOutboxReader for InMemoryDataService {
+    async fn claim_undispatched_obligations(
+        &self,
+        limit: i64,
+        visibility_secs: i64,
+    ) -> RepositoryResult<Vec<crate::WebhookObligation>> {
+        let now = Utc::now();
+        let outbox = self.webhook_outbox.read().unwrap();
+        let mut claims = self.webhook_outbox_claims.write().unwrap();
+
+        let mut claimable: Vec<_> = outbox
+            .iter()
+            .filter(|o| claims.get(&o.id).is_none_or(|until| *until < now))
+            .cloned()
+            .collect();
+        claimable.sort_by_key(|o| o.created_at);
+        claimable.truncate(limit.max(0) as usize);
+
+        let claimed_until = now + chrono::Duration::seconds(visibility_secs);
+        for obligation in &claimable {
+            claims.insert(obligation.id, claimed_until);
+        }
+
+        Ok(claimable)
+    }
+}
+
+#[async_trait]
+impl crate::WebhookOutboxWriter for InMemoryDataService {
+    async fn mark_obligation_dispatched(&self, id: Uuid) -> RepositoryResult<()> {
+        let mut outbox = self.webhook_outbox.write().unwrap();
+        outbox.retain(|o| o.id != id);
+        self.webhook_outbox_claims.write().unwrap().remove(&id);
         Ok(())
     }
 }

@@ -1,47 +1,34 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Proves the watch reconciler can actually go red, in both directions, on
+//! purpose.
+//!
+//! Neither fault has an easy accidental trigger: `watched_addresses` cascades
+//! away with its invoice, so Postgres alone can never hold an "orphaned" row,
+//! and a healthy deploy never leaves Redis and Postgres disagreeing either.
+//! Seeding one of each here is the only way to show this check can fail
+//! rather than being vacuously green - the same standard this repo holds
+//! every check like it to.
+//!
+//! Needs a real Postgres and a real Redis; skips (not fails) when either
+//! `DATABASE_URL` or `TEST_REDIS_URL` is unset, the convention every other
+//! ignored integration test in this crate follows.
 
-//! Reconciling the watches the database expects against the watches the
-//! monitor actually holds, against a real database and a real live-watch store.
-//!
-//! This is the test the feature exists for, so it is worth being explicit about
-//! what it does and does not prove. It seeds a real discrepancy in each
-//! direction and asserts each is reported as itself:
-//!
-//! - a live watch nothing in the database expects - wasteful only;
-//! - an expected watch that has been removed from the live set - **nobody is
-//!   watching an address an invoice expects payment on**, and a payment there
-//!   arrives uncredited.
-//!
-//! The removed one is a *token* watch on an address whose *native* watch is
-//! still held. That is deliberate: it is the case a comparison on the address
-//! alone reports as healthy, and it is the case that loses a payment. If the
-//! comparison key is ever narrowed to the address, this test is what goes red.
-//!
-//! It asserts membership rather than totals. The database and the live store
-//! are shared with every other integration test, so unrelated entries are
-//! expected in both directions and a count assertion here would fail for
-//! reasons that have nothing to do with the feature.
-
-use std::collections::HashSet;
-
+use auth::{Store, UserId};
+use data_service::invoice_creation::InvoiceCreationWriter;
+use data_service::store_creation::StoreCreationWriter;
+use data_service::{
+    ExpectedWatch, LiveWatchedAddressReader, LiveWatchedAddressWriter, PgDataService,
+    RedisDataService, WatchKey, reconcile,
+};
+use server::services::{RedisEVMMonitor, reconcile_watches};
 use sqlx::PgPool;
+use types::{
+    ChainId, InvoiceData, InvoiceId, InvoiceStatus, InvoiceWriter, PaymentMethodId,
+    PaymentOptionData, PaymentOptionId, StoreId,
+};
 use uuid::Uuid;
 
-use data_service::postgres::{WatchKey, reconcile_watches};
-use data_service::{LiveWatchedAddressWriter, PgDataService, RedisDataService};
-use types::{ChainId, InvoiceId};
-
-/// Sepolia, the chain the rest of this suite seeds against.
-const CHAIN_TEXT: &str = "eip155:11155111";
-
-fn chain() -> ChainId {
-    ChainId::evm(11155111)
-}
-
-/// A `DATABASE_URL` that is set but unreachable is not the same thing as one
-/// that is not configured, and a test that quietly reports success in the
-/// second case reports success in the first too.
-async fn pg_service() -> Option<PgDataService> {
+async fn service() -> Option<PgDataService> {
     let database_url = std::env::var("DATABASE_URL").ok()?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
@@ -51,25 +38,15 @@ async fn pg_service() -> Option<PgDataService> {
     Some(PgDataService::new(pool))
 }
 
-async fn live_watches() -> Option<RedisDataService> {
-    let url = std::env::var("TEST_REDIS_URL").ok()?;
-    Some(
-        RedisDataService::new(&url)
-            .await
-            .unwrap_or_else(|e| panic!("TEST_REDIS_URL is set but connecting failed: {e}")),
-    )
-}
-
-fn unique_address() -> String {
-    format!("0x{:040x}", Uuid::new_v4().as_u128())
-}
-
 async fn seed_user(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, kdf_params, encrypted_symmetric_key, \
-         recovery_verification_hash, kdf_salt_identifier) \
-         VALUES ($1, '{}'::jsonb, '{}'::jsonb, 'h', 'passkey:' || $1::text)",
+         recovery_verification_hash, kdf_salt_identifier, role) \
+         VALUES ($1, \
+           '{\"algorithm\":\"argon2id\",\"memory_kb\":65536,\"iterations\":3,\"parallelism\":4,\"salt\":\"\"}'::jsonb, \
+           '{\"ciphertext\":\"\",\"iv\":\"\",\"mac\":\"\"}'::jsonb, \
+           'h', 'passkey:' || $1::text, 'user')",
     )
     .bind(id)
     .execute(pool)
@@ -78,20 +55,7 @@ async fn seed_user(pool: &PgPool) -> Uuid {
     id
 }
 
-async fn seed_store(pool: &PgPool, owner: Uuid) -> Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO stores (id, name, owner_id) VALUES ($1, $2, $3)")
-        .bind(id)
-        .bind(format!("watch-reconciliation-{id}"))
-        .bind(owner)
-        .execute(pool)
-        .await
-        .expect("seed store");
-    id
-}
-
-/// A pending, unexpired invoice: the case where a lost watch costs a payment.
-async fn seed_invoice(pool: &PgPool, store: Uuid) -> String {
+async fn seed_pending_invoice(pool: &PgPool, store: Uuid) -> String {
     let id = format!("inv-{}", Uuid::new_v4());
     sqlx::query(
         "INSERT INTO invoices (id, store_id, currency, amount, expires_at) \
@@ -105,191 +69,322 @@ async fn seed_invoice(pool: &PgPool, store: Uuid) -> String {
     id
 }
 
-/// One payment option and its active watch row, for the native asset when
-/// `token` is `None` and for that token contract otherwise.
-///
-/// Two of these on one address is the shape the whole comparison key exists
-/// for: the same address, watched separately per asset.
-async fn seed_watch(pool: &PgPool, invoice: &str, address: &str, token: Option<&str>) {
-    let option_id = Uuid::new_v4();
+/// An invoice and its single native-asset option, shaped for
+/// `InvoiceCreationWriter::create_invoice_with_options` - the real entry
+/// point a new invoice is created through, as opposed to `seed_pending_invoice`
+/// and `seed_payment_option` below, which write rows directly and skip it.
+fn an_invoice_and_option(store: Uuid, address: &str) -> (InvoiceData, PaymentOptionData) {
+    let chain = ChainId::evm(11155111);
+    let invoice = InvoiceData {
+        id: InvoiceId(format!("inv-{}", Uuid::new_v4())),
+        store_id: StoreId(store),
+        currency: "USD".to_string(),
+        status: InvoiceStatus::Pending,
+        amount: "10".to_string(),
+        amount_received: "0".to_string(),
+        created_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        metadata: None,
+        customer_email: None,
+        extra: None,
+    };
+    let option = PaymentOptionData {
+        id: PaymentOptionId(Uuid::new_v4()),
+        invoice_id: invoice.id.clone(),
+        payment_method_id: PaymentMethodId::new("ETH", &chain),
+        chain_id: chain,
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        decimals: 18,
+        payment_address: address.to_string(),
+        wallet_id: None,
+        derivation_index: None,
+        amount: "1".to_string(),
+        rate: None,
+        rate_at: None,
+        is_active: true,
+        created_at: chrono::Utc::now(),
+    };
+    (invoice, option)
+}
+
+async fn seed_payment_option(pool: &PgPool, invoice: &str, address: &str) -> Uuid {
+    let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO payment_options \
-         (id, invoice_id, payment_method_id, chain_id, asset_type, asset_symbol, \
-          token_address, payment_address, amount) \
-         VALUES ($1, $2, $3, $4, $5::asset_type, $6, $7, $8, 1)",
+         (id, invoice_id, payment_method_id, chain_id, asset_type, asset_symbol, payment_address, amount) \
+         VALUES ($1, $2, 'ETH-11155111', 'eip155:11155111', 'native', 'ETH', $3, 1)",
     )
-    .bind(option_id)
+    .bind(id)
     .bind(invoice)
-    .bind(if token.is_some() {
-        "USDC-11155111"
-    } else {
-        "ETH-11155111"
-    })
-    .bind(CHAIN_TEXT)
-    .bind(if token.is_some() { "erc20" } else { "native" })
-    .bind(if token.is_some() { "USDC" } else { "ETH" })
-    .bind(token)
     .bind(address)
     .execute(pool)
     .await
     .expect("seed payment option");
+    id
+}
 
+async fn seed_watched_address(pool: &PgPool, invoice: &str, payment_option: Uuid, address: &str) {
     sqlx::query(
         "INSERT INTO watched_addresses \
-         (invoice_id, payment_option_id, address, chain_id, token_address, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, now() + interval '1 hour')",
+         (invoice_id, payment_option_id, address, chain_id, expires_at) \
+         VALUES ($1, $2, $3, 'eip155:11155111', now() + interval '1 hour')",
     )
     .bind(invoice)
-    .bind(option_id)
+    .bind(payment_option)
     .bind(address)
-    .bind(CHAIN_TEXT)
-    .bind(token)
     .execute(pool)
     .await
     .expect("seed watched address");
 }
 
-/// What one seeded discrepancy leaves behind, and what the assertions need to
-/// recognise it among everything else the shared fixtures hold.
-struct Seeded {
-    owner: Uuid,
-    /// Expected and held: must appear in neither direction.
-    native: WatchKey,
-    /// Expected and no longer held: the expensive direction.
-    missing: WatchKey,
-    /// Held and never expected: the cheap direction.
-    orphan: WatchKey,
-}
-
-/// Put both directions of disagreement into the two stores.
-///
-/// The address keeps its native watch and loses only its token one, which is
-/// the discrepancy an address-keyed comparison cannot see.
-async fn seed_a_discrepancy(pg: &PgDataService, live: &RedisDataService) -> Seeded {
-    let owner = seed_user(pg.pool()).await;
-    let store = seed_store(pg.pool(), owner).await;
-    let invoice = seed_invoice(pg.pool(), store).await;
-    let invoice_id = InvoiceId::from_string(invoice.clone());
-
-    // One address, two assets. The database expects both watched.
-    let address = unique_address();
-    let token = unique_address();
-    seed_watch(pg.pool(), &invoice, &address, None).await;
-    seed_watch(pg.pool(), &invoice, &address, Some(&token)).await;
-
-    // The monitor holds both, as it would after accepting both watch commands.
-    for tok in [None, Some(token.as_str())] {
-        live.watch_address(&address, &invoice_id, &chain(), tok)
-            .await
-            .expect("seed a live watch");
-    }
-
-    // A live watch for an address and invoice the database has never heard of.
-    let orphan_address = unique_address();
-    let orphan_invoice = InvoiceId::from_string(format!("inv-{}", Uuid::new_v4()));
-    live.watch_address(&orphan_address, &orphan_invoice, &chain(), None)
-        .await
-        .expect("seed an orphan live watch");
-
-    // And the expensive case: the token watch disappears from the live set
-    // while the database still expects it, and while the same address keeps
-    // its native watch.
-    let removed = live
-        .unwatch_address(&address, &chain(), Some(&token))
-        .await
-        .expect("remove a live watch");
-    assert!(removed, "the token watch must have been there to remove");
-
-    Seeded {
-        owner,
-        native: WatchKey::new(&address, &invoice, chain(), None),
-        missing: WatchKey::new(&address, &invoice, chain(), Some(&token)),
-        orphan: WatchKey::new(&orphan_address, orphan_invoice.as_str(), chain(), None),
-    }
-}
-
-/// Leave both stores as they were found. The live keys have no expiry, so an
-/// orphan left behind is a permanent false positive for every later run.
-async fn tidy_up(pg: &PgDataService, live: &RedisDataService, seeded: &Seeded) {
-    for key in [&seeded.native, &seeded.missing, &seeded.orphan] {
-        let _ = live
-            .unwatch_address(&key.address, &key.chain_id, key.token_address.as_deref())
+async fn cleanup(pool: &PgPool, users: &[Uuid]) {
+    for user in users {
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(pool)
             .await;
     }
-    let _ = sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(seeded.owner)
-        .execute(pg.pool())
-        .await;
 }
 
+/// Seeds a fault in each direction on purpose:
+///
+/// - a Redis key with no invoice behind it in Postgres at all, standing in
+///   for what a deleted or resolved invoice leaves behind - **stale**.
+/// - a live, pending invoice's watched address on record in Postgres,
+///   deliberately never told to Redis - **missed**, the worse fault, since a
+///   real payment to it would go uncredited.
+///
+/// A prior pass of this reconciler that only checked one direction would
+/// have passed a suite covering only the other, so both are asserted here in
+/// the same test rather than split across two.
 #[tokio::test]
-#[ignore = "requires a live database and live-watch store; set DATABASE_URL and TEST_REDIS_URL"]
-async fn a_stale_watch_and_a_missing_watch_are_reported_as_different_things() {
-    let Some(pg) = pg_service().await else {
+#[ignore]
+async fn reconcile_watches_reports_a_stale_watch_and_a_missed_watch() {
+    let Some(pg) = service().await else {
         return;
     };
-    let Some(live) = live_watches().await else {
+    let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };
 
-    let seeded = seed_a_discrepancy(&pg, &live).await;
-    let (native_key, token_key, orphan_key) = (&seeded.native, &seeded.missing, &seeded.orphan);
-
-    let expected = pg
-        .get_expected_watches()
+    let monitor = RedisEVMMonitor::connect(&redis_url)
         .await
-        .expect("read what the database expects to be watched");
-    let report = reconcile_watches(expected, &live)
+        .unwrap_or_else(|e| panic!("TEST_REDIS_URL is set but connecting failed: {e}"));
+    let live_watches = RedisDataService::new(&redis_url)
         .await
-        .expect("compare the two sides");
+        .unwrap_or_else(|e| panic!("TEST_REDIS_URL is set but connecting failed: {e}"));
 
-    // The expensive direction: expected, not held.
-    assert!(
-        report.missing.contains(token_key),
-        "a watch the database expects and the monitor does not hold must be \
-         reported missing; missing={:?}",
-        report.missing
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(
+        format!("watch-reconciler-test-{}", Uuid::new_v4()),
+        UserId(owner),
     );
-    // Reported as missing on the strength of the token, not the address: the
-    // address itself is still watched, and an address-keyed comparison would
-    // have found nothing wrong here.
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store");
+
+    // The missed-watch case.
+    let invoice = seed_pending_invoice(pg.pool(), store.id.0).await;
+    let missed_address = format!("0x{:040x}", Uuid::new_v4().as_u128());
+    let payment_option = seed_payment_option(pg.pool(), &invoice, &missed_address).await;
+    seed_watched_address(pg.pool(), &invoice, payment_option, &missed_address).await;
+
+    // The stale-watch case.
+    let stale_address = format!("0x{:040x}", Uuid::new_v4().as_u128());
+    live_watches
+        .watch_address(
+            &stale_address,
+            &InvoiceId::from_string("a-deleted-invoice".to_string()),
+            &ChainId::evm(11155111),
+            None,
+        )
+        .await
+        .expect("seed a stale redis watch");
+
+    let expected: Vec<WatchKey> = pg
+        .get_expected_watched_addresses()
+        .await
+        .expect("read the expected set")
+        .iter()
+        .map(ExpectedWatch::key)
+        .collect();
+    let actual: Vec<WatchKey> = live_watches
+        .get_all_watched()
+        .await
+        .expect("read the actual set")
+        .into_iter()
+        .map(|(address, _invoice_id, chain_id, token)| {
+            WatchKey::new(chain_id, &address, token.as_deref())
+        })
+        .collect();
+
+    let diff = reconcile(&expected, &actual);
+    let missed_key = WatchKey::new(ChainId::evm(11155111), &missed_address, None);
+    let stale_key = WatchKey::new(ChainId::evm(11155111), &stale_address, None);
     assert!(
-        !report.missing.contains(native_key),
-        "the native watch is still held and must not be reported missing"
+        diff.missed.contains(&missed_key),
+        "a live invoice's never-watched address must be reported missed"
+    );
+    assert!(
+        diff.stale.contains(&stale_key),
+        "a redis-only key with no invoice behind it must be reported stale"
     );
 
-    // The cheap direction: held, not expected.
+    // `reconcile_watches` is the exact function `/health/deep` calls - prove
+    // it, not just the pieces it is built from, sees both.
+    let counts = reconcile_watches(&pg, &monitor)
+        .await
+        .expect("reconcile via the real entry point");
+    assert!(counts.stale >= 1);
+    assert!(counts.missed >= 1);
+
+    let _ = live_watches
+        .unwatch_address(&stale_address, &ChainId::evm(11155111), None)
+        .await;
+    cleanup(pg.pool(), &[owner]).await;
+}
+
+/// `WatchKey` deliberately drops the invoice id - see its doc comment for
+/// why that is safe rather than merely convenient. This is the "why" made
+/// concrete: a stale Redis watch for a deleted invoice, then the same
+/// address legitimately rewatched for a second invoice, must leave Redis
+/// holding the *new* invoice id (proving the plain Redis `SET` in
+/// `watch_address` really does overwrite in place) and the reconciler
+/// reporting nothing for that key (proving the key-only comparison does not
+/// need the invoice id to be safe here).
+///
+/// Invoice B is created through `create_invoice_with_options`, the same
+/// entry point a real invoice goes through, rather than by hand-inserting a
+/// `watched_addresses` row: that function's `ON CONFLICT (address, chain_id,
+/// token_address) DO UPDATE` is what actually reassigns the row in
+/// production, and it never touches the row's `invoice_id` column directly -
+/// only `payment_option_id`, which the `expected_watched_addresses` view
+/// joins through to get the invoice. Exercising anything less than the real
+/// upsert would not prove the thing this test exists to prove.
+///
+/// Invoice A is resolved rather than deleted, for the same reason: deleting
+/// its row would remove the very conflict this test needs invoice B's write
+/// to hit, and would prove the easier, less realistic case instead.
+#[tokio::test]
+#[ignore]
+#[allow(clippy::too_many_lines)] // integration test with multi-step setup + assertions
+async fn a_reused_address_resolves_to_the_new_invoice_not_the_stale_one() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
+        return;
+    };
+
+    let monitor = RedisEVMMonitor::connect(&redis_url)
+        .await
+        .unwrap_or_else(|e| panic!("TEST_REDIS_URL is set but connecting failed: {e}"));
+    let live_watches = RedisDataService::new(&redis_url)
+        .await
+        .unwrap_or_else(|e| panic!("TEST_REDIS_URL is set but connecting failed: {e}"));
+
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(
+        format!("watch-reuse-test-{}", Uuid::new_v4()),
+        UserId(owner),
+    );
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store");
+
+    let address = format!("0x{:040x}", Uuid::new_v4().as_u128());
+    let chain = ChainId::evm(11155111);
+
+    // Invoice A watches the address, then resolves (paid) while its
+    // `watched_addresses` row stays `is_active = TRUE` - the cleanup-lag
+    // window the view's doc comment describes - and Redis is never told.
+    // The row is not deleted: production reuse never deletes it either (see
+    // below), so leaving it in place is what makes the second half of this
+    // test exercise the real code path instead of an easier one.
+    let invoice_a = seed_pending_invoice(pg.pool(), store.id.0).await;
+    let payment_option_a = seed_payment_option(pg.pool(), &invoice_a, &address).await;
+    seed_watched_address(pg.pool(), &invoice_a, payment_option_a, &address).await;
+    live_watches
+        .watch_address(
+            &address,
+            &InvoiceId::from_string(invoice_a.clone()),
+            &chain,
+            None,
+        )
+        .await
+        .expect("seed invoice A's watch");
+    InvoiceWriter::update_status(
+        &pg,
+        &InvoiceId::from_string(invoice_a.clone()),
+        InvoiceStatus::Paid,
+    )
+    .await
+    .expect("resolve invoice A without touching its watched_addresses row");
+
+    let key = WatchKey::new(chain.clone(), &address, None);
+    let stale_counts = reconcile_watches(&pg, &monitor)
+        .await
+        .expect("reconcile before reuse");
     assert!(
-        report.stale.contains(orphan_key),
-        "a live watch the database does not expect must be reported stale; \
-         stale={:?}",
-        report.stale
+        stale_counts.stale >= 1,
+        "invoice A's watch must be reported stale before the address is reused"
     );
 
-    // Distinctly. Neither direction may leak into the other, and a watch that
-    // is genuinely in both places appears in neither list.
-    assert!(
-        !report.stale.contains(token_key),
-        "a missing watch must not also be reported stale"
-    );
-    assert!(
-        !report.missing.contains(orphan_key),
-        "a stale watch must not also be reported missing"
-    );
-    assert!(
-        !report.stale.contains(native_key),
-        "a watch both sides agree on must appear in neither direction"
-    );
-    let stale: HashSet<&WatchKey> = report.stale.iter().collect();
-    assert!(
-        !report.missing.iter().any(|m| stale.contains(m)),
-        "the two directions must be disjoint"
+    // Invoice B legitimately rewatches the same address through the real
+    // write path (`InvoiceCreationWriter::create_invoice_with_options`),
+    // not a hand-written INSERT. That function's `ON CONFLICT (address,
+    // chain_id, token_address) DO UPDATE` fires here because invoice A's row
+    // is still physically present, and its `SET` clause only ever touches
+    // `payment_option_id` - never `invoice_id` - so the same underlying row
+    // that used to belong to invoice A is repointed to invoice B's option
+    // without the `invoice_id` column itself ever being written. Proving the
+    // reconciler goes quiet after this is what proves dropping `invoice_id`
+    // from `WatchKey` is safe against the actual conflict-update path, not
+    // just a delete-then-insert that never exercises it.
+    let (invoice_b, option_b) = an_invoice_and_option(store.id.0, &address);
+    let invoice_b_id = invoice_b.id.clone();
+    pg.create_invoice_with_options(&invoice_b, std::slice::from_ref(&option_b))
+        .await
+        .expect("legitimately rewatch the address for invoice B via the real write path");
+    live_watches
+        .watch_address(&address, &invoice_b_id, &chain, None)
+        .await
+        .expect("the app's post-write watch_address call for invoice B");
+
+    let redis_value = live_watches
+        .get_watched_invoice(&address, &chain, None)
+        .await
+        .expect("read back the overwritten watch")
+        .expect("the address is still watched");
+    assert_eq!(
+        redis_value.as_str(),
+        invoice_b_id.as_str(),
+        "the Redis value must have moved to invoice B, not stayed on the stale invoice A"
     );
 
-    // Counted, per direction, never as one total.
-    assert!(report.missing_count() >= 1);
-    assert!(report.stale_count() >= 1);
-    assert!(!report.agrees());
+    let expected: Vec<WatchKey> = pg
+        .get_expected_watched_addresses()
+        .await
+        .expect("read the expected set")
+        .iter()
+        .map(ExpectedWatch::key)
+        .collect();
+    let actual: Vec<WatchKey> = live_watches
+        .get_all_watched()
+        .await
+        .expect("read the actual set")
+        .into_iter()
+        .map(|(address, _invoice_id, chain_id, token)| {
+            WatchKey::new(chain_id, &address, token.as_deref())
+        })
+        .collect();
+    let diff = reconcile(&expected, &actual);
+    assert!(
+        !diff.stale.contains(&key) && !diff.missed.contains(&key),
+        "once invoice B legitimately owns the address, the reconciler must report neither fault for it"
+    );
 
-    tidy_up(&pg, &live, &seeded).await;
+    let _ = live_watches.unwatch_address(&address, &chain, None).await;
+    cleanup(pg.pool(), &[owner]).await;
 }

@@ -24,6 +24,8 @@
 //!   audit trail outlives the plugin it describes
 //! - `seeded_tokens`: the migration-seeded L2 and testnet tokens, resolved
 //!   by `TokenReader::get_by_address` the way a real payment resolves them
+//! - `expected_watch`: `expected_watched_addresses` excludes a still-active
+//!   watch once its invoice resolves, not just once it is deactivated
 
 mod account_deletion;
 mod aggregation;
@@ -31,6 +33,7 @@ mod analytics;
 mod backfill_truncated_payment_symbols;
 mod chain_cursor;
 mod email_change;
+mod expected_watch;
 mod installed_plugins;
 mod invoice;
 mod invoice_creation;
