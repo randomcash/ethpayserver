@@ -376,16 +376,6 @@ impl EventBridge for RedisBridge {
     }
 
     async fn subscribe_from(&self, from: Option<EventCursor>) -> EvmResult<DurableEventStream> {
-        // Same epoch does not, on its own, mean `cursor.seq` is still safe
-        // to resume from: `XADD ... MAXLEN` trims independently of the
-        // epoch key, so a consumer that falls behind the retention window
-        // can have its committed position trimmed out while the epoch never
-        // moved. Left unchecked, the `XREAD` below would silently resume
-        // from whatever the stream happens to retain next - exactly the
-        // "starting from wherever" failure this whole mechanism exists to
-        // rule out. The epoch is left alone on purpose: bumping it would make
-        // the next start read a mismatch and resume past the gap silently,
-        // so instead every restart fails until an operator audits the gap.
         // Read once, before anything else, and compared to the cursor's
         // epoch: the caller read the epoch separately, so the keyspace can
         // have been lost in between. `seq` numbers from another lineage
@@ -400,6 +390,16 @@ impl EventBridge for RedisBridge {
             )));
         }
 
+        // Same epoch does not, on its own, mean `cursor.seq` is still safe
+        // to resume from: `XADD ... MAXLEN` trims independently of the
+        // epoch key, so a consumer that falls behind the retention window
+        // can have its committed position trimmed out while the epoch never
+        // moved. Left unchecked, the `XREAD` below would silently resume
+        // from whatever the stream happens to retain next - exactly the
+        // "starting from wherever" failure this whole mechanism exists to
+        // rule out. The epoch is left alone on purpose: bumping it would make
+        // the next start read a mismatch and resume past the gap silently,
+        // so instead every restart fails until an operator audits the gap.
         if let Some(cursor) = from
             && let Some(oldest) = self.oldest_retained_seq().await?
             && oldest > cursor.seq + 1
