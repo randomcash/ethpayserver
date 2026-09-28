@@ -108,7 +108,8 @@ async fn an_outbox_lineage_break_re_arms_watch_retry_and_still_credits_the_next_
     // Restart against the broken lineage: the stored cursor's epoch no
     // longer matches the outbox's, so this must not resume from it as if
     // nothing happened.
-    let consumer2 = create_test_consumer(ds.clone(), bridge.clone());
+    let consumer2 =
+        create_test_consumer(ds.clone(), bridge.clone()).with_accepted_lineage_break(true);
     let task2 = tokio::spawn(consumer2.run());
     wait_for_payment(&ds, &invoice_id).await;
     task2.abort();
@@ -174,7 +175,8 @@ async fn a_genuinely_fresh_memory_bridge_after_a_restart_is_treated_as_a_lineage
         .await
         .unwrap();
 
-    let consumer2 = create_test_consumer(ds.clone(), bridge2.clone());
+    let consumer2 =
+        create_test_consumer(ds.clone(), bridge2.clone()).with_accepted_lineage_break(true);
     let task2 = tokio::spawn(consumer2.run());
     wait_for_payment(&ds, &invoice_id).await;
     task2.abort();
@@ -190,4 +192,57 @@ async fn a_genuinely_fresh_memory_bridge_after_a_restart_is_treated_as_a_lineage
         .unwrap();
     assert_eq!(payments.len(), 1);
     assert_eq!(payments[0].amount, "500000000000000000");
+}
+
+#[tokio::test]
+async fn an_unaccepted_lineage_break_halts_without_resuming_or_rearming() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let store_id = StoreId::new();
+
+    let invoice_id = InvoiceId::new();
+    create_test_invoice(&ds, &invoice_id, store_id).await;
+    bridge
+        .publish(&make_payment_detected(
+            &invoice_id,
+            1,
+            B256::from([1u8; 32]),
+        ))
+        .await
+        .unwrap();
+    let task1 = tokio::spawn(create_test_consumer(ds.clone(), bridge.clone()).run());
+    wait_for_payment(&ds, &invoice_id).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    task1.abort();
+    let _ = task1.await;
+
+    bridge.bump_epoch().await.unwrap();
+    let invoice2 = InvoiceId::new();
+    create_test_invoice(&ds, &invoice2, store_id).await;
+    bridge
+        .publish(&make_payment_detected(&invoice2, 2, B256::from([2u8; 32])))
+        .await
+        .unwrap();
+
+    let reasons: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = reasons.clone();
+    let consumer = create_test_consumer(ds.clone(), bridge.clone()).with_resume_failure_hook(
+        Arc::new(move |reason| recorded.lock().unwrap().push(reason.to_string())),
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(2), consumer.run()).await;
+
+    assert_eq!(reasons.lock().unwrap().len(), 1, "must halt exactly once");
+    assert!(reasons.lock().unwrap()[0].contains("not accepted"));
+    assert_eq!(
+        ds.watch_reset_calls(),
+        0,
+        "a refused break must change nothing"
+    );
+    assert!(
+        PaymentReader::get_for_invoice(&*ds, &invoice2)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a refused break must not resume from the new lineage"
+    );
 }

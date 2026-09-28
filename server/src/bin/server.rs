@@ -356,6 +356,11 @@ async fn main() -> Result<()> {
         Some((store_id, observers)) => event_consumer.with_own_store_payments(store_id, observers),
         None => event_consumer,
     };
+    // An outbox lineage break can hide lost payments; the consumer refuses to
+    // resume across one until an operator has audited the gap and opts in.
+    let event_consumer = event_consumer.with_accepted_lineage_break(
+        std::env::var("EVENT_ACCEPT_LINEAGE_BREAK").is_ok_and(|v| v == "true"),
+    );
     let mut event_consumer_handle = tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
 

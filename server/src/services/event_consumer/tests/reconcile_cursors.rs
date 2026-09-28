@@ -17,7 +17,7 @@ use super::helpers::create_test_consumer;
 async fn a_stale_chains_cursor_does_not_lower_the_resume_point_below_a_current_chains() {
     let ds = Arc::new(InMemoryDataService::new());
     let bridge = Arc::new(MemoryBridge::new());
-    let consumer = create_test_consumer(ds.clone(), bridge);
+    let consumer = create_test_consumer(ds.clone(), bridge).with_accepted_lineage_break(true);
 
     let old_epoch = 1;
     let new_epoch = 2;
@@ -134,7 +134,7 @@ async fn the_resume_point_is_the_highest_committed_seq_across_chains_on_the_curr
 async fn every_chain_mismatching_resumes_from_scratch_rather_than_a_stale_combined_mark() {
     let ds = Arc::new(InMemoryDataService::new());
     let bridge = Arc::new(MemoryBridge::new());
-    let consumer = create_test_consumer(ds.clone(), bridge);
+    let consumer = create_test_consumer(ds.clone(), bridge).with_accepted_lineage_break(true);
 
     let old_epoch = 1;
     let new_epoch = 2;

@@ -134,6 +134,7 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     own_store_id: Option<types::StoreId>,
     on_apply_failure: Option<ApplyFailureHook>,
     on_resume_failure: Option<ResumeFailureHook>,
+    accept_lineage_break: bool,
 }
 
 impl<
@@ -162,7 +163,25 @@ impl<
             own_store_id: None,
             on_apply_failure: None,
             on_resume_failure: None,
+            accept_lineage_break: false,
         }
+    }
+
+    /// Let the consumer resume across an outbox lineage break instead of
+    /// refusing to start.
+    ///
+    /// A stored cursor whose epoch differs from the outbox's means events
+    /// between the last commit and now may be gone, and there is no rescan by
+    /// `block_height` to recover them. Re-arming `watch_retry` only re-drives
+    /// watches that are still active, so a payment that confirmed and whose
+    /// watch expired inside the gap would never be credited. By default the
+    /// consumer therefore halts, so a human audits the gap; an operator who
+    /// has done that opts in here, and the break is then handled by
+    /// re-arming `watch_retry` and forgetting the stale cursors.
+    #[must_use]
+    pub fn with_accepted_lineage_break(mut self, accept: bool) -> Self {
+        self.accept_lineage_break = accept;
+        self
     }
 
     /// Report settled invoices on `own_store_id` to `observers`.
@@ -341,7 +360,9 @@ impl<
     /// A chain whose epoch does not match means the outbox lost continuity
     /// for it specifically - `seq` numbers from before the break name a
     /// lineage that may no longer exist. There is no rescan-from-height
-    /// fallback to fall back to, so this does the next best thing: log
+    /// fallback, so unless the operator opted in with
+    /// [`Self::with_accepted_lineage_break`] this halts. When accepted it does
+    /// the next best thing: log
     /// loudly (this is the "page someone" moment, not a silent one),
     /// re-arm `watch_retry` for that chain, and forget its cursor so it
     /// does not pollute the low-water mark next time either. If every chain
@@ -368,6 +389,19 @@ impl<
             .filter(|(_, c)| c.epoch != bridge_epoch)
             .map(|(&chain_id, _)| chain_id)
             .collect();
+
+        if !mismatched.is_empty() && !self.accept_lineage_break {
+            tracing::error!(
+                ?mismatched,
+                bridge_epoch,
+                "event outbox epoch changed since these chains last resumed; events since \
+                 their last commit may be lost and cannot be replayed. Refusing to resume - \
+                 audit the gap for payments missing from `payments`, then restart with \
+                 EVENT_ACCEPT_LINEAGE_BREAK=true to accept the break."
+            );
+            self.fatal("event outbox lineage break not accepted");
+            return Err(());
+        }
 
         if !mismatched.is_empty() {
             tracing::error!(

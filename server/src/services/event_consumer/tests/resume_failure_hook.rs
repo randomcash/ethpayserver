@@ -206,8 +206,9 @@ async fn a_lineage_break_that_cannot_re_arm_watch_retry_halts_rather_than_forget
 
     let reasons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let recorded = reasons.clone();
-    let consumer =
-        create_test_consumer(ds, bridge).with_resume_failure_hook(Arc::new(move |reason| {
+    let consumer = create_test_consumer(ds, bridge)
+        .with_accepted_lineage_break(true)
+        .with_resume_failure_hook(Arc::new(move |reason| {
             recorded.lock().unwrap().push(reason.to_string())
         }));
 
