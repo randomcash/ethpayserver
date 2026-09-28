@@ -399,6 +399,19 @@ pub fn validate_xpub(xpub_str: &str) -> bool {
     MainnetEncoder::xpub_from_base58(xpub_str).is_ok()
 }
 
+/// Names the more likely reason a string failed `validate_xpub`: it looks
+/// like a pasted extended *private* key rather than a typo or truncation.
+///
+/// `validate_xpub` already refuses this on the version byte - decoding it as
+/// an xpub fails - so this takes no part in that boundary. It exists only so
+/// a caller can tell an operator what they actually pasted instead of a bare
+/// refusal, which matters because the more specific message is what stops
+/// someone from trying the same private key again with a typo "fixed".
+pub fn looks_like_a_private_key(xpub_str: &str) -> bool {
+    let trimmed = xpub_str.trim();
+    trimmed.starts_with("xprv") || trimmed.starts_with("tprv")
+}
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -335,3 +335,16 @@ fn an_xprv_is_never_accepted_as_an_xpub() {
         "an xprv was accepted as an xpub: the server would be holding a spending key"
     );
 }
+
+#[test]
+fn looks_like_a_private_key_flags_mainnet_and_testnet_prefixes() {
+    assert!(looks_like_a_private_key(
+        "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi"
+    ));
+    assert!(looks_like_a_private_key("  tprv8ZgxMBicQKsPd...  "));
+    assert!(!looks_like_a_private_key(
+        "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"
+    ));
+    assert!(!looks_like_a_private_key("not-a-key-at-all"));
+    assert!(!looks_like_a_private_key(""));
+}
