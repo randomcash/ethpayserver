@@ -477,18 +477,36 @@ impl<
             return true;
         }
 
-        if let Err(e) = self.handle_event(envelope.event).await {
-            tracing::error!(
-                chain_id,
-                seq = envelope.cursor.seq,
-                error = %e,
-                "failed to apply event; halting so the durable cursor cannot advance past it"
-            );
-            match &self.on_apply_failure {
-                Some(hook) => hook(chain_id, envelope.cursor.seq),
-                None => std::process::exit(1),
+        match self.handle_event(envelope.event).await {
+            Ok(()) => {}
+            // Permanent: the event names data that does not exist or cannot
+            // be interpreted (an invoice since deleted, a malformed token
+            // field). Redelivery fails identically forever, so halting would
+            // crash-loop the consumer and stop every other merchant and
+            // chain behind it. Skip it - the cursor advances past it - but
+            // at error level with the full position, so it is a page and
+            // not a silent drop. An operator can find it by (chain, seq).
+            Err(e @ EventConsumerError::InvalidData(_)) => {
+                tracing::error!(
+                    chain_id,
+                    epoch = envelope.cursor.epoch,
+                    seq = envelope.cursor.seq,
+                    error = %e,
+                    "quarantined an event that can never apply; cursor advances past it"
+                );
             }
-            return false;
+            // Possibly transient (database): halt so the durable cursor
+            // cannot advance past it, and let the restart redeliver.
+            Err(e) => {
+                tracing::error!(
+                    chain_id,
+                    seq = envelope.cursor.seq,
+                    error = %e,
+                    "failed to apply event; halting so the durable cursor cannot advance past it"
+                );
+                self.halt(chain_id, envelope.cursor.seq);
+                return false;
+            }
         }
 
         let cursor = ChainCursor {
@@ -513,14 +531,21 @@ impl<
                 error = %e,
                 "failed to commit chain cursor; halting"
             );
-            match &self.on_apply_failure {
-                Some(hook) => hook(chain_id, envelope.cursor.seq),
-                None => std::process::exit(1),
-            }
+            self.halt(chain_id, envelope.cursor.seq);
             return false;
         }
         cursors.insert(chain_id, cursor);
         true
+    }
+
+    /// Stop the consumer after an unrecoverable apply failure: the hook if
+    /// one is installed (tests), otherwise the process, so a supervisor
+    /// restarts it and the durable cursor redelivers.
+    fn halt(&self, chain_id: u64, seq: i64) {
+        match &self.on_apply_failure {
+            Some(hook) => hook(chain_id, seq),
+            None => std::process::exit(1),
+        }
     }
 
     /// Handle a single monitor event.

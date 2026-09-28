@@ -75,6 +75,7 @@ pub struct InMemoryDataService {
     /// since every other method here only ever returns `Ok`.
     fail_invoice_reads: AtomicBool,
     fail_payment_reads: AtomicBool,
+    fail_payment_writes: AtomicBool,
 }
 
 impl InMemoryDataService {
@@ -103,6 +104,11 @@ impl InMemoryDataService {
     /// fail.
     pub fn set_fail_commit_chain_cursor(&self, fail: bool) {
         self.fail_commit_chain_cursor.store(fail, Ordering::SeqCst);
+    }
+
+    /// Make every subsequent payment upsert fail with a transient error.
+    pub fn fail_payment_writes(&self) {
+        self.fail_payment_writes.store(true, Ordering::SeqCst);
     }
 
     /// Make every subsequent `InvoiceReader::get` call fail with a transient
@@ -528,6 +534,11 @@ impl crate::payment_tx_index::PaymentTxIndexWriter for InMemoryDataService {
         tx_index: i32,
         event_type: &str,
     ) -> RepositoryResult<()> {
+        if self.fail_payment_writes.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated transient payment write failure".to_string(),
+            ));
+        }
         // Not a real transaction - this double has no rollback to offer -
         // but the two writes below are the same two the Postgres
         // implementation makes atomic, so a test against this double still

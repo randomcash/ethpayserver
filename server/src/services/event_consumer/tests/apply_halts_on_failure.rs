@@ -50,7 +50,7 @@ fn make_payment(
 }
 
 #[tokio::test]
-async fn a_failed_apply_stops_a_later_envelope_on_the_same_chain_from_committing_past_it() {
+async fn a_permanently_bad_event_is_quarantined_and_later_envelopes_still_apply() {
     let ds = Arc::new(InMemoryDataService::new());
     let bridge = Arc::new(MemoryBridge::new());
     let store_id = StoreId::new();
@@ -107,7 +107,66 @@ async fn a_failed_apply_stops_a_later_envelope_on_the_same_chain_from_committing
             recorded.lock().unwrap().push((chain_id, seq));
         }),
     );
+    let task = tokio::spawn(consumer.run());
 
+    // The bad event must not freeze the stream: the envelope after it has
+    // to apply.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let ps = PaymentReader::get_for_invoice(&*ds, &later_invoice)
+                .await
+                .unwrap();
+            if !ps.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("an event that can never apply froze the consumer");
+    task.abort();
+
+    assert!(
+        failures.lock().unwrap().is_empty(),
+        "halted on a permanent error"
+    );
+    let cursors = ChainCursorReader::chain_cursors(&*ds, ADAPTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(cursors.get(&1).map(|c| c.seq), Some(2));
+}
+
+/// A possibly-transient failure (the database) must halt, and the cursor
+/// must not move past the event that failed.
+#[tokio::test]
+async fn a_transient_apply_failure_halts_without_committing_the_cursor() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let store_id = StoreId::new();
+
+    let invoice = InvoiceId::new();
+    create_test_invoice(&ds, &invoice, store_id).await;
+    for (amount, byte) in [(1u64, 1u8), (2, 2)] {
+        bridge
+            .publish(&make_payment(
+                &invoice,
+                amount,
+                B256::from([byte; 32]),
+                true,
+                None,
+            ))
+            .await
+            .unwrap();
+    }
+    ds.fail_payment_writes();
+
+    let failures: Arc<Mutex<Vec<(u64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = failures.clone();
+    let consumer = create_test_consumer(ds.clone(), bridge.clone()).with_apply_failure_hook(
+        Arc::new(move |chain_id, seq| {
+            recorded.lock().unwrap().push((chain_id, seq));
+        }),
+    );
     let task = tokio::spawn(consumer.run());
 
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -117,28 +176,13 @@ async fn a_failed_apply_stops_a_later_envelope_on_the_same_chain_from_committing
     })
     .await
     .expect("apply failure hook was never called");
-    // The hook doesn't exit, so `run`'s own loop is what has to stop; give
-    // it a moment to actually return rather than asserting mid-flight.
     let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
 
-    assert_eq!(*failures.lock().unwrap(), vec![(1, 1)]);
-
-    // The envelope after the failed one must never have been applied.
-    let later_payments = PaymentReader::get_for_invoice(&*ds, &later_invoice)
-        .await
-        .unwrap();
-    assert!(
-        later_payments.is_empty(),
-        "an envelope after a failed one was applied - the consumer skipped past the failure \
-         instead of halting"
-    );
-
-    // The persisted cursor must sit at the last successful apply (seq 0),
-    // not skip forward past the failed seq 1.
+    assert_eq!(*failures.lock().unwrap(), vec![(1, 0)]);
     let cursors = ChainCursorReader::chain_cursors(&*ds, ADAPTER_ID)
         .await
         .unwrap();
-    assert_eq!(cursors.get(&1).map(|c| c.seq), Some(0));
+    assert_eq!(cursors.get(&1), None);
 }
 
 /// A `handle_event` success followed by a failed `commit_chain_cursor` write
