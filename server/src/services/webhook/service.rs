@@ -1,6 +1,8 @@
 //! Webhook delivery service: queue, delivery loop, signing, and retry handling.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -40,23 +42,53 @@ fn process_error_is_fault(error: &WebhookError, shutting_down: bool) -> bool {
     }
 }
 
-/// Whether a permanently-failed delivery is a fact about the merchant's own
-/// endpoint, rather than payserver's.
+/// Whether a permanently-failed delivery is *eligible* to be treated as a
+/// fact about the merchant's own endpoint, rather than payserver's.
 ///
 /// Only `WebhookError::Unreachable` — the request never reached the
-/// merchant's endpoint at all — qualifies, so only that case is logged under
-/// the target `evm::telemetry::sentry_event_filter` demotes to a breadcrumb.
-/// Every other cause (a non-success status, which can reflect a signing or
-/// request-construction bug on our side just as easily as a merchant one, or
-/// the payload failing to serialize, which is entirely ours) keeps this
-/// module's default target and pages like any other error. `tracing`'s
-/// `target:` must be a compile-time constant, so this can only steer which
-/// of two literal targets a call site picks, not compute one.
+/// merchant's endpoint at all — is eligible; every other cause (a
+/// non-success status, which can reflect a signing or request-construction
+/// bug on our side just as easily as a merchant one, or the payload failing
+/// to serialize, which is entirely ours) keeps this module's default target
+/// and pages like any other error.
+///
+/// Eligible is not the same as demoted: `Unreachable` alone cannot tell "one
+/// merchant is down" from "payserver's own egress is broken", since both
+/// look identical from here (see `recent_unreachable_are_one_merchant`).
+/// Only when this is true *and* the isolation check also passes does the
+/// call site pick the target `evm::telemetry::sentry_event_filter` demotes
+/// to a breadcrumb. `tracing`'s `target:` must be a compile-time constant,
+/// so this can only steer which of two literal targets a call site picks,
+/// not compute one.
 ///
 /// Split out so the classification is unit-testable without constructing a
 /// `WebhookService` or driving a real delivery.
 fn permanent_failure_is_merchant_unreachable(error: &WebhookError) -> bool {
     matches!(error, WebhookError::Unreachable(_))
+}
+
+/// How many recent permanently-failed-as-`Unreachable` deliveries to
+/// remember the store webhook id of. Only needs to be enough to notice "a
+/// second one showed up", not to hold a history.
+const RECENT_UNREACHABLE_CAPACITY: usize = 8;
+
+/// Whether every store webhook in `recent` is the same one.
+///
+/// `WebhookError::Unreachable` covers a DNS failure, a refused connection,
+/// or a request that times out with no answer at all — exactly what a
+/// merchant's endpoint being down looks like, but also exactly what
+/// payserver's own egress breaking looks like, since nothing here can reach
+/// anyone either way. Whether a *second* store webhook shows up in the same
+/// short window is what tells the two apart: one endpoint failing
+/// repeatedly keeps naming the same id, while payserver's own egress
+/// breaking fails every merchant's deliveries at once, not just one's.
+/// Empty is vacuously true — a first failure in a while has no one to
+/// disagree with yet.
+fn recent_unreachable_are_one_merchant(recent: &VecDeque<uuid::Uuid>) -> bool {
+    match recent.back() {
+        Some(last) => recent.iter().all(|id| id == last),
+        None => true,
+    }
 }
 
 /// Atomically moves a job from the ready queue to the processing set.
@@ -124,6 +156,14 @@ pub struct WebhookService<D: WebhookDataService> {
     /// caused by the container's network dropping out during shutdown reads
     /// identically to a real fault unless we know shutdown was asked for.
     shutting_down: AtomicBool,
+    /// Store webhook ids of the most recent permanently-failed-as-
+    /// `Unreachable` deliveries, capped at `RECENT_UNREACHABLE_CAPACITY`.
+    ///
+    /// See `recent_unreachable_are_one_merchant` for what this is checked
+    /// against and why. `process_next_job` only ever runs one delivery at a
+    /// time (`run()` spawns a single loop), so this is never contended; the
+    /// mutex exists for `Send`/`Sync`, not for real concurrency.
+    recent_unreachable: Mutex<VecDeque<uuid::Uuid>>,
 }
 
 impl<D: WebhookDataService + 'static> WebhookService<D> {
@@ -158,6 +198,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             http_client,
             config,
             shutting_down: AtomicBool::new(false),
+            recent_unreachable: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -423,6 +464,58 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         }
     }
 
+    /// Record a permanently-failed-as-`Unreachable` delivery for
+    /// `job.store_webhook_id` and report whether the recent run of these
+    /// still looks isolated to that one store webhook.
+    ///
+    /// See `recent_unreachable_are_one_merchant` for what "isolated" means
+    /// and why it's the question that decides whether this can be demoted.
+    fn record_unreachable_and_check_isolated(&self, store_webhook_id: uuid::Uuid) -> bool {
+        let mut recent = self
+            .recent_unreachable
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        recent.push_back(store_webhook_id);
+        while recent.len() > RECENT_UNREACHABLE_CAPACITY {
+            recent.pop_front();
+        }
+        recent_unreachable_are_one_merchant(&recent)
+    }
+
+    /// Log a permanently-failed delivery's final `tracing::error!`, choosing
+    /// between the module's default target and the one
+    /// `evm::telemetry::sentry_event_filter` demotes to a breadcrumb.
+    ///
+    /// Demoting requires both: the failure never reached the merchant's
+    /// endpoint at all (`permanent_failure_is_merchant_unreachable`), *and*
+    /// `record_unreachable_and_check_isolated` confirms the recent run of
+    /// those still names one store webhook rather than several — a second
+    /// one appearing means payserver's own egress, not one merchant, is the
+    /// more likely explanation, and that must keep paging.
+    ///
+    /// Split out so this decision — target string included — is testable
+    /// without a live Redis connection or a running delivery loop.
+    fn log_permanent_failure(&self, job: &WebhookJob, error: &WebhookError) {
+        if permanent_failure_is_merchant_unreachable(error)
+            && self.record_unreachable_and_check_isolated(job.store_webhook_id)
+        {
+            tracing::error!(
+                target: "server::services::webhook::merchant_delivery_failed",
+                job_id = %job.id,
+                invoice_id = %job.payload.invoice_id,
+                "Webhook delivery permanently failed after {} attempts",
+                job.attempts,
+            );
+        } else {
+            tracing::error!(
+                job_id = %job.id,
+                invoice_id = %job.payload.invoice_id,
+                "Webhook delivery permanently failed after {} attempts",
+                job.attempts,
+            );
+        }
+    }
+
     /// Process the next job from the queue.
     ///
     /// Returns Ok(true) if a job was processed, Ok(false) if queue was empty
@@ -523,34 +616,11 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                 );
 
                 if job.is_exhausted() {
-                    // Only when the request never reached the merchant's
-                    // endpoint at all (`WebhookError::Unreachable` — see
-                    // `permanent_failure_is_merchant_unreachable`) is this a
-                    // fact about their server rather than ours, so only that
-                    // case gets the target `evm::telemetry::sentry_event_filter`
-                    // demotes to a breadcrumb instead of a page. A non-success
-                    // status or a payload that failed to serialize keeps this
-                    // module's default target — same as `log_process_error`'s
-                    // "Error processing webhook job" — since either can
-                    // reflect a fault in our own signing or request
-                    // construction just as easily as one in the merchant's
-                    // server, and must keep paging.
-                    if permanent_failure_is_merchant_unreachable(&e) {
-                        tracing::error!(
-                            target: "server::services::webhook::merchant_delivery_failed",
-                            job_id = %job.id,
-                            invoice_id = %job.payload.invoice_id,
-                            "Webhook delivery permanently failed after {} attempts",
-                            job.attempts,
-                        );
-                    } else {
-                        tracing::error!(
-                            job_id = %job.id,
-                            invoice_id = %job.payload.invoice_id,
-                            "Webhook delivery permanently failed after {} attempts",
-                            job.attempts,
-                        );
-                    }
+                    // See `log_permanent_failure` for the target choice: only
+                    // an `Unreachable` failure isolated to this one store
+                    // webhook demotes to a breadcrumb; everything else keeps
+                    // paging.
+                    self.log_permanent_failure(&job, &e);
                     metrics::record_webhook_failed(&job.payload.event_type.to_string());
                     metrics::record_webhook_delivery_status("permanent_failed");
                     self.write_delivery_record(
@@ -1069,6 +1139,216 @@ mod tests {
         assert!(!permanent_failure_is_merchant_unreachable(
             &WebhookError::Serialization("bad json".to_string())
         ));
+    }
+
+    #[test]
+    fn recent_unreachable_are_one_merchant_cases() {
+        let empty: VecDeque<uuid::Uuid> = VecDeque::new();
+        assert!(
+            recent_unreachable_are_one_merchant(&empty),
+            "no evidence yet must not block the first demotion"
+        );
+
+        let one_id = uuid::Uuid::new_v4();
+        let same: VecDeque<uuid::Uuid> = [one_id, one_id, one_id].into_iter().collect();
+        assert!(
+            recent_unreachable_are_one_merchant(&same),
+            "the same store webhook failing repeatedly is still one merchant"
+        );
+
+        let other_id = uuid::Uuid::new_v4();
+        let mixed: VecDeque<uuid::Uuid> = [one_id, other_id].into_iter().collect();
+        assert!(
+            !recent_unreachable_are_one_merchant(&mixed),
+            "a second store webhook in the window means this isn't isolated to one"
+        );
+    }
+
+    /// The stateful wrapper `recent_unreachable_are_one_merchant` sits behind:
+    /// a second, different store webhook failing must flip isolation to
+    /// false even though the mutex/eviction plumbing around the pure check
+    /// is untested by the case above.
+    #[test]
+    fn record_unreachable_and_check_isolated_detects_a_second_merchant() {
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            "redis://this-host-does-not-resolve.invalid:6379",
+            WebhookConfig::default(),
+        )
+        .expect("construct service");
+        let merchant_a = uuid::Uuid::new_v4();
+        let merchant_b = uuid::Uuid::new_v4();
+
+        assert!(service.record_unreachable_and_check_isolated(merchant_a));
+        assert!(service.record_unreachable_and_check_isolated(merchant_a));
+        assert!(
+            !service.record_unreachable_and_check_isolated(merchant_b),
+            "a different merchant showing up must break isolation"
+        );
+    }
+
+    /// Old entries age out, so a merchant that recovers and stays healthy
+    /// eventually stops being penalized by a stale second id sitting in the
+    /// window from long before.
+    #[test]
+    fn record_unreachable_and_check_isolated_evicts_beyond_capacity() {
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            "redis://this-host-does-not-resolve.invalid:6379",
+            WebhookConfig::default(),
+        )
+        .expect("construct service");
+        let stale_other = uuid::Uuid::new_v4();
+        let merchant_a = uuid::Uuid::new_v4();
+
+        service.record_unreachable_and_check_isolated(stale_other);
+        assert!(
+            !service.record_unreachable_and_check_isolated(merchant_a),
+            "stale_other is still inside the window here"
+        );
+        // Push enough of `merchant_a`'s own failures to age `stale_other`
+        // out of the window entirely.
+        for _ in 0..RECENT_UNREACHABLE_CAPACITY {
+            service.record_unreachable_and_check_isolated(merchant_a);
+        }
+        assert!(
+            service.record_unreachable_and_check_isolated(merchant_a),
+            "a stale entry from outside the capacity window must not keep blocking isolation"
+        );
+    }
+
+    /// Captures the `&'static Metadata` of every event a subscriber observes
+    /// while `f` runs.
+    ///
+    /// The reachability gap this closes: earlier tests proved
+    /// `permanent_failure_is_merchant_unreachable`'s classification in
+    /// isolation, and `evm::telemetry`'s own tests proved `sentry_event_filter`
+    /// demotes the right target string — but nothing tied those together, so
+    /// a typo in either of the two hand-typed target literals, or the
+    /// `if`/`else` in `log_permanent_failure` picking the wrong branch, would
+    /// compile and pass every existing test while still shipping the wrong
+    /// behavior. This drives the real call site and hands its real,
+    /// compiler-checked `Metadata` to the real filter, so any of those
+    /// regressions fails this test.
+    fn observed_metadata(f: impl FnOnce()) -> &'static tracing::Metadata<'static> {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Option<&'static tracing::Metadata<'static>>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                *self.0.lock().unwrap() = Some(event.metadata());
+            }
+        }
+
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        tracing::subscriber::with_default(subscriber, f);
+        capture
+            .0
+            .lock()
+            .unwrap()
+            .take()
+            .expect("event was recorded")
+    }
+
+    #[test]
+    fn isolated_unreachable_failure_is_demoted_end_to_end() {
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            "redis://this-host-does-not-resolve.invalid:6379",
+            WebhookConfig::default(),
+        )
+        .expect("construct service");
+        let job = WebhookJob::new(
+            uuid::Uuid::new_v4(),
+            "http://example.invalid/webhook".to_string(),
+            "secret".to_string(),
+            test_payload(),
+        );
+
+        let metadata = observed_metadata(|| {
+            service.log_permanent_failure(&job, &WebhookError::Unreachable("timed out".into()));
+        });
+        let filter = evm::telemetry::sentry_event_filter(tracing::Level::WARN)(metadata);
+
+        assert!(
+            filter.contains(sentry_tracing::EventFilter::Breadcrumb),
+            "expected a breadcrumb, got {filter:?}"
+        );
+        assert!(
+            !filter.contains(sentry_tracing::EventFilter::Event),
+            "a single isolated merchant outage should not page: got {filter:?}"
+        );
+    }
+
+    #[test]
+    fn unreachable_failure_across_two_merchants_still_pages_end_to_end() {
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            "redis://this-host-does-not-resolve.invalid:6379",
+            WebhookConfig::default(),
+        )
+        .expect("construct service");
+        let job_a = WebhookJob::new(
+            uuid::Uuid::new_v4(),
+            "http://a.example.invalid/webhook".to_string(),
+            "secret".to_string(),
+            test_payload(),
+        );
+        let job_b = WebhookJob::new(
+            uuid::Uuid::new_v4(),
+            "http://b.example.invalid/webhook".to_string(),
+            "secret".to_string(),
+            test_payload(),
+        );
+
+        // The first merchant's own exhaustion, in isolation, would demote.
+        observed_metadata(|| {
+            service.log_permanent_failure(&job_a, &WebhookError::Unreachable("timed out".into()));
+        });
+        // A second, different merchant exhausting the same way in the same
+        // window is the shape payserver's own egress breaking takes.
+        let metadata = observed_metadata(|| {
+            service.log_permanent_failure(&job_b, &WebhookError::Unreachable("refused".into()));
+        });
+        let filter = evm::telemetry::sentry_event_filter(tracing::Level::WARN)(metadata);
+
+        assert!(
+            filter.contains(sentry_tracing::EventFilter::Event),
+            "two different merchants failing the same way looks systemic and must page: got {filter:?}"
+        );
+    }
+
+    #[test]
+    fn http_failure_still_pages_end_to_end() {
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            "redis://this-host-does-not-resolve.invalid:6379",
+            WebhookConfig::default(),
+        )
+        .expect("construct service");
+        let job = WebhookJob::new(
+            uuid::Uuid::new_v4(),
+            "http://example.invalid/webhook".to_string(),
+            "secret".to_string(),
+            test_payload(),
+        );
+
+        let metadata = observed_metadata(|| {
+            service.log_permanent_failure(&job, &WebhookError::Http("HTTP 500".into()));
+        });
+        let filter = evm::telemetry::sentry_event_filter(tracing::Level::WARN)(metadata);
+
+        assert!(
+            filter.contains(sentry_tracing::EventFilter::Event),
+            "a bad status can be our own bug and must still page: got {filter:?}"
+        );
     }
 
     /// A defect this regresses: `ConnectionManager::new`'s default config has
