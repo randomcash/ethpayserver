@@ -271,6 +271,66 @@ async fn a_gap_that_opens_while_already_subscribed_ends_the_stream() {
     }
 }
 
+/// A keyspace loss while a consumer is already subscribed resets `seq` to 1,
+/// below the reader's position, so `XREAD` would block forever and every new
+/// payment would go undelivered with no error. The stream must end instead.
+#[tokio::test]
+#[ignore]
+async fn a_keyspace_loss_while_subscribed_ends_the_stream() {
+    let suffix = Uuid::new_v4();
+    let events_channel = format!("test:durable_resume:{suffix}:events");
+    let commands_channel = format!("test:durable_resume:{suffix}:commands");
+    let bridge = RedisBridge::new(&redis_url(), &events_channel, &commands_channel)
+        .await
+        .expect("connect to REDIS_URL");
+
+    for i in 0..3u8 {
+        bridge
+            .publish(&make_event(B256::from([i; 32])))
+            .await
+            .unwrap();
+    }
+    let mut stream = bridge.subscribe_from(None).await.unwrap();
+    for expected_seq in 1..=3i64 {
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(envelope.cursor.seq, expected_seq);
+    }
+
+    let client = redis::Client::open(redis_url()).expect("connect to REDIS_URL");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("raw connection");
+    let _: () = redis::AsyncCommands::del(
+        &mut conn,
+        vec![
+            events_channel.clone(),
+            format!("{events_channel}:seq"),
+            format!("{events_channel}:epoch"),
+        ],
+    )
+    .await
+    .expect("DEL outbox keys");
+    // Lands as seq 1 under a fresh epoch: below the reader's position.
+    bridge
+        .publish(&make_event(B256::from([9u8; 32])))
+        .await
+        .unwrap();
+
+    let next = tokio::time::timeout(std::time::Duration::from_secs(8), stream.next()).await;
+    match next {
+        Ok(None) => {}
+        Ok(Some(envelope)) => panic!(
+            "stream delivered seq {} after keyspace loss",
+            envelope.cursor.seq
+        ),
+        Err(_) => panic!("stream stayed silent after keyspace loss instead of ending"),
+    }
+}
+
 /// A total Redis data loss (restart with no AOF/RDB, an evicted keyspace)
 /// must not let the outbox mint the same epoch it had before. If it did, a
 /// cursor persisted before the loss would compare equal to the "fresh" one

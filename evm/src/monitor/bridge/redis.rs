@@ -25,6 +25,39 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
+/// `(epoch, seq, chain_id, block_height, payload)` of an outbox entry, or
+/// `None` if any field is missing or unparseable.
+fn parse_entry(entry: &redis::streams::StreamId) -> Option<(i64, i64, u64, i64, String)> {
+    let get_field = |name: &str| -> Option<String> {
+        entry
+            .map
+            .get(name)
+            .and_then(|v| redis::from_redis_value::<String>(v).ok())
+    };
+    Some((
+        get_field("epoch")?.parse().ok()?,
+        get_field("seq")?.parse().ok()?,
+        get_field("chain_id")?.parse().ok()?,
+        get_field("block_height")?.parse().ok()?,
+        get_field("payload")?,
+    ))
+}
+
+/// Whether the outbox's epoch key still holds `expected`. A keyspace loss
+/// while subscribed resets `seq` to 1, so every new entry sorts below the
+/// reader's `last_id` and `XREAD` blocks forever without erroring. Checked
+/// before every `XREAD` (which returns at least every 5s); on "no" the
+/// stream ends so `run` re-enters the startup lineage check. A read error
+/// counts as "no": ending the stream is the safe answer to not knowing.
+async fn epoch_unchanged(
+    conn: &mut redis::aio::MultiplexedConnection,
+    epoch_key: &str,
+    expected: i64,
+) -> bool {
+    let current: Result<Option<String>, _> = conn.get(epoch_key).await;
+    matches!(current, Ok(Some(v)) if v.parse::<i64>().ok() == Some(expected))
+}
+
 /// Mint a fresh epoch identity.
 ///
 /// Drawn from the full positive range of `i64`, not a counter: a counter
@@ -366,19 +399,19 @@ impl EventBridge for RedisBridge {
         let client = self.client.clone();
         let stream_key = self.events_channel.clone();
         let shutting_down = Arc::clone(&self.shutting_down);
-        // XREAD returns entries with an ID strictly greater than the one
-        // given. Our entry IDs are always `{seq}-0`, so asking for anything
-        // after `{cursor.seq}-0` is exactly "replay from seq + 1"; asking
-        // for anything after `0-0` (nothing published ever has that ID) is
-        // "replay everything retained".
+        // XREAD returns IDs strictly greater than the one given; entry IDs
+        // are `{seq}-0`, so after `{cursor.seq}-0` is "replay from seq + 1"
+        // and after `0-0` is "replay everything retained".
         let mut last_id = match from {
             Some(cursor) => format!("{}-0", cursor.seq),
             None => "0-0".to_string(),
         };
-        // The check above only runs once, before this generator starts - it
-        // does not cover a reader that falls behind *while already
-        // subscribed*. `is_seq_gap` below closes that for every batch.
+        // The check above runs once; `is_seq_gap` covers later batches.
         let mut expected_seq = from.map(|cursor| cursor.seq + 1);
+
+        // See `epoch_unchanged` for why the epoch is re-checked while subscribed.
+        let epoch_key = self.epoch_key();
+        let subscribed_epoch = self.get_or_init_epoch().await?;
 
         let s = stream! {
             let mut conn = match client.get_multiplexed_async_connection().await {
@@ -390,6 +423,11 @@ impl EventBridge for RedisBridge {
             };
 
             loop {
+                if !epoch_unchanged(&mut conn, &epoch_key, subscribed_epoch).await {
+                    error!(stream = %stream_key, subscribed_epoch, "outbox epoch changed or vanished while subscribed; ending the stream");
+                    return;
+                }
+
                 let opts = StreamReadOptions::default().count(500).block(5_000);
                 let reply: StreamReadReply = match conn
                     .xread_options(&[stream_key.as_str()], &[last_id.as_str()], &opts)
@@ -413,13 +451,6 @@ impl EventBridge for RedisBridge {
                     for entry in key.ids {
                         last_id = entry.id.clone();
 
-                        let get_field = |name: &str| -> Option<String> {
-                            entry
-                                .map
-                                .get(name)
-                                .and_then(|v| redis::from_redis_value::<String>(v).ok())
-                        };
-
                         // `last_id` above already advanced past this entry, so a
                         // plain `continue` here would move on for good: no cursor
                         // gap to detect, no replay path to recover it - the same
@@ -429,13 +460,7 @@ impl EventBridge for RedisBridge {
                         // same way it does to any other fatal resume condition
                         // (a dead connection, a failed `XREAD`): the consumer
                         // halts rather than silently skipping a payment.
-                        let (Some(epoch), Some(seq), Some(chain_id), Some(block_height), Some(payload)) = (
-                            get_field("epoch").and_then(|v| v.parse().ok()),
-                            get_field("seq").and_then(|v| v.parse().ok()),
-                            get_field("chain_id").and_then(|v| v.parse().ok()),
-                            get_field("block_height").and_then(|v| v.parse().ok()),
-                            get_field("payload"),
-                        ) else {
+                        let Some((epoch, seq, chain_id, block_height, payload)) = parse_entry(&entry) else {
                             error!(id = %entry.id, "malformed stream entry; ending the stream rather than skipping it");
                             return;
                         };
