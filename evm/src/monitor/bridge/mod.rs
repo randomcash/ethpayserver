@@ -97,11 +97,11 @@ pub trait EventBridge: Send + Sync {
 
     /// Invalidate the current outbox lineage and start a new one.
     ///
-    /// The event consumer does not call this: a position the outbox no
-    /// longer retains halts the consumer instead. It exists for tests and
-    /// operator tooling to simulate or force a lineage break; in production
-    /// a break normally arrives as the outbox's backing store losing its
-    /// keyspace and minting a fresh epoch. The change is
+    /// Nothing in production calls this: a position the outbox no longer
+    /// retains halts the consumer instead, and a real break arrives as the
+    /// backing store losing its keyspace and minting a fresh epoch. It is
+    /// on the trait so tests can simulate a lineage break against either
+    /// bridge. The change is
     /// visible to every caller sharing this outbox, not just the one that
     /// detected the loss: the next [`EventBridge::current_epoch`] call from
     /// any of them sees the new value, so nobody resumes from the broken
