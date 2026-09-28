@@ -1,19 +1,28 @@
 //! `expected_watched_addresses`: the view the watch reconciler treats as
 //! truth.
 //!
-//! The case that matters is the second test below - a watch whose invoice
-//! has already resolved is exactly the state the ticket this exists for
-//! calls out: nothing in this schema flips `watched_addresses.is_active` to
-//! `FALSE` just because the invoice's status changed, so `is_active = TRUE`
-//! alone cannot tell a live invoice from one a cleanup job has not reached
-//! yet. Proving the view excludes it is what makes this a check that can
-//! fail, rather than one built on a Postgres invariant (the cascade) that
-//! makes an "orphaned" row impossible to produce in the first place.
+//! A watch whose invoice has already resolved is exactly the state the
+//! ticket this exists for calls out: nothing in this schema flips
+//! `watched_addresses.is_active` to `FALSE` just because the invoice's
+//! status changed, so `is_active = TRUE` alone cannot tell a live invoice
+//! from one a cleanup job has not reached yet. But resolved does not mean
+//! "unwatch immediately" either - `InvoiceCleanupService` deliberately keeps
+//! a paid invoice's address watched for a grace period afterward so a reorg
+//! can still re-validate it, so the view has to track that window rather
+//! than excluding every resolved invoice on sight. The tests below cover
+//! both edges: still inside the grace window (must stay expected, or the
+//! check false-positives on every payment) and long past it (must stop
+//! being expected, or the check is vacuous again).
 
 use chrono::{Duration, Utc};
-use types::{ChainId, InvoiceStatus, InvoiceWriter, PaymentOptionWriter, WatchedAddressWriter};
+use types::{
+    ChainId, InvoiceStatus, InvoiceWriter, PaymentOptionWriter, PaymentWriter,
+    WatchedAddressWriter,
+};
 
-use super::{create_test_service, seeded_test_invoice, test_payment_option, unique_address};
+use super::{
+    create_test_service, seeded_test_invoice, test_payment, test_payment_option, unique_address,
+};
 
 #[tokio::test]
 #[ignore]
@@ -49,15 +58,65 @@ async fn expected_watched_addresses_includes_a_still_pending_invoices_watch() {
     );
 }
 
-/// The acceptance criterion: seed the exact state the ticket names - an
-/// `is_active = TRUE` watched address whose invoice has already resolved,
-/// with no cleanup job having run yet - and confirm the view stops treating
-/// it as expected. Without this, the view would be exactly as vacuous as
-/// the orphan check the ticket rejects: green because the state it claims to
-/// catch cannot be produced.
+/// A paid invoice inside `InvoiceCleanupService`'s grace period is not the
+/// vacuous case - it's the one the reviewer of an earlier pass on this
+/// ticket caught: `cleanup_paid_addresses` deliberately leaves a just-paid
+/// address watched (default 3600s) so a reorg can still re-validate a
+/// relocated-but-still-paid transaction. A view that dropped `paid`
+/// invoices from "expected" the instant status flips would report every
+/// confirmed payment as a false "stale watch" for the length of that
+/// window.
 #[tokio::test]
 #[ignore]
-async fn expected_watched_addresses_excludes_a_resolved_invoices_watch() {
+async fn expected_watched_addresses_includes_a_just_paid_invoices_watch() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut invoice = seeded_test_invoice(&service).await;
+    invoice.expires_at = Utc::now() + Duration::hours(2);
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    let payment_option = test_payment_option(&invoice.id, &ChainId::evm(1));
+    PaymentOptionWriter::create(&service, &payment_option)
+        .await
+        .unwrap();
+
+    let address = unique_address();
+    WatchedAddressWriter::upsert(
+        &service,
+        &address,
+        &payment_option.id,
+        &ChainId::evm(1),
+        None,
+    )
+    .await
+    .unwrap();
+
+    InvoiceWriter::update_status(&service, &invoice.id, InvoiceStatus::Paid)
+        .await
+        .unwrap();
+
+    let mut payment = test_payment(&invoice.id);
+    payment.confirmed_at = Some(Utc::now() - Duration::minutes(5));
+    PaymentWriter::upsert(&service, &payment).await.unwrap();
+
+    let expected = service.get_expected_watched_addresses().await.unwrap();
+    assert!(
+        expected.iter().any(|w| w.address == address),
+        "a paid invoice's watch must still appear as expected while inside \
+         the cleanup service's grace period - the monitor is still, \
+         correctly, watching it"
+    );
+}
+
+/// The acceptance criterion: seed the exact state the ticket names - an
+/// `is_active = TRUE` watched address whose invoice resolved long enough
+/// ago that no legitimate grace period explains it still being watched -
+/// and confirm the view stops treating it as expected. Without this, the
+/// view would be exactly as vacuous as the orphan check the ticket rejects:
+/// green because the state it claims to catch cannot be produced.
+#[tokio::test]
+#[ignore]
+async fn expected_watched_addresses_excludes_a_long_resolved_invoices_watch() {
     let service = create_test_service().await.expect("DATABASE_URL required");
 
     let mut invoice = seeded_test_invoice(&service).await;
@@ -93,11 +152,16 @@ async fn expected_watched_addresses_excludes_a_resolved_invoices_watch() {
         .await
         .unwrap();
 
+    let mut payment = test_payment(&invoice.id);
+    payment.confirmed_at = Some(Utc::now() - Duration::days(2));
+    PaymentWriter::upsert(&service, &payment).await.unwrap();
+
     let expected = service.get_expected_watched_addresses().await.unwrap();
     assert!(
         !expected.iter().any(|w| w.address == address),
-        "a paid invoice's watch must not appear as expected, even though \
-         nothing has deactivated the watched_addresses row yet"
+        "a paid invoice's watch must not appear as expected once it is well \
+         past any legitimate grace period, even though nothing has \
+         deactivated the watched_addresses row yet"
     );
 }
 
@@ -184,5 +248,49 @@ async fn expected_watched_addresses_includes_an_expired_but_not_yet_cleaned_up_i
         "an invoice past its expiry but still pending (cleanup has not run \
          yet) must still appear as expected - the monitor is still, \
          correctly, watching it"
+    );
+}
+
+/// The same grace-window reasoning applies once `i.status` actually reaches
+/// `expired`: `cleanup_expired_addresses` waits `unwatch_grace_period_secs`
+/// after `expires_at` before unwatching, so an invoice that flipped to
+/// `expired` moments ago must stay expected. Long after that window,
+/// nothing legitimate explains a still-active watch, so it must drop out -
+/// same shape as the paid-side pair of tests above, for the other status
+/// this view treats specially.
+#[tokio::test]
+#[ignore]
+async fn expected_watched_addresses_excludes_a_long_expired_invoices_watch() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut invoice = seeded_test_invoice(&service).await;
+    invoice.expires_at = Utc::now() - Duration::days(2);
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+    InvoiceWriter::update_status(&service, &invoice.id, InvoiceStatus::Expired)
+        .await
+        .unwrap();
+
+    let payment_option = test_payment_option(&invoice.id, &ChainId::evm(1));
+    PaymentOptionWriter::create(&service, &payment_option)
+        .await
+        .unwrap();
+
+    let address = unique_address();
+    WatchedAddressWriter::upsert(
+        &service,
+        &address,
+        &payment_option.id,
+        &ChainId::evm(1),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let expected = service.get_expected_watched_addresses().await.unwrap();
+    assert!(
+        !expected.iter().any(|w| w.address == address),
+        "an invoice expired well past any legitimate grace period must not \
+         appear as expected, even though nothing has deactivated the \
+         watched_addresses row yet"
     );
 }

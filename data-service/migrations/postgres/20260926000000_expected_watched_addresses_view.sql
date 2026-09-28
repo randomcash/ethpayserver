@@ -25,6 +25,30 @@
 -- expiry check here would reintroduce, from the other side, the exact
 -- cleanup-lag false positive the `is_active` scoping above exists to avoid.
 -- Expiry reaches this view through `i.status` once cleanup actually runs.
+--
+-- `paid`/`expired` invoices are not simply excluded, either, for the same
+-- reason: `InvoiceCleanupService` deliberately keeps an address watched past
+-- the moment its invoice resolves - `paid_unwatch_grace_period_secs`
+-- (operator-configured, default 3600s, raised per chain by
+-- `ChainConfig::min_paid_unwatch_grace_period_secs`) after a payment
+-- confirms, `unwatch_grace_period_secs` (default 60s) after expiry - so a
+-- reorg can still re-validate a relocated-but-still-paid transaction by
+-- re-scanning currently watched addresses. Excluding those invoices from
+-- "expected" the instant status flips would report every one of them as a
+-- false "stale watch" for the length of its grace window - the exact
+-- cleanup-lag false positive this file already reasons about for expiry,
+-- reintroduced for the (much larger, on the paid side) grace period.
+--
+-- This view cannot read the operator's configured grace-period seconds at
+-- query time, so it uses `GRACE_CEILING` below as a fixed upper bound
+-- instead of mirroring the live value. Every built-in default and per-chain
+-- floor is at most 3600s; the ceiling is a full day, comfortably above any
+-- of them. A watch still sitting outside this window is one no legitimate
+-- grace period explains, so it is correctly still reported stale - this
+-- only widens the window in which a *recently* resolved invoice is not
+-- misreported, it does not blunt detection of a watch that never gets
+-- cleaned up at all. If an operator ever configures a grace period longer
+-- than this ceiling, it needs to grow with it.
 CREATE VIEW expected_watched_addresses AS
 SELECT
     wa.address,
@@ -36,4 +60,18 @@ FROM watched_addresses wa
 JOIN payment_options po ON wa.payment_option_id = po.id
 JOIN invoices i ON po.invoice_id = i.id
 WHERE wa.is_active = TRUE
-  AND i.status IN ('pending', 'processing', 'partially_paid');
+  AND (
+    i.status IN ('pending', 'processing', 'partially_paid')
+    OR (
+      i.status = 'expired'
+      AND i.expires_at > NOW() - INTERVAL '1 day' -- GRACE_CEILING
+    )
+    OR (
+      i.status = 'paid'
+      AND EXISTS (
+        SELECT 1 FROM payments p
+        WHERE p.invoice_id = i.id
+          AND p.confirmed_at > NOW() - INTERVAL '1 day' -- GRACE_CEILING
+      )
+    )
+  );
