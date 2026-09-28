@@ -479,6 +479,10 @@ async fn integration_redelivered_payment_reuses_the_original_row_id_and_does_not
     let mut redelivered = test_payment(&invoice.id);
     redelivered.tx_hash = first.tx_hash.clone();
     redelivered.chain_id = first.chain_id.clone();
+    // The handler derives the credit from the payment option's stored rate,
+    // which is fixed when the invoice is created, so a redelivery reproduces
+    // the same credit; only `rate_applied_at` is re-stamped. Equal credits are
+    // therefore what a real redelivery carries, not a convenience.
     redelivered.credited_amount = first.credited_amount.clone();
     assert_ne!(
         redelivered.id, first.id,
