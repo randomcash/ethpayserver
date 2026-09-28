@@ -168,6 +168,14 @@ cat > "$BODY_FILE" <<'JSON'
 JSON
 check "a missed watch (watch_reconciliation not ok) is refused" 1
 
+cat > "$BODY_FILE" <<'JSON'
+{"postgres":{"status":"ok"},"redis":{"status":"ok"},
+ "monitor":{"status":"ok","data_fresh":true},
+ "rpcs":{"1":{"status":"ok","last_block":100}},
+ "watch_reconciliation":{"status":"unknown"}}
+JSON
+check "watch_reconciliation unknown (reconciler couldn't run) is refused" 1
+
 # A stalled last_block only shows up after enough consecutive checks that
 # report the same block - the failure the ticket calls out as distinct from
 # rpcs.*.status, since the RPC connection itself can stay "ok" throughout.
