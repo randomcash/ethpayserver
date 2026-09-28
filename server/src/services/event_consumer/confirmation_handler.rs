@@ -28,6 +28,43 @@ impl<
     W: WebhookDataService + 'static,
 > EventConsumer<D, M, W>
 {
+    /// Record the shortfall a tolerance accepted, if the payment was short.
+    ///
+    /// Called only from the arms that actually move the invoice to a settled
+    /// state, so a confirmation that settles nothing leaves no record. It runs
+    /// before the status write and replaces any earlier record: a retry after
+    /// a failed write re-records under the setting then in force, so the audit
+    /// always names the setting that decided the outcome.
+    async fn record_allowance_if_short(
+        &self,
+        invoice_id: &InvoiceId,
+        amount_received: &BigDecimal,
+        amount_expected: &BigDecimal,
+        tolerance_percent: &BigDecimal,
+        tolerance_source: &'static str,
+    ) -> Result<(), EventConsumerError> {
+        if amount_received >= amount_expected {
+            return Ok(());
+        }
+        let shortfall = amount_expected - amount_received;
+        SettlementToleranceWriter::record_settlement_allowance(
+            &*self.data_service,
+            invoice_id,
+            &shortfall.to_string(),
+            &tolerance_percent.to_string(),
+            tolerance_source,
+        )
+        .await?;
+        tracing::warn!(
+            invoice_id = %invoice_id.as_str(),
+            shortfall = %shortfall,
+            tolerance_percent = %tolerance_percent,
+            tolerance_source,
+            "Invoice settled within the store's shortfall tolerance"
+        );
+        Ok(())
+    }
+
     /// Handle PaymentConfirmed event.
     ///
     /// Updates payment confirmation status and transitions invoice to `paid`
@@ -126,32 +163,19 @@ impl<
         let is_fully_paid =
             settlement::is_fully_paid(&amount_received, &amount_expected, &tolerance_percent);
 
-        // When the tolerance is what settles the invoice, keep the shortfall
-        // and the setting that allowed it, so it can be explained later.
-        if is_fully_paid && amount_received < amount_expected {
-            let shortfall = &amount_expected - &amount_received;
-            SettlementToleranceWriter::record_settlement_allowance(
-                &*self.data_service,
-                &invoice_id,
-                &shortfall.to_string(),
-                &tolerance_percent.to_string(),
-                tolerance_source,
-            )
-            .await?;
-            tracing::warn!(
-                invoice_id = %event.invoice_id,
-                shortfall = %shortfall,
-                tolerance_percent = %tolerance_percent,
-                tolerance_source,
-                "Invoice settled within the store's shortfall tolerance"
-            );
-        }
-
         // Handle based on invoice status
         match invoice.status {
             InvoiceStatus::Processing | InvoiceStatus::PartiallyPaid => {
                 // Normal flow: transition to paid if fully paid
                 if is_fully_paid {
+                    self.record_allowance_if_short(
+                        &invoice_id,
+                        &amount_received,
+                        &amount_expected,
+                        &tolerance_percent,
+                        tolerance_source,
+                    )
+                    .await?;
                     InvoiceWriter::update_status(
                         &*self.data_service,
                         &invoice_id,
@@ -205,6 +229,14 @@ impl<
                 // Late payment: invoice expired but payment still came through
                 // Transition to LatePaid for merchant review
                 if is_fully_paid {
+                    self.record_allowance_if_short(
+                        &invoice_id,
+                        &amount_received,
+                        &amount_expected,
+                        &tolerance_percent,
+                        tolerance_source,
+                    )
+                    .await?;
                     InvoiceWriter::update_status(
                         &*self.data_service,
                         &invoice_id,

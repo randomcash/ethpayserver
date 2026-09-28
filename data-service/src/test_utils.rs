@@ -464,17 +464,16 @@ impl crate::SettlementToleranceWriter for InMemoryDataService {
         tolerance_percent: &str,
         source: &str,
     ) -> RepositoryResult<()> {
-        self.settlement_allowances
-            .write()
-            .unwrap()
-            .entry(invoice_id.as_str().to_string())
-            .or_insert_with(|| crate::SettlementAllowance {
+        self.settlement_allowances.write().unwrap().insert(
+            invoice_id.as_str().to_string(),
+            crate::SettlementAllowance {
                 invoice_id: invoice_id.as_str().to_string(),
                 shortfall: shortfall.to_string(),
                 tolerance_percent: tolerance_percent.to_string(),
                 source: source.to_string(),
                 recorded_at: Utc::now(),
-            });
+            },
+        );
         Ok(())
     }
 }

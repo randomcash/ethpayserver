@@ -21,7 +21,7 @@ use uuid::Uuid;
 pub const DEFAULT_TOLERANCE_PERCENT: &str = "0.0001";
 
 /// The most a store may set, in percent. Refused above, never clamped.
-pub const MAX_TOLERANCE_PERCENT: &str = "1";
+pub const MAX_TOLERANCE_PERCENT: &str = "0.1";
 
 /// A shortfall that was accepted because of the tolerance.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,8 +57,9 @@ pub trait SettlementToleranceWriter: Send + Sync {
     /// Revert the store to the server default.
     async fn clear_settlement_tolerance(&self, store_id: Uuid) -> RepositoryResult<()>;
 
-    /// Record the shortfall a tolerance accepted. Idempotent per invoice: the
-    /// first record stands.
+    /// Record the shortfall a tolerance accepted. One record per invoice; recording again
+    /// replaces it, so a retried settlement is described by the setting that
+    /// finally decided it.
     async fn record_settlement_allowance(
         &self,
         invoice_id: &InvoiceId,

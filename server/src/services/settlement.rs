@@ -70,8 +70,9 @@ mod tests {
 
     #[test]
     fn ceiling_is_refused_not_clamped() {
-        assert!(parse_tolerance_percent("1").is_ok());
-        assert!(parse_tolerance_percent("1.000000001").is_err());
+        assert!(parse_tolerance_percent("0.1").is_ok());
+        assert!(parse_tolerance_percent("0.100000001").is_err());
+        assert!(parse_tolerance_percent("1").is_err());
         assert!(parse_tolerance_percent("50").is_err());
         assert!(parse_tolerance_percent("-0.1").is_err());
         assert!(parse_tolerance_percent("abc").is_err());

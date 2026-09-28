@@ -91,7 +91,10 @@ impl SettlementToleranceWriter for PgDataService {
             "INSERT INTO invoice_settlement_allowances \
                  (invoice_id, shortfall, tolerance_percent, source) \
              VALUES ($1, $2::numeric, $3::numeric, $4) \
-             ON CONFLICT (invoice_id) DO NOTHING",
+             ON CONFLICT (invoice_id) DO UPDATE SET \
+                 shortfall = EXCLUDED.shortfall, \
+                 tolerance_percent = EXCLUDED.tolerance_percent, \
+                 source = EXCLUDED.source, recorded_at = NOW()",
         )
         .bind(invoice_id.as_str())
         .bind(shortfall)

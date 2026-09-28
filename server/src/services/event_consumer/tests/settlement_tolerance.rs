@@ -21,6 +21,14 @@ async fn confirm_with_received(
     received: &str,
     store_tolerance: Option<&str>,
 ) -> (Arc<InMemoryDataService>, InvoiceId, InvoiceStatus) {
+    confirm_with_status(received, store_tolerance, InvoiceStatus::Processing).await
+}
+
+async fn confirm_with_status(
+    received: &str,
+    store_tolerance: Option<&str>,
+    starting_status: InvoiceStatus,
+) -> (Arc<InMemoryDataService>, InvoiceId, InvoiceStatus) {
     let ds = Arc::new(InMemoryDataService::new());
     let bridge = Arc::new(MemoryBridge::new());
     let consumer = create_test_consumer(ds.clone(), bridge);
@@ -37,7 +45,7 @@ async fn confirm_with_received(
         id: invoice_id.clone(),
         store_id,
         currency: "USD".to_string(),
-        status: InvoiceStatus::Processing,
+        status: starting_status,
         amount: "20.000000000000000000".to_string(),
         amount_received: received.to_string(),
         created_at: Utc::now(),
@@ -124,7 +132,7 @@ async fn exact_payment_records_no_allowance() {
 #[tokio::test]
 async fn real_underpayment_does_not_settle_under_the_default() {
     let (ds, id, status) = confirm_with_received("19.99", None).await;
-    assert_ne!(status, InvoiceStatus::Paid);
+    assert_eq!(status, InvoiceStatus::Processing);
     assert!(
         SettlementToleranceReader::get_settlement_allowance(&*ds, &id)
             .await
@@ -146,4 +154,78 @@ async fn store_tolerance_widens_what_settles() {
         .unwrap();
     assert_eq!(allowance.source, "store");
     assert_eq!(allowance.tolerance_percent, "0.1");
+}
+
+/// A within-tolerance payment confirmed against an invoice that does not
+/// transition to paid must leave no record claiming a tolerance settled it.
+#[tokio::test]
+async fn no_allowance_when_the_invoice_is_not_settled_by_it() {
+    for (start, expected) in [
+        (InvoiceStatus::Paid, InvoiceStatus::Paid),
+        (InvoiceStatus::Cancelled, InvoiceStatus::Cancelled),
+    ] {
+        let (ds, id, status) = confirm_with_status("19.999999999999973228", None, start).await;
+        assert_eq!(status, expected);
+        assert!(
+            SettlementToleranceReader::get_settlement_allowance(&*ds, &id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{expected:?} invoice must not gain an allowance record"
+        );
+    }
+}
+
+/// A late payment within tolerance does transition (to LatePaid), so it is
+/// recorded.
+#[tokio::test]
+async fn late_payment_within_tolerance_is_recorded() {
+    let (ds, id, status) =
+        confirm_with_status("19.999999999999973228", None, InvoiceStatus::Expired).await;
+    assert_eq!(status, InvoiceStatus::LatePaid);
+    assert!(
+        SettlementToleranceReader::get_settlement_allowance(&*ds, &id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// Quote 20 USD, pay the quoted base-unit amount to the wei, credit it back
+/// through the consumer's own conversion, and the invoice settles by being
+/// paid in full: no tolerance is needed and none is recorded. Flooring the
+/// quote instead leaves this 1 wei short.
+#[tokio::test]
+async fn paying_the_quote_exactly_settles_without_a_tolerance() {
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    let rate = "0.000373530158825023551";
+    let quoted = crate::api::invoices::convert_to_crypto_smallest_unit(
+        "20",
+        Decimal::from_str(rate).unwrap(),
+        18,
+    )
+    .unwrap();
+    assert_eq!(quoted, "7470603176500472");
+
+    let consumer = create_test_consumer(
+        Arc::new(InMemoryDataService::new()),
+        Arc::new(MemoryBridge::new()),
+    );
+    let received = consumer
+        .convert_payment_to_invoice_currency(&quoted, rate, 18)
+        .unwrap();
+    let received_bd: bigdecimal::BigDecimal = received.parse().unwrap();
+    assert!(received_bd >= "20".parse::<bigdecimal::BigDecimal>().unwrap());
+
+    // With a zero tolerance the quote alone must be enough.
+    let (ds, id, status) = confirm_with_received(&received, Some("0")).await;
+    assert_eq!(status, InvoiceStatus::Paid);
+    assert!(
+        SettlementToleranceReader::get_settlement_allowance(&*ds, &id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
