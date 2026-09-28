@@ -45,7 +45,7 @@ impl ChainCursorWriter for PgDataService {
         chain_id: u64,
         cursor: ChainCursor,
     ) -> RepositoryResult<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO chain_cursors (adapter_id, chain_id, epoch, seq, block_height, updated_at)
             VALUES ($1, $2, $3, $4, $5, NOW())
@@ -66,6 +66,17 @@ impl ChainCursorWriter for PgDataService {
         .execute(&self.pool)
         .await
         .map_err(sqlx_to_repo_error)?;
+
+        if result.rows_affected() == 0 {
+            // Expected when a lagging writer commits a position at or behind
+            // the stored one; logged so a caller bug is distinguishable.
+            tracing::debug!(
+                adapter_id,
+                chain_id,
+                seq = cursor.seq,
+                "chain cursor commit ignored: stored cursor is already at or past it"
+            );
+        }
 
         Ok(())
     }

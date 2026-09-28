@@ -97,8 +97,11 @@ pub trait EventBridge: Send + Sync {
 
     /// Invalidate the current outbox lineage and start a new one.
     ///
-    /// Called when a resume target can no longer be honored - a cursor's
-    /// `seq` names a position the outbox no longer retains. The change is
+    /// The event consumer does not call this: a position the outbox no
+    /// longer retains halts the consumer instead. It exists for tests and
+    /// operator tooling to simulate or force a lineage break; in production
+    /// a break normally arrives as the outbox's backing store losing its
+    /// keyspace and minting a fresh epoch. The change is
     /// visible to every caller sharing this outbox, not just the one that
     /// detected the loss: the next [`EventBridge::current_epoch`] call from
     /// any of them sees the new value, so nobody resumes from the broken
