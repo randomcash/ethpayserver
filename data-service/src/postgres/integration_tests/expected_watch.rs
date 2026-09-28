@@ -16,8 +16,7 @@
 
 use chrono::{Duration, Utc};
 use types::{
-    ChainId, InvoiceStatus, InvoiceWriter, PaymentOptionWriter, PaymentWriter,
-    WatchedAddressWriter,
+    ChainId, InvoiceStatus, InvoiceWriter, PaymentOptionWriter, PaymentWriter, WatchedAddressWriter,
 };
 
 use super::{
