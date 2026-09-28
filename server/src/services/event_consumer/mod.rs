@@ -135,7 +135,7 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     on_apply_failure: Option<ApplyFailureHook>,
     on_resume_failure: Option<ResumeFailureHook>,
     accept_lineage_break: bool,
-    skip_events: HashSet<(u64, i64)>,
+    skip_events: HashSet<(u64, i64, i64)>,
 }
 
 impl<
@@ -194,7 +194,7 @@ impl<
     /// what to do with the deposit by hand; nothing is skipped unless listed,
     /// so the default is still "never advance past an unapplied payment".
     #[must_use]
-    pub fn with_skipped_events(mut self, skip: impl IntoIterator<Item = (u64, i64)>) -> Self {
+    pub fn with_skipped_events(mut self, skip: impl IntoIterator<Item = (u64, i64, i64)>) -> Self {
         self.skip_events = skip.into_iter().collect();
         self
     }
@@ -537,9 +537,13 @@ impl<
     ) -> bool {
         let chain_id = envelope.chain_id;
 
-        if self.skip_events.contains(&(chain_id, envelope.cursor.seq)) {
+        if self
+            .skip_events
+            .contains(&(chain_id, envelope.cursor.epoch, envelope.cursor.seq))
+        {
             tracing::warn!(
                 chain_id,
+                epoch = envelope.cursor.epoch,
                 seq = envelope.cursor.seq,
                 "skipping event named by the operator; it is NOT applied"
             );
@@ -595,11 +599,12 @@ impl<
             Err(e) => {
                 tracing::error!(
                     chain_id = envelope.chain_id,
+                    epoch = envelope.cursor.epoch,
                     seq = envelope.cursor.seq,
                     error = %e,
                     "failed to apply event; halting so the durable cursor cannot advance past it \
                      (after handling the deposit by hand, list it in EVENT_SKIP_EVENTS as \
-                     chain_id:seq to move past it)"
+                     chain_id:epoch:seq to move past it)"
                 );
                 self.halt(envelope.chain_id, envelope.cursor.seq);
                 false
@@ -800,26 +805,33 @@ pub enum EventConsumerError {
     InvalidData(String),
 }
 
-/// Parse `chain_id:seq[,chain_id:seq...]`. A malformed entry is an error
+/// Parse `chain_id:epoch:seq[,...]`. The epoch is part of the key because `seq` restarts under a new epoch, so a stale entry must not skip an unrelated event. A malformed entry is an error
 /// rather than ignored: a typo that silently skipped nothing would leave the
 /// operator believing the poison event was handled.
-pub fn parse_skip_events(raw: &str) -> Result<Vec<(u64, i64)>, String> {
+pub fn parse_skip_events(raw: &str) -> Result<Vec<(u64, i64, i64)>, String> {
     raw.split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .map(|part| {
-            let (chain, seq) = part
-                .split_once(':')
-                .ok_or_else(|| format!("expected chain_id:seq, got {part:?}"))?;
+            let mut fields = part.split(':');
+            let (Some(chain), Some(epoch), Some(seq), None) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                return Err(format!("expected chain_id:epoch:seq, got {part:?}"));
+            };
             let chain = chain
                 .trim()
                 .parse::<u64>()
                 .map_err(|e| format!("bad chain_id in {part:?}: {e}"))?;
+            let epoch = epoch
+                .trim()
+                .parse::<i64>()
+                .map_err(|e| format!("bad epoch in {part:?}: {e}"))?;
             let seq = seq
                 .trim()
                 .parse::<i64>()
                 .map_err(|e| format!("bad seq in {part:?}: {e}"))?;
-            Ok((chain, seq))
+            Ok((chain, epoch, seq))
         })
         .collect()
 }
@@ -830,18 +842,18 @@ mod skip_events_tests {
     use super::parse_skip_events;
 
     #[test]
-    fn parses_pairs_and_ignores_blanks() {
+    fn parses_triples_and_ignores_blanks() {
         assert_eq!(
-            parse_skip_events(" 8453:12, 1:5 ,").unwrap(),
-            vec![(8453, 12), (1, 5)]
+            parse_skip_events(" 8453:7:12, 1:2:5 ,").unwrap(),
+            vec![(8453, 7, 12), (1, 2, 5)]
         );
         assert!(parse_skip_events("").unwrap().is_empty());
     }
 
     #[test]
     fn rejects_malformed_entries() {
-        assert!(parse_skip_events("8453").is_err());
-        assert!(parse_skip_events("x:1").is_err());
-        assert!(parse_skip_events("1:y").is_err());
+        assert!(parse_skip_events("8453:12").is_err());
+        assert!(parse_skip_events("x:1:1").is_err());
+        assert!(parse_skip_events("1:1:y").is_err());
     }
 }

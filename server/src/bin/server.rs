@@ -365,7 +365,7 @@ async fn main() -> Result<()> {
     // it (from the halt log) here once the deposit is handled by hand.
     let skipped_events = match std::env::var("EVENT_SKIP_EVENTS") {
         Ok(raw) => server::services::event_consumer::parse_skip_events(&raw).map_err(|e| {
-            anyhow::anyhow!("EVENT_SKIP_EVENTS must be chain_id:seq[,chain_id:seq...]: {e}")
+            anyhow::anyhow!("EVENT_SKIP_EVENTS must be chain_id:epoch:seq[,...]: {e}")
         })?,
         Err(_) => Vec::new(),
     };
