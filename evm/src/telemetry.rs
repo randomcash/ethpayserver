@@ -505,7 +505,7 @@ pub fn sentry_log_event_filter(
 /// metric and the `webhook_deliveries` table row the same call site writes.
 /// A non-success response or a payload that failed to serialize keeps the
 /// module's default target instead (see
-/// `server::services::webhook::service::permanently_failed_target`), since
+/// `server::services::webhook::service::permanent_failure_is_merchant_unreachable`), since
 /// either can reflect a fault in our own signing or request construction
 /// just as easily as one in the merchant's server, and those must keep
 /// paging the same as `log_process_error`'s "Error processing webhook job".
