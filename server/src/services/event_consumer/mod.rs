@@ -456,6 +456,23 @@ impl<
                 .await
             {
                 Ok(_) => {
+                    // Delete the stored row too, not just the in-memory
+                    // entry: an idle chain would otherwise keep its old
+                    // epoch and read as a fresh mismatch on the next restart,
+                    // after the operator has unset the accept flag.
+                    if let Err(e) = self
+                        .data_service
+                        .delete_chain_cursor(ADAPTER_ID, chain_id)
+                        .await
+                    {
+                        tracing::error!(
+                            chain_id,
+                            error = %e,
+                            "failed to delete the stale chain cursor after an event outbox lineage break"
+                        );
+                        all_rearmed = false;
+                        continue;
+                    }
                     cursors.remove(&chain_id);
                 }
                 Err(e) => {
@@ -469,7 +486,7 @@ impl<
             }
         }
         if !all_rearmed {
-            self.fatal("failed to re-arm watch_retry after an event outbox lineage break");
+            self.fatal("failed to re-arm watch_retry or drop the stale cursor after an event outbox lineage break");
         }
         all_rearmed
     }

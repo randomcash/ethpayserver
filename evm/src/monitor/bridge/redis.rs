@@ -386,6 +386,20 @@ impl EventBridge for RedisBridge {
         // rule out. The epoch is left alone on purpose: bumping it would make
         // the next start read a mismatch and resume past the gap silently,
         // so instead every restart fails until an operator audits the gap.
+        // Read once, before anything else, and compared to the cursor's
+        // epoch: the caller read the epoch separately, so the keyspace can
+        // have been lost in between. `seq` numbers from another lineage
+        // must not be used as an `XREAD` position - they would skip or hang.
+        let subscribed_epoch = self.get_or_init_epoch().await?;
+        if let Some(cursor) = from
+            && cursor.epoch != subscribed_epoch
+        {
+            return Err(EvmError::EventStreamOutOfRange(format!(
+                "resume cursor names epoch {} but the outbox is at epoch {subscribed_epoch}",
+                cursor.epoch
+            )));
+        }
+
         if let Some(cursor) = from
             && let Some(oldest) = self.oldest_retained_seq().await?
             && oldest > cursor.seq + 1
@@ -411,7 +425,6 @@ impl EventBridge for RedisBridge {
 
         // See `epoch_unchanged` for why the epoch is re-checked while subscribed.
         let epoch_key = self.epoch_key();
-        let subscribed_epoch = self.get_or_init_epoch().await?;
 
         let s = stream! {
             let mut conn = match client.get_multiplexed_async_connection().await {

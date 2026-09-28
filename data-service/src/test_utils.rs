@@ -655,6 +655,19 @@ impl ChainCursorWriter for InMemoryDataService {
         Ok(())
     }
 
+    async fn delete_chain_cursor(&self, adapter_id: &str, chain_id: u64) -> RepositoryResult<()> {
+        if self.fail_commit_chain_cursor.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated delete_chain_cursor failure".to_string(),
+            ));
+        }
+        self.chain_cursors
+            .write()
+            .unwrap()
+            .remove(&(adapter_id.to_string(), chain_id));
+        Ok(())
+    }
+
     async fn reset_chain_watch_notifications(&self, _chain_id: u64) -> RepositoryResult<u64> {
         if self
             .fail_reset_chain_watch_notifications

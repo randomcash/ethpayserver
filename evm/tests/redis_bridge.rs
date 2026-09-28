@@ -208,6 +208,34 @@ async fn resuming_past_the_retention_window_fails_out_of_range_without_changing_
     );
 }
 
+/// The caller reads the epoch and then subscribes; if the keyspace is lost in
+/// between, the cursor names a lineage the outbox no longer has. Its `seq`
+/// must not become an `XREAD` position.
+#[tokio::test]
+#[ignore]
+async fn resuming_with_a_cursor_from_another_epoch_fails_out_of_range() {
+    let bridge = fresh_bridge().await;
+    bridge
+        .publish(&make_event(B256::from([1u8; 32])))
+        .await
+        .unwrap();
+    let epoch = bridge.current_epoch().await.unwrap();
+
+    let result = bridge
+        .subscribe_from(Some(EventCursor {
+            epoch: epoch + 1,
+            seq: 1,
+            block_height: 0,
+        }))
+        .await;
+
+    match result {
+        Err(EvmError::EventStreamOutOfRange(_)) => {}
+        Err(e) => panic!("expected EventStreamOutOfRange, got a different error: {e}"),
+        Ok(_) => panic!("expected EventStreamOutOfRange, got a stream"),
+    }
+}
+
 /// The retention check in `subscribe_from` only runs once, before the
 /// stream starts - it does not cover a reader that falls behind *while
 /// already subscribed*. A consumer that stalls applying one envelope for

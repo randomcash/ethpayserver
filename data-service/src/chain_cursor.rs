@@ -53,6 +53,14 @@ pub trait ChainCursorWriter: Send + Sync {
         cursor: ChainCursor,
     ) -> RepositoryResult<()>;
 
+    /// Forget the stored cursor for `(adapter_id, chain_id)`.
+    ///
+    /// Used when an accepted lineage break makes the stored position name a
+    /// lineage that no longer exists. Removing it from memory alone would
+    /// leave the row behind, and the next restart would read the same stale
+    /// epoch as a fresh mismatch.
+    async fn delete_chain_cursor(&self, adapter_id: &str, chain_id: u64) -> RepositoryResult<()>;
+
     /// Re-arm `watch_retry` for every active watch on `chain_id`.
     ///
     /// Called when the outbox's epoch no longer matches what this server

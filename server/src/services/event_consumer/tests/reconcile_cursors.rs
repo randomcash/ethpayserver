@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use data_service::{ChainCursor, InMemoryDataService};
+use data_service::{ChainCursor, ChainCursorReader, ChainCursorWriter, InMemoryDataService};
 use evm::monitor::bridge::{EventCursor, MemoryBridge};
 
 use super::helpers::create_test_consumer;
@@ -157,6 +157,12 @@ async fn every_chain_mismatching_resumes_from_scratch_rather_than_a_stale_combin
         ),
     ]);
 
+    for (&chain_id, &cursor) in &cursors {
+        ChainCursorWriter::commit_chain_cursor(&*ds, "evmmonitor", chain_id, cursor)
+            .await
+            .unwrap();
+    }
+
     let resume = consumer
         .reconcile_cursors(&mut cursors, new_epoch)
         .await
@@ -168,5 +174,13 @@ async fn every_chain_mismatching_resumes_from_scratch_rather_than_a_stale_combin
          safe to resume from"
     );
     assert!(cursors.is_empty());
+    assert!(
+        ChainCursorReader::chain_cursors(&*ds, "evmmonitor")
+            .await
+            .unwrap()
+            .is_empty(),
+        "an accepted break must delete the stored rows, or the next restart reads the same \
+         stale epoch as a new mismatch"
+    );
     assert_eq!(ds.watch_reset_calls(), 2);
 }

@@ -81,6 +81,16 @@ impl ChainCursorWriter for PgDataService {
         Ok(())
     }
 
+    async fn delete_chain_cursor(&self, adapter_id: &str, chain_id: u64) -> RepositoryResult<()> {
+        sqlx::query("DELETE FROM chain_cursors WHERE adapter_id = $1 AND chain_id = $2")
+            .bind(adapter_id)
+            .bind(chain_id as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+        Ok(())
+    }
+
     async fn reset_chain_watch_notifications(&self, chain_id: u64) -> RepositoryResult<u64> {
         // `watched_addresses.chain_id` is CAIP-2 (see the `caip2` domain
         // migration); the bridge/outbox boundary this method is called from
