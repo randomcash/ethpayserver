@@ -1,12 +1,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! `run` has three places where it used to give up quietly - a failed
+//! `run` has five places where it used to give up quietly - a failed
 //! `chain_cursors` load, a failed `current_epoch` read, and a failed
 //! `subscribe_from` (including `OUT_OF_RANGE`, with no retry) - plus
-//! `break_lineage` swallowing a failed `reset_chain_watch_notifications`.
+//! `break_lineage` swallowing a failed `reset_chain_watch_notifications` - plus
+//! a live event stream that ends and a `subscribe_from` that fails for any
+//! other reason.
 //! Every one of those left the process running with no consumer at all,
 //! indistinguishable from a healthy, idle one: nothing paged anyone, and
 //! nothing in the diff proved a restart would even help. These assert that
-//! all four now go through `ResumeFailureHook` instead of returning silently.
+//! all of them now go through `ResumeFailureHook` instead of returning silently.
 //! Production leaves the hook unset, which exits the process so a supervisor
 //! restarts it, the same recovery `ApplyFailureHook` already had.
 
@@ -213,4 +215,89 @@ async fn a_lineage_break_that_cannot_re_arm_watch_retry_halts_rather_than_forget
     let reason = wait_for_reason(&reasons).await;
     assert!(reason.contains("re-arm"), "unexpected reason: {reason}");
     let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+}
+
+/// A bridge whose `subscribe_from` either fails with a plain error or hands
+/// back a stream that is already finished, as a dropped Redis connection or
+/// a gap detected mid-subscription does.
+struct BrokenStreamBridge {
+    subscribe_fails: bool,
+}
+
+#[async_trait]
+impl EventBridge for BrokenStreamBridge {
+    async fn publish(&self, _event: &MonitorEvent) -> EvmResult<()> {
+        unimplemented!("not exercised by this test")
+    }
+
+    async fn subscribe_from(&self, _from: Option<EventCursor>) -> EvmResult<DurableEventStream> {
+        if self.subscribe_fails {
+            return Err(EvmError::Monitor(
+                "simulated connection failure".to_string(),
+            ));
+        }
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    async fn current_epoch(&self) -> EvmResult<i64> {
+        Ok(1)
+    }
+
+    async fn bump_epoch(&self) -> EvmResult<i64> {
+        unimplemented!("not exercised by this test")
+    }
+
+    async fn publish_command(&self, _command: &MonitorCommand) -> EvmResult<()> {
+        unimplemented!("not exercised by this test")
+    }
+
+    async fn subscribe_commands(&self) -> EvmResult<CommandStream> {
+        unimplemented!("not exercised by this test")
+    }
+
+    fn name(&self) -> &str {
+        "BrokenStreamBridge"
+    }
+
+    async fn health_check(&self) -> EvmResult<()> {
+        Ok(())
+    }
+}
+
+async fn reason_for(bridge: BrokenStreamBridge) -> String {
+    let ds = Arc::new(InMemoryDataService::new());
+    let reasons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = reasons.clone();
+    let consumer = create_test_consumer_with_bridge(ds, Arc::new(bridge)).with_resume_failure_hook(
+        Arc::new(move |reason| recorded.lock().unwrap().push(reason.to_string())),
+    );
+
+    let task = tokio::spawn(consumer.run());
+    let reason = wait_for_reason(&reasons).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+    reason
+}
+
+#[tokio::test]
+async fn a_stream_that_ends_while_consuming_halts_instead_of_leaving_a_dead_consumer() {
+    let reason = reason_for(BrokenStreamBridge {
+        subscribe_fails: false,
+    })
+    .await;
+    assert!(
+        reason.contains("ended unexpectedly"),
+        "unexpected reason: {reason}"
+    );
+}
+
+#[tokio::test]
+async fn a_subscribe_failure_that_is_not_out_of_range_halts() {
+    let reason = reason_for(BrokenStreamBridge {
+        subscribe_fails: true,
+    })
+    .await;
+    assert!(
+        reason.contains("failed to subscribe"),
+        "unexpected reason: {reason}"
+    );
 }
