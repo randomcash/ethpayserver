@@ -495,15 +495,30 @@ pub fn sentry_log_event_filter(
 /// this exists to quiet is specifically the `error!` call sites in
 /// `alloy_transport_ws::native`, not `debug!`/`trace!` chatter the same
 /// target might log, so this filter does not touch those.
+///
+/// `server::services::webhook::merchant_delivery_failed` is demoted the same
+/// way, for an unrelated reason: it's logged once a webhook job exhausts
+/// every retry against a *merchant's own* endpoint, which is a fact about
+/// their server, not a payserver defect, and is already fully captured by the
+/// `webhook_delivery_status="permanent_failed"` metric and the
+/// `webhook_deliveries` table row the same call site writes. Paging on-call
+/// for it teaches the same lesson as the WS noise above — ignore Sentry
+/// errors — for a condition no payserver engineer can act on. This is a
+/// distinct target from the rest of `server::services::webhook::service`
+/// (see that call site) specifically so it doesn't also swallow
+/// `log_process_error`'s "Error processing webhook job", which reports a real
+/// fault in our own code (Redis, serialization, the database) and must keep
+/// paging.
 pub fn sentry_event_filter(
     min_level: tracing::Level,
 ) -> impl Fn(&tracing::Metadata<'_>) -> sentry_tracing::EventFilter + Send + Sync + 'static {
     let log_gate = sentry_log_event_filter(min_level);
     move |metadata| {
         let filter = log_gate(metadata);
-        if *metadata.level() == tracing::Level::ERROR
-            && metadata.target().starts_with("alloy_transport_ws")
-        {
+        let demote = *metadata.level() == tracing::Level::ERROR
+            && (metadata.target().starts_with("alloy_transport_ws")
+                || metadata.target() == "server::services::webhook::merchant_delivery_failed");
+        if demote {
             (filter - sentry_tracing::EventFilter::Event) | sentry_tracing::EventFilter::Breadcrumb
         } else {
             filter

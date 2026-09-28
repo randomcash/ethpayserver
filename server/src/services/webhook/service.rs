@@ -500,7 +500,20 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                 );
 
                 if job.is_exhausted() {
+                    // A merchant's own endpoint being down or erroring for all
+                    // `max_attempts` retries is a fact about their server, not
+                    // ours — there is nothing a payserver on-call engineer can
+                    // do about it, and it's already fully captured by the
+                    // `webhook_delivery_status="permanent_failed"` metric and
+                    // the `webhook_deliveries` row below. A distinct target
+                    // (rather than this module's default) lets
+                    // `evm::telemetry::sentry_event_filter` demote *this*
+                    // error to a breadcrumb without also swallowing
+                    // `log_process_error`'s "Error processing webhook job",
+                    // which is a real fault in our own code and must keep
+                    // paging.
                     tracing::error!(
+                        target: "server::services::webhook::merchant_delivery_failed",
                         job_id = %job.id,
                         invoice_id = %job.payload.invoice_id,
                         "Webhook delivery permanently failed after {} attempts",
