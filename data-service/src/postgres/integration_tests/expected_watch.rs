@@ -293,3 +293,54 @@ async fn expected_watched_addresses_excludes_a_long_expired_invoices_watch() {
          watched_addresses row yet"
     );
 }
+
+/// `cancelled` gets no grace-window branch, unlike `paid`/`expired`:
+/// `cleanup_cancelled_addresses` has no grace-period check at all, so the
+/// only lag between `status` flipping and `is_active` catching up is the
+/// cleanup job's own poll interval. A view that dropped `cancelled` from
+/// "expected" the moment status flips (the earlier pass on this ticket did
+/// exactly that, since `cancelled` was simply absent from the status list)
+/// would report every routine cancellation as a false "stale watch" for
+/// that window - the same class of false positive the `paid`/`expired`
+/// branches above exist to avoid, missed for the third cleanup job the
+/// ticket names in the same breath as the other two. Unlike those two,
+/// there is no timestamp on `invoices` to bound a ceiling against and no
+/// deliberate grace period to bound it to, so this asserts the watch stays
+/// expected even long after cancellation, for as long as `is_active` says
+/// the monitor is still, correctly, watching it.
+#[tokio::test]
+#[ignore]
+async fn expected_watched_addresses_includes_a_cancelled_but_not_yet_cleaned_up_invoices_watch() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut invoice = seeded_test_invoice(&service).await;
+    invoice.expires_at = Utc::now() - Duration::days(2);
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+    InvoiceWriter::update_status(&service, &invoice.id, InvoiceStatus::Cancelled)
+        .await
+        .unwrap();
+
+    let payment_option = test_payment_option(&invoice.id, &ChainId::evm(1));
+    PaymentOptionWriter::create(&service, &payment_option)
+        .await
+        .unwrap();
+
+    let address = unique_address();
+    WatchedAddressWriter::upsert(
+        &service,
+        &address,
+        &payment_option.id,
+        &ChainId::evm(1),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let expected = service.get_expected_watched_addresses().await.unwrap();
+    assert!(
+        expected.iter().any(|w| w.address == address),
+        "a cancelled invoice's watch must still appear as expected while \
+         the cleanup job has not yet reached it - the monitor is still, \
+         correctly, watching it"
+    );
+}

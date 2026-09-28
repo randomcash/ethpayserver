@@ -49,6 +49,16 @@
 -- misreported, it does not blunt detection of a watch that never gets
 -- cleaned up at all. If an operator ever configures a grace period longer
 -- than this ceiling, it needs to grow with it.
+--
+-- `cancelled` gets no grace branch, deliberately unlike `paid`/`expired`:
+-- `cleanup_cancelled_addresses` has no grace-period check at all - it
+-- unwatches the moment it sees `is_active = TRUE AND status = 'cancelled'`.
+-- The only lag is the cleanup job's own poll interval, and there is no
+-- timestamp on `invoices` recording when the cancellation happened to bound
+-- a window against, so this is included unconditionally rather than with a
+-- ceiling: a cancelled invoice's watch is expected for exactly as long as
+-- `is_active` says it is, which is exactly as long as the monitor is
+-- correctly still watching it.
 CREATE VIEW expected_watched_addresses AS
 SELECT
     wa.address,
@@ -61,7 +71,7 @@ JOIN payment_options po ON wa.payment_option_id = po.id
 JOIN invoices i ON po.invoice_id = i.id
 WHERE wa.is_active = TRUE
   AND (
-    i.status IN ('pending', 'processing', 'partially_paid')
+    i.status IN ('pending', 'processing', 'partially_paid', 'cancelled')
     OR (
       i.status = 'expired'
       AND i.expires_at > NOW() - INTERVAL '1 day' -- GRACE_CEILING
