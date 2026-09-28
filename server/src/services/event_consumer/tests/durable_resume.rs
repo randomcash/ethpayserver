@@ -9,6 +9,14 @@
 //! listening, with no backlog and no cursor to resume from. There was
 //! nothing for a restarted consumer to ask for. This test exercises the
 //! durable outbox and `chain_cursors` this commit adds in their place.
+//!
+//! Checked by ablation: making `MemoryBridge::subscribe_from` start at the
+//! outbox's current tail instead of the requested position (the old
+//! pub/sub behaviour) turns this red with "payment was never credited".
+//! Ignoring the persisted cursor alone does not, because replaying the whole
+//! outbox is idempotent; that half is pinned by
+//! `resume_uses_persisted_cursor`, which records the cursor passed in.
+//! `durable_resume_redis` runs the same scenario against a real Redis.
 
 use std::sync::Arc;
 use std::time::Duration;

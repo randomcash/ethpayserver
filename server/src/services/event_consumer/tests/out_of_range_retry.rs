@@ -52,7 +52,7 @@ async fn wait_for_payment(ds: &InMemoryDataService, invoice_id: &InvoiceId) {
         }
     })
     .await
-    .expect("payment was never credited after the out-of-range retry")
+    .expect("payment was never credited after the consumer resumed")
 }
 
 #[tokio::test]

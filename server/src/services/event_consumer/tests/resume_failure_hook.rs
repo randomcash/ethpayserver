@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! `run` has three places where it used to give up quietly - a failed
-//! `chain_cursors` load, a failed `current_epoch` read, and a second
-//! `subscribe_from` failure after the one out-of-range retry - plus
+//! `chain_cursors` load, a failed `current_epoch` read, and a failed
+//! `subscribe_from` (including `OUT_OF_RANGE`, with no retry) - plus
 //! `break_lineage` swallowing a failed `reset_chain_watch_notifications`.
 //! Every one of those left the process running with no consumer at all,
 //! indistinguishable from a healthy, idle one: nothing paged anyone, and
