@@ -213,7 +213,15 @@ fn disabling_enable_logs_suppresses_automatic_integration_capture() {
         .set_default();
 
     let mut options = client_options(None, None, "test".to_string());
-    options.enable_logs = false;
+    // Same `#[allow(deprecated)]` as the production site, and for the same
+    // reason: 0.49 deprecates this field but `sentry_tracing::layer()` is an
+    // automatic-capture integration, so it still governs whether a log reaches
+    // the envelope. This test is the thing that demonstrates that, so it has to
+    // be able to set it.
+    #[allow(deprecated)]
+    {
+        options.enable_logs = false;
+    }
 
     let envelopes = sentry::test::with_captured_envelopes_options(
         || {
