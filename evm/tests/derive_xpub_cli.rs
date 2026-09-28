@@ -131,10 +131,15 @@ fn generate_prints_an_xpub_matching_its_own_mnemonic() {
 
     let mnemonic = stdout
         .lines()
-        .nth(2)
-        .map(str::trim)
+        .find(|line| line.trim_start().starts_with("mnemonic:"))
+        .map(|line| {
+            line.trim_start()
+                .strip_prefix("mnemonic:")
+                .expect("prefix checked above")
+                .trim()
+        })
         .filter(|line| !line.is_empty())
-        .expect("mnemonic printed on the third line");
+        .expect("mnemonic line present");
 
     let xpub_line = stdout
         .lines()
