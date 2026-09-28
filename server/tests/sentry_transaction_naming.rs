@@ -89,13 +89,14 @@ fn transaction_name_is_the_route_pattern_not_the_request_uri() {
         state, false, None, None, None,
     ));
 
-    let options = sentry::ClientOptions {
-        // Sample everything: the property under test is the transaction's
-        // *name*, not the sampling knob, and an unsampled transaction is
-        // never turned into an envelope for the test transport to capture.
-        traces_sample_rate: 1.0,
-        ..Default::default()
-    };
+    // Sample everything: the property under test is the transaction's *name*,
+    // not the sampling knob, and an unsampled transaction is never turned into
+    // an envelope for the test transport to capture.
+    //
+    // Builder form, not a struct literal: 0.49 marks `ClientOptions`
+    // `#[non_exhaustive]`, so the literal no longer compiles outside the
+    // defining crate.
+    let options = sentry::ClientOptions::new().traces_sample_rate(1.0);
 
     let envelopes = sentry::test::with_captured_envelopes_options(
         || {
