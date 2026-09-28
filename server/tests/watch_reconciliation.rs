@@ -214,14 +214,24 @@ async fn reconcile_watches_reports_a_stale_watch_and_a_missed_watch() {
         .await
         .expect("read the actual set")
         .into_iter()
-        .map(|(address, _invoice_id, chain_id, token)| {
-            WatchKey::new(chain_id, &address, token.as_deref())
+        .map(|(address, invoice_id, chain_id, token)| {
+            WatchKey::new(chain_id, &address, token.as_deref(), invoice_id)
         })
         .collect();
 
     let diff = reconcile(&expected, &actual);
-    let missed_key = WatchKey::new(ChainId::evm(11155111), &missed_address, None);
-    let stale_key = WatchKey::new(ChainId::evm(11155111), &stale_address, None);
+    let missed_key = WatchKey::new(
+        ChainId::evm(11155111),
+        &missed_address,
+        None,
+        InvoiceId::from_string(invoice.clone()),
+    );
+    let stale_key = WatchKey::new(
+        ChainId::evm(11155111),
+        &stale_address,
+        None,
+        InvoiceId::from_string("a-deleted-invoice".to_string()),
+    );
     assert!(
         diff.missed.contains(&missed_key),
         "a live invoice's never-watched address must be reported missed"
@@ -245,23 +255,25 @@ async fn reconcile_watches_reports_a_stale_watch_and_a_missed_watch() {
     cleanup(pg.pool(), &[owner]).await;
 }
 
-/// `WatchKey` deliberately drops the invoice id - see its doc comment for
-/// why that is safe rather than merely convenient. This is the "why" made
-/// concrete: a stale Redis watch for a deleted invoice, then the same
-/// address legitimately rewatched for a second invoice, must leave Redis
-/// holding the *new* invoice id (proving the plain Redis `SET` in
-/// `watch_address` really does overwrite in place) and the reconciler
-/// reporting nothing for that key (proving the key-only comparison does not
-/// need the invoice id to be safe here).
+/// `WatchKey` includes the invoice id precisely because reuse is not atomic:
+/// `create_invoice_with_options` commits the Postgres side first, and only
+/// afterward does the application call `watch_address` to overwrite the
+/// Redis key. This test catches the reconciler mid-reuse - Postgres already
+/// repointed to invoice B, Redis still holding invoice A - and proves that
+/// window now shows up as a visible missed/stale pair rather than a silent
+/// match. Only after the Redis write lands does the reconciler go quiet for
+/// the address, and only then with invoice B's id, not invoice A's.
 ///
 /// Invoice B is created through `create_invoice_with_options`, the same
 /// entry point a real invoice goes through, rather than by hand-inserting a
 /// `watched_addresses` row: that function's `ON CONFLICT (address, chain_id,
 /// token_address) DO UPDATE` is what actually reassigns the row in
-/// production, and it never touches the row's `invoice_id` column directly -
-/// only `payment_option_id`, which the `expected_watched_addresses` view
-/// joins through to get the invoice. Exercising anything less than the real
-/// upsert would not prove the thing this test exists to prove.
+/// production. The `expected_watched_addresses` view joins through
+/// `payment_option_id` to `payment_options.invoice_id`, which the conflict's
+/// `SET` clause does repoint to invoice B's option - so the expected side
+/// already reports invoice B the instant that write commits, before Redis
+/// knows anything changed. Exercising anything less than the real upsert
+/// would not prove the thing this test exists to prove.
 ///
 /// Invoice A is resolved rather than deleted, for the same reason: deleting
 /// its row would remove the very conflict this test needs invoice B's write
@@ -322,7 +334,12 @@ async fn a_reused_address_resolves_to_the_new_invoice_not_the_stale_one() {
     .await
     .expect("resolve invoice A without touching its watched_addresses row");
 
-    let key = WatchKey::new(chain.clone(), &address, None);
+    let key_a = WatchKey::new(
+        chain.clone(),
+        &address,
+        None,
+        InvoiceId::from_string(invoice_a.clone()),
+    );
     let stale_counts = reconcile_watches(&pg, &monitor)
         .await
         .expect("reconcile before reuse");
@@ -335,18 +352,49 @@ async fn a_reused_address_resolves_to_the_new_invoice_not_the_stale_one() {
     // write path (`InvoiceCreationWriter::create_invoice_with_options`),
     // not a hand-written INSERT. That function's `ON CONFLICT (address,
     // chain_id, token_address) DO UPDATE` fires here because invoice A's row
-    // is still physically present, and its `SET` clause only ever touches
-    // `payment_option_id` - never `invoice_id` - so the same underlying row
-    // that used to belong to invoice A is repointed to invoice B's option
-    // without the `invoice_id` column itself ever being written. Proving the
-    // reconciler goes quiet after this is what proves dropping `invoice_id`
-    // from `WatchKey` is safe against the actual conflict-update path, not
-    // just a delete-then-insert that never exercises it.
+    // is still physically present, and its `SET` clause repoints
+    // `payment_option_id` to invoice B's option - which is what the
+    // `expected_watched_addresses` view joins through, so the expected set
+    // already reports invoice B the instant this commits, before Redis is
+    // told anything.
     let (invoice_b, option_b) = an_invoice_and_option(store.id.0, &address);
     let invoice_b_id = invoice_b.id.clone();
     pg.create_invoice_with_options(&invoice_b, std::slice::from_ref(&option_b))
         .await
         .expect("legitimately rewatch the address for invoice B via the real write path");
+
+    // Caught here, between the Postgres commit above and the Redis write
+    // below, is the exact non-atomic window `WatchKey`'s invoice id exists
+    // to catch: Postgres already expects invoice B, Redis still holds
+    // invoice A. A payment landing here would be credited to the wrong
+    // invoice, and a key that ignored the invoice id would report nothing.
+    let key_b = WatchKey::new(chain.clone(), &address, None, invoice_b_id.clone());
+    let mid_reuse_expected: Vec<WatchKey> = pg
+        .get_expected_watched_addresses()
+        .await
+        .expect("read the expected set mid-reuse")
+        .iter()
+        .map(ExpectedWatch::key)
+        .collect();
+    let mid_reuse_actual: Vec<WatchKey> = live_watches
+        .get_all_watched()
+        .await
+        .expect("read the actual set mid-reuse")
+        .into_iter()
+        .map(|(address, invoice_id, chain_id, token)| {
+            WatchKey::new(chain_id, &address, token.as_deref(), invoice_id)
+        })
+        .collect();
+    let mid_reuse_diff = reconcile(&mid_reuse_expected, &mid_reuse_actual);
+    assert!(
+        mid_reuse_diff.missed.contains(&key_b),
+        "invoice B must be reported missed while Redis still holds invoice A"
+    );
+    assert!(
+        mid_reuse_diff.stale.contains(&key_a),
+        "invoice A must still be reported stale mid-reuse, not silently matched to invoice B"
+    );
+
     live_watches
         .watch_address(&address, &invoice_b_id, &chain, None)
         .await
@@ -375,14 +423,18 @@ async fn a_reused_address_resolves_to_the_new_invoice_not_the_stale_one() {
         .await
         .expect("read the actual set")
         .into_iter()
-        .map(|(address, _invoice_id, chain_id, token)| {
-            WatchKey::new(chain_id, &address, token.as_deref())
+        .map(|(address, invoice_id, chain_id, token)| {
+            WatchKey::new(chain_id, &address, token.as_deref(), invoice_id)
         })
         .collect();
     let diff = reconcile(&expected, &actual);
     assert!(
-        !diff.stale.contains(&key) && !diff.missed.contains(&key),
-        "once invoice B legitimately owns the address, the reconciler must report neither fault for it"
+        !diff.stale.contains(&key_a) && !diff.missed.contains(&key_a),
+        "once invoice B legitimately owns the address, the reconciler must report neither fault for invoice A's key"
+    );
+    assert!(
+        !diff.stale.contains(&key_b) && !diff.missed.contains(&key_b),
+        "once the redis write lands, invoice B's key must be quiet too"
     );
 
     let _ = live_watches.unwatch_address(&address, &chain, None).await;

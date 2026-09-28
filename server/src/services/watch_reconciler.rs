@@ -59,8 +59,8 @@ pub async fn reconcile_watches(
         .await
         .map_err(WatchReconciliationError::Actual)?
         .into_iter()
-        .map(|(address, _invoice_id, chain_id, token_address)| {
-            data_service::WatchKey::new(chain_id, &address, token_address.as_deref())
+        .map(|(address, invoice_id, chain_id, token_address)| {
+            data_service::WatchKey::new(chain_id, &address, token_address.as_deref(), invoice_id)
         })
         .collect();
 
