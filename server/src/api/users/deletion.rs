@@ -5,6 +5,7 @@ use axum::{extract::State, http::StatusCode};
 use auth::SessionService;
 
 use crate::api::extractors::AuthenticatedUser;
+use crate::services::plugins::notify_account_closed;
 use crate::state::PgAppState;
 
 /// Confirmation the caller must type back before the account is deleted.
@@ -48,15 +49,14 @@ fn deletion_confirmation_matches(expected: &str, typed: &str) -> bool {
 /// key and surface as a 500. `DELETE /stores/{id}` already archives rather than
 /// deletes for this reason; this endpoint declines rather than pretending.
 ///
-/// Also refuses while any owned store still has an actively watched address -
-/// the same guard `admin::deletion::delete_user_account` applies, for the same
-/// reason: `account_deletion_blockers` only sees *recorded* payments, so a
-/// `pending`, never-expired invoice whose customer has already broadcast a
-/// transaction that has not confirmed yet passes it untouched. Without this, a
-/// merchant could delete their own account out from under a payment in
-/// flight - the cascade removes the invoice while the monitor is still
-/// watching for it, and the payment that lands afterward has nothing left to
-/// credit.
+/// Does **not** refuse on a still-watched address, unlike
+/// `admin::deletion::delete_user_account`, which still does. An unpaid invoice
+/// must not stop a merchant deleting their own account; the case worth refusing
+/// is a payment already broadcast, and `account_deletion_blockers` catches that
+/// on its own because detection writes a `payments` row before it confirms. The
+/// watches such a delete orphans are cleared after the commit instead, by
+/// `admin::deletion::unwatch_after_delete` - best effort, and counted when it
+/// cannot be done.
 ///
 /// What it is for is the case deletion is actually asked for: an abandoned
 /// signup, a test account, a merchant who never traded. Those cascade cleanly -
@@ -69,7 +69,7 @@ fn deletion_confirmation_matches(expected: &str, typed: &str) -> bool {
     responses(
         (status = 204, description = "Account deleted"),
         (status = 400, description = "Confirmation did not match"),
-        (status = 409, description = "Account holds financial records, or a still-watched address, and cannot be deleted"),
+        (status = 409, description = "Account holds financial records and cannot be deleted"),
     ),
     tag = "users"
 )]
@@ -100,24 +100,20 @@ where
             })?;
     let store_ids: Vec<uuid::Uuid> = owned_stores.iter().map(|s| s.id.0).collect();
 
-    // This refuses outright below rather than unwatching and proceeding (see
-    // the docstring above), so this read only ever needs to answer "any?" -
-    // same as `admin::deletion::delete_user_account`, which this mirrors.
+    // Read, but no longer refuse on. These addresses are cleared after the
+    // delete commits instead - see the call at the end of this function.
+    //
+    // This used to return 409 whenever the list was non-empty, which blocked a
+    // merchant from deleting their own account while ANY unpaid invoice lived.
+    // That is broader than the reason for it: the case worth refusing is a
+    // payment already broadcast, and `account_deletion_blockers` below already
+    // catches that, because detection writes a `payments` row with
+    // `confirmed_at = NULL` and that count has no `confirmed_at` filter. The
+    // old refusal also told the merchant to cancel the invoice, which does not
+    // help - cancelling deactivates the payment options and leaves
+    // `watched_addresses.is_active` true.
     let addresses =
         crate::api::admin::deletion::active_watched_addresses(&state, &store_ids).await?;
-
-    if !addresses.is_empty() {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "This account has {} still-watched address(es) for a pending invoice. \
-                 A payment broadcast to one of them may not have confirmed yet, and \
-                 deleting now would stop watching it with nothing left to credit it to. \
-                 Refused until the invoice resolves (paid, cancelled or expired).",
-                addresses.len()
-            ),
-        ));
-    }
 
     let blockers = data_service::AccountDeletionReader::account_deletion_blockers(
         &*state.data_service,
@@ -153,9 +149,26 @@ where
             )
         })?;
 
-    // No `unwatch_after_delete` call here: this function already returned
-    // above if `addresses` was non-empty, so by construction there is
-    // nothing left to unwatch by the time the delete runs.
+    // Only now, with the account actually gone. This cannot run any earlier:
+    // unwatching is an external side effect with no rollback, so doing it
+    // before a delete that then failed would stop watching a still-live
+    // invoice. Run after a commit, the worst case is the opposite and much
+    // cheaper - the monitor polls a deleted invoice a little longer.
+    //
+    // This replaces the refusal that used to stand above. That refusal made
+    // orphaned watches impossible; this makes them unlikely, and the counter
+    // inside is how we learn which. The general fix is a reconciler against
+    // the monitor's watch set, because Postgres cannot see a stale watch at
+    // all: `watched_addresses` cascades from both `invoices` and
+    // `payment_options`, so the rows are gone and the monitor's are not.
+    crate::api::admin::deletion::unwatch_after_delete(state.evm_monitor.as_deref(), addresses)
+        .await;
+
+    // After the account is actually gone, not before: a plugin holding data
+    // for it must never be told "closed" for an account that a later failure
+    // in this handler left alive.
+    notify_account_closed(&state.account_closed_observers, user.id).await;
+
     tracing::info!(user_id = %user.id.0, "account deleted at its owner's request");
     Ok(StatusCode::NO_CONTENT)
 }

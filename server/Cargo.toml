@@ -105,7 +105,10 @@ wasmtime = { version = "47.0.4", default-features = false, features = ["runtime"
 [dev-dependencies]
 tokio = { version = "1.42", features = ["test-util"] }
 tokio-tungstenite = "0.28"
-data-service = { path = "../data-service", features = ["test-utils"] }
+# `redis` here, not in the dependency above: the live watched-address reader the
+# watch-reconciliation test compares against is behind that feature, and this
+# keeps it a test-only build. The running server links data-service without it.
+data-service = { path = "../data-service", features = ["test-utils", "redis"] }
 evm = { path = "../evm", features = ["api", "redis", "test-utils"] }
 wat = "1.259.0"
 tempfile = "3"

@@ -15,8 +15,35 @@ use crate::monitor::events::{MonitorCommand, MonitorEvent};
 use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_stream::StreamExt;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
+
+/// Whether a subscription stream ending is a fault worth reporting.
+///
+/// Split out from the two stream tails below so the shutdown/fault decision
+/// itself is unit-testable without a live redis connection.
+fn subscription_end_is_fault(shutting_down: bool) -> bool {
+    !shutting_down
+}
+
+/// Log a subscription stream ending at the level its cause deserves.
+///
+/// `kind` names the stream ("events" or "commands") for the log message.
+/// Factored out of the two stream tails below so it's directly testable
+/// under a captured subscriber, rather than only through the extracted
+/// `subscription_end_is_fault` boolean.
+fn log_subscription_end(kind: &str, channel: &str, shutting_down: bool) {
+    if subscription_end_is_fault(shutting_down) {
+        error!(channel = %channel, "redis {} subscription ended unexpectedly", kind);
+    } else {
+        info!(
+            channel = %channel,
+            "redis {} subscription ended: shutdown in progress", kind
+        );
+    }
+}
 
 /// Redis pub/sub event bridge.
 pub struct RedisBridge {
@@ -28,6 +55,12 @@ pub struct RedisBridge {
     events_channel: String,
     /// Channel name for commands (API server -> monitor).
     commands_channel: String,
+    /// Set once the owning process has asked to stop.
+    ///
+    /// A subscription stream ending is only a fault when nobody asked it to;
+    /// during a normal shutdown the surrounding container's network can drop
+    /// out from under it, which looks identical at the redis client level.
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl RedisBridge {
@@ -51,7 +84,18 @@ impl RedisBridge {
             publisher,
             events_channel: events_channel.to_string(),
             commands_channel: commands_channel.to_string(),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Mark this bridge as shutting down intentionally.
+    ///
+    /// Call this from the process's own shutdown handler, before tearing
+    /// anything else down. A subscription stream that ends afterwards logs
+    /// at `info` instead of `error` — it ended because we asked it to, not
+    /// because something broke.
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Relaxed);
     }
 
     /// Get the events channel name.
@@ -107,6 +151,7 @@ impl EventBridge for RedisBridge {
             .map_err(|e| EvmError::Monitor(format!("redis subscribe failed: {}", e)))?;
 
         let channel = self.events_channel.clone();
+        let shutting_down = Arc::clone(&self.shutting_down);
         let stream = async_stream::stream! {
             let mut msg_stream = pubsub.on_message();
             while let Some(msg) = msg_stream.next().await {
@@ -125,7 +170,7 @@ impl EventBridge for RedisBridge {
                     }
                 }
             }
-            error!(channel = %channel, "redis events subscription ended unexpectedly");
+            log_subscription_end("events", &channel, shutting_down.load(Ordering::Relaxed));
         };
 
         Ok(Box::pin(stream))
@@ -161,6 +206,7 @@ impl EventBridge for RedisBridge {
             .map_err(|e| EvmError::Monitor(format!("redis subscribe commands failed: {}", e)))?;
 
         let channel = self.commands_channel.clone();
+        let shutting_down = Arc::clone(&self.shutting_down);
         let stream = async_stream::stream! {
             let mut msg_stream = pubsub.on_message();
             while let Some(msg) = msg_stream.next().await {
@@ -182,7 +228,7 @@ impl EventBridge for RedisBridge {
                     }
                 }
             }
-            error!(channel = %channel, "redis commands subscription ended unexpectedly");
+            log_subscription_end("commands", &channel, shutting_down.load(Ordering::Relaxed));
         };
 
         Ok(Box::pin(stream))
@@ -224,5 +270,72 @@ mod tests {
         // Just verify URL parsing works
         let result = Client::open("redis://localhost:6379");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn subscription_end_during_shutdown_is_not_a_fault() {
+        assert!(!subscription_end_is_fault(true));
+    }
+
+    #[test]
+    fn subscription_end_without_shutdown_is_a_fault() {
+        assert!(subscription_end_is_fault(false));
+    }
+
+    /// Runs `log_subscription_end` under a subscriber that captures its
+    /// output, so the tests below exercise the real `error!`/`info!` call
+    /// sites the stream tails use — not just the extracted
+    /// `subscription_end_is_fault` boolean.
+    fn capture_log_subscription_end(shutting_down: bool) -> String {
+        use std::io;
+        use std::sync::Mutex;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+
+        impl io::Write for Buf {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_subscription_end("events", "test-channel", shutting_down);
+        });
+
+        String::from_utf8(buf.0.lock().unwrap().clone()).expect("utf8 log output")
+    }
+
+    #[test]
+    fn log_subscription_end_reports_error_when_not_shutting_down() {
+        let output = capture_log_subscription_end(false);
+        assert!(output.contains("ERROR"), "expected ERROR, got: {output}");
+    }
+
+    #[test]
+    fn log_subscription_end_reports_info_when_shutting_down() {
+        let output = capture_log_subscription_end(true);
+        assert!(output.contains("INFO"), "expected INFO, got: {output}");
+        assert!(
+            !output.contains("ERROR"),
+            "shutdown noise must not reach error level: {output}"
+        );
     }
 }

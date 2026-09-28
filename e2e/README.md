@@ -32,16 +32,16 @@ RATE_LIMIT_READ=10000 RATE_LIMIT_WS=10000 \
   cargo run --release --bin ethpayserver
 ```
 
-The stock defaults are `auth_rpm: 5`, `write_rpm: 10`, `read_rpm: 60`. A full
-suite run makes far more than ten writes a minute, so against a stock server a
-scattering of tests fails with no obvious pattern — and the rate limiter
-returns 429 **without logging anything** (`server/src/api/rate_limit.rs`), so
+The stock defaults are `auth_rpm: 30`, `write_rpm: 120`, `read_rpm: 300`,
+`ws_rpm: 60` (`server/src/api/rate_limit.rs`) — raised more than once since
+this suite was first written, most recently to "numbers a payment processor
+can live with." A full suite run still makes far more requests than that in a
+minute, so against a stock server a scattering of tests fails with no obvious
+pattern — and the rate limiter returns 429 **without logging anything**, so
 the server logs look perfectly healthy while it happens. Failures land in
 whichever tests happened to be running when the window filled, which makes them
 read like flakiness or like a regression in whatever changed most recently.
-
-Measured on this suite: stock limits produced 9 failures on one run and 20+ on
-another; the same code at CI's limits passes 76/76.
+Run at CI's `RATE_LIMIT_*=10000` and this stops being a variable at all.
 
 ## What is not here
 
@@ -110,14 +110,16 @@ registration against live testnet completes end to end.
 It is **not** `resetDatabase()`. `fixtures/db.ts` returns early when `E2E_REMOTE`
 is `true`, so it is already a no-op remotely.
 
-The real blocker is **rate limiting**: the auth tier allows 5 requests per minute
-per IP (`RATE_LIMIT_AUTH`), and this spec performs five registrations plus a login
-well inside a minute. Remotely it returns `HTTP 429: Too many requests` and three
-of five tests fail. `scout.spec.ts` registers once, which is why it passes
-remotely and this does not.
+The real blocker is **rate limiting**: the auth tier defaults to
+`RATE_LIMIT_AUTH=30` requests per minute per IP (whatever the deployed
+environment actually sets it to may differ), and this spec performs five
+registrations plus a login. Depending on what else is hitting the same IP,
+this can still return `HTTP 429: Too many requests` for some of the five
+tests. `scout.spec.ts` registers once, which is why it is far less likely to
+trip this than this spec is.
 
-`E2E_SKIP_AUTH=false` force-runs them; expect 429s until either the spec paces
-itself under the limit or test traffic gets a higher one.
+`E2E_SKIP_AUTH=false` force-runs them; expect occasional 429s until either the
+spec paces itself under the limit or test traffic gets a dedicated one.
 
 **Still local-only for a different reason:** `invoices`, `stores`,
 `payment-methods`, `ui-interactions` and `webhooks` all call `resetDatabase()`.
@@ -328,3 +330,46 @@ Each run creates a fresh store (`e2e-synthetic-<timestamp>`) and leaves it
 behind. The derivation index advances per payment method, so reusing one store
 would couple each run to the last; and on a failure the invoice and its payment
 rows are the evidence. Prune them by hand if testnet gets noisy.
+
+## Nightly visual review (`tests/visual-review.spec.ts`, `scripts/visual-review.mjs`)
+
+The routes scout.spec.ts already reaches — unauthenticated, then authenticated
+after one passkey registration — screenshotted at a mobile (375x812) and a
+desktop (1280x720) viewport. `scripts/visual-review.mjs` then sends each
+route's pair of screenshots to Claude against a fixed rubric (clipped content,
+an unlabelled control, a raw decimal where a formatted amount belongs, and so
+on) and writes `test-results/visual/report.md`.
+
+This is advisory, not a gate — a model judging layout will produce false
+positives, and a check that can go red on one gets disabled. `.github/workflows/
+visual-review-scheduled.yml` runs it nightly against testnet and files (or
+comments on) a `visual-review`-labelled issue only when there is something to
+report; it never fails the build.
+
+This repo is public, so the issue carries the per-finding "what is wrong"
+text in full, not just counts and routes — the rubric only ever asks about
+layout/UX defects, never a security or fund-movement bug, and every one of
+those is already visible to anyone loading the page, so describing it here
+is no different from any other public bug report. Only the screenshots stay
+out of it: a `visual-review-manifest` artifact (which routes/viewports
+captured, no defect text) is uploaded for debugging the capture pipeline,
+and report.md / findings.json stay in the job's own ephemeral workspace,
+since a picture of the live UI adds nothing the text doesn't already say.
+
+A route that could not be captured (a broken passkey registration, a
+navigation timeout) or reviewed (an Anthropic API error) is not silently
+dropped — it lands in `findings.json`'s `errors` array and in `report.md`
+as "could not be reviewed," so a broken run reads as incomplete rather than
+as a clean pass with nothing to say.
+
+**Off by default**, same reasoning as the synthetic payment: `npx playwright
+test` with no filter is what `ci.yml`'s `e2e` job runs, and a screenshot pass
+nobody reviews has no business slowing down every push. Run it explicitly:
+
+```bash
+E2E_REMOTE=true E2E_VISUAL_REVIEW=true npx playwright test tests/visual-review.spec.ts
+ANTHROPIC_API_KEY=... node scripts/visual-review.mjs
+```
+
+`ANTHROPIC_API_KEY` is the only new secret this needs; without it the review
+script logs and exits cleanly rather than failing.

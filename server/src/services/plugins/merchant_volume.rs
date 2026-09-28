@@ -56,20 +56,11 @@
 //! `payment_volume_by_day` per account, and one rate lookup per distinct
 //! asset in the batch instead of one per asset per account.
 //!
-//! **Not yet reachable from a plugin.** `payserver-plugin-host`'s
-//! `PluginHostCalls` trait has gained a `merchant_volumes` method and a
-//! matching wasm import (`define_answering_call`, the same helper
-//! `merchant_volume` uses), tested the same way that one is. None of that is
-//! visible to this repo yet: `payserver-plugin-host` is pinned by revision in
-//! this repo's `Cargo.toml`, and a change there does not reach here until the
-//! pin moves, which needs the commons change merged first - a same-session
-//! commit on a branch that could still be rebased is not something a pin
-//! should ever point at. Once the pin does move, wiring this repo's side is:
-//! implement `merchant_volumes` on [`super::host_calls::PluginCalls`], the
-//! same shape as `read_volume` there (a `DeferredBulkVolume` cell, a request
-//! carrying a list of account ids in place of one), and call
-//! [`BulkMerchantVolumeReader::merchant_volumes`] from it. No design decision
-//! is open at that point, only the wiring.
+//! Reachable from a plugin as of the `payserver-plugin-host` pin that added
+//! `merchant_volumes` to `PluginHostCalls`: [`super::host_calls::PluginCalls`]
+//! implements it over a `DeferredBulkVolume` cell, the same shape
+//! `merchant_volume`/`DeferredVolume` use, and `server.rs` publishes both
+//! cells from the one reader this type provides.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

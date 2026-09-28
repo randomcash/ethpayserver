@@ -309,6 +309,54 @@ fn client_options(
         // Structured logs (see `sentry_log_event_filter` for which levels
         // actually reach this). Same mandatory scrubber, via the separate
         // hook logs go through.
+        //
+        // Load-bearing on both this crate's current 0.47 pin and on 0.49 —
+        // not vestigial on either. `enable_logs` is deprecated starting in
+        // sentry 0.49, with a note that it still governs automatic capture
+        // by integrations — `sentry_tracing::layer()`, which is what
+        // actually gets a `tracing` event into an envelope here, is exactly
+        // that case.
+        //
+        // `disabling_enable_logs_suppresses_automatic_integration_capture`
+        // in `capture_tests` pins this down on 0.47 as a real, running
+        // assertion rather than a claim: it takes this exact
+        // `client_options()` output, flips only this field to `false`, and
+        // asserts no structured log reaches the envelope. That test passes
+        // today, on 0.47.
+        //
+        // The same ablation was then reproduced directly, in this tree,
+        // against a real 0.49.3 build rather than argued from reading a
+        // changelog: bump both `sentry` and `sentry-tracing` in
+        // `evm/Cargo.toml` to "0.49.3", `cargo update -p sentry -p
+        // sentry-tracing`, then `cargo test -p evm --lib --features
+        // sentry-scrub capture_tests` (this file's `client_options` needs
+        // its struct-literal construction changed to the `let mut opts =
+        // ...; opts.field = ...;` form first — 0.49's `ClientOptions`
+        // became `#[non_exhaustive]`, so the literal no longer compiles
+        // outside the defining crate; that change is not part of this
+        // pin, it belongs to whichever PR actually moves it). With
+        // `enable_logs: true` all four tests in `capture_tests` pass
+        // exactly as on 0.47; flipping only that field to `false`
+        // reproduces the identical failure — the same three
+        // "expected at least one structured log to reach the envelope"
+        // panics, `disabling_enable_logs_suppresses_automatic_integration_capture`
+        // the lone survivor. So the deprecation note's claim holds for our
+        // configuration on the version it will actually describe: the
+        // option is not vestigial at 0.49 either, and it must stay under
+        // `#[allow(deprecated)]` once the pin itself moves, rather than
+        // being dropped or having the lint suppressed as if the field no
+        // longer mattered. This recipe is independent of any particular
+        // commit and can be rerun against whatever version the next SDK
+        // bump proposes.
+        //
+        // `capture_tests` already runs on every push, not just on demand:
+        // `server/Cargo.toml`'s `evm = { path = "../evm", features = ["api",
+        // "redis", "sentry-scrub"] }` line lists `sentry-scrub` as a normal,
+        // non-optional feature, so cargo's feature unification turns it on
+        // for the whole workspace build, and `.github/workflows/ci.yml`'s
+        // `test` job runs `cargo nextest run --workspace --no-fail-fast -j
+        // 2` — that exact line already compiles and executes this test on
+        // every push.
         enable_logs: true,
         before_send_log: Some(Arc::new(scrub_log)),
         ..Default::default()
@@ -389,6 +437,105 @@ pub fn sentry_log_event_filter(
     }
 }
 
+/// Sentry event filter for the `sentry_tracing` layer installed by the
+/// `server` and `evmmonitor` binaries.
+///
+/// `alloy_transport_ws` logs at `error!` for every ordinary WebSocket hiccup a
+/// long-lived RPC connection sees - a proxy resetting an idle socket, a
+/// missed keepalive pong - and `sentry_tracing`'s default filter turns any
+/// `error!` into a full Sentry event regardless of which crate logged it. So
+/// every blip the library logs was paging as if nothing were handling it.
+/// Built on top of [`sentry_log_event_filter`] rather than
+/// `default_event_filter` directly, so the WS-target demotion and the
+/// `SENTRY_LOG_LEVEL` gate compose through one filter instead of the two
+/// binaries needing to install two separate `event_filter` layers.
+///
+/// This filter only ever needs to swallow an *isolated* blip, never a
+/// persistent failure, because it is not the backstop for a connection that
+/// stays down: `ChainMonitor::resubscribe_if_stalled`
+/// (`evm/src/monitor/chain/lifecycle.rs`) already watches for that on its own
+/// clock, independent of anything `alloy_transport_ws` or `alloy_pubsub` logs
+/// or doesn't log. It resubscribes and logs its own `error!` under
+/// `evm::monitor::chain::lifecycle` - a target this filter never touches -
+/// once a block stream has gone silent for `stall_timeout`. So a transient
+/// reset stays a breadcrumb, and a connection that never recovers pages
+/// within one stall window regardless of what the WS layer's own retry logic
+/// happens to be doing underneath it. `our_own_errors_still_page` covers that
+/// target generically, and `evm/tests/stalled_stream_still_pages.rs` drives a
+/// real stall through a real `ChainMonitor` to confirm
+/// `resubscribe_if_stalled`'s own `error!` resolves to a paging event, not
+/// just a hand-typed target string.
+///
+/// An earlier version of this filter argued instead that `alloy_pubsub`'s own
+/// service loop (`alloy_pubsub::service`) always logs a paging `error!` when
+/// *it* gives up retrying, and used that as the backstop. That turned out not
+/// to hold in general: `evm/tests/ws_pubsub_retry_escalation.rs` runs the
+/// real `alloy_pubsub`/`alloy_transport_ws` retry loop (pinned to `alloy =
+/// "1.0"`, resolved in `Cargo.lock` to 1.8.3) against a WS server that
+/// completes the handshake and then resets every connection, including
+/// retries, and `alloy_pubsub::service` never logs at all - it just
+/// reconnects, dies, and reconnects again, forever. Traced against that
+/// pinned source: `reconnect_with_retries`
+/// (`alloy-pubsub-1.8.3/src/service.rs:195`) only counts a `reconnect()` call
+/// as a failed attempt if establishing the connection itself errors; a
+/// connection that establishes fine and then dies immediately after counts as
+/// a *successful* reconnect, so `max_retries` is never approached and the
+/// give-up log at `service.rs:205` is never reached. That is a real gap in
+/// `alloy_pubsub`, not a defect in this filter - it just means this filter
+/// cannot lean on it, which is why the actual backstop is our own
+/// `resubscribe_if_stalled` instead.
+///
+/// `alloy_pubsub_giving_up_still_pages` documents the narrower case where
+/// `alloy_pubsub`'s give-up log does still apply - the connection attempt
+/// itself fails outright (DNS, refused, TLS) rather than flapping - which
+/// still pages correctly since this filter never touches that target either.
+/// It is not relied on as the general backstop.
+///
+/// Only `error!`-level `alloy_transport_ws` events are demoted: the noise
+/// this exists to quiet is specifically the `error!` call sites in
+/// `alloy_transport_ws::native`, not `debug!`/`trace!` chatter the same
+/// target might log, so this filter does not touch those.
+///
+/// `server::services::webhook::merchant_delivery_failed` is demoted the same
+/// way, for an unrelated reason: it's logged only when a webhook job
+/// exhausts every retry because the request never reached the merchant's
+/// endpoint at all (`WebhookError::Unreachable` - DNS, refused, or timed
+/// out) *and* the caller has already checked that failure isn't isolated to
+/// payserver's own egress (see
+/// `server::services::webhook::service::log_permanent_failure` and
+/// `recent_unreachable_are_one_merchant` for that check - a DNS/refused/
+/// timeout failure alone can't tell "one merchant is down" from "we can't
+/// reach anyone", so this target is only ever chosen once the caller has
+/// ruled the latter out). The demoted case is already fully captured by the
+/// `webhook_delivery_status="permanent_failed"` metric and the
+/// `webhook_deliveries` table row the same call site writes. A non-success
+/// response, a payload that failed to serialize, or an `Unreachable` failure
+/// that isn't isolated to one store webhook keeps the module's default
+/// target instead (see
+/// `server::services::webhook::service::permanent_failure_is_merchant_unreachable`), since
+/// each of those can reflect a fault in our own signing, request
+/// construction, or network egress just as easily as one in the merchant's
+/// server, and those must keep paging the same as `log_process_error`'s
+/// "Error processing webhook job". Paging on-call for the genuinely-isolated
+/// case teaches the same lesson as the WS noise above — ignore Sentry errors
+/// — for a condition no payserver engineer can act on.
+pub fn sentry_event_filter(
+    min_level: tracing::Level,
+) -> impl Fn(&tracing::Metadata<'_>) -> sentry_tracing::EventFilter + Send + Sync + 'static {
+    let log_gate = sentry_log_event_filter(min_level);
+    move |metadata| {
+        let filter = log_gate(metadata);
+        let demote = *metadata.level() == tracing::Level::ERROR
+            && (metadata.target().starts_with("alloy_transport_ws")
+                || metadata.target() == "server::services::webhook::merchant_delivery_failed");
+        if demote {
+            (filter - sentry_tracing::EventFilter::Event) | sentry_tracing::EventFilter::Breadcrumb
+        } else {
+            filter
+        }
+    }
+}
+
 /// Log whether error reporting is on, at INFO, always — never the DSN itself
 /// — and refuse to continue when [`reporting_status`] says this environment
 /// must not run disabled.
@@ -418,644 +565,6 @@ pub fn report_reporting_status(dsn_configured: bool, environment: &str) -> anyho
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redacts_eth_private_key_and_address() {
-        let pk = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-        let addr = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
-        let out = redact_secrets(&format!("signing with {pk} to {addr}"));
-        assert!(!out.contains("deadbeefdead"), "private key leaked: {out}");
-        assert!(!out.contains("71C7656E"), "address leaked: {out}");
-        assert!(out.contains("[redacted-hex]"));
-    }
-
-    #[test]
-    fn redacts_bare_64_hex_private_key() {
-        let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-        let out = redact_secrets(&format!("key={pk}"));
-        assert!(!out.contains(pk), "bare key leaked: {out}");
-    }
-
-    #[test]
-    fn redacts_jwt() {
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmNHl0w5N";
-        let out = redact_secrets(&format!("auth failed for {jwt}"));
-        assert!(!out.contains("eyJ"), "jwt leaked: {out}");
-        assert!(out.contains("[redacted-jwt]"));
-    }
-
-    #[test]
-    fn redacts_mnemonic() {
-        let m = "legal winner thank year wave sausage worth useful legal winner thank yellow";
-        let out = redact_secrets(&format!("loaded wallet: {m}"));
-        assert!(!out.contains("sausage"), "mnemonic leaked: {out}");
-        assert!(out.contains("[redacted-mnemonic]"));
-    }
-
-    #[test]
-    fn redacts_email() {
-        let out = redact_secrets("customer alice@example.com paid invoice");
-        assert!(!out.contains("alice@example.com"), "email leaked: {out}");
-    }
-
-    #[test]
-    fn redacts_keyed_secrets() {
-        for input in [
-            "api_key=sk_live_abc123def456",
-            "Authorization: Bearer abc.def.ghi",
-            "password = hunter2",
-            "mnemonic: somesecretvalue",
-        ] {
-            let out = redact_secrets(input);
-            assert!(out.contains("[redacted]"), "not redacted: {input} -> {out}");
-            assert!(!out.contains("hunter2") || !input.contains("hunter2"));
-        }
-        let out = redact_secrets("password = hunter2");
-        assert!(!out.contains("hunter2"), "password leaked: {out}");
-    }
-
-    #[test]
-    fn redacts_api_key_in_rpc_url_path() {
-        for url in [
-            "https://eth-sepolia.g.alchemy.com/v2/alch_EPqFizwy30wuSFY4ewmD-",
-            "wss://eth-sepolia.g.alchemy.com/v2/alch_EPqFizwy30wuSFY4ewmD-",
-            "https://mainnet.infura.io/v3/0123456789abcdef0123456789abcdef",
-        ] {
-            let out = redact_secrets(url);
-            assert!(
-                out.contains("[redacted-rpc-key]"),
-                "not redacted: {url} -> {out}"
-            );
-            assert!(
-                !out.contains("alch_EPqFizwy30wuSFY4ewmD-"),
-                "key leaked: {out}"
-            );
-            assert!(!out.contains("0123456789abcdef"), "key leaked: {out}");
-        }
-    }
-
-    #[test]
-    fn redacts_rpc_key_inside_a_provider_error_string() {
-        // The shape alloy produces when a connection fails.
-        let msg = "error sending request for url \
-                   (https://eth-sepolia.g.alchemy.com/v2/alch_EPqFizwy30wuSFY4ewmD-)";
-        let out = redact_secrets(msg);
-        assert!(
-            !out.contains("alch_EPqFizwy30wuSFY4ewmD-"),
-            "key leaked: {out}"
-        );
-        assert!(
-            out.contains("eth-sepolia.g.alchemy.com"),
-            "host should survive for diagnosis: {out}"
-        );
-    }
-
-    #[test]
-    fn keeps_keyless_rpc_urls_readable() {
-        for url in [
-            "https://eth.llamarpc.com",
-            "https://polygon-rpc.com/",
-            "http://192.168.1.10:8545/",
-            "https://api.coingecko.com/api/v3/simple/price",
-            "https://api.coingecko.com/api/v3/coins/ethereum/market_chart",
-            "https://api.kraken.com/0/public/Ticker",
-        ] {
-            assert_eq!(redact_secrets(url), url, "over-redacted: {url}");
-        }
-    }
-
-    #[test]
-    fn scrub_event_redacts_logentry_params_and_frame_vars() {
-        use sentry::protocol::{Exception, Frame, LogEntry, Stacktrace};
-
-        let mut event = Event {
-            logentry: Some(LogEntry {
-                message: "connecting to %s".to_string(),
-                params: vec![Value::String(
-                    "https://eth-sepolia.g.alchemy.com/v2/alch_supersecretkey".to_string(),
-                )],
-            }),
-            ..Default::default()
-        };
-        let mut frame = Frame::default();
-        frame
-            .vars
-            .insert("password".to_string(), Value::String("hunter2".to_string()));
-        event.exception.values.push(Exception {
-            stacktrace: Some(Stacktrace {
-                frames: vec![frame],
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-
-        let scrubbed = scrub_event(event).expect("event passes through");
-        let params = &scrubbed.logentry.as_ref().unwrap().params;
-        assert!(
-            !format!("{params:?}").contains("alch_supersecretkey"),
-            "logentry param leaked: {params:?}"
-        );
-        let vars = &scrubbed.exception.values[0]
-            .stacktrace
-            .as_ref()
-            .unwrap()
-            .frames[0]
-            .vars;
-        assert!(
-            !format!("{vars:?}").contains("hunter2"),
-            "frame var leaked: {vars:?}"
-        );
-    }
-
-    #[test]
-    fn keeps_innocuous_text() {
-        let msg = "failed to connect to database after 3 retries";
-        assert_eq!(redact_secrets(msg), msg);
-    }
-
-    fn test_log(body: &str) -> Log {
-        Log {
-            level: sentry::protocol::LogLevel::Info,
-            body: body.to_string(),
-            trace_id: None,
-            timestamp: std::time::SystemTime::now(),
-            severity_number: None,
-            attributes: Default::default(),
-        }
-    }
-
-    #[test]
-    fn scrub_log_redacts_secret_shaped_body() {
-        let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-        let log = test_log(&format!("loaded key {pk}"));
-
-        let scrubbed = scrub_log(log).expect("log passes through");
-        assert!(!scrubbed.body.contains(pk), "key leaked: {}", scrubbed.body);
-    }
-
-    #[test]
-    fn scrub_log_redacts_sensitive_keyed_attribute_regardless_of_shape() {
-        use sentry::protocol::LogAttribute;
-
-        let mut log = test_log("connecting");
-        log.attributes.insert(
-            "mnemonic".to_string(),
-            LogAttribute(Value::String("not-shaped-like-a-secret".to_string())),
-        );
-
-        let scrubbed = scrub_log(log).expect("log passes through");
-        let value = &scrubbed.attributes.get("mnemonic").unwrap().0;
-        assert_eq!(value, &Value::String("[redacted]".to_string()));
-    }
-
-    #[test]
-    fn scrub_log_redacts_secret_shaped_attribute_under_an_innocuous_key() {
-        use sentry::protocol::LogAttribute;
-
-        let mut log = test_log("connecting");
-        log.attributes.insert(
-            "context".to_string(),
-            LogAttribute(Value::String("token=sk_live_supersecret".to_string())),
-        );
-
-        let scrubbed = scrub_log(log).expect("log passes through");
-        let value = &scrubbed.attributes.get("context").unwrap().0;
-        assert!(
-            !format!("{value:?}").contains("supersecret"),
-            "attribute leaked: {value:?}"
-        );
-    }
-
-    #[test]
-    fn scrub_log_leaves_benign_attributes_unredacted() {
-        use sentry::protocol::LogAttribute;
-
-        let mut log = test_log("connecting");
-        log.attributes.insert(
-            "retry_count".to_string(),
-            LogAttribute(Value::Number(3.into())),
-        );
-        log.attributes.insert(
-            "status".to_string(),
-            LogAttribute(Value::String("connected".to_string())),
-        );
-
-        let scrubbed = scrub_log(log).expect("log passes through");
-        assert_eq!(
-            scrubbed.attributes.get("retry_count").unwrap().0,
-            Value::Number(3.into()),
-            "benign attribute should survive scrub_log unchanged"
-        );
-        assert_eq!(
-            scrubbed.attributes.get("status").unwrap().0,
-            Value::String("connected".to_string()),
-            "benign attribute should survive scrub_log unchanged"
-        );
-    }
-
-    /// Collects the `Log` items out of a batch of captured envelopes.
-    fn captured_logs(envelopes: &[sentry::Envelope]) -> Vec<Log> {
-        envelopes
-            .iter()
-            .flat_map(|envelope| envelope.items())
-            .filter_map(|item| match item {
-                sentry::protocol::EnvelopeItem::ItemContainer(
-                    sentry::protocol::ItemContainer::Logs(logs),
-                ) => Some(logs.iter().cloned()),
-                _ => None,
-            })
-            .flatten()
-            .collect()
-    }
-
-    /// Proves the wiring, not just the pure function: emits a `tracing::info!`
-    /// carrying a secret through the exact layer construction `server.rs` and
-    /// `evmmonitor/main.rs` use — `sentry_tracing::layer().event_filter(
-    /// sentry_log_event_filter(min_level))` — and a real `sentry::Client`
-    /// built from [`client_options`], the same function [`init_sentry`]
-    /// calls, so a later edit that drops `enable_logs`/`before_send_log`
-    /// from production breaks this test too. `scrub_log_redacts_secret_shaped_body`
-    /// above calls `scrub_log` directly, which proves the function redacts
-    /// but not that the SDK actually routes logs through it before sending —
-    /// this is the end-to-end check the ticket's "Check before shipping"
-    /// section asked for.
-    #[test]
-    fn scrub_log_redacts_a_secret_through_the_real_capture_pipeline() {
-        use tracing_subscriber::prelude::*;
-
-        let _dispatcher = tracing_subscriber::registry()
-            .with(
-                sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)),
-            )
-            .set_default();
-
-        let pk = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-
-        let envelopes = sentry::test::with_captured_envelopes_options(
-            || {
-                tracing::info!("loaded key {pk}");
-            },
-            client_options(None, None, "test".to_string()),
-        );
-
-        let logs = captured_logs(&envelopes);
-        assert!(
-            !logs.is_empty(),
-            "expected at least one structured log to reach the envelope"
-        );
-        for log in &logs {
-            assert!(
-                !log.body.contains(pk),
-                "key survived the real subscriber -> sentry_tracing -> \
-                 before_send_log pipeline: {}",
-                log.body
-            );
-        }
-    }
-
-    /// Companion to the test above: proves `sentry_log_event_filter`'s
-    /// threshold is actually consulted when wired into a live
-    /// `sentry_tracing` layer, not just when `apply_log_level_gate` is called
-    /// directly. Without this, a builder quirk that silently ignores
-    /// `.event_filter(...)` — so every record keeps `sentry_tracing`'s
-    /// default filtering regardless of `SENTRY_LOG_LEVEL` — would pass every
-    /// other test in this file.
-    #[test]
-    fn sentry_log_event_filter_suppresses_a_record_below_the_threshold_through_a_real_subscriber() {
-        use tracing_subscriber::prelude::*;
-
-        let _dispatcher = tracing_subscriber::registry()
-            .with(
-                sentry_tracing::layer()
-                    .event_filter(sentry_log_event_filter(tracing::Level::ERROR)),
-            )
-            .set_default();
-
-        let envelopes = sentry::test::with_captured_envelopes_options(
-            || {
-                tracing::info!("should not reach Sentry logs when min_level=ERROR");
-            },
-            client_options(None, None, "test".to_string()),
-        );
-
-        let logs = captured_logs(&envelopes);
-        assert!(
-            logs.is_empty(),
-            "an INFO record should not become a Sentry log when \
-             sentry_log_event_filter is wired with min_level=ERROR: {logs:?}"
-        );
-    }
-
-    /// Regression test for a composition bug a review pass caught: a bare
-    /// `.with(filter)` layer sits in the same `Layered` stack as every other
-    /// layer, and `Layered::enabled` ANDs across all of them — so an event
-    /// the `LOG_LEVEL` filter rejects would never reach the Sentry layer's
-    /// `on_event` at all, making `SENTRY_LOG_LEVEL` only ever a *further*
-    /// restriction on top of `LOG_LEVEL`, never independent of it, exactly
-    /// contradicting the comment above the call sites in `server.rs` and
-    /// `evmmonitor/main.rs`. This builds that real stack — a strict
-    /// `LOG_LEVEL` filter per-layer-filtered onto the fmt layer, and
-    /// `sentry_log_event_filter` per-layer-filtered onto the Sentry layer,
-    /// the fix for that bug — and proves an INFO record still reaches Sentry
-    /// even though the sibling fmt layer's filter would drop it.
-    #[test]
-    fn sentry_log_event_filter_is_independent_of_the_log_level_filter_in_the_real_stack() {
-        use tracing_subscriber::prelude::*;
-
-        let _dispatcher = tracing_subscriber::registry()
-            .with(
-                sentry_tracing::layer()
-                    .event_filter(sentry_log_event_filter(tracing::Level::INFO))
-                    .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_filter(tracing_subscriber::EnvFilter::new("error")),
-            )
-            .set_default();
-
-        let envelopes = sentry::test::with_captured_envelopes_options(
-            || {
-                tracing::info!(
-                    "should reach Sentry logs even though the sibling LOG_LEVEL=error filter would drop it"
-                );
-            },
-            client_options(None, None, "test".to_string()),
-        );
-
-        let logs = captured_logs(&envelopes);
-        assert!(
-            !logs.is_empty(),
-            "an INFO record should reach Sentry's structured logs even when a \
-             sibling layer's LOG_LEVEL filter is stricter (error) — SENTRY_LOG_LEVEL \
-             must be independent of LOG_LEVEL, not a further restriction on top of it"
-        );
-    }
-
-    #[test]
-    fn resolve_sentry_log_level_defaults_to_warn_when_unset_or_invalid() {
-        use tracing_subscriber::prelude::*;
-
-        struct CapturesWarn(Arc<std::sync::Mutex<bool>>);
-
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturesWarn {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _ctx: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if *event.metadata().level() == tracing::Level::WARN {
-                    *self.0.lock().unwrap() = true;
-                }
-            }
-        }
-
-        let previous = std::env::var("SENTRY_LOG_LEVEL").ok();
-
-        // SAFETY: no other test reads or writes SENTRY_LOG_LEVEL.
-        unsafe {
-            std::env::remove_var("SENTRY_LOG_LEVEL");
-        }
-        assert_eq!(resolve_sentry_log_level(), tracing::Level::WARN);
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("SENTRY_LOG_LEVEL", "not-a-level");
-        }
-        // An unparsable value (as opposed to an absent one) is a
-        // misconfiguration and must be visible, not silently identical to a
-        // deliberate WARN.
-        let saw_warn = Arc::new(std::sync::Mutex::new(false));
-        let subscriber = tracing_subscriber::registry().with(CapturesWarn(Arc::clone(&saw_warn)));
-        tracing::subscriber::with_default(subscriber, || {
-            assert_eq!(resolve_sentry_log_level(), tracing::Level::WARN);
-        });
-        assert!(
-            *saw_warn.lock().unwrap(),
-            "expected a WARN-level log when SENTRY_LOG_LEVEL is set but unparsable"
-        );
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("SENTRY_LOG_LEVEL", "info");
-        }
-        assert_eq!(resolve_sentry_log_level(), tracing::Level::INFO);
-
-        // SAFETY: see above.
-        unsafe {
-            match &previous {
-                Some(value) => std::env::set_var("SENTRY_LOG_LEVEL", value),
-                None => std::env::remove_var("SENTRY_LOG_LEVEL"),
-            }
-        }
-    }
-
-    #[test]
-    fn apply_log_level_gate_strips_log_flag_only_below_threshold() {
-        use sentry_tracing::EventFilter;
-
-        let full = EventFilter::Breadcrumb | EventFilter::Log;
-
-        // At min_level=WARN: ERROR and WARN keep the Log flag, INFO/DEBUG/TRACE lose it.
-        for level in [tracing::Level::ERROR, tracing::Level::WARN] {
-            assert!(
-                apply_log_level_gate(full, level, tracing::Level::WARN).contains(EventFilter::Log),
-                "{level:?} should keep the Log flag at min_level=WARN"
-            );
-        }
-        for level in [
-            tracing::Level::INFO,
-            tracing::Level::DEBUG,
-            tracing::Level::TRACE,
-        ] {
-            assert!(
-                !apply_log_level_gate(full, level, tracing::Level::WARN).contains(EventFilter::Log),
-                "{level:?} should lose the Log flag at min_level=WARN"
-            );
-        }
-
-        // Non-Log flags are untouched either way.
-        assert!(
-            apply_log_level_gate(full, tracing::Level::INFO, tracing::Level::WARN)
-                .contains(EventFilter::Breadcrumb)
-        );
-
-        // At min_level=INFO, INFO now keeps the Log flag too.
-        assert!(
-            apply_log_level_gate(full, tracing::Level::INFO, tracing::Level::INFO)
-                .contains(EventFilter::Log)
-        );
-    }
-
-    #[test]
-    fn scrub_event_drops_request_user_and_server_name() {
-        let event = Event {
-            request: Some(sentry::protocol::Request::default()),
-            user: Some(sentry::protocol::User::default()),
-            server_name: Some("payserver-prod-01".into()),
-            ..Default::default()
-        };
-
-        let scrubbed = scrub_event(event).expect("event passes through");
-        assert!(scrubbed.request.is_none());
-        assert!(scrubbed.user.is_none());
-        assert!(scrubbed.server_name.is_none());
-    }
-
-    #[test]
-    fn scrub_event_redacts_message_and_extra() {
-        let mut event = Event {
-            message: Some(
-                "panic: invalid key \
-                 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-                    .to_string(),
-            ),
-            ..Default::default()
-        };
-        event.extra.insert(
-            "ctx".to_string(),
-            Value::String("token=sk_live_supersecret".to_string()),
-        );
-
-        let scrubbed = scrub_event(event).expect("event passes through");
-        assert!(!scrubbed.message.unwrap().contains("deadbeefdead"));
-        let extra = scrubbed.extra.get("ctx").and_then(Value::as_str).unwrap();
-        assert!(!extra.contains("supersecret"), "extra leaked: {extra}");
-    }
-
-    /// Asserts the dependency-free scanners in payserver-commons `scrub` produce
-    /// byte-identical output to the regex table above, across a corpus chosen to
-    /// hit every rule plus the boundaries between them (rule ordering, adjacent
-    /// matches, non-ASCII neighbours, empty and truncated inputs).
-    ///
-    /// This is the only place both can be compiled. If it fails, the two
-    /// implementations have diverged and the browser is redacting differently
-    /// from the servers — fix `scrub`, do not delete the case.
-    #[test]
-    fn parity_with_shared_scrubber() {
-        const CORPUS: &[&str] = &[
-            "",
-            "plain message with no secrets",
-            "failed to fetch /api/invoices/inv_001: HTTP 502",
-            "auth failed for eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc-_123 (401)",
-            "eyJ.a.b eyJa..b eyJa.b.c",
-            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e paid 0x1234",
-            "tx deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef mined",
-            "zzdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefzz",
-            "GET https://eth-mainnet.g.alchemy.com/v2/9f8e7d6c5b4a3210zz failed",
-            "wss://polygon-mainnet.infura.io:443/ws/v3/0123456789abcdefzz closed",
-            "https://api.coingecko.com/api/v3/simple/price?ids=ethereum",
-            "https://telemetry.example.com/api/random.cash/envelope/",
-            "no store for merchant@example.com or a@b.co.uk or bad@b.c",
-            "Authorization: Bearer rc_live_opaque123",
-            "authorization=eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig; token: abc, secret = \"s3cr3t\"",
-            "api-key: k1 apikey:k2 API_KEY = k3 private-key k4 passwd:\tk5",
-            "secretariat: not a secret keyword",
-            "seed abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            "twelve plain lowercase words here really do trip the mnemonic rule ok now",
-            "façade ↔ merchant@example.com ↔ 0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
-            "token",
-            "token=",
-        ];
-        for input in CORPUS {
-            assert_eq!(
-                redact_secrets(input),
-                scrub::redact_secrets(input),
-                "shared `scrub` diverged from the audited regex table on: {input}"
-            );
-        }
-    }
-
-    #[test]
-    fn no_dsn_is_disabled_but_permitted_outside_mainnet() {
-        assert_eq!(
-            reporting_status(false, "testnet"),
-            ReportingStatus::DisabledPermitted
-        );
-        assert_eq!(
-            reporting_status(false, "dev"),
-            ReportingStatus::DisabledPermitted
-        );
-    }
-
-    #[test]
-    fn no_dsn_in_mainnet_is_refused() {
-        assert_eq!(
-            reporting_status(false, "mainnet"),
-            ReportingStatus::DisabledRefused
-        );
-    }
-
-    #[test]
-    fn no_dsn_with_unset_or_unrecognised_environment_fails_closed() {
-        // The exact shape of the incident this exists for: nothing said the
-        // environment was wrong, so an absent or misspelled
-        // `SENTRY_ENVIRONMENT` must not be treated as a known-safe one.
-        for environment in ["", "mainet", "prod", "MAINNET"] {
-            assert_eq!(
-                reporting_status(false, environment),
-                ReportingStatus::DisabledRefused,
-                "environment={environment:?} should fail closed"
-            );
-        }
-    }
-
-    #[test]
-    fn a_configured_dsn_flips_every_environment_to_enabled() {
-        for environment in ["mainnet", "testnet", "dev"] {
-            assert_eq!(
-                reporting_status(true, environment),
-                ReportingStatus::Enabled,
-                "environment={environment}"
-            );
-        }
-    }
-
-    #[test]
-    fn report_reporting_status_is_ok_when_permitted_and_err_when_refused() {
-        assert!(report_reporting_status(true, "mainnet").is_ok());
-        assert!(report_reporting_status(false, "testnet").is_ok());
-        assert!(report_reporting_status(false, "dev").is_ok());
-        assert!(report_reporting_status(false, "mainnet").is_err());
-        assert!(report_reporting_status(false, "").is_err());
-    }
-
-    #[test]
-    fn resolve_environment_does_not_default_an_absent_var_to_a_permitted_value() {
-        // Owns SENTRY_ENVIRONMENT for the duration of the test and restores
-        // whatever was there before, since this is a process-global var and
-        // no other test touches it.
-        let previous = std::env::var("SENTRY_ENVIRONMENT").ok();
-
-        // SAFETY: no other test reads or writes SENTRY_ENVIRONMENT.
-        unsafe {
-            std::env::remove_var("SENTRY_ENVIRONMENT");
-        }
-        let absent = resolve_environment();
-        assert_ne!(
-            absent, "dev",
-            "an absent SENTRY_ENVIRONMENT must not resolve to a permitted value"
-        );
-        assert_eq!(
-            reporting_status(false, &absent),
-            ReportingStatus::DisabledRefused,
-            "the resolved value for an absent var must fail closed, not boot disabled on mainnet"
-        );
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("SENTRY_ENVIRONMENT", "testnet");
-        }
-        assert_eq!(resolve_environment(), "testnet");
-
-        // SAFETY: see above.
-        unsafe {
-            match &previous {
-                Some(value) => std::env::set_var("SENTRY_ENVIRONMENT", value),
-                None => std::env::remove_var("SENTRY_ENVIRONMENT"),
-            }
-        }
-    }
-}
+mod reporting_tests;
+#[cfg(test)]
+mod tests;

@@ -276,6 +276,40 @@ jobs:
             echo "::warning::ops/client-image.pin is $AHEAD_BY commits behind payserver-client main (pinned sha-$PIN_SHA, current $CURRENT_TAG) - past $MAX_COMMITS_BEHIND, e2e may no longer exercise what the client actually ships. Bump it: sed -i '\$ s|.*|ghcr.io/randomcash/payserver-client:$CURRENT_TAG|' ops/client-image.pin"
           fi
 
+  # The full `e2e` job below needs a built server, a live Postgres/Redis and a
+  # trunk-served frontend, so it only runs once a branch actually lands (see
+  # its own `if:`) - a regression in e2e/tests/*.spec.ts's pure logic is
+  # otherwise invisible until then, not at PR time. Some of that logic needs
+  # none of that: route-coverage.spec.ts only reads scout.spec.ts as text,
+  # visual-review-report.spec.ts only exercises plain functions, and
+  # visual-review-main.spec.ts spawns visual-review.mjs as a subprocess
+  # against a stand-in HTTP server in place of the Anthropic API - none of the
+  # three touches a browser or the server/DB stack. Running them here, with
+  # E2E_REMOTE=true so playwright.config.ts skips its `webServer` entries
+  # entirely, catches a regression before merge without paying for what none
+  # of them touches.
+  e2e-static-checks:
+    name: E2E static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install e2e dependencies
+        working-directory: e2e
+        run: npm ci
+
+      - name: Run static e2e tests
+        working-directory: e2e
+        env:
+          E2E_REMOTE: "true"
+        run: npx playwright test tests/route-coverage.spec.ts tests/visual-review-report.spec.ts tests/visual-review-main.spec.ts
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -399,8 +433,19 @@ jobs:
     # runs on pull requests too so a PR that breaks it is red before merge
     # rather than after. `docker`, further down, keeps its branch/tag-only
     # `if:` unchanged - building on a PR must not push or sign anything.
+    #
+    # `merge_group` included for the same reason, and it is a precondition for
+    # switching the queue on rather than a tidy-up. A queue run's ref is
+    # `refs/heads/gh-readonly-queue/...` and its event is `merge_group`, so
+    # neither arm above matched it: with the queue enabled and this arm absent,
+    # `build` and `e2e` are SKIPPED on the merged result, and since a queue
+    # lands a pull request without re-running its own checks, nothing would
+    # ever build or end-to-end test what actually merges. Lint, Test and Audit
+    # are required and would still run, so the queue would report green while
+    # covering less than the pull request it replaced. `docker` keeps its
+    # branch/tag-only `if:` - a queue run must not push or sign an image.
     needs: [lint, audit, test]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - uses: actions/checkout@v4
 
@@ -509,7 +554,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'merge_group'
     services:
       postgres:
         image: postgres:16-alpine
@@ -908,7 +953,7 @@ jobs:
   deploy-verify-testnet:
     name: Verify testnet deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     needs: [notify-deploy-testnet]
     if: github.ref == 'refs/heads/testnet'
     permissions: {}
@@ -924,8 +969,12 @@ jobs:
           HEALTH_URL: https://testnet.random.cash/api/health/deep
           # Long enough for the dispatch to be picked up, the image pulled and
           # migrations to run. Short enough that a deploy which never lands is
-          # reported on the same run that should have produced it.
-          HEALTH_TIMEOUT: "600"
+          # reported on the same run that should have produced it. Four
+          # testnet deploys measured 380-488s to verify; 600s left as little
+          # as 112s of headroom and one of those four timed out despite the
+          # deploy succeeding seconds later. 900s keeps real headroom over the
+          # observed worst case.
+          HEALTH_TIMEOUT: "900"
         run: |
           set -e
           export EXPECTED_SHA="${GITHUB_SHA::7}"

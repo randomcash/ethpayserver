@@ -29,6 +29,7 @@ pub mod reorg;
 pub mod store_creation;
 pub mod watch_reconciliation;
 pub mod webhook_delivery;
+pub mod webhook_outbox;
 
 pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
 pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
@@ -47,6 +48,7 @@ pub use webhook_delivery::{
     UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,
     WebhookDeliveryWriter,
 };
+pub use webhook_outbox::{WebhookObligation, WebhookOutboxReader, WebhookOutboxWriter};
 
 #[cfg(feature = "postgres")]
 pub mod postgres;

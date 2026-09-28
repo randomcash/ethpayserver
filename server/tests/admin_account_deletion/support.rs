@@ -14,6 +14,7 @@ use rates::NoOpRateProvider;
 use server::api::admin::E2E_STORE_OWNER_ID;
 use server::api::{AdminAuth, AuthenticatedUser};
 use server::services::RedisEVMMonitor;
+use server::services::plugins::AccountClosedObserver;
 use server::state::PgAppState;
 
 /// Not exercised: neither handler calls back into session management, only
@@ -214,6 +215,36 @@ pub(crate) async fn clear_refunds_for_store(pool: &PgPool, store: Uuid) {
         .await;
 }
 
+/// How many times the post-delete unwatch counter fired, read out of a
+/// rendered metrics exposition.
+///
+/// A metric missing from the render never fired, which is genuinely zero. A
+/// value that is present but unreadable is not - reporting that as zero is the
+/// could-not-look-versus-found-nothing conflation this repository keeps paying
+/// for - so it panics instead.
+pub(crate) fn unwatch_failures(rendered: &str) -> u64 {
+    const COUNTER: &str = "ethpayserver_unwatch_after_delete_failures_total";
+    let mut found: Option<u64> = None;
+    for line in rendered.lines() {
+        // `# HELP`/`# TYPE` lines start with `#` and never match. A space
+        // separates name from value; anything else is a longer metric name
+        // that merely starts with this one.
+        let Some(value) = line
+            .strip_prefix(COUNTER)
+            .and_then(|rest| rest.strip_prefix(' '))
+        else {
+            continue;
+        };
+        found = Some(
+            value
+                .trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("could not read {COUNTER} from {line:?}: {e}")),
+        );
+    }
+    found.unwrap_or(0)
+}
+
 pub(crate) fn admin_auth(id: Uuid) -> AdminAuth {
     AdminAuth(UserInfo {
         id: UserId(id),
@@ -255,4 +286,25 @@ pub(crate) fn app_state_with_monitor(
         Arc::new(NoOpRateProvider),
         Arc::new(server::services::email::NoopEmailSender),
     )
+}
+
+pub(crate) fn app_state_with_observers(
+    data_service: Arc<PgDataService>,
+    observers: Vec<Arc<dyn AccountClosedObserver>>,
+) -> PgAppState<UnusedSessionService> {
+    let mut state = app_state(data_service);
+    state.account_closed_observers = observers;
+    state
+}
+
+/// Needed by refusal tests that must drive a real monitor to prove a blocked
+/// deletion never unwatches *and* never notifies a plugin the account is gone.
+pub(crate) fn app_state_with_monitor_and_observers(
+    data_service: Arc<PgDataService>,
+    evm_monitor: Option<Arc<RedisEVMMonitor>>,
+    observers: Vec<Arc<dyn AccountClosedObserver>>,
+) -> PgAppState<UnusedSessionService> {
+    let mut state = app_state_with_monitor(data_service, evm_monitor);
+    state.account_closed_observers = observers;
+    state
 }

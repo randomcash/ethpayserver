@@ -195,7 +195,7 @@ where
 
     // Only now, with the store actually gone - see `unwatch_after_delete`
     // for why this cannot run any earlier.
-    unwatch_after_delete(&state, addresses).await;
+    unwatch_after_delete(state.evm_monitor.as_deref(), addresses).await;
 
     tracing::info!(actor = %admin.id, store_id = %sid, "synthetic E2E store hard-deleted by admin");
     Ok(StatusCode::NO_CONTENT)
