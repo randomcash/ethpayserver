@@ -450,7 +450,18 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         Ok(count)
     }
 
-    /// Send unwatch command and deactivate address in database.
+    /// Deactivate the address in the database, then send the unwatch command.
+    ///
+    /// Postgres before Redis, matching the ordering `unwatch_after_delete`
+    /// already uses elsewhere: the unwatch is best-effort and asynchronous -
+    /// published over a Redis pub/sub channel and applied later by a separate
+    /// monitor process, not applied synchronously here. Flipping `is_active`
+    /// first guarantees the reconciler's "expected" set (which reads
+    /// `is_active`) stops listing this address no later than the "actual"
+    /// watch set does. Reversed, a Postgres write slower than the monitor's
+    /// own pub/sub round trip could make a still-genuinely-watched address
+    /// look missed instead of merely stale - the worse of the two false
+    /// positives this reconciler exists to tell apart.
     async fn unwatch_and_deactivate(
         &self,
         address: &str,
@@ -469,12 +480,13 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         let eip155 = chain_id
             .evm_chain_id()
             .ok_or_else(|| CleanupError::NotAnEvmChain(chain_id.to_string()))?;
-        self.evm_monitor
-            .unwatch_address_by_chain_id(eip155, addr, token_contract)
+
+        // Deactivate in database first
+        WatchedAddressWriter::deactivate(&*self.data_service, address, chain_id, token_address)
             .await?;
 
-        // Deactivate in database
-        WatchedAddressWriter::deactivate(&*self.data_service, address, chain_id, token_address)
+        self.evm_monitor
+            .unwatch_address_by_chain_id(eip155, addr, token_contract)
             .await?;
 
         Ok(())
@@ -660,6 +672,66 @@ mod tests {
         }
     }
 
+    /// An `EVMMonitor` whose unwatch always fails - simulating Redis being
+    /// unreachable when cleanup tries to publish the unwatch command.
+    #[derive(Default)]
+    struct FailingUnwatchEVMMonitor;
+
+    #[async_trait]
+    impl EVMMonitor for FailingUnwatchEVMMonitor {
+        async fn watch_address(
+            &self,
+            _chain_id: &ChainId,
+            _address: Address,
+            _invoice_id: Uuid,
+            _expected_amount: Option<U256>,
+            _token_contract: Option<Address>,
+        ) -> Result<(), EVMMonitorError> {
+            Ok(())
+        }
+
+        async fn watch_address_by_chain_id(
+            &self,
+            _chain_id: u64,
+            _address: Address,
+            _invoice_id: Uuid,
+            _expected_amount: Option<U256>,
+            _token_contract: Option<Address>,
+        ) -> Result<(), EVMMonitorError> {
+            Ok(())
+        }
+
+        async fn unwatch_address(
+            &self,
+            chain_id: &ChainId,
+            _address: Address,
+            _token_contract: Option<Address>,
+        ) -> Result<(), EVMMonitorError> {
+            Err(EVMMonitorError::NotAnEvmChain(chain_id.clone()))
+        }
+
+        async fn unwatch_address_by_chain_id(
+            &self,
+            _chain_id: u64,
+            _address: Address,
+            _token_contract: Option<Address>,
+        ) -> Result<(), EVMMonitorError> {
+            Err(EVMMonitorError::NotAnEvmChain(
+                ChainId::parse("eip155:1").unwrap(),
+            ))
+        }
+
+        async fn health_check(&self) -> Result<(), EVMMonitorError> {
+            Ok(())
+        }
+
+        async fn get_chain_health(
+            &self,
+        ) -> Result<Vec<evm::monitor::ChainHealth>, EVMMonitorError> {
+            Ok(vec![])
+        }
+    }
+
     /// Sets up a `Paid` invoice with one confirmed payment and one watched
     /// address, `confirmed_at` set `age_secs` in the past. Returns the
     /// service under test plus the address to assert on.
@@ -801,5 +873,88 @@ mod tests {
         assert_eq!(stats.paid, 1);
         let unwatched = service.evm_monitor.unwatched.lock().unwrap();
         assert_eq!(unwatched.as_slice(), [address.parse::<Address>().unwrap()]);
+    }
+
+    /// A failed Redis unwatch must not leave Postgres still listing the
+    /// address as active - see `unwatch_and_deactivate`'s ordering comment.
+    /// Deactivating first means a failed unwatch can only ever make the
+    /// *actual* Redis side lag behind Postgres, which the reconciler reports
+    /// as a stale watch; reversed, it would leave Postgres still expecting a
+    /// watch Redis was never told to keep, and the failure mode this ticket
+    /// exists to catch - a live-looking address reported missed - is exactly
+    /// backwards from a merely stale one.
+    #[tokio::test]
+    async fn a_failed_unwatch_does_not_leave_the_address_looking_still_watched() {
+        let ds = Arc::new(InMemoryDataService::new());
+        let chain_id = ChainId::parse("eip155:1").unwrap();
+        let address = "0x3333333333333333333333333333333333333333".to_string();
+
+        let invoice_id = InvoiceId::new();
+        let invoice = InvoiceData {
+            id: invoice_id.clone(),
+            store_id: StoreId::new(),
+            currency: "ETH".to_string(),
+            status: InvoiceStatus::Cancelled,
+            amount: "1000000000000000000".to_string(),
+            amount_received: "0".to_string(),
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            metadata: None,
+            customer_email: None,
+            extra: None,
+        };
+        InvoiceWriter::upsert(&*ds, &invoice).await.unwrap();
+
+        let payment_option_id = PaymentOptionId::new();
+        let option = PaymentOptionData {
+            id: payment_option_id.clone(),
+            invoice_id: invoice_id.clone(),
+            payment_method_id: PaymentMethodId::new("ETH", &chain_id),
+            chain_id: chain_id.clone(),
+            asset_symbol: "ETH".to_string(),
+            token_address: None,
+            decimals: 18,
+            payment_address: address.clone(),
+            wallet_id: None,
+            derivation_index: None,
+            amount: "1000000000000000000".to_string(),
+            rate: None,
+            rate_at: None,
+            is_active: true,
+            created_at: Utc::now(),
+        };
+        PaymentOptionWriter::create(&*ds, &option).await.unwrap();
+
+        WatchedAddressWriter::upsert(&*ds, &address, &payment_option_id, &chain_id, None)
+            .await
+            .unwrap();
+
+        let config = CleanupConfig {
+            fallback_interval_secs: 60,
+            unwatch_grace_period_secs: 60,
+            paid_unwatch_grace_period_secs: 3600,
+        };
+        let service: InvoiceCleanupService<InMemoryDataService, FailingUnwatchEVMMonitor> =
+            InvoiceCleanupService::new(
+                ds.clone(),
+                Arc::new(FailingUnwatchEVMMonitor),
+                config,
+                None,
+                None,
+            );
+
+        let stats = service.cleanup_addresses().await.unwrap();
+        assert_eq!(
+            stats.cancelled, 0,
+            "the unwatch failed, so this was not counted as a successful cleanup"
+        );
+
+        let still_active = WatchedAddressReader::get_cancelled_for_cleanup(&*ds)
+            .await
+            .unwrap();
+        assert!(
+            still_active.is_empty(),
+            "the address must already be deactivated even though the unwatch failed"
+        );
     }
 }

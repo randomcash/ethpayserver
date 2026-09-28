@@ -20,7 +20,7 @@ use data_service::{
     ExpectedWatch, LiveWatchedAddressReader, LiveWatchedAddressWriter, PgDataService,
     RedisDataService, WatchKey, reconcile,
 };
-use server::services::{RedisEVMMonitor, reconcile_watches};
+use server::services::{RedisEVMMonitor, diff_watches, reconcile_watches};
 use sqlx::PgPool;
 use types::{
     ChainId, InvoiceData, InvoiceId, InvoiceStatus, InvoiceWriter, PaymentMethodId,
@@ -202,24 +202,14 @@ async fn reconcile_watches_reports_a_stale_watch_and_a_missed_watch() {
         .await
         .expect("seed a stale redis watch");
 
-    let expected: Vec<WatchKey> = pg
-        .get_expected_watched_addresses()
+    // `diff_watches` reads through the same `RedisEVMMonitor` `/health/deep`
+    // does, not the `RedisDataService` used above only to seed the stale
+    // watch - going through anything else here would leave a wiring bug (the
+    // two sides read from the wrong source, or swapped) invisible, since a
+    // hand-rolled copy of the same comparison would just as happily pass.
+    let diff = diff_watches(&pg, &monitor)
         .await
-        .expect("read the expected set")
-        .iter()
-        .map(ExpectedWatch::key)
-        .collect();
-    let actual: Vec<WatchKey> = live_watches
-        .get_all_watched()
-        .await
-        .expect("read the actual set")
-        .into_iter()
-        .map(|(address, invoice_id, chain_id, token)| {
-            WatchKey::new(chain_id, &address, token.as_deref(), invoice_id)
-        })
-        .collect();
-
-    let diff = reconcile(&expected, &actual);
+        .expect("reconcile via the real entry point");
     let missed_key = WatchKey::new(
         ChainId::evm(11155111),
         &missed_address,
@@ -241,13 +231,14 @@ async fn reconcile_watches_reports_a_stale_watch_and_a_missed_watch() {
         "a redis-only key with no invoice behind it must be reported stale"
     );
 
-    // `reconcile_watches` is the exact function `/health/deep` calls - prove
-    // it, not just the pieces it is built from, sees both.
+    // `reconcile_watches` is the exact function `/health/deep` calls - a
+    // thin reduction of `diff_watches` to counts, so this only needs to
+    // prove the reduction agrees with the diff already proven precise above.
     let counts = reconcile_watches(&pg, &monitor)
         .await
         .expect("reconcile via the real entry point");
-    assert!(counts.stale >= 1);
-    assert!(counts.missed >= 1);
+    assert_eq!(counts.stale, diff.stale.len());
+    assert_eq!(counts.missed, diff.missed.len());
 
     let _ = live_watches
         .unwatch_address(&stale_address, &ChainId::evm(11155111), None)
