@@ -134,6 +134,57 @@ async fn a_permanently_bad_event_is_quarantined_and_later_envelopes_still_apply(
         .await
         .unwrap();
     assert_eq!(cursors.get(&1).map(|c| c.seq), Some(2));
+
+    // The skip must leave a durable, findable record carrying the payload.
+    let quarantined = ds.quarantined_events();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(quarantined[0].chain_id, 1);
+    assert_eq!(quarantined[0].cursor.seq, 1);
+    assert_eq!(quarantined[0].event["type"], "payment_detected");
+}
+
+/// If the quarantine record cannot be written the event is neither applied
+/// nor findable, so the cursor must not move past it.
+#[tokio::test]
+async fn an_unrecordable_quarantine_halts_without_committing_the_cursor() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let invoice = InvoiceId::new();
+    create_test_invoice(&ds, &invoice, StoreId::new()).await;
+    bridge
+        .publish(&make_payment(
+            &invoice,
+            1,
+            B256::from([9u8; 32]),
+            false,
+            None,
+        ))
+        .await
+        .unwrap();
+    ds.set_fail_quarantine(true);
+
+    let failures: Arc<Mutex<Vec<(u64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = failures.clone();
+    let consumer = create_test_consumer(ds.clone(), bridge.clone()).with_apply_failure_hook(
+        Arc::new(move |chain_id, seq| {
+            recorded.lock().unwrap().push((chain_id, seq));
+        }),
+    );
+    let task = tokio::spawn(consumer.run());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while failures.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("halt hook was never called");
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+
+    let cursors = ChainCursorReader::chain_cursors(&*ds, ADAPTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(cursors.get(&1), None);
 }
 
 /// A possibly-transient failure (the database) must halt, and the cursor

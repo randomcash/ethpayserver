@@ -25,6 +25,16 @@ use crate::chain_cursor::{ChainCursor, ChainCursorReader, ChainCursorWriter};
 use crate::{UpsertDeliveryParams, WebhookDeliveryWriter};
 
 /// In-memory implementation of all repository traits for testing.
+/// One row of the in-memory quarantine record.
+#[derive(Debug, Clone)]
+pub struct QuarantinedEvent {
+    pub adapter_id: String,
+    pub chain_id: u64,
+    pub cursor: ChainCursor,
+    pub reason: String,
+    pub event: serde_json::Value,
+}
+
 #[derive(Default)]
 pub struct InMemoryDataService {
     invoices: RwLock<HashMap<String, InvoiceData>>,
@@ -43,6 +53,9 @@ pub struct InMemoryDataService {
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
     chain_cursors: RwLock<HashMap<(String, u64), ChainCursor>>,
+    // Quarantined events as `(adapter_id, chain_id, cursor, reason, event)`.
+    quarantined_events: RwLock<Vec<QuarantinedEvent>>,
+    fail_quarantine: AtomicBool,
     // `reset_chain_watch_notifications` is otherwise a no-op here (see its
     // impl below), so a test asserting a lineage break actually re-armed
     // `watch_retry` has nothing else to check against.
@@ -98,6 +111,16 @@ impl InMemoryDataService {
     pub fn set_fail_reset_chain_watch_notifications(&self, fail: bool) {
         self.fail_reset_chain_watch_notifications
             .store(fail, Ordering::SeqCst);
+    }
+
+    /// Force every `quarantine_chain_event` call to fail.
+    pub fn set_fail_quarantine(&self, fail: bool) {
+        self.fail_quarantine.store(fail, Ordering::SeqCst);
+    }
+
+    /// Every event quarantined so far, in order.
+    pub fn quarantined_events(&self) -> Vec<QuarantinedEvent> {
+        self.quarantined_events.read().unwrap().clone()
     }
 
     /// Force the next (and every subsequent) `commit_chain_cursor` call to
@@ -646,6 +669,38 @@ impl ChainCursorWriter for InMemoryDataService {
             .write()
             .unwrap()
             .insert((adapter_id.to_string(), chain_id), cursor);
+        Ok(())
+    }
+
+    async fn quarantine_chain_event(
+        &self,
+        adapter_id: &str,
+        chain_id: u64,
+        cursor: ChainCursor,
+        reason: &str,
+        event: serde_json::Value,
+    ) -> RepositoryResult<()> {
+        if self.fail_quarantine.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated quarantine_chain_event failure".to_string(),
+            ));
+        }
+        let mut rows = self.quarantined_events.write().unwrap();
+        let seen = rows.iter().any(|q| {
+            q.adapter_id == adapter_id
+                && q.chain_id == chain_id
+                && q.cursor.epoch == cursor.epoch
+                && q.cursor.seq == cursor.seq
+        });
+        if !seen {
+            rows.push(QuarantinedEvent {
+                adapter_id: adapter_id.to_string(),
+                chain_id,
+                cursor,
+                reason: reason.to_string(),
+                event,
+            });
+        }
         Ok(())
     }
 

@@ -87,4 +87,32 @@ impl ChainCursorWriter for PgDataService {
 
         Ok(result.rows_affected())
     }
+
+    async fn quarantine_chain_event(
+        &self,
+        adapter_id: &str,
+        chain_id: u64,
+        cursor: ChainCursor,
+        reason: &str,
+        event: serde_json::Value,
+    ) -> RepositoryResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO quarantined_chain_events (adapter_id, chain_id, epoch, seq, reason, event)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (adapter_id, chain_id, epoch, seq) DO NOTHING
+            "#,
+        )
+        .bind(adapter_id)
+        .bind(chain_id as i64)
+        .bind(cursor.epoch)
+        .bind(cursor.seq)
+        .bind(reason)
+        .bind(event)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(())
+    }
 }

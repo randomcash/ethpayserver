@@ -477,36 +477,8 @@ impl<
             return true;
         }
 
-        match self.handle_event(envelope.event).await {
-            Ok(()) => {}
-            // Permanent: the event names data that does not exist or cannot
-            // be interpreted (an invoice since deleted, a malformed token
-            // field). Redelivery fails identically forever, so halting would
-            // crash-loop the consumer and stop every other merchant and
-            // chain behind it. Skip it - the cursor advances past it - but
-            // at error level with the full position, so it is a page and
-            // not a silent drop. An operator can find it by (chain, seq).
-            Err(e @ EventConsumerError::InvalidData(_)) => {
-                tracing::error!(
-                    chain_id,
-                    epoch = envelope.cursor.epoch,
-                    seq = envelope.cursor.seq,
-                    error = %e,
-                    "quarantined an event that can never apply; cursor advances past it"
-                );
-            }
-            // Possibly transient (database): halt so the durable cursor
-            // cannot advance past it, and let the restart redeliver.
-            Err(e) => {
-                tracing::error!(
-                    chain_id,
-                    seq = envelope.cursor.seq,
-                    error = %e,
-                    "failed to apply event; halting so the durable cursor cannot advance past it"
-                );
-                self.halt(chain_id, envelope.cursor.seq);
-                return false;
-            }
+        if !self.apply_or_quarantine(&envelope).await {
+            return false;
         }
 
         let cursor = ChainCursor {
@@ -536,6 +508,78 @@ impl<
         }
         cursors.insert(chain_id, cursor);
         true
+    }
+
+    /// Apply the event, or quarantine it if it can never apply. Returns
+    /// `false` after halting, when the cursor must not advance.
+    async fn apply_or_quarantine(&self, envelope: &EventEnvelope) -> bool {
+        let chain_id = envelope.chain_id;
+        let payload = serde_json::to_value(&envelope.event);
+        match self.handle_event(envelope.event.clone()).await {
+            Ok(()) => {}
+            // Permanent: the event names data that does not exist or cannot
+            // be interpreted (an invoice since deleted, a malformed token
+            // field). Redelivery fails identically forever, so halting would
+            // crash-loop the consumer and stop every other merchant and
+            // chain behind it. Skip it, but only after the full payload is
+            // durably recorded in `quarantined_chain_events`: a skip that
+            // leaves nothing queryable is a lost payment. If that record
+            // cannot be written, halt - the cursor must not pass an event
+            // that is neither applied nor findable.
+            Err(e @ EventConsumerError::InvalidData(_)) => {
+                tracing::error!(
+                    chain_id,
+                    epoch = envelope.cursor.epoch,
+                    seq = envelope.cursor.seq,
+                    error = %e,
+                    "quarantining an event that can never apply; cursor advances past it"
+                );
+                let at = ChainCursor {
+                    epoch: envelope.cursor.epoch,
+                    seq: envelope.cursor.seq,
+                    block_height: envelope.cursor.block_height,
+                };
+                let recorded = self.record_quarantine(chain_id, at, &e, payload).await;
+                if let Err(err) = recorded {
+                    tracing::error!(
+                        chain_id,
+                        seq = envelope.cursor.seq,
+                        error = %err,
+                        "failed to record a quarantined event; halting so the cursor cannot pass it"
+                    );
+                    self.halt(chain_id, envelope.cursor.seq);
+                    return false;
+                }
+            }
+            // Possibly transient (database): halt so the durable cursor
+            // cannot advance past it, and let the restart redeliver.
+            Err(e) => {
+                tracing::error!(
+                    chain_id,
+                    seq = envelope.cursor.seq,
+                    error = %e,
+                    "failed to apply event; halting so the durable cursor cannot advance past it"
+                );
+                self.halt(chain_id, envelope.cursor.seq);
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Persist a permanently unappliable event; see `apply_envelope`.
+    async fn record_quarantine(
+        &self,
+        chain_id: u64,
+        at: ChainCursor,
+        reason: &EventConsumerError,
+        payload: Result<serde_json::Value, serde_json::Error>,
+    ) -> Result<(), String> {
+        let event = payload.map_err(|e| e.to_string())?;
+        self.data_service
+            .quarantine_chain_event(ADAPTER_ID, chain_id, at, &reason.to_string(), event)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Stop the consumer after an unrecoverable apply failure: the hook if
