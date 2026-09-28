@@ -191,6 +191,13 @@ async fn test_handle_payment_confirmed_one_unit_below_exact_amount_stays_unpaid(
     let expected_amount = "79228162514264337593543950336"; // 2^96
     let received_amount = "79228162514264337593543950335"; // one base unit short
 
+    // A store that accepts no shortfall at all. Under the default tolerance a
+    // one-unit gap at this magnitude is dust and would settle; this test is
+    // about the comparison itself not rounding, so it takes the tolerance out.
+    data_service::SettlementToleranceWriter::set_settlement_tolerance(&*ds, store_id.0, "0")
+        .await
+        .unwrap();
+
     let invoice = InvoiceData {
         id: invoice_id.clone(),
         store_id,

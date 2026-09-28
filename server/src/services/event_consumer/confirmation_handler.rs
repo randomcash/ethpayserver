@@ -3,7 +3,7 @@
 use auth::StoreRepository;
 use bigdecimal::BigDecimal;
 use chrono::Utc;
-use data_service::PaymentTxIndexReader;
+use data_service::{PaymentTxIndexReader, SettlementToleranceReader, SettlementToleranceWriter};
 use evm::get_any_chain_config;
 use evm::monitor::events::PaymentConfirmed;
 use types::{
@@ -16,6 +16,7 @@ use crate::metrics;
 use crate::services::email::ReceiptData;
 use crate::services::evm_monitor::EVMMonitor;
 use crate::services::plugins::notify_own_store_payment;
+use crate::services::settlement;
 use crate::services::webhook::WebhookDataService;
 use crate::services::webhook::WebhookEventType;
 
@@ -111,7 +112,40 @@ impl<
             EventConsumerError::InvalidData(format!("Invalid amount '{}': {}", invoice.amount, e))
         })?;
 
-        let is_fully_paid = amount_received >= amount_expected;
+        // The store's tolerance decides how close to the invoice amount
+        // counts as paid; without one the server default applies, which is
+        // never zero (see `DEFAULT_TOLERANCE_PERCENT`).
+        let store_tolerance = SettlementToleranceReader::get_settlement_tolerance(
+            &*self.data_service,
+            invoice.store_id.0,
+        )
+        .await?;
+        let (tolerance_percent, tolerance_source) =
+            settlement::effective_tolerance(store_tolerance.as_deref())
+                .map_err(EventConsumerError::InvalidData)?;
+        let is_fully_paid =
+            settlement::is_fully_paid(&amount_received, &amount_expected, &tolerance_percent);
+
+        // When the tolerance is what settles the invoice, keep the shortfall
+        // and the setting that allowed it, so it can be explained later.
+        if is_fully_paid && amount_received < amount_expected {
+            let shortfall = &amount_expected - &amount_received;
+            SettlementToleranceWriter::record_settlement_allowance(
+                &*self.data_service,
+                &invoice_id,
+                &shortfall.to_string(),
+                &tolerance_percent.to_string(),
+                tolerance_source,
+            )
+            .await?;
+            tracing::warn!(
+                invoice_id = %event.invoice_id,
+                shortfall = %shortfall,
+                tolerance_percent = %tolerance_percent,
+                tolerance_source,
+                "Invoice settled within the store's shortfall tolerance"
+            );
+        }
 
         // Handle based on invoice status
         match invoice.status {

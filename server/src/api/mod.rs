@@ -152,6 +152,10 @@ where
         .route("/{store_id}/token-policy", get(stores::get_token_policy::<A>))
         .route("/{store_id}/token-policy", put(stores::set_token_policy::<A>))
         .route("/{store_id}/token-policy", delete(stores::delete_token_policy::<A>))
+        // Settlement tolerance
+        .route("/{store_id}/settlement-tolerance", get(stores::get_settlement_tolerance::<A>))
+        .route("/{store_id}/settlement-tolerance", put(stores::set_settlement_tolerance::<A>))
+        .route("/{store_id}/settlement-tolerance", delete(stores::delete_settlement_tolerance::<A>))
         // Payouts
         .route("/{store_id}/payouts", get(payouts::list_payouts::<A>))
         .route("/{store_id}/payouts", post(payouts::create_payout::<A>))
@@ -196,6 +200,10 @@ where
         .route(
             "/{invoice_id}/status",
             get(invoices::get_invoice_status::<A>),
+        )
+        .route(
+            "/{invoice_id}/settlement-allowance",
+            get(invoices::get_invoice_settlement_allowance::<A>),
         )
         .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
         .route("/{invoice_id}/refund", post(refunds::create_refund::<A>))
