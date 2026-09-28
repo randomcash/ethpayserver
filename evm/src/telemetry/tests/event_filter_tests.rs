@@ -78,6 +78,49 @@ fn our_own_errors_still_page() {
     );
 }
 
+/// This target is only chosen once the caller has both classified the
+/// failure as `WebhookError::Unreachable` and confirmed it's isolated to one
+/// store webhook rather than several (see `permanent_failure_is_merchant_unreachable`
+/// and `log_permanent_failure` in `server::services::webhook::service`), and
+/// is already tracked via a metric and a `webhook_deliveries` row — see
+/// `sentry_event_filter`'s doc comment. It should reach Sentry as a
+/// breadcrumb, not page on-call.
+#[test]
+fn exhausted_webhook_delivery_is_a_breadcrumb_not_a_page() {
+    let filter = observed_filter(|| {
+        tracing::error!(
+            target: "server::services::webhook::merchant_delivery_failed",
+            "Webhook delivery permanently failed after 7 attempts"
+        );
+    });
+    assert!(
+        filter.contains(sentry_tracing::EventFilter::Breadcrumb),
+        "expected a breadcrumb, got {filter:?}"
+    );
+    assert!(
+        !filter.contains(sentry_tracing::EventFilter::Event),
+        "a merchant endpoint being down is not a payserver defect and should not page: got {filter:?}"
+    );
+}
+
+/// The sibling error in the same module — `log_process_error`'s "Error
+/// processing webhook job" — reports a real fault in our own code (Redis,
+/// serialization, the database) and must not be swept up by the demotion
+/// above just because it shares a module with the merchant-caused one.
+#[test]
+fn other_webhook_service_errors_still_page() {
+    let filter = observed_filter(|| {
+        tracing::error!(
+            target: "server::services::webhook::service",
+            "Error processing webhook job"
+        );
+    });
+    assert!(
+        filter.contains(sentry_tracing::EventFilter::Event),
+        "a real fault in our own webhook processing must still page, got {filter:?}"
+    );
+}
+
 /// A narrower case than the general backstop above: when a WS *connection
 /// attempt itself* fails outright (DNS, refused, TLS) rather than completing
 /// and then flapping, `alloy_pubsub`'s service loop does exhaust its retries
