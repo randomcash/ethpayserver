@@ -328,8 +328,9 @@ fn client_options(
     // with `enable_logs: true` all four `capture_tests` pass exactly as on
     // 0.47, and flipping only this field to `false` reproduces the identical
     // three "expected at least one structured log to reach the envelope"
-    // failures. See RCS-451 and #289, which recorded that result while this
-    // pin was still on 0.47.
+    // failures. That result was recorded on this file's own comment while the
+    // pin was still 0.47, by the change that established it; the recipe is
+    // above and can be re-run against whatever version the next bump proposes.
     //
     // This is the pull request that moves the pin, so this is where the
     // `#[allow(deprecated)]` the ablation called for belongs. Dropping the
