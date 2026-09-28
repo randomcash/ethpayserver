@@ -70,6 +70,16 @@ fn ws_transport_reset_is_a_breadcrumb_not_a_page() {
 /// `ws_transport_reset_is_a_breadcrumb_not_a_page` in substance; this test
 /// pins the exact wording so a future change that starts matching on message
 /// text too can't silently stop demoting this one without a test going red.
+///
+/// This test is green against the filter as it stands today, since the
+/// demotion it pins already existed before this test was written - there is
+/// no code change in this diff for it to prove. That was checked by ablation
+/// rather than taken on faith: temporarily forcing `sentry_event_filter`'s
+/// `alloy_transport_ws` branch to never match turns this test red
+/// (`expected a breadcrumb, got EventFilter(Event | Log)`), and restoring the
+/// real condition turns it back to green. So the assertion is real, not
+/// tautological; it just isn't a fix-verifying test, because there is no fix
+/// here to verify.
 #[test]
 fn ws_missed_pong_is_a_breadcrumb_not_a_page() {
     let filter = observed_filter(|| {
