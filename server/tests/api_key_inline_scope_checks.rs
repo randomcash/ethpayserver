@@ -38,6 +38,7 @@ use rates::NoOpRateProvider;
 use server::api::StoreScopedUser;
 use server::api::stores::{
     StoreWalletQuery, add_store_member, get_store_wallet, list_store_members, remove_store_member,
+    update_store_member,
 };
 use server::state::PgAppState;
 
@@ -381,5 +382,125 @@ async fn a_key_scoped_to_something_else_is_refused_get_wallet() {
         result.err(),
         Some(StatusCode::FORBIDDEN),
         "a key not scoped to canviewstoresettings must be refused by get_store_wallet"
+    );
+}
+
+/// A key scoped to `canmodifystoreusers` reaches past `update_store_member`'s
+/// own inline permission check.
+///
+/// The doc at the top of this file has always named five handlers; for a
+/// while it covered four. This is the fifth. Nothing drove
+/// `update_store_member` with a real `Some(scope)` key in either direction,
+/// so dropping its `&& key_grants_store_permission(..)` clause outright
+/// would have compiled and passed the whole suite.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_modify_users_can_update_a_member() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let member = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    seed_owner_with_permissions(
+        &pg,
+        owner,
+        store.id.0,
+        vec!["ethpay.store.canmodifystoreusers".to_string()],
+    )
+    .await;
+
+    let state = app_state(Arc::new(pg));
+    let scope = Some(vec!["ethpay.store.canmodifystoreusers".to_string()]);
+
+    add_store_member(
+        StoreScopedUser(user_info(owner), scope.clone()),
+        State(state.clone()),
+        Path(store.id.0),
+        Json(api_types::AddMemberRequest {
+            user_id: member,
+            role: "Guest".to_string(),
+        }),
+    )
+    .await
+    .map(|(_status, Json(member))| member)
+    .expect("seed the membership this test then updates");
+
+    let result = update_store_member(
+        StoreScopedUser(user_info(owner), scope),
+        State(state),
+        Path((store.id.0, member)),
+        Json(api_types::UpdateMemberRequest {
+            role: "Manager".to_string(),
+        }),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a key scoped to canmodifystoreusers must be able to update a member: {:?}",
+        result.err()
+    );
+}
+
+/// The other direction, and the specific slip this handler's shape invites:
+/// `{store_id}/members/{user_id}` takes two path parameters, so a check that
+/// reads the wrong one would still compile and would still look right.
+///
+/// A key scoped to store A's `canmodifystoreusers` must be refused on store
+/// B. The owner holds the permission on both stores, so the only thing that
+/// can produce a refusal here is the key scope being matched against the
+/// correct path parameter.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_one_store_is_refused_update_member_on_another() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let member = seed_user(pg.pool()).await;
+    let store_a = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    let store_b = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store_a, UserId(owner))
+        .await
+        .expect("seed store a");
+    pg.create_store_owned_by(&store_b, UserId(owner))
+        .await
+        .expect("seed store b");
+    seed_owner_with_permissions(
+        &pg,
+        owner,
+        store_a.id.0,
+        vec!["ethpay.store.canmodifystoreusers".to_string()],
+    )
+    .await;
+    seed_owner_with_permissions(
+        &pg,
+        owner,
+        store_b.id.0,
+        vec!["ethpay.store.canmodifystoreusers".to_string()],
+    )
+    .await;
+
+    let state = app_state(Arc::new(pg));
+    let scoped_to_store_a = vec![format!("ethpay.store.canmodifystoreusers:{}", store_a.id.0)];
+
+    let result = update_store_member(
+        StoreScopedUser(user_info(owner), Some(scoped_to_store_a)),
+        State(state),
+        Path((store_b.id.0, member)),
+        Json(api_types::UpdateMemberRequest {
+            role: "Manager".to_string(),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        result.err(),
+        Some(StatusCode::FORBIDDEN),
+        "a key scoped to store A's canmodifystoreusers must be refused on store B"
     );
 }
