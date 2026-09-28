@@ -16,6 +16,15 @@
 -- follows it never fires. Scoping by invoice status here, the same statuses
 -- `idx_invoices_pending` already treats as unresolved, is what excludes that
 -- window rather than reporting it as still expected.
+--
+-- Deliberately no `expires_at > NOW()` clause: that would exclude a row the
+-- moment its expiry timestamp passes, before `get_expired_for_cleanup` has
+-- run and before the monitor has been told to unwatch it. Since the invoice
+-- is still `pending` at that instant, a payment to the address should still
+-- be detected, and Redis is (correctly) still watching it - adding the
+-- expiry check here would reintroduce, from the other side, the exact
+-- cleanup-lag false positive the `is_active` scoping above exists to avoid.
+-- Expiry reaches this view through `i.status` once cleanup actually runs.
 CREATE VIEW expected_watched_addresses AS
 SELECT
     wa.address,
@@ -27,5 +36,4 @@ FROM watched_addresses wa
 JOIN payment_options po ON wa.payment_option_id = po.id
 JOIN invoices i ON po.invoice_id = i.id
 WHERE wa.is_active = TRUE
-  AND wa.expires_at > NOW()
   AND i.status IN ('pending', 'processing', 'partially_paid');

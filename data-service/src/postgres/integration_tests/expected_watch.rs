@@ -100,3 +100,45 @@ async fn expected_watched_addresses_excludes_a_resolved_invoices_watch() {
          nothing has deactivated the watched_addresses row yet"
     );
 }
+
+/// The mirror-image lag window: an invoice whose `expires_at` has already
+/// passed, but `get_expired_for_cleanup` has not run yet, so `i.status` is
+/// still `pending`. The invoice can still be paid at this instant and the
+/// monitor is still, correctly, watching it. A view that additionally filters
+/// on `wa.expires_at > NOW()` would drop this row and manufacture a false
+/// "stale watch" report on every invoice that ever expires unpaid - the same
+/// class of false positive the `is_active` scoping above exists to avoid,
+/// reintroduced from the other side.
+#[tokio::test]
+#[ignore]
+async fn expected_watched_addresses_includes_an_expired_but_not_yet_cleaned_up_invoices_watch() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let mut invoice = seeded_test_invoice(&service).await;
+    invoice.expires_at = Utc::now() - Duration::hours(1);
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    let payment_option = test_payment_option(&invoice.id, &ChainId::evm(1));
+    PaymentOptionWriter::create(&service, &payment_option)
+        .await
+        .unwrap();
+
+    let address = unique_address();
+    WatchedAddressWriter::upsert(
+        &service,
+        &address,
+        &payment_option.id,
+        &ChainId::evm(1),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let expected = service.get_expected_watched_addresses().await.unwrap();
+    assert!(
+        expected.iter().any(|w| w.address == address),
+        "an invoice past its expiry but still pending (cleanup has not run \
+         yet) must still appear as expected - the monitor is still, \
+         correctly, watching it"
+    );
+}
