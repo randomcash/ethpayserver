@@ -9,17 +9,14 @@ developer machine is breached, or as part of a scheduled key rotation policy.
 - **Personnel change**: developer who had access leaves the team.
 - **Scheduled rotation**: periodic rotation as part of security hygiene.
 
-**Rotation is API-only today.** There is no rotate control in the dashboard:
-the server exposes `POST /stores/{store_id}/wallet/rotate`
-(`server/src/api/stores/wallets.rs`), and the client has no call site for it -
-its Wallet tab can add, view and export a key, but not rotate one. So the
-`curl` form below is not merely the scriptable route, it is the only route, and
-whoever rotates a key reads the warnings in "What happens during rotation"
-here rather than being walked through them on screen.
-
-Saying so plainly because the alternative is worse than the gap: a runbook that
-describes a control the reader cannot find leaves them hunting the UI during
-exactly the incident - a compromised key - when they have least time to spare.
+**The dashboard's Wallet tab has a rotate control**: it shows the outstanding-
+invoice count and the other stores that share the wallet before letting the
+operator confirm, and renders the audit trail the rotation returns. The
+`curl` form below still works directly against `POST
+/stores/{store_id}/wallet/rotate` (`server/src/api/stores/wallets.rs`) for
+scripting or when the dashboard is unavailable, but reaching for it during an
+incident is no longer the only way to see the warnings below - the UI states
+them before the operator confirms.
 
 ## What happens during rotation
 
