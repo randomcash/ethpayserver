@@ -78,10 +78,12 @@ fn our_own_errors_still_page() {
     );
 }
 
-/// A merchant's own webhook endpoint failing every retry is a fact about
-/// their server, not ours, and is already tracked via a metric and a
-/// `webhook_deliveries` row — see `sentry_event_filter`'s doc comment. It
-/// should reach Sentry as a breadcrumb, not page on-call.
+/// A merchant's own webhook endpoint being unreachable for every retry (this
+/// target is only used for `WebhookError::Unreachable` - see
+/// `permanently_failed_target` in `server::services::webhook::service`) is a
+/// fact about their server, not ours, and is already tracked via a metric
+/// and a `webhook_deliveries` row — see `sentry_event_filter`'s doc comment.
+/// It should reach Sentry as a breadcrumb, not page on-call.
 #[test]
 fn exhausted_webhook_delivery_is_a_breadcrumb_not_a_page() {
     let filter = observed_filter(|| {

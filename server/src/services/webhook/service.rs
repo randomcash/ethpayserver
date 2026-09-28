@@ -21,19 +21,42 @@ use super::{WebhookConfig, WebhookError, WebhookJob};
 /// error means a job already sitting in the queue no longer deserializes —
 /// a real bug, not a network teardown artifact — and must not go quiet just
 /// because it happened to surface in the same window as a shutdown signal.
-/// `Http` is listed here as always-a-fault for the same reason, though in
-/// practice `process_next_job` never returns it: a delivery failure is
-/// handled inline (logged via "Webhook delivery failed" or "...permanently
-/// failed", never propagated with `?`), so this match arm exists to keep
-/// the decision total rather than to gate a reachable path.
+/// `Http` and `Unreachable` are listed here as always-a-fault for the same
+/// reason, though in practice `process_next_job` never returns either: a
+/// delivery failure is handled inline (logged via "Webhook delivery failed"
+/// or "...permanently failed", never propagated with `?`), so these match
+/// arms exist to keep the decision total rather than to gate a reachable
+/// path.
 ///
 /// Split out from `log_process_error` so the shutdown/fault decision itself
 /// is unit-testable without a live Redis connection.
 fn process_error_is_fault(error: &WebhookError, shutting_down: bool) -> bool {
     match error {
         WebhookError::Redis(_) => !shutting_down,
-        WebhookError::Http(_) | WebhookError::Serialization(_) | WebhookError::Database(_) => true,
+        WebhookError::Http(_)
+        | WebhookError::Unreachable(_)
+        | WebhookError::Serialization(_)
+        | WebhookError::Database(_) => true,
     }
+}
+
+/// Whether a permanently-failed delivery is a fact about the merchant's own
+/// endpoint, rather than payserver's.
+///
+/// Only `WebhookError::Unreachable` — the request never reached the
+/// merchant's endpoint at all — qualifies, so only that case is logged under
+/// the target `evm::telemetry::sentry_event_filter` demotes to a breadcrumb.
+/// Every other cause (a non-success status, which can reflect a signing or
+/// request-construction bug on our side just as easily as a merchant one, or
+/// the payload failing to serialize, which is entirely ours) keeps this
+/// module's default target and pages like any other error. `tracing`'s
+/// `target:` must be a compile-time constant, so this can only steer which
+/// of two literal targets a call site picks, not compute one.
+///
+/// Split out so the classification is unit-testable without constructing a
+/// `WebhookService` or driving a real delivery.
+fn permanent_failure_is_merchant_unreachable(error: &WebhookError) -> bool {
+    matches!(error, WebhookError::Unreachable(_))
 }
 
 /// Atomically moves a job from the ready queue to the processing set.
@@ -500,25 +523,34 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
                 );
 
                 if job.is_exhausted() {
-                    // A merchant's own endpoint being down or erroring for all
-                    // `max_attempts` retries is a fact about their server, not
-                    // ours — there is nothing a payserver on-call engineer can
-                    // do about it, and it's already fully captured by the
-                    // `webhook_delivery_status="permanent_failed"` metric and
-                    // the `webhook_deliveries` row below. A distinct target
-                    // (rather than this module's default) lets
-                    // `evm::telemetry::sentry_event_filter` demote *this*
-                    // error to a breadcrumb without also swallowing
-                    // `log_process_error`'s "Error processing webhook job",
-                    // which is a real fault in our own code and must keep
-                    // paging.
-                    tracing::error!(
-                        target: "server::services::webhook::merchant_delivery_failed",
-                        job_id = %job.id,
-                        invoice_id = %job.payload.invoice_id,
-                        "Webhook delivery permanently failed after {} attempts",
-                        job.attempts,
-                    );
+                    // Only when the request never reached the merchant's
+                    // endpoint at all (`WebhookError::Unreachable` — see
+                    // `permanent_failure_is_merchant_unreachable`) is this a
+                    // fact about their server rather than ours, so only that
+                    // case gets the target `evm::telemetry::sentry_event_filter`
+                    // demotes to a breadcrumb instead of a page. A non-success
+                    // status or a payload that failed to serialize keeps this
+                    // module's default target — same as `log_process_error`'s
+                    // "Error processing webhook job" — since either can
+                    // reflect a fault in our own signing or request
+                    // construction just as easily as one in the merchant's
+                    // server, and must keep paging.
+                    if permanent_failure_is_merchant_unreachable(&e) {
+                        tracing::error!(
+                            target: "server::services::webhook::merchant_delivery_failed",
+                            job_id = %job.id,
+                            invoice_id = %job.payload.invoice_id,
+                            "Webhook delivery permanently failed after {} attempts",
+                            job.attempts,
+                        );
+                    } else {
+                        tracing::error!(
+                            job_id = %job.id,
+                            invoice_id = %job.payload.invoice_id,
+                            "Webhook delivery permanently failed after {} attempts",
+                            job.attempts,
+                        );
+                    }
                     metrics::record_webhook_failed(&job.payload.event_type.to_string());
                     metrics::record_webhook_delivery_status("permanent_failed");
                     self.write_delivery_record(
@@ -629,7 +661,18 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             .body(payload_json)
             .send()
             .await
-            .map_err(|e| WebhookError::Http(e.to_string()))?;
+            .map_err(|e| {
+                // `is_connect()`/`is_timeout()` are the only two reqwest
+                // classifications that mean "we could not get an answer out
+                // of this host" - a bad header value or malformed URL fails
+                // as `is_builder()` before a connection is ever attempted,
+                // so it can't be confused with an unreachable merchant here.
+                if e.is_connect() || e.is_timeout() {
+                    WebhookError::Unreachable(e.to_string())
+                } else {
+                    WebhookError::Http(e.to_string())
+                }
+            })?;
 
         // Check response status
         if response.status().is_success() {
@@ -895,6 +938,137 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// A TCP listener that completes the HTTP exchange but answers with a
+    /// non-success status — the shape of a merchant endpoint that is up and
+    /// responding, just rejecting the request, as opposed to
+    /// `spawn_unresponsive_server`, which never completes the exchange at
+    /// all.
+    async fn spawn_error_status_server() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        addr
+    }
+
+    /// The classification `permanent_failure_is_merchant_unreachable` relies
+    /// on: only a connection that never got an answer out of the merchant's
+    /// endpoint counts as `Unreachable`. Reaching the endpoint at all — even
+    /// to a non-success status — must not demote to a breadcrumb, since a
+    /// bad status can reflect a fault in our own signing or request
+    /// construction just as easily as one in the merchant's server.
+    #[tokio::test]
+    async fn deliver_webhook_reports_unreachable_when_the_connection_is_refused() {
+        // Bind then drop: frees the port while keeping it very unlikely to
+        // be reused by anything else before the connection attempt below.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind loopback listener");
+            listener.local_addr().expect("local_addr")
+        };
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            "redis://this-host-does-not-resolve.invalid:6379",
+            WebhookConfig::default(),
+        )
+        .expect("construct service");
+        let job = WebhookJob::new(
+            uuid::Uuid::new_v4(),
+            format!("http://{addr}/webhook"),
+            "secret".to_string(),
+            test_payload(),
+        );
+
+        let err = service
+            .deliver_webhook(&job)
+            .await
+            .expect_err("a refused connection must fail delivery");
+        assert!(
+            matches!(err, WebhookError::Unreachable(_)),
+            "expected Unreachable, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_webhook_reports_unreachable_when_the_endpoint_never_responds() {
+        let addr = spawn_unresponsive_server().await;
+        let config = WebhookConfig {
+            request_timeout: Duration::from_millis(200),
+            ..WebhookConfig::default()
+        };
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            "redis://this-host-does-not-resolve.invalid:6379",
+            config,
+        )
+        .expect("construct service");
+        let job = WebhookJob::new(
+            uuid::Uuid::new_v4(),
+            format!("http://{addr}/webhook"),
+            "secret".to_string(),
+            test_payload(),
+        );
+
+        let err = service
+            .deliver_webhook(&job)
+            .await
+            .expect_err("a request that never gets an answer must time out");
+        assert!(
+            matches!(err, WebhookError::Unreachable(_)),
+            "expected Unreachable, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_webhook_reports_http_when_the_endpoint_responds_with_an_error_status() {
+        let addr = spawn_error_status_server().await;
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            "redis://this-host-does-not-resolve.invalid:6379",
+            WebhookConfig::default(),
+        )
+        .expect("construct service");
+        let job = WebhookJob::new(
+            uuid::Uuid::new_v4(),
+            format!("http://{addr}/webhook"),
+            "secret".to_string(),
+            test_payload(),
+        );
+
+        let err = service
+            .deliver_webhook(&job)
+            .await
+            .expect_err("a non-success status must fail delivery");
+        assert!(
+            matches!(err, WebhookError::Http(_)),
+            "expected Http, not a breadcrumb-eligible Unreachable, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn permanent_failure_is_merchant_unreachable_only_for_unreachable() {
+        assert!(permanent_failure_is_merchant_unreachable(
+            &WebhookError::Unreachable("timed out".to_string())
+        ));
+        assert!(!permanent_failure_is_merchant_unreachable(
+            &WebhookError::Http("HTTP 500".to_string())
+        ));
+        assert!(!permanent_failure_is_merchant_unreachable(
+            &WebhookError::Serialization("bad json".to_string())
+        ));
     }
 
     /// A defect this regresses: `ConnectionManager::new`'s default config has
