@@ -49,108 +49,18 @@ fn make_payment(
     })
 }
 
+/// An event that can never apply must halt too, not be skipped: a skip
+/// would commit the cursor past a payment nobody credited.
 #[tokio::test]
-async fn a_permanently_bad_event_is_quarantined_and_later_envelopes_still_apply() {
-    let ds = Arc::new(InMemoryDataService::new());
-    let bridge = Arc::new(MemoryBridge::new());
-    let store_id = StoreId::new();
-
-    // seq 0: applies cleanly.
-    let good_invoice = InvoiceId::new();
-    create_test_invoice(&ds, &good_invoice, store_id).await;
-    bridge
-        .publish(&make_payment(
-            &good_invoice,
-            1,
-            B256::from([1u8; 32]),
-            true,
-            None,
-        ))
-        .await
-        .unwrap();
-
-    // seq 1: malformed - `is_native: false` with no token address is
-    // rejected by `handle_payment_detected` before it touches the
-    // database at all, a deterministic and DB-free way to make
-    // `handle_event` fail.
-    bridge
-        .publish(&make_payment(
-            &good_invoice,
-            1,
-            B256::from([2u8; 32]),
-            false,
-            None,
-        ))
-        .await
-        .unwrap();
-
-    // seq 2: well-formed, on the same chain. With the bug this test
-    // guards against, the consumer would skip past the failed seq 1 and
-    // apply this one anyway, silently losing seq 1 for good.
-    let later_invoice = InvoiceId::new();
-    create_test_invoice(&ds, &later_invoice, store_id).await;
-    bridge
-        .publish(&make_payment(
-            &later_invoice,
-            2,
-            B256::from([3u8; 32]),
-            true,
-            None,
-        ))
-        .await
-        .unwrap();
-
-    let failures: Arc<Mutex<Vec<(u64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
-    let recorded = failures.clone();
-    let consumer = create_test_consumer(ds.clone(), bridge.clone()).with_apply_failure_hook(
-        Arc::new(move |chain_id, seq| {
-            recorded.lock().unwrap().push((chain_id, seq));
-        }),
-    );
-    let task = tokio::spawn(consumer.run());
-
-    // The bad event must not freeze the stream: the envelope after it has
-    // to apply.
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let ps = PaymentReader::get_for_invoice(&*ds, &later_invoice)
-                .await
-                .unwrap();
-            if !ps.is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("an event that can never apply froze the consumer");
-    task.abort();
-
-    assert!(
-        failures.lock().unwrap().is_empty(),
-        "halted on a permanent error"
-    );
-    let cursors = ChainCursorReader::chain_cursors(&*ds, ADAPTER_ID)
-        .await
-        .unwrap();
-    assert_eq!(cursors.get(&1).map(|c| c.seq), Some(2));
-
-    // The skip must leave a durable, findable record carrying the payload.
-    let quarantined = ds.quarantined_events();
-    assert_eq!(quarantined.len(), 1);
-    assert_eq!(quarantined[0].chain_id, 1);
-    assert_eq!(quarantined[0].cursor.seq, 1);
-    assert_eq!(quarantined[0].event["type"], "payment_detected");
-}
-
-/// If the quarantine record cannot be written the event is neither applied
-/// nor findable, so the cursor must not move past it.
-#[tokio::test]
-async fn an_unrecordable_quarantine_halts_without_committing_the_cursor() {
+async fn a_permanently_bad_event_halts_without_committing_the_cursor() {
     let ds = Arc::new(InMemoryDataService::new());
     let bridge = Arc::new(MemoryBridge::new());
     let invoice = InvoiceId::new();
     create_test_invoice(&ds, &invoice, StoreId::new()).await;
+
+    // Malformed: `is_native: false` with no token address is rejected by
+    // `handle_payment_detected` before it touches the database at all, a
+    // deterministic and DB-free way to make `handle_event` fail.
     bridge
         .publish(&make_payment(
             &invoice,
@@ -161,7 +71,6 @@ async fn an_unrecordable_quarantine_halts_without_committing_the_cursor() {
         ))
         .await
         .unwrap();
-    ds.set_fail_quarantine(true);
 
     let failures: Arc<Mutex<Vec<(u64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
     let recorded = failures.clone();

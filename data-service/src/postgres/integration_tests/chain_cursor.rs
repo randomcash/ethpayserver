@@ -186,34 +186,3 @@ async fn resetting_watch_notifications_only_touches_the_named_chain() {
         "a different chain's watch must be left alone"
     );
 }
-
-#[tokio::test]
-#[ignore]
-async fn quarantining_an_event_is_idempotent_per_position() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
-    let adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
-    let cursor = ChainCursor {
-        epoch: 1,
-        seq: 7,
-        block_height: 100,
-    };
-    for _ in 0..2 {
-        service
-            .quarantine_chain_event(
-                &adapter_id,
-                999_888_777,
-                cursor,
-                "invoice not found",
-                serde_json::json!({"type": "payment_detected"}),
-            )
-            .await
-            .unwrap();
-    }
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM quarantined_chain_events WHERE adapter_id = $1")
-            .bind(&adapter_id)
-            .fetch_one(&service.pool)
-            .await
-            .unwrap();
-    assert_eq!(count, 1);
-}

@@ -477,7 +477,7 @@ impl<
             return true;
         }
 
-        if !self.apply_or_quarantine(&envelope).await {
+        if !self.apply_or_halt(&envelope).await {
             return false;
         }
 
@@ -510,76 +510,28 @@ impl<
         true
     }
 
-    /// Apply the event, or quarantine it if it can never apply. Returns
-    /// `false` after halting, when the cursor must not advance.
-    async fn apply_or_quarantine(&self, envelope: &EventEnvelope) -> bool {
-        let chain_id = envelope.chain_id;
-        let payload = serde_json::to_value(&envelope.event);
+    /// Apply the event. Returns `false` after halting, when the cursor must
+    /// not advance.
+    ///
+    /// Every failure halts, including one that looks permanent (an invoice
+    /// since deleted, a malformed token field). Skipping such an event would
+    /// commit the cursor past a payment that was never credited, with nothing
+    /// pointing at it: a halt is loud, and a human decides what to do with
+    /// the deposit.
+    async fn apply_or_halt(&self, envelope: &EventEnvelope) -> bool {
         match self.handle_event(envelope.event.clone()).await {
-            Ok(()) => {}
-            // Permanent: the event names data that does not exist or cannot
-            // be interpreted (an invoice since deleted, a malformed token
-            // field). Redelivery fails identically forever, so halting would
-            // crash-loop the consumer and stop every other merchant and
-            // chain behind it. Skip it, but only after the full payload is
-            // durably recorded in `quarantined_chain_events`: a skip that
-            // leaves nothing queryable is a lost payment. If that record
-            // cannot be written, halt - the cursor must not pass an event
-            // that is neither applied nor findable.
-            Err(e @ EventConsumerError::InvalidData(_)) => {
-                tracing::error!(
-                    chain_id,
-                    epoch = envelope.cursor.epoch,
-                    seq = envelope.cursor.seq,
-                    error = %e,
-                    "quarantining an event that can never apply; cursor advances past it"
-                );
-                let at = ChainCursor {
-                    epoch: envelope.cursor.epoch,
-                    seq: envelope.cursor.seq,
-                    block_height: envelope.cursor.block_height,
-                };
-                let recorded = self.record_quarantine(chain_id, at, &e, payload).await;
-                if let Err(err) = recorded {
-                    tracing::error!(
-                        chain_id,
-                        seq = envelope.cursor.seq,
-                        error = %err,
-                        "failed to record a quarantined event; halting so the cursor cannot pass it"
-                    );
-                    self.halt(chain_id, envelope.cursor.seq);
-                    return false;
-                }
-            }
-            // Possibly transient (database): halt so the durable cursor
-            // cannot advance past it, and let the restart redeliver.
+            Ok(()) => true,
             Err(e) => {
                 tracing::error!(
-                    chain_id,
+                    chain_id = envelope.chain_id,
                     seq = envelope.cursor.seq,
                     error = %e,
                     "failed to apply event; halting so the durable cursor cannot advance past it"
                 );
-                self.halt(chain_id, envelope.cursor.seq);
-                return false;
+                self.halt(envelope.chain_id, envelope.cursor.seq);
+                false
             }
         }
-        true
-    }
-
-    /// Persist a permanently unappliable event; see `apply_envelope`.
-    async fn record_quarantine(
-        &self,
-        chain_id: u64,
-        at: ChainCursor,
-        reason: &EventConsumerError,
-        payload: Result<serde_json::Value, serde_json::Error>,
-    ) -> Result<(), String> {
-        let event = payload.map_err(|e| e.to_string())?;
-        self.data_service
-            .quarantine_chain_event(ADAPTER_ID, chain_id, at, &reason.to_string(), event)
-            .await
-            .map_err(|e| e.to_string())
     }
 
     /// Stop the consumer after an unrecoverable apply failure: the hook if

@@ -63,19 +63,4 @@ pub trait ChainCursorWriter: Send + Sync {
     /// the adapter within `watch_retry`'s normal 30-second cycle, the same
     /// path a fresh watch already takes and already has tests.
     async fn reset_chain_watch_notifications(&self, chain_id: u64) -> RepositoryResult<u64>;
-
-    /// Durably record an event that can never apply, before the cursor is
-    /// advanced past it.
-    ///
-    /// `event` is the full serialized payload, so an operator can re-credit
-    /// the payment by hand. Idempotent on `(adapter_id, chain_id, epoch,
-    /// seq)`: a redelivered envelope does not add a second row.
-    async fn quarantine_chain_event(
-        &self,
-        adapter_id: &str,
-        chain_id: u64,
-        cursor: ChainCursor,
-        reason: &str,
-        event: serde_json::Value,
-    ) -> RepositoryResult<()>;
 }
