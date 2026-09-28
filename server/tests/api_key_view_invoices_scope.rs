@@ -31,7 +31,10 @@ use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
 use server::api::StoreScopedUser;
-use server::api::invoices::{ListInvoicesQuery, get_invoice, list_invoices};
+use server::api::invoices::{
+    ListInvoicesQuery, ListPaymentsQuery, export_invoices_csv, export_payments_csv, get_invoice,
+    list_invoices, list_payments,
+};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 use types::{InvoiceData, InvoiceId, InvoiceWriter, StoreId};
@@ -120,6 +123,16 @@ fn list_query(store_id: Uuid) -> ListInvoicesQuery {
         store_id: Some(store_id),
         status: None,
         currency: None,
+        search: None,
+        limit: None,
+        offset: None,
+    }
+}
+
+fn payments_query(store_id: Uuid) -> ListPaymentsQuery {
+    ListPaymentsQuery {
+        store_id: Some(store_id),
+        status: None,
         search: None,
         limit: None,
         offset: None,
@@ -295,5 +308,204 @@ async fn a_preexisting_unscoped_key_still_lists_invoices() {
         result.is_ok(),
         "an unscoped key must list invoices exactly as before: {:?}",
         result.err()
+    );
+}
+
+// The three call sites below gate on the same `narrow_scope_by_key` as the
+// handlers above, and until now nothing drove any of them with a narrowed key.
+// The two CSV ones matter most: they are bulk-data paths, so the regression
+// that would slip through - the `narrow_scope_by_key` line deleted, applied to
+// the wrong variable, or checking the wrong policy - hands a key scoped only to
+// `cancreateinvoice` every invoice and every payment on the store in one
+// download. The cross-tenant suites that do reach these handlers seed
+// unrestricted keys and say so in their own comments, so they prove tenant
+// isolation and nothing about per-key narrowing.
+
+/// A key scoped only to `cancreateinvoice` must not be able to list payments.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_create_invoice_is_refused_list_payments() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = list_payments(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
+        ),
+        State(state),
+        Query(payments_query(store.id.0)),
+    )
+    .await;
+
+    let Err(err) = result else {
+        panic!("a key not scoped to canviewinvoices must be refused list_payments");
+    };
+    assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+}
+
+/// The other direction, so the refusal above is not passing for some unrelated
+/// reason: the same call with the right grant must succeed.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_view_invoices_can_list_payments() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = list_payments(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_VIEW_INVOICES.to_string()]),
+        ),
+        State(state),
+        Query(payments_query(store.id.0)),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a key scoped to canviewinvoices must be able to list payments"
+    );
+}
+
+/// A key scoped only to `cancreateinvoice` must not be able to export every
+/// invoice on the store as CSV.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_create_invoice_is_refused_export_invoices_csv() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = export_invoices_csv(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
+        ),
+        State(state),
+        Query(list_query(store.id.0)),
+    )
+    .await;
+
+    let Err(err) = result else {
+        panic!("a key not scoped to canviewinvoices must be refused the invoice CSV export");
+    };
+    assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+}
+
+/// The admitting direction for the invoice CSV export.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_view_invoices_can_export_invoices_csv() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = export_invoices_csv(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_VIEW_INVOICES.to_string()]),
+        ),
+        State(state),
+        Query(list_query(store.id.0)),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a key scoped to canviewinvoices must be able to export invoices"
+    );
+}
+
+/// A key scoped only to `cancreateinvoice` must not be able to export every
+/// payment on the store as CSV.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_create_invoice_is_refused_export_payments_csv() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = export_payments_csv(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
+        ),
+        State(state),
+        Query(payments_query(store.id.0)),
+    )
+    .await;
+
+    let Err(err) = result else {
+        panic!("a key not scoped to canviewinvoices must be refused the payment CSV export");
+    };
+    assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
+}
+
+/// The admitting direction for the payment CSV export.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_view_invoices_can_export_payments_csv() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = export_payments_csv(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_VIEW_INVOICES.to_string()]),
+        ),
+        State(state),
+        Query(payments_query(store.id.0)),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a key scoped to canviewinvoices must be able to export payments"
     );
 }
