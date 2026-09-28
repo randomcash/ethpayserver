@@ -62,6 +62,9 @@ pub struct InMemoryDataService {
     // did not - the one case this test double cannot otherwise reach, since
     // it is normally an infallible map insert.
     fail_commit_chain_cursor: AtomicBool,
+    // Separate from the commit flag so a test can fail only the stale-row
+    // delete that follows a successful re-arm.
+    fail_delete_chain_cursor: AtomicBool,
     webhook_outbox: RwLock<Vec<crate::WebhookObligation>>,
     /// Obligation id -> claim deadline, mirroring the Postgres
     /// implementation's `claimed_until` column so this double's
@@ -104,6 +107,11 @@ impl InMemoryDataService {
     /// fail.
     pub fn set_fail_commit_chain_cursor(&self, fail: bool) {
         self.fail_commit_chain_cursor.store(fail, Ordering::SeqCst);
+    }
+
+    /// Force every subsequent `delete_chain_cursor` call to fail.
+    pub fn set_fail_delete_chain_cursor(&self, fail: bool) {
+        self.fail_delete_chain_cursor.store(fail, Ordering::SeqCst);
     }
 
     /// Make every subsequent payment upsert fail with a transient error.
@@ -656,7 +664,7 @@ impl ChainCursorWriter for InMemoryDataService {
     }
 
     async fn delete_chain_cursor(&self, adapter_id: &str, chain_id: u64) -> RepositoryResult<()> {
-        if self.fail_commit_chain_cursor.load(Ordering::SeqCst) {
+        if self.fail_delete_chain_cursor.load(Ordering::SeqCst) {
             return Err(RepositoryError::Database(
                 "simulated delete_chain_cursor failure".to_string(),
             ));

@@ -302,3 +302,41 @@ async fn a_subscribe_failure_that_is_not_out_of_range_halts() {
         "unexpected reason: {reason}"
     );
 }
+
+#[tokio::test]
+async fn a_lineage_break_that_cannot_drop_the_stale_cursor_halts_and_keeps_it() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(evm::monitor::bridge::MemoryBridge::new());
+
+    // The re-arm succeeds; only the delete of the stale stored row fails.
+    // Forgetting the row in memory alone would leave the old epoch on disk to
+    // read as a fresh mismatch after the operator unsets the accept flag.
+    let stale = ChainCursor {
+        epoch: 1,
+        seq: 5,
+        block_height: 0,
+    };
+    ChainCursorWriter::commit_chain_cursor(&*ds, ADAPTER_ID, 1, stale)
+        .await
+        .unwrap();
+    bridge.bump_epoch().await.unwrap();
+    ds.set_fail_delete_chain_cursor(true);
+
+    let reasons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = reasons.clone();
+    let consumer = create_test_consumer(ds.clone(), bridge)
+        .with_accepted_lineage_break(true)
+        .with_resume_failure_hook(Arc::new(move |reason| {
+            recorded.lock().unwrap().push(reason.to_string())
+        }));
+
+    let task = tokio::spawn(consumer.run());
+    let reason = wait_for_reason(&reasons).await;
+    assert!(reason.contains("drop"), "unexpected reason: {reason}");
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+
+    let stored = data_service::ChainCursorReader::chain_cursors(&*ds, ADAPTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(stored.get(&1), Some(&stale));
+}
