@@ -454,17 +454,17 @@ impl<
     /// lose the event - the exact failure this whole mechanism exists to
     /// close.
     ///
-    /// Returns `false` when the caller must stop advancing this stream. A
-    /// `handle_event` failure is the case that matters: `cursors` holds one
-    /// scalar `(epoch, seq)` per chain, so if the caller kept going and a
-    /// *later* envelope on the same chain applied and committed, that
-    /// commit would move the chain's cursor past this failed one - on any
-    /// future resume (restart or otherwise) the dedup check above would
-    /// then treat the failed envelope as already applied and it would never
-    /// be redelivered. Stopping here instead means nothing commits past it,
-    /// so it stays exactly at the resume point until a retry (in
-    /// production, a process restart, since [`ApplyFailureHook`] defaults
-    /// to exiting) redelivers it.
+    /// Returns `false` when the caller must stop advancing this stream. Both
+    /// a `handle_event` failure and a `commit_chain_cursor` failure are
+    /// cases that matter: `cursors` holds one scalar `(epoch, seq)` per
+    /// chain, so if the caller kept going and a *later* envelope on the same
+    /// chain applied and committed, that commit would move the chain's
+    /// cursor past this failed one - on any future resume (restart or
+    /// otherwise) the dedup check above would then treat the failed envelope
+    /// as already applied and it would never be redelivered. Stopping here
+    /// instead means nothing commits past it, so it stays exactly at the
+    /// resume point until a retry (in production, a process restart, since
+    /// [`ApplyFailureHook`] defaults to exiting) redelivers it.
     async fn apply_envelope(
         &self,
         envelope: EventEnvelope,
@@ -506,8 +506,23 @@ impl<
             .commit_chain_cursor(ADAPTER_ID, chain_id, cursor)
             .await
         {
-            tracing::error!(chain_id, error = %e, "failed to commit chain cursor");
-            return true;
+            // The effect (`handle_event`, above) already applied - idempotent
+            // redelivery covers it on restart - but if this keeps failing,
+            // `chain_cursors` stops advancing for this chain with nothing
+            // else to notice. Halting here, like every other unrecoverable
+            // failure in this file, gets that in front of a supervisor
+            // instead of a silent log line.
+            tracing::error!(
+                chain_id,
+                seq = envelope.cursor.seq,
+                error = %e,
+                "failed to commit chain cursor; halting"
+            );
+            match &self.on_apply_failure {
+                Some(hook) => hook(chain_id, envelope.cursor.seq),
+                None => std::process::exit(1),
+            }
+            return false;
         }
         cursors.insert(chain_id, cursor);
         true

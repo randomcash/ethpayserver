@@ -140,3 +140,84 @@ async fn a_failed_apply_stops_a_later_envelope_on_the_same_chain_from_committing
         .unwrap();
     assert_eq!(cursors.get(&1).map(|c| c.seq), Some(0));
 }
+
+/// A `handle_event` success followed by a failed `commit_chain_cursor` write
+/// must halt exactly like a `handle_event` failure does above - the effect
+/// applied, but nothing durable points at that fact, so a later envelope on
+/// the same chain must not be allowed to commit a cursor past it.
+#[tokio::test]
+async fn a_failed_cursor_commit_stops_a_later_envelope_on_the_same_chain_from_committing_past_it() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let store_id = StoreId::new();
+
+    // seq 0: applies cleanly, but its cursor commit is made to fail below.
+    let good_invoice = InvoiceId::new();
+    create_test_invoice(&ds, &good_invoice, store_id).await;
+    bridge
+        .publish(&make_payment(
+            &good_invoice,
+            1,
+            B256::from([1u8; 32]),
+            true,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    // seq 1, same chain. With the bug this test guards against, the
+    // consumer would keep going after the swallowed commit failure and
+    // apply this one anyway.
+    let later_invoice = InvoiceId::new();
+    create_test_invoice(&ds, &later_invoice, store_id).await;
+    bridge
+        .publish(&make_payment(
+            &later_invoice,
+            2,
+            B256::from([2u8; 32]),
+            true,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    ds.set_fail_commit_chain_cursor(true);
+
+    let failures: Arc<Mutex<Vec<(u64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = failures.clone();
+    let consumer = create_test_consumer(ds.clone(), bridge.clone()).with_apply_failure_hook(
+        Arc::new(move |chain_id, seq| {
+            recorded.lock().unwrap().push((chain_id, seq));
+        }),
+    );
+
+    let task = tokio::spawn(consumer.run());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while failures.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("apply failure hook was never called");
+    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+
+    assert_eq!(*failures.lock().unwrap(), vec![(1, 0)]);
+
+    // The envelope after the one whose commit failed must never have been
+    // applied.
+    let later_payments = PaymentReader::get_for_invoice(&*ds, &later_invoice)
+        .await
+        .unwrap();
+    assert!(
+        later_payments.is_empty(),
+        "an envelope after a failed cursor commit was applied - the consumer kept going \
+         instead of halting"
+    );
+
+    // No cursor for the chain was ever durably committed.
+    let cursors = ChainCursorReader::chain_cursors(&*ds, ADAPTER_ID)
+        .await
+        .unwrap();
+    assert_eq!(cursors.get(&1), None);
+}

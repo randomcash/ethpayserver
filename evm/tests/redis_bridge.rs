@@ -205,3 +205,58 @@ async fn resuming_past_the_retention_window_bumps_the_epoch_and_fails_out_of_ran
         "a retention gap must bump the epoch so every other resumer sees the break too"
     );
 }
+
+/// A total Redis data loss (restart with no AOF/RDB, an evicted keyspace)
+/// must not let the outbox mint the same epoch it had before. If it did, a
+/// cursor persisted before the loss would compare equal to the "fresh" one
+/// and be silently trusted to resume from a `seq` the new, reset outbox can
+/// never reach - the exact silent-loss failure this whole mechanism exists
+/// to close, reached through its own bootstrap.
+#[tokio::test]
+#[ignore]
+async fn a_full_keyspace_loss_mints_an_epoch_that_does_not_collide_with_the_old_one() {
+    let suffix = Uuid::new_v4();
+    let events_channel = format!("test:durable_resume:{suffix}:events");
+    let commands_channel = format!("test:durable_resume:{suffix}:commands");
+    let bridge = RedisBridge::new(&redis_url(), &events_channel, &commands_channel)
+        .await
+        .expect("connect to REDIS_URL");
+
+    bridge
+        .publish(&make_event(B256::from([1u8; 32])))
+        .await
+        .unwrap();
+    let epoch_before = bridge.current_epoch().await.unwrap();
+
+    // Simulate total data loss for this outbox: delete every key it owns,
+    // the same effect a Redis restart with no persistence would have.
+    let client = redis::Client::open(redis_url()).expect("connect to REDIS_URL");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("raw connection");
+    let _: () = redis::AsyncCommands::del(
+        &mut conn,
+        vec![
+            events_channel.clone(),
+            format!("{events_channel}:seq"),
+            format!("{events_channel}:epoch"),
+        ],
+    )
+    .await
+    .expect("DEL outbox keys");
+
+    // A fresh bridge instance stands in for the process that reconnects
+    // after the loss - the point is that nothing else survived to hand it
+    // the old epoch back.
+    let reconnected = RedisBridge::new(&redis_url(), &events_channel, &commands_channel)
+        .await
+        .expect("connect to REDIS_URL");
+    let epoch_after = reconnected.current_epoch().await.unwrap();
+
+    assert_ne!(
+        epoch_before, epoch_after,
+        "a fresh mint after total data loss collided with the pre-loss epoch - a persisted \
+         cursor from before the loss would be silently trusted to resume into the reset outbox"
+    );
+}

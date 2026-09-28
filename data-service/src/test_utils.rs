@@ -57,6 +57,11 @@ pub struct InMemoryDataService {
     // happened - the one case this test double cannot otherwise reach, since
     // it is normally a no-op that always succeeds.
     fail_reset_chain_watch_notifications: AtomicBool,
+    // Lets a test force `commit_chain_cursor` to fail, to exercise a
+    // consumer whose event applied cleanly but whose durable cursor write
+    // did not - the one case this test double cannot otherwise reach, since
+    // it is normally an infallible map insert.
+    fail_commit_chain_cursor: AtomicBool,
     webhook_outbox: RwLock<Vec<crate::WebhookObligation>>,
     /// Obligation id -> claim deadline, mirroring the Postgres
     /// implementation's `claimed_until` column so this double's
@@ -92,6 +97,12 @@ impl InMemoryDataService {
     pub fn set_fail_reset_chain_watch_notifications(&self, fail: bool) {
         self.fail_reset_chain_watch_notifications
             .store(fail, Ordering::SeqCst);
+    }
+
+    /// Force the next (and every subsequent) `commit_chain_cursor` call to
+    /// fail.
+    pub fn set_fail_commit_chain_cursor(&self, fail: bool) {
+        self.fail_commit_chain_cursor.store(fail, Ordering::SeqCst);
     }
 
     /// Make every subsequent `InvoiceReader::get` call fail with a transient
@@ -599,6 +610,11 @@ impl ChainCursorWriter for InMemoryDataService {
         chain_id: u64,
         cursor: ChainCursor,
     ) -> RepositoryResult<()> {
+        if self.fail_commit_chain_cursor.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated commit_chain_cursor failure".to_string(),
+            ));
+        }
         self.chain_cursors
             .write()
             .unwrap()

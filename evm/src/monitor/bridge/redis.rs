@@ -16,6 +16,7 @@ use crate::error::{EvmError, EvmResult};
 use crate::monitor::events::{MonitorCommand, MonitorEvent};
 use async_stream::stream;
 use async_trait::async_trait;
+use rand::Rng;
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamRangeReply, StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, Client, Script};
@@ -23,6 +24,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
+
+/// Mint a fresh epoch identity.
+///
+/// Drawn from the full positive range of `i64`, not a counter: a counter
+/// needs its own durable storage to guarantee it never repeats a value it
+/// has already issued, but here that storage would have to live in the same
+/// Redis instance as the epoch key itself, so a total keyspace loss (a
+/// restart with no AOF/RDB, an evicted keyspace) resets the counter right
+/// alongside the value it exists to keep unique - the very lineage break
+/// this mechanism must detect. A random draw from a ~9.2*10^18 range makes a
+/// collision with any specific prior epoch negligibly improbable regardless
+/// of what the backing store does or does not remember, with no auxiliary
+/// key to lose.
+fn random_epoch() -> i64 {
+    rand::rng().random_range(1..=i64::MAX)
+}
 
 /// Whether a subscription stream ending is a fault worth reporting.
 ///
@@ -75,20 +92,16 @@ const STREAM_MAXLEN: usize = 200_000;
 /// another invocation of this same script, nor a concurrent `bump_epoch` -
 /// can interleave with the `INCR`, the epoch read, and the `XADD` it feeds.
 ///
-/// The epoch itself is seeded from `INCR` on a second counter key, not
-/// `TIME`/wall-clock: every caller that decides "is this cursor still
-/// trustworthy" does so with plain equality against the current epoch, so a
-/// repeated value would make a cursor from an invalidated lineage compare
-/// equal to a brand new one and be silently accepted. A clock can repeat a
-/// value it already issued - a backward NTP step, a VM restored from an
-/// older snapshot, a dead RTC on reboot; a counter that only ever increments
-/// cannot.
+/// If nobody has minted an epoch for this outbox yet, the caller draws one
+/// with [`random_epoch`] (see its doc comment for why: it survives a total
+/// Redis keyspace loss that a same-instance counter cannot) and passes it in
+/// as `ARGV[5]`; `SET ... NX` inside the script is what makes that draw safe
+/// against a concurrent publisher doing the same thing (see below).
 const PUBLISH_SCRIPT: &str = r"
     local seq = redis.call('INCR', KEYS[2])
     local epoch = redis.call('GET', KEYS[3])
     if not epoch then
-        local candidate = redis.call('INCR', KEYS[4])
-        redis.call('SET', KEYS[3], candidate, 'NX')
+        redis.call('SET', KEYS[3], ARGV[5], 'NX')
         epoch = redis.call('GET', KEYS[3])
     end
     redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], seq .. '-0',
@@ -202,24 +215,14 @@ impl RedisBridge {
         format!("{}:seq", self.events_channel)
     }
 
-    /// Key of the counter this outbox draws its epoch identity from.
-    ///
-    /// Separate from [`Self::epoch_key`] itself: the epoch key holds the
-    /// *current* value, but a monotonic source for that value has to survive
-    /// `bump_epoch` overwriting it, so the generator lives under its own key
-    /// rather than being derived from the epoch key's current contents.
-    fn epoch_gen_key(&self) -> String {
-        format!("{}:epoch_gen", self.events_channel)
-    }
-
     /// The outbox's epoch, creating one if this is the first publisher or
     /// resumer to ever see this outbox (a fresh deployment, or a Redis that
     /// lost the key along with everything else).
     ///
     /// `SET ... NX` races safely: if two callers lose the key at once, both
-    /// draw a fresh value from [`Self::epoch_gen_key`] (so neither wastes the
-    /// other's), only one write sticks, and the follow-up `GET` returns
-    /// whichever won for both of them.
+    /// draw their own candidate from [`random_epoch`], only one write
+    /// sticks, and the follow-up `GET` returns whichever won for both of
+    /// them.
     async fn get_or_init_epoch(&self) -> EvmResult<i64> {
         let mut conn = self.publisher.clone();
         let key = self.epoch_key();
@@ -230,13 +233,7 @@ impl RedisBridge {
                 .map_err(|e| EvmError::Monitor(format!("corrupt epoch value {epoch:?}: {e}")));
         }
 
-        // See `PUBLISH_SCRIPT`'s doc comment for why this is a counter and
-        // not a timestamp: a repeated epoch value would let a cursor from an
-        // invalidated lineage compare equal to a brand new one.
-        let candidate: i64 = conn
-            .incr(self.epoch_gen_key(), 1)
-            .await
-            .map_err(|e| EvmError::Monitor(format!("redis INCR failed: {}", e)))?;
+        let candidate = random_epoch();
         let _: () = redis::cmd("SET")
             .arg(&key)
             .arg(candidate)
@@ -285,16 +282,22 @@ impl EventBridge for RedisBridge {
         let chain_id = event.chain_id();
         let block_height = event.block_height();
 
+        // Drawn even on the common path where the epoch key already exists
+        // and this goes unused: minting it inside the script would need a
+        // second Lua RNG call whose determinism across replication is not
+        // worth relying on, and one wasted `random_range` call is cheap.
+        let candidate_epoch = random_epoch();
+
         let mut conn = self.publisher.clone();
         let (seq, epoch): (i64, i64) = Script::new(PUBLISH_SCRIPT)
             .key(&self.events_channel)
             .key(self.seq_key())
             .key(self.epoch_key())
-            .key(self.epoch_gen_key())
             .arg(self.maxlen)
             .arg(chain_id)
             .arg(block_height)
             .arg(payload)
+            .arg(candidate_epoch)
             .invoke_async(&mut conn)
             .await
             .map_err(|e| EvmError::Monitor(format!("redis publish script failed: {}", e)))?;
@@ -424,14 +427,7 @@ impl EventBridge for RedisBridge {
 
     async fn bump_epoch(&self) -> EvmResult<i64> {
         let mut conn = self.publisher.clone();
-        // See `PUBLISH_SCRIPT`'s doc comment for why this draws from a
-        // counter rather than the wall clock: `INCR` can never hand back a
-        // value it has already issued, so a cursor stamped with any prior
-        // epoch can never compare equal to the one this produces.
-        let new_epoch: i64 = conn
-            .incr(self.epoch_gen_key(), 1)
-            .await
-            .map_err(|e| EvmError::Monitor(format!("redis INCR failed: {}", e)))?;
+        let new_epoch = random_epoch();
         // Unconditional SET, not `NX`: `get_or_init_epoch` uses `NX` because
         // it must not clobber a value another caller already agreed on, but
         // this is the one call whose entire job is to make every existing
