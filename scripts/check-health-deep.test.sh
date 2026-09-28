@@ -176,6 +176,7 @@ cat > "$BODY_FILE" <<'JSON'
 JSON
 check "watch_reconciliation unknown (reconciler couldn't run) is refused" 1
 
+
 # A stalled last_block only shows up after enough consecutive checks that
 # report the same block - the failure the ticket calls out as distinct from
 # rpcs.*.status, since the RPC connection itself can stay "ok" throughout.
