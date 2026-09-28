@@ -13,6 +13,10 @@
 #     (a chain can report status "ok" while its indexer has stopped advancing
 #     — a distinct partial-outage mode from monitor.data_fresh going false)
 #   - postgres or redis not "ok"
+#   - watch_reconciliation.status not "ok" (a Redis watch the monitor still
+#     polls for an invoice Postgres no longer considers live, or the inverse
+#     and more expensive fault: a live invoice nobody is watching, so a real
+#     payment to it goes uncredited)
 #
 # Meant to run on a schedule from somewhere that is not the deploy host, so a
 # dead box cannot also be the thing reporting it is fine. Single-shot, not a
@@ -85,6 +89,9 @@ data = json.load(sys.stdin)
 bad = [k for k, v in data.get('rpcs', {}).items() if v.get('status') != 'ok']
 print(','.join(bad) if bad else '')
 " 2>/dev/null || echo "unknown")
+WATCH_STATUS=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['watch_reconciliation']['status'])" 2>/dev/null || echo "error")
+WATCH_STALE=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['watch_reconciliation'].get('stale_watches', 0))" 2>/dev/null || echo "?")
+WATCH_MISSED=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['watch_reconciliation'].get('missed_watches', 0))" 2>/dev/null || echo "?")
 
 STALL_BAD=""
 STALL_ERRORED=""
@@ -134,6 +141,7 @@ FAILED=()
 [[ "$REDIS_STATUS" == "ok" ]] || FAILED+=("redis=$REDIS_STATUS")
 [[ "$MONITOR_FRESH" == "True" ]] || FAILED+=("monitor.data_fresh=$MONITOR_FRESH")
 [[ -z "$RPC_BAD" ]] || FAILED+=("unhealthy chains: $RPC_BAD")
+[[ "$WATCH_STATUS" == "ok" ]] || FAILED+=("watch_reconciliation=$WATCH_STATUS (stale=$WATCH_STALE missed=$WATCH_MISSED)")
 [[ -z "$STALL_ERRORED" ]] || FAILED+=("stall-check errored")
 [[ -z "$STALL_BAD" ]] || FAILED+=("stalled last_block: $STALL_BAD")
 
@@ -143,5 +151,5 @@ if [[ ${#FAILED[@]} -gt 0 ]]; then
   exit 1
 fi
 
-log "HEALTHY — pg=ok redis=ok monitor.data_fresh=true rpcs=all_ok"
+log "HEALTHY — pg=ok redis=ok monitor.data_fresh=true rpcs=all_ok watch_reconciliation=ok"
 checkin ok

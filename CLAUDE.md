@@ -97,17 +97,23 @@ that are not in CI's path. Several people have lost an hour to this.
   **without logging anything** — so the server looks healthy while tests fail
   in no pattern. Run a local server with every `RATE_LIMIT_*` at `10000`, as
   CI does. See `e2e/README.md`.
-- Integration tests are `#[ignore]` by convention and need `DATABASE_URL`. CI
-  *does* run them — the `test` job migrates a real Postgres service and runs
-  `cargo nextest run -p data-service --no-fail-fast --run-ignored only -j 1` —
-  so a failure there gates merges same as any other test. The `-j 1` is not
-  cosmetic: these tests share one real Postgres instance, so run them locally
-  with the same flag rather than nextest's default concurrency, or you can get
-  spurious cross-test failures CI never sees. The command now covers
-  `data-service` **and** `server`, so a `server/tests/*.rs` integration test
-  does gate merges - this paragraph used to say otherwise, which is worth
-  knowing if you wrote one and assumed it never ran. Other crates' `#[ignore]`'d
-  tests are still not in it and need running locally. The gate above does not touch any of them either way, so run
+- Integration tests are `#[ignore]` by convention and need `DATABASE_URL`. A
+  few also need a real Redis and gate on `TEST_REDIS_URL` the same way,
+  skipping (not failing) when it is unset - CI sets both for the job that runs
+  `--run-ignored`, so don't take an unset `TEST_REDIS_URL` locally as proof a
+  Redis-dependent test can't fail; it's provisioned in CI even when it isn't
+  on your machine. CI *does* run them — the `test` job migrates a real
+  Postgres service, starts a Redis service, and runs
+  `cargo nextest run -p data-service -p server --no-fail-fast --run-ignored only -j 1`
+  with both env vars set — so a failure there gates merges same as any other
+  test. The `-j 1` is not cosmetic: these tests share one real Postgres
+  instance, so run them locally with the same flag rather than nextest's
+  default concurrency, or you can get spurious cross-test failures CI never
+  sees. The command now covers `data-service` **and** `server`, so a
+  `server/tests/*.rs` integration test does gate merges - this paragraph used
+  to say otherwise, which is worth knowing if you wrote one and assumed it
+  never ran. Other crates' `#[ignore]`'d tests are still not in it and need
+  running locally. The gate above does not touch any of them either way, so run
   the `data-service` ones locally too when you touch that layer — CI will
   catch a failure regardless, but locally you see it sooner.
 
