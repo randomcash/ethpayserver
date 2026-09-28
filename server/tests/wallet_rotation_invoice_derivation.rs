@@ -79,7 +79,7 @@ async fn service() -> Option<PgDataService> {
         .max_connections(5)
         .connect(&database_url)
         .await
-        .ok()?;
+        .expect("DATABASE_URL is set but the database is unreachable");
     Some(PgDataService::new(pool))
 }
 
