@@ -9,7 +9,7 @@
 use axum::http::StatusCode;
 use uuid::Uuid;
 
-use auth::{Permission, Policies, Role};
+use auth::{Permission, Policies};
 
 /// Is a single requested permission entry a store-scoped grant this server
 /// can actually enforce?
@@ -52,28 +52,30 @@ fn is_store_scope_entry(entry: &str) -> bool {
 /// the owner anyway, since enforcement always intersects the two (see
 /// `key_grants_store_permission`), so there is nothing here to launder.
 ///
-/// `owner_role` is always the role belonging to the account the key
-/// authenticates as, never the caller's - the write-time half of "a key can
-/// never exceed its owner". Read-time enforcement (`validate_api_key`, and
-/// every `role == Role::ServerAdmin` check downstream of it) covers a key
-/// whose owner's role later changes, but without this an admin editing
-/// someone else's key could grant it `unrestricted` on the strength of the
-/// *admin's* role, which that key's own owner could never grant themselves -
-/// precisely the "promoting the owner must not widen keys already issued"
-/// failure this feature exists to close, from the other direction.
-pub(super) fn validate_requested_permissions(
-    owner_role: Role,
-    requested: &[String],
-) -> Result<(), StatusCode> {
+/// This takes no role, because none of its answers depend on one. Every
+/// accepted form resolves against whoever owns the key rather than naming a
+/// power directly: `[]` and `["unrestricted"]` both mean "the owner's role in
+/// full", and a store entry is intersected with `user_has_store_permission`
+/// at every call site. Every rejected form is rejected for an admin too.
+///
+/// `["unrestricted"]` briefly required a `ServerAdmin` owner. That refused a
+/// spelling rather than a grant: for a non-admin it produces exactly what
+/// `[]` produces - a NULL scope - and `[]` was accepted either way. The two
+/// are indistinguishable at every gate, since
+/// `key_retains_unrestricted_access` is true for both and neither triggers
+/// the scoped-key downgrade, so the condition failed a request while the
+/// other name for it succeeded. The ticket asked for `unrestricted` to keep
+/// working; it does.
+///
+/// "A key can never exceed its owner" is enforced at read time, not here -
+/// `validate_api_key`'s downgrade, the intersection in
+/// `key_grants_store_permission`, and every `role == Role::ServerAdmin`
+/// check downstream. That is also what covers a key whose owner's role
+/// changes after the key was issued, which no write-time check could.
+pub(super) fn validate_requested_permissions(requested: &[String]) -> Result<(), StatusCode> {
     match requested {
         [] => Ok(()),
-        [single] if single == Permission::Unrestricted.as_policy() => {
-            if owner_role == Role::ServerAdmin {
-                Ok(())
-            } else {
-                Err(StatusCode::BAD_REQUEST)
-            }
-        }
+        [single] if single == Permission::Unrestricted.as_policy() => Ok(()),
         entries if entries.iter().all(|e| is_store_scope_entry(e)) => Ok(()),
         _ => Err(StatusCode::BAD_REQUEST),
     }
@@ -85,15 +87,17 @@ mod permission_scope_tests {
 
     #[test]
     fn an_empty_scope_is_always_accepted() {
-        assert!(validate_requested_permissions(Role::User, &[]).is_ok());
-        assert!(validate_requested_permissions(Role::ServerAdmin, &[]).is_ok());
+        assert!(validate_requested_permissions(&[]).is_ok());
     }
 
     #[test]
-    fn unrestricted_is_accepted_only_for_a_server_admin_owner() {
+    fn unrestricted_is_accepted_for_any_owner_because_it_resolves_against_their_own_role() {
         let unrestricted = vec![Permission::Unrestricted.as_policy().to_string()];
-        assert!(validate_requested_permissions(Role::ServerAdmin, &unrestricted).is_ok());
-        assert!(validate_requested_permissions(Role::User, &unrestricted).is_err());
+        // Not an admin-only spelling: for a plain user this resolves to the
+        // same NULL scope `[]` does, and `[]` is accepted just above.
+        // Refusing it would fail the request while the other name for the
+        // identical grant succeeded.
+        assert!(validate_requested_permissions(&unrestricted).is_ok());
     }
 
     #[test]
@@ -102,7 +106,7 @@ mod permission_scope_tests {
         // individually - accepting one here would promise scoping the rest
         // of the codebase cannot deliver.
         let named = vec![Permission::ServerManageTokens.as_policy().to_string()];
-        assert!(validate_requested_permissions(Role::ServerAdmin, &named).is_err());
+        assert!(validate_requested_permissions(&named).is_err());
     }
 
     #[test]
@@ -111,7 +115,7 @@ mod permission_scope_tests {
             Permission::Unrestricted.as_policy().to_string(),
             Permission::ServerViewUsers.as_policy().to_string(),
         ];
-        assert!(validate_requested_permissions(Role::ServerAdmin, &mixed).is_err());
+        assert!(validate_requested_permissions(&mixed).is_err());
     }
 
     #[test]
@@ -119,8 +123,7 @@ mod permission_scope_tests {
         // Store permissions ARE enforced individually, so there is nothing
         // to launder through a wider owner role - unlike `unrestricted`.
         let named = vec![Permission::StoreCreateInvoice.as_policy().to_string()];
-        assert!(validate_requested_permissions(Role::User, &named).is_ok());
-        assert!(validate_requested_permissions(Role::ServerAdmin, &named).is_ok());
+        assert!(validate_requested_permissions(&named).is_ok());
     }
 
     #[test]
@@ -130,7 +133,7 @@ mod permission_scope_tests {
             Permission::StoreCreateInvoice.as_policy(),
             Uuid::new_v4()
         )];
-        assert!(validate_requested_permissions(Role::User, &scoped).is_ok());
+        assert!(validate_requested_permissions(&scoped).is_ok());
     }
 
     #[test]
@@ -143,7 +146,7 @@ mod permission_scope_tests {
                 Uuid::new_v4()
             ),
         ];
-        assert!(validate_requested_permissions(Role::User, &many).is_ok());
+        assert!(validate_requested_permissions(&many).is_ok());
     }
 
     #[test]
@@ -152,7 +155,7 @@ mod permission_scope_tests {
             "{}:not-a-uuid",
             Permission::StoreCreateInvoice.as_policy()
         )];
-        assert!(validate_requested_permissions(Role::User, &malformed).is_err());
+        assert!(validate_requested_permissions(&malformed).is_err());
     }
 
     #[test]
@@ -161,6 +164,6 @@ mod permission_scope_tests {
             Permission::Unrestricted.as_policy().to_string(),
             Permission::StoreCreateInvoice.as_policy().to_string(),
         ];
-        assert!(validate_requested_permissions(Role::ServerAdmin, &mixed).is_err());
+        assert!(validate_requested_permissions(&mixed).is_err());
     }
 }

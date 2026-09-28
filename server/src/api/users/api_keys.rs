@@ -195,7 +195,7 @@ where
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    validate_requested_permissions(user.role, &payload.permissions)?;
+    validate_requested_permissions(&payload.permissions)?;
 
     let (raw_key, api_key) = build_api_key(&name, user.id, payload.expires_at);
 
