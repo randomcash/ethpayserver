@@ -11,7 +11,7 @@ mod webhook_dispatch;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use auth::StoreRepository;
@@ -135,6 +135,7 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     on_apply_failure: Option<ApplyFailureHook>,
     on_resume_failure: Option<ResumeFailureHook>,
     accept_lineage_break: bool,
+    skip_events: HashSet<(u64, i64)>,
 }
 
 impl<
@@ -164,6 +165,7 @@ impl<
             on_apply_failure: None,
             on_resume_failure: None,
             accept_lineage_break: false,
+            skip_events: HashSet::new(),
         }
     }
 
@@ -181,6 +183,19 @@ impl<
     #[must_use]
     pub fn with_accepted_lineage_break(mut self, accept: bool) -> Self {
         self.accept_lineage_break = accept;
+        self
+    }
+
+    /// Skip the named `(chain_id, seq)` envelopes instead of applying them.
+    ///
+    /// The escape hatch for a poison event: one that can never apply halts
+    /// the consumer on every restart, and with it every merchant's crediting.
+    /// The operator names the exact envelope from the halt log after deciding
+    /// what to do with the deposit by hand; nothing is skipped unless listed,
+    /// so the default is still "never advance past an unapplied payment".
+    #[must_use]
+    pub fn with_skipped_events(mut self, skip: impl IntoIterator<Item = (u64, i64)>) -> Self {
+        self.skip_events = skip.into_iter().collect();
         self
     }
 
@@ -522,7 +537,13 @@ impl<
     ) -> bool {
         let chain_id = envelope.chain_id;
 
-        if !self.apply_or_halt(&envelope).await {
+        if self.skip_events.contains(&(chain_id, envelope.cursor.seq)) {
+            tracing::warn!(
+                chain_id,
+                seq = envelope.cursor.seq,
+                "skipping event named by the operator; it is NOT applied"
+            );
+        } else if !self.apply_or_halt(&envelope).await {
             return false;
         }
 
@@ -576,7 +597,9 @@ impl<
                     chain_id = envelope.chain_id,
                     seq = envelope.cursor.seq,
                     error = %e,
-                    "failed to apply event; halting so the durable cursor cannot advance past it"
+                    "failed to apply event; halting so the durable cursor cannot advance past it \
+                     (after handling the deposit by hand, list it in EVENT_SKIP_EVENTS as \
+                     chain_id:seq to move past it)"
                 );
                 self.halt(envelope.chain_id, envelope.cursor.seq);
                 false
@@ -775,4 +798,50 @@ pub enum EventConsumerError {
 
     #[error("invalid data: {0}")]
     InvalidData(String),
+}
+
+/// Parse `chain_id:seq[,chain_id:seq...]`. A malformed entry is an error
+/// rather than ignored: a typo that silently skipped nothing would leave the
+/// operator believing the poison event was handled.
+pub fn parse_skip_events(raw: &str) -> Result<Vec<(u64, i64)>, String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (chain, seq) = part
+                .split_once(':')
+                .ok_or_else(|| format!("expected chain_id:seq, got {part:?}"))?;
+            let chain = chain
+                .trim()
+                .parse::<u64>()
+                .map_err(|e| format!("bad chain_id in {part:?}: {e}"))?;
+            let seq = seq
+                .trim()
+                .parse::<i64>()
+                .map_err(|e| format!("bad seq in {part:?}: {e}"))?;
+            Ok((chain, seq))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod skip_events_tests {
+    use super::parse_skip_events;
+
+    #[test]
+    fn parses_pairs_and_ignores_blanks() {
+        assert_eq!(
+            parse_skip_events(" 8453:12, 1:5 ,").unwrap(),
+            vec![(8453, 12), (1, 5)]
+        );
+        assert!(parse_skip_events("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_entries() {
+        assert!(parse_skip_events("8453").is_err());
+        assert!(parse_skip_events("x:1").is_err());
+        assert!(parse_skip_events("1:y").is_err());
+    }
 }

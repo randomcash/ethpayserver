@@ -225,3 +225,66 @@ async fn a_failed_cursor_commit_stops_a_later_envelope_on_the_same_chain_from_co
         .unwrap();
     assert_eq!(cursors.get(&1), None);
 }
+
+/// The operator's way past a poison event: naming its `(chain_id, seq)` lets
+/// the consumer commit past it and carry on, while the same event unnamed
+/// still halts (previous tests). Only the named envelope is skipped.
+#[tokio::test]
+async fn a_named_poison_event_is_skipped_and_the_next_one_applies() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let invoice = InvoiceId::new();
+    create_test_invoice(&ds, &invoice, StoreId::new()).await;
+
+    // seq 0: malformed, can never apply. seq 1: valid.
+    bridge
+        .publish(&make_payment(
+            &invoice,
+            1,
+            B256::from([9u8; 32]),
+            false,
+            None,
+        ))
+        .await
+        .unwrap();
+    bridge
+        .publish(&make_payment(
+            &invoice,
+            2,
+            B256::from([2u8; 32]),
+            true,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let failures: Arc<Mutex<Vec<(u64, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = failures.clone();
+    let consumer = create_test_consumer(ds.clone(), bridge.clone())
+        .with_skipped_events([(1, 0)])
+        .with_apply_failure_hook(Arc::new(move |chain_id, seq| {
+            recorded.lock().unwrap().push((chain_id, seq));
+        }));
+    let task = tokio::spawn(consumer.run());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let cursors = ChainCursorReader::chain_cursors(&*ds, ADAPTER_ID)
+                .await
+                .unwrap();
+            if cursors.get(&1).is_some_and(|c| c.seq == 1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cursor never advanced past the skipped event");
+    task.abort();
+
+    assert!(failures.lock().unwrap().is_empty());
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice)
+        .await
+        .unwrap();
+    assert_eq!(payments.len(), 1, "only the valid event is applied");
+}
