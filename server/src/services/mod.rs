@@ -6,6 +6,7 @@ pub mod event_consumer;
 pub mod evm_monitor;
 pub mod invoice_cleanup;
 pub mod plugins;
+pub mod watch_reconciler;
 pub mod watch_retry;
 pub mod webhook;
 pub mod webhook_outbox_drain;
@@ -23,6 +24,9 @@ pub use plugins::{
     PluginStorage, PluginStorageError, PluginWasmError, Viewer, account_closed_observers,
     host_version, invoice_creation_filters, load_installed_plugins, own_store_payment_reporting,
     payment_observers, report_boot,
+};
+pub use watch_reconciler::{
+    WatchReconciliationCounts, WatchReconciliationError, reconcile_watches,
 };
 pub use watch_retry::{WatchRetryConfig, WatchRetryService};
 pub use webhook::{WebhookConfig, WebhookService, WebhookSink};

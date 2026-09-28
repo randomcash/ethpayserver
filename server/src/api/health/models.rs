@@ -6,6 +6,41 @@ pub use api_types::{
 };
 use evm::monitor::{ChainHealth, SourceStatus};
 
+/// Comparison between the monitor's actual Redis watch set and what
+/// Postgres's `expected_watched_addresses` view says should be watched.
+///
+/// Not part of `api_types::DeepHealthResponse`: that type is pinned by
+/// revision in `payserver-commons`, and a new field there needs its own
+/// merge-then-bump-pin cycle before this repo can see it. `deep_health`
+/// serializes this alongside the shared response's fields instead of
+/// waiting on that cycle - see its handler for how.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct WatchReconciliationHealth {
+    /// "ok" once the comparison ran, "unknown" if it could not - no monitor
+    /// configured, or the comparison itself failed or timed out.
+    pub status: String,
+    /// Watched in Redis, absent from the expected set: a deleted or
+    /// resolved invoice the monitor is still polling.
+    pub stale_watches: usize,
+    /// In the expected set, not watched in Redis: a live invoice nobody is
+    /// watching. Worse than a stale watch - a real payment to it would go
+    /// uncredited.
+    pub missed_watches: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl WatchReconciliationHealth {
+    pub(super) fn unknown(reason: impl Into<String>) -> Self {
+        Self {
+            status: "unknown".to_string(),
+            stale_watches: 0,
+            missed_watches: 0,
+            error: Some(reason.into()),
+        }
+    }
+}
+
 /// Build the wire shape from the monitor's per-chain health.
 ///
 /// A free function rather than a `From` impl: `ChainHealth` belongs to `evm`

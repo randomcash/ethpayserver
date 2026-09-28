@@ -39,6 +39,7 @@ pub mod config;
 pub mod metrics;
 pub mod services;
 pub mod state;
+pub mod tracing_init;
 
 pub use config::Config;
 pub use services::{

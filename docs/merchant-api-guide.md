@@ -69,12 +69,11 @@ places a plausible-looking guess is wrong.
     send a pre-converted (smallest-unit) value as the request `amount`; a
     same-asset invoice runs it through `convert_human_to_smallest_unit`
     server-side (`server/src/api/invoices/crud.rs`). The upstream doc comment
-    on `CreateInvoiceRequest.amount` in `payserver-commons` was
-    self-contradictory on this exact point; it is fixed at the source
-    (`api-types/src/invoice.rs`), and the generated spec will carry the
-    correct description once this repo's commons pin moves to that revision.
-    Until then, trust this page and the linked server code over the spec's
-    field description for this one field.
+    on `CreateInvoiceRequest.amount` in `payserver-commons` used to be
+    self-contradictory on this exact point; it was fixed at the source
+    (`api-types/src/invoice.rs`), and this repo's commons pin already carries
+    that revision, so `GET /api-docs/openapi.json`'s field description agrees
+    with this page.
   - `PaymentOption.amount`, `Payment.amount`, and refund/payout `amount`
     fields are integer strings in the asset's **smallest unit** (wei for
     ETH, the ERC20's own base unit for a token) — divide by `10^decimals` to

@@ -421,7 +421,8 @@ fn apply_log_level_gate(
     }
 }
 
-/// Wraps [`sentry_tracing::default_event_filter`], additionally dropping the
+/// Wraps [`sentry_event_filter`] (which already downgrades
+/// `alloy_transport_ws` noise to a breadcrumb), additionally dropping the
 /// `Log` flag for any record more verbose than `min_level` — the knob behind
 /// [`resolve_sentry_log_level`]. Breadcrumbs and error events are untouched:
 /// this only changes whether a record also becomes a Sentry structured log.
@@ -526,7 +527,8 @@ pub fn sentry_event_filter(
     move |metadata| {
         let filter = log_gate(metadata);
         let demote = *metadata.level() == tracing::Level::ERROR
-            && (metadata.target().starts_with("alloy_transport_ws")
+            && (metadata.target() == "alloy_transport_ws"
+                || metadata.target().starts_with("alloy_transport_ws::")
                 || metadata.target() == "server::services::webhook::merchant_delivery_failed");
         if demote {
             (filter - sentry_tracing::EventFilter::Event) | sentry_tracing::EventFilter::Breadcrumb
@@ -564,6 +566,8 @@ pub fn report_reporting_status(dsn_configured: bool, environment: &str) -> anyho
     Ok(())
 }
 
+#[cfg(test)]
+mod alloy_filter_tests;
 #[cfg(test)]
 mod reporting_tests;
 #[cfg(test)]
