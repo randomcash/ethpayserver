@@ -122,7 +122,7 @@ pub trait HostInvoiceIssuer: Send + Sync {
 /// which `host_calls::PluginCalls::invoice_create` reads from, so a wasm
 /// plugin's `invoice_create` import should land here rather than on a stub.
 /// That publish call (`plugin_issuer.publish`, guarded on a configured
-/// billing store) has been in `server/src/bin/server.rs` since before this
+/// operator store) has been in `server/src/bin/server.rs` since before this
 /// comment was corrected, so the wiring is pre-existing rather than aspirational.
 ///
 /// No test in this repo boots the real binary and drives a compiled wasm
