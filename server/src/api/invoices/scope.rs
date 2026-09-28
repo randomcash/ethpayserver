@@ -137,3 +137,108 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use auth::Policies;
+
+    fn store(n: u8) -> StoreId {
+        StoreId(uuid::Uuid::from_bytes([n; 16]))
+    }
+
+    /// The case the `Membership` branch exists for, and the one a listing
+    /// query takes when no `store_id` is given: the owner belongs to two
+    /// stores, the key is scoped to one of them, and only that one may be
+    /// read. Without the `.filter(..)` this returns both, which is a
+    /// cross-store read through a key that was deliberately narrowed.
+    #[test]
+    fn a_store_scoped_key_narrows_membership_to_the_store_it_names() {
+        let (a, b) = (store(1), store(2));
+        let key = [format!("{}:{}", Policies::STORE_VIEW_INVOICES, a.0)];
+
+        let got = narrow_scope_by_key(
+            StoreScope::Membership(vec![a, b]),
+            Some(&key),
+            Policies::STORE_VIEW_INVOICES,
+        )
+        .expect("membership never refuses, it filters");
+
+        assert_eq!(
+            got,
+            StoreScope::Membership(vec![a]),
+            "a key scoped to one store must not read the owner's other stores"
+        );
+    }
+
+    /// A key scoped to a store its owner is not a member of narrows to
+    /// nothing, rather than falling back to the owner's full membership.
+    /// `Membership(vec![])` matches no store, which is the point.
+    #[test]
+    fn a_key_scoped_to_an_unrelated_store_narrows_membership_to_nothing() {
+        let (a, b, other) = (store(1), store(2), store(9));
+        let key = [format!("{}:{}", Policies::STORE_VIEW_INVOICES, other.0)];
+
+        let got = narrow_scope_by_key(
+            StoreScope::Membership(vec![a, b]),
+            Some(&key),
+            Policies::STORE_VIEW_INVOICES,
+        )
+        .expect("membership never refuses, it filters");
+
+        assert_eq!(got, StoreScope::Membership(vec![]));
+    }
+
+    /// A key with no scope at all inherits the owner's reach, so membership
+    /// passes through untouched. This is the pre-scoping behaviour every key
+    /// issued before this feature still relies on.
+    #[test]
+    fn an_unscoped_key_leaves_membership_untouched() {
+        let (a, b) = (store(1), store(2));
+
+        let got = narrow_scope_by_key(
+            StoreScope::Membership(vec![a, b]),
+            None,
+            Policies::STORE_VIEW_INVOICES,
+        )
+        .expect("membership never refuses, it filters");
+
+        assert_eq!(got, StoreScope::Membership(vec![a, b]));
+    }
+
+    /// A grant written without a store suffix means "on every store the owner
+    /// can reach", so it also leaves membership untouched. Distinguishing this
+    /// from the store-suffixed form above is the whole of
+    /// `key_grants_store_permission`'s parsing.
+    #[test]
+    fn a_bare_policy_grant_leaves_membership_untouched() {
+        let (a, b) = (store(1), store(2));
+        let key = [Policies::STORE_VIEW_INVOICES.to_string()];
+
+        let got = narrow_scope_by_key(
+            StoreScope::Membership(vec![a, b]),
+            Some(&key),
+            Policies::STORE_VIEW_INVOICES,
+        )
+        .expect("membership never refuses, it filters");
+
+        assert_eq!(got, StoreScope::Membership(vec![a, b]));
+    }
+
+    /// A key scoped to a *different* policy on the right store does not grant
+    /// this one - otherwise any scope would collapse into every scope.
+    #[test]
+    fn a_key_scoped_to_another_policy_narrows_membership_to_nothing() {
+        let (a, b) = (store(1), store(2));
+        let key = [format!("{}:{}", Policies::STORE_MODIFY_SETTINGS, a.0)];
+
+        let got = narrow_scope_by_key(
+            StoreScope::Membership(vec![a, b]),
+            Some(&key),
+            Policies::STORE_VIEW_INVOICES,
+        )
+        .expect("membership never refuses, it filters");
+
+        assert_eq!(got, StoreScope::Membership(vec![]));
+    }
+}
