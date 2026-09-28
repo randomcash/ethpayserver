@@ -72,6 +72,20 @@ fn permanent_failure_is_merchant_unreachable(error: &WebhookError) -> bool {
 /// second one showed up", not to hold a history.
 const RECENT_UNREACHABLE_CAPACITY: usize = 8;
 
+/// How many consecutive demotions the isolation check may grant before
+/// paging anyway, regardless of whether a second store webhook ever shows up.
+///
+/// The isolation window can only ever disagree with itself by naming a
+/// second merchant; it has no way to notice payserver's own egress breaking
+/// while only one merchant happens to be generating traffic — a plausible
+/// case on testnet, and for any merchant with disproportionate volume on
+/// mainnet. Left unbounded, that failure mode never repages once the window
+/// fills with one id. This forces a page every `MAX_CONSECUTIVE_DEMOTIONS`th
+/// time regardless, so a persistent failure — merchant-side or
+/// payserver-side — surfaces again on its own instead of staying a
+/// breadcrumb forever.
+const MAX_CONSECUTIVE_DEMOTIONS: u32 = 20;
+
 /// Whether every store webhook in `recent` is the same one.
 ///
 /// `WebhookError::Unreachable` covers a DNS failure, a refused connection,
@@ -164,6 +178,11 @@ pub struct WebhookService<D: WebhookDataService> {
     /// time (`run()` spawns a single loop), so this is never contended; the
     /// mutex exists for `Send`/`Sync`, not for real concurrency.
     recent_unreachable: Mutex<VecDeque<uuid::Uuid>>,
+    /// Count of consecutive demotions the isolation check has granted since
+    /// the last page (or the last time a second merchant broke isolation).
+    ///
+    /// See `MAX_CONSECUTIVE_DEMOTIONS` for why this exists.
+    demotion_streak: Mutex<u32>,
 }
 
 impl<D: WebhookDataService + 'static> WebhookService<D> {
@@ -199,6 +218,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             config,
             shutting_down: AtomicBool::new(false),
             recent_unreachable: Mutex::new(VecDeque::new()),
+            demotion_streak: Mutex::new(0),
         })
     }
 
@@ -465,11 +485,14 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
     }
 
     /// Record a permanently-failed-as-`Unreachable` delivery for
-    /// `job.store_webhook_id` and report whether the recent run of these
-    /// still looks isolated to that one store webhook.
+    /// `job.store_webhook_id` and report whether it may still be demoted.
     ///
-    /// See `recent_unreachable_are_one_merchant` for what "isolated" means
-    /// and why it's the question that decides whether this can be demoted.
+    /// See `recent_unreachable_are_one_merchant` for what "isolated" means,
+    /// and `MAX_CONSECUTIVE_DEMOTIONS` for why isolation alone isn't the
+    /// whole answer: a second merchant breaking isolation resets the streak
+    /// to zero (there's nothing to cap), and hitting the cap while still
+    /// isolated pages once and resets the streak, so a persistent failure
+    /// pages again on its own instead of staying demoted forever.
     fn record_unreachable_and_check_isolated(&self, store_webhook_id: uuid::Uuid) -> bool {
         let mut recent = self
             .recent_unreachable
@@ -479,7 +502,20 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
         while recent.len() > RECENT_UNREACHABLE_CAPACITY {
             recent.pop_front();
         }
-        recent_unreachable_are_one_merchant(&recent)
+        let isolated = recent_unreachable_are_one_merchant(&recent);
+        drop(recent);
+
+        let mut streak = self
+            .demotion_streak
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if isolated && *streak < MAX_CONSECUTIVE_DEMOTIONS {
+            *streak += 1;
+            true
+        } else {
+            *streak = 0;
+            false
+        }
     }
 
     /// Log a permanently-failed delivery's final `tracing::error!`, choosing
@@ -1214,6 +1250,31 @@ mod tests {
         assert!(
             service.record_unreachable_and_check_isolated(merchant_a),
             "a stale entry from outside the capacity window must not keep blocking isolation"
+        );
+    }
+
+    /// The isolation window alone cannot tell "one merchant is down" from
+    /// "payserver's own egress is down but only this merchant is generating
+    /// traffic" — both look identical once the window fills with one id.
+    /// Without a backstop, a persistent failure of either kind would be
+    /// demoted forever the moment no second merchant ever shows up. This
+    /// proves it pages again on its own well before that.
+    #[test]
+    fn record_unreachable_and_check_isolated_pages_again_when_persistent() {
+        let service = WebhookService::new(
+            Arc::new(data_service::InMemoryDataService::new()),
+            "redis://this-host-does-not-resolve.invalid:6379",
+            WebhookConfig::default(),
+        )
+        .expect("construct service");
+        let merchant_a = uuid::Uuid::new_v4();
+
+        let repaged = (0..=MAX_CONSECUTIVE_DEMOTIONS)
+            .any(|_| !service.record_unreachable_and_check_isolated(merchant_a));
+
+        assert!(
+            repaged,
+            "a single merchant failing forever must still page again eventually, not go dark permanently"
         );
     }
 
