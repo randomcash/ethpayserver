@@ -15,12 +15,26 @@ use crate::error::{EvmError, EvmResult};
 use crate::monitor::events::{MonitorCommand, MonitorEvent};
 use async_stream::stream;
 use async_trait::async_trait;
+use rand::Rng;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::error;
+
+/// Mint a fresh epoch identity.
+///
+/// Mirrors `RedisBridge::random_epoch` (duplicated rather than shared: that
+/// one lives behind the `redis` feature gate, this bridge does not). A fresh
+/// `MemoryBridge` is exactly the "single-process deployment restarted" case
+/// the epoch mechanism exists to catch - a fixed starting value would
+/// silently match whatever epoch a prior process instance had persisted to
+/// `chain_cursors`, so a resume would proceed against a brand-new, empty
+/// outbox as if it were a continuation of the old one.
+fn random_epoch() -> i64 {
+    rand::rng().random_range(1..=i64::MAX)
+}
 
 /// The event outbox: every retained published envelope, in publish order.
 ///
@@ -82,7 +96,7 @@ impl MemoryBridge {
         let (commands_tx, _) = broadcast::channel(commands_capacity);
         Self {
             outbox: Arc::new(Mutex::new(Outbox {
-                epoch: 1,
+                epoch: random_epoch(),
                 entries: VecDeque::new(),
                 next_seq: 0,
                 max_retained,

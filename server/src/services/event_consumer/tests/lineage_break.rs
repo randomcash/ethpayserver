@@ -125,3 +125,69 @@ async fn an_outbox_lineage_break_re_arms_watch_retry_and_still_credits_the_next_
     assert_eq!(payments.len(), 1);
     assert_eq!(payments[0].amount, "500000000000000000");
 }
+
+#[tokio::test]
+async fn a_genuinely_fresh_memory_bridge_after_a_restart_is_treated_as_a_lineage_break() {
+    // The other two tests in this file simulate a restart with
+    // `bridge.clone()` - the same `Arc<MemoryBridge>`, same outbox object,
+    // either untouched or explicitly `bump_epoch`'d. A single-process
+    // deployment restart (a crash, a redeploy) does not clone the old
+    // bridge; it constructs a brand new one with an empty outbox. Before
+    // `MemoryBridge` minted a random epoch, a fresh instance always started
+    // at the same fixed value, so this case - the one the "single-process
+    // deployment" topology in the module doc actually describes - could
+    // reach `reconcile_cursors` with a false epoch match and try to resume
+    // a nonzero seq out of a zero-length outbox.
+    let ds = Arc::new(InMemoryDataService::new());
+    let store_id = StoreId::new();
+
+    let bridge1 = Arc::new(MemoryBridge::new());
+    let warm_invoice_id = InvoiceId::new();
+    create_test_invoice(&ds, &warm_invoice_id, store_id).await;
+    bridge1
+        .publish(&make_payment_detected(
+            &warm_invoice_id,
+            1,
+            B256::from([1u8; 32]),
+        ))
+        .await
+        .unwrap();
+
+    let consumer1 = create_test_consumer(ds.clone(), bridge1.clone());
+    let task1 = tokio::spawn(consumer1.run());
+    wait_for_payment(&ds, &warm_invoice_id).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    task1.abort();
+    let _ = task1.await;
+
+    // A real restart: a new bridge, not the old one bumped or cloned.
+    let bridge2 = Arc::new(MemoryBridge::new());
+
+    let invoice_id = InvoiceId::new();
+    create_test_invoice(&ds, &invoice_id, store_id).await;
+    bridge2
+        .publish(&make_payment_detected(
+            &invoice_id,
+            500_000_000_000_000_000,
+            B256::from([2u8; 32]),
+        ))
+        .await
+        .unwrap();
+
+    let consumer2 = create_test_consumer(ds.clone(), bridge2.clone());
+    let task2 = tokio::spawn(consumer2.run());
+    wait_for_payment(&ds, &invoice_id).await;
+    task2.abort();
+    let _ = task2.await;
+
+    assert!(
+        ds.watch_reset_calls() > 0,
+        "a fresh outbox after a restart must be treated as a lineage break, not a silent resume"
+    );
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert_eq!(payments.len(), 1);
+    assert_eq!(payments[0].amount, "500000000000000000");
+}
