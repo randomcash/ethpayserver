@@ -4,7 +4,8 @@
 //! carry secrets or customer data: wallet/private keys, mnemonics, API keys,
 //! JWTs, bearer tokens, emails, on-chain addresses/hashes, HTTP request bodies,
 //! or per-user identity. [`scrub_event`] is installed as the Sentry
-//! `before_send` hook in every binary that initialises Sentry, and
+//! `before_send` hook in every binary that initialises Sentry, [`scrub_log`]
+//! as `before_send_log` for the separate structured-logs pipeline, and
 //! [`redact_secrets`] redacts secret-shaped substrings from free-text fields.
 //!
 //! This lives in `evm` (rather than being duplicated per binary) so the
@@ -27,7 +28,7 @@ use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
-use sentry::protocol::{Context, Event, Map, Value};
+use sentry::protocol::{Context, Event, Log, Map, Value};
 
 /// Ordered `(pattern, replacement)` redaction rules applied to every free-text
 /// field. Compiled once and reused for the life of the process.
@@ -380,6 +381,27 @@ impl sentry::TransportFactory for ScrubbingTransportFactory {
     }
 }
 
+/// Sentry `before_send_log` hook: strip PII/secrets before a structured log
+/// record leaves the process.
+///
+/// Structured logs are a separate Sentry pipeline from events/breadcrumbs —
+/// `before_send` above never sees them — so without this hook a log line
+/// that interpolated a mnemonic, a JWT, or an on-chain address would ship
+/// unredacted. Mirrors [`scrub_event`]: `body` is the free-text message,
+/// `attributes` is the structured-data map, redacted the same way `extra` is.
+#[must_use]
+pub fn scrub_log(mut log: Log) -> Option<Log> {
+    log.body = redact_secrets(&log.body);
+    for (key, attribute) in log.attributes.iter_mut() {
+        if is_sensitive_key(key) {
+            attribute.0 = Value::String("[redacted]".to_string());
+        } else {
+            redact_value(&mut attribute.0);
+        }
+    }
+    Some(log)
+}
+
 /// Whether error reporting is on, and — when it is off — whether that is
 /// acceptable for the environment reporting failed to catch this itself once:
 /// a disabled integration looks identical to a working one unless something
@@ -478,31 +500,12 @@ pub fn resolve_traces_sample_rate() -> f32 {
     }
 }
 
-/// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
-/// `before_send` hook, [`ScrubbingTransportFactory`] as the transport (so
-/// performance transactions get scrubbed too), and tagging events with
-/// [`resolve_environment`]. Shared by the `server` and `evmmonitor` binaries
-/// so the mainnet boot-gate and the PII scrubber live in exactly one place
-/// each, instead of two copies that can quietly diverge.
-///
-/// `traces_sample_rate` is one of those shared settings, so both binaries
-/// sample once an environment opts in — but the route-pattern transaction
-/// naming (`with_sentry_performance_tracing` in `server/src/api/mod.rs`) is
-/// only needed by `server`. `evmmonitor`'s `[[bin]]` in `evm/Cargo.toml`
-/// requires `monitor-bin`, a feature list that does not include `api`, so
-/// `axum` is never compiled into that binary: it has no `Router`, no
-/// `.route()`, no listener, nothing for `sentry-tower` to name transactions
-/// from in the first place. It talks to `server` over Redis pub/sub instead
-/// (see `evm/src/bin/evmmonitor/health.rs`). Sampling `evmmonitor` cannot
-/// reproduce the per-id-transaction cardinality problem this ticket exists to
-/// close, because there is no HTTP surface for a transaction name to be
-/// per-id about.
-///
-/// Build the `ClientOptions` for [`init_sentry`], split out so a test can
-/// assert `traces_sample_rate` and the scrubbing transport both actually land
-/// on the struct `sentry::init` receives, rather than each being proven only
-/// in isolation.
-fn build_client_options(
+/// Builds the `ClientOptions` [`init_sentry`] hands to `sentry::init`. Split
+/// out so a test can construct the exact options production uses — via
+/// `sentry::test::with_captured_envelopes_options` — instead of hand-rolling
+/// a lookalike `ClientOptions` that could quietly drift from what actually
+/// ships.
+fn client_options(
     dsn: Option<sentry::types::Dsn>,
     release: Option<Cow<'static, str>>,
     environment: String,
@@ -519,10 +522,63 @@ fn build_client_options(
         // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
         // API keys, emails and on-chain addresses before events leave the host.
         before_send: Some(Arc::new(scrub_event)),
-        // `before_send` doesn't run for performance transactions in this SDK
-        // version (see `scrub_transaction`), so the transport itself scrubs
-        // them instead of leaving the "mandatory" scrubber half-applied now
-        // that traces_sample_rate can be nonzero.
+        // Structured logs (see `sentry_log_event_filter` for which levels
+        // actually reach this). Same mandatory scrubber, via the separate
+        // hook logs go through.
+        //
+        // Load-bearing on both this crate's current 0.47 pin and on 0.49 —
+        // not vestigial on either. `enable_logs` is deprecated starting in
+        // sentry 0.49, with a note that it still governs automatic capture
+        // by integrations — `sentry_tracing::layer()`, which is what
+        // actually gets a `tracing` event into an envelope here, is exactly
+        // that case.
+        //
+        // `disabling_enable_logs_suppresses_automatic_integration_capture`
+        // in `capture_tests` pins this down on 0.47 as a real, running
+        // assertion rather than a claim: it takes this exact
+        // `client_options()` output, flips only this field to `false`, and
+        // asserts no structured log reaches the envelope. That test passes
+        // today, on 0.47.
+        //
+        // The same ablation was then reproduced directly, in this tree,
+        // against a real 0.49.3 build rather than argued from reading a
+        // changelog: bump both `sentry` and `sentry-tracing` in
+        // `evm/Cargo.toml` to "0.49.3", `cargo update -p sentry -p
+        // sentry-tracing`, then `cargo test -p evm --lib --features
+        // sentry-scrub capture_tests` (this file's `client_options` needs
+        // its struct-literal construction changed to the `let mut opts =
+        // ...; opts.field = ...;` form first — 0.49's `ClientOptions`
+        // became `#[non_exhaustive]`, so the literal no longer compiles
+        // outside the defining crate; that change is not part of this
+        // pin, it belongs to whichever PR actually moves it). With
+        // `enable_logs: true` all four tests in `capture_tests` pass
+        // exactly as on 0.47; flipping only that field to `false`
+        // reproduces the identical failure — the same three
+        // "expected at least one structured log to reach the envelope"
+        // panics, `disabling_enable_logs_suppresses_automatic_integration_capture`
+        // the lone survivor. So the deprecation note's claim holds for our
+        // configuration on the version it will actually describe: the
+        // option is not vestigial at 0.49 either, and it must stay under
+        // `#[allow(deprecated)]` once the pin itself moves, rather than
+        // being dropped or having the lint suppressed as if the field no
+        // longer mattered. This recipe is independent of any particular
+        // commit and can be rerun against whatever version the next SDK
+        // bump proposes.
+        //
+        // `capture_tests` already runs on every push, not just on demand:
+        // `server/Cargo.toml`'s `evm = { path = "../evm", features = ["api",
+        // "redis", "sentry-scrub"] }` line lists `sentry-scrub` as a normal,
+        // non-optional feature, so cargo's feature unification turns it on
+        // for the whole workspace build, and `.github/workflows/ci.yml`'s
+        // `test` job runs `cargo nextest run --workspace --no-fail-fast -j
+        // 2` — that exact line already compiles and executes this test on
+        // every push.
+        enable_logs: true,
+        before_send_log: Some(Arc::new(scrub_log)),
+        // `before_send` does not run for performance transactions in this
+        // SDK version (see `scrub_transaction`), so the transport scrubs
+        // them instead - otherwise the mandatory scrubber is only half
+        // applied once `traces_sample_rate` can be nonzero.
         transport: Some(Arc::new(ScrubbingTransportFactory)),
         ..Default::default()
     }
@@ -537,13 +593,169 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
         .and_then(|s| s.parse().ok());
     let dsn_configured = dsn.is_some();
     let environment = resolve_environment();
-    let guard = sentry::init(build_client_options(
+    let guard = sentry::init(client_options(
         dsn,
         release,
         environment.clone(),
         resolve_traces_sample_rate(),
     ));
     (guard, dsn_configured, environment)
+}
+
+/// Env var controlling which tracing levels become Sentry *structured logs*,
+/// independently of `LOG_LEVEL` (which controls what the process emits at
+/// all, e.g. to stdout/Loki). Unset or unparsable resolves to `WARN`, the
+/// stricter option, so a deploy that forgets to set this does not start
+/// billing/shipping `mainnet` INFO logs to a third party by default; testnet
+/// sets this to `info` explicitly to get the noisier feed.
+#[must_use]
+pub fn resolve_sentry_log_level() -> tracing::Level {
+    match std::env::var("SENTRY_LOG_LEVEL") {
+        Err(_) => tracing::Level::WARN,
+        Ok(value) => value.parse().unwrap_or_else(|_| {
+            // Unlike an unset var, this is a misconfiguration: someone set
+            // the knob and got it wrong, so the fallback to WARN should be
+            // visible rather than indistinguishable from "correctly set to
+            // WARN".
+            tracing::warn!(
+                value = %value,
+                "SENTRY_LOG_LEVEL is set but not a valid tracing level; defaulting to WARN"
+            );
+            tracing::Level::WARN
+        }),
+    }
+}
+
+/// Drops the `Log` flag from `filter` when `event_level` is more verbose than
+/// `min_level`. Split out from [`sentry_log_event_filter`] so the threshold
+/// logic is testable without constructing a real `tracing::Metadata`.
+fn apply_log_level_gate(
+    filter: sentry_tracing::EventFilter,
+    event_level: tracing::Level,
+    min_level: tracing::Level,
+) -> sentry_tracing::EventFilter {
+    if event_level > min_level {
+        filter.difference(sentry_tracing::EventFilter::Log)
+    } else {
+        filter
+    }
+}
+
+/// Wraps [`sentry_event_filter`] (which already downgrades
+/// `alloy_transport_ws` noise to a breadcrumb), additionally dropping the
+/// `Log` flag for any record more verbose than `min_level` — the knob behind
+/// [`resolve_sentry_log_level`]. Breadcrumbs and error events are untouched:
+/// this only changes whether a record also becomes a Sentry structured log.
+pub fn sentry_log_event_filter(
+    min_level: tracing::Level,
+) -> impl Fn(&tracing::Metadata<'_>) -> sentry_tracing::EventFilter + Send + Sync + 'static {
+    move |metadata| {
+        apply_log_level_gate(
+            sentry_tracing::default_event_filter(metadata),
+            *metadata.level(),
+            min_level,
+        )
+    }
+}
+
+/// Sentry event filter for the `sentry_tracing` layer installed by the
+/// `server` and `evmmonitor` binaries.
+///
+/// `alloy_transport_ws` logs at `error!` for every ordinary WebSocket hiccup a
+/// long-lived RPC connection sees - a proxy resetting an idle socket, a
+/// missed keepalive pong - and `sentry_tracing`'s default filter turns any
+/// `error!` into a full Sentry event regardless of which crate logged it. So
+/// every blip the library logs was paging as if nothing were handling it.
+/// Built on top of [`sentry_log_event_filter`] rather than
+/// `default_event_filter` directly, so the WS-target demotion and the
+/// `SENTRY_LOG_LEVEL` gate compose through one filter instead of the two
+/// binaries needing to install two separate `event_filter` layers.
+///
+/// This filter only ever needs to swallow an *isolated* blip, never a
+/// persistent failure, because it is not the backstop for a connection that
+/// stays down: `ChainMonitor::resubscribe_if_stalled`
+/// (`evm/src/monitor/chain/lifecycle.rs`) already watches for that on its own
+/// clock, independent of anything `alloy_transport_ws` or `alloy_pubsub` logs
+/// or doesn't log. It resubscribes and logs its own `error!` under
+/// `evm::monitor::chain::lifecycle` - a target this filter never touches -
+/// once a block stream has gone silent for `stall_timeout`. So a transient
+/// reset stays a breadcrumb, and a connection that never recovers pages
+/// within one stall window regardless of what the WS layer's own retry logic
+/// happens to be doing underneath it. `our_own_errors_still_page` covers that
+/// target generically, and `evm/tests/stalled_stream_still_pages.rs` drives a
+/// real stall through a real `ChainMonitor` to confirm
+/// `resubscribe_if_stalled`'s own `error!` resolves to a paging event, not
+/// just a hand-typed target string.
+///
+/// An earlier version of this filter argued instead that `alloy_pubsub`'s own
+/// service loop (`alloy_pubsub::service`) always logs a paging `error!` when
+/// *it* gives up retrying, and used that as the backstop. That turned out not
+/// to hold in general: `evm/tests/ws_pubsub_retry_escalation.rs` runs the
+/// real `alloy_pubsub`/`alloy_transport_ws` retry loop (pinned to `alloy =
+/// "1.0"`, resolved in `Cargo.lock` to 1.8.3) against a WS server that
+/// completes the handshake and then resets every connection, including
+/// retries, and `alloy_pubsub::service` never logs at all - it just
+/// reconnects, dies, and reconnects again, forever. Traced against that
+/// pinned source: `reconnect_with_retries`
+/// (`alloy-pubsub-1.8.3/src/service.rs:195`) only counts a `reconnect()` call
+/// as a failed attempt if establishing the connection itself errors; a
+/// connection that establishes fine and then dies immediately after counts as
+/// a *successful* reconnect, so `max_retries` is never approached and the
+/// give-up log at `service.rs:205` is never reached. That is a real gap in
+/// `alloy_pubsub`, not a defect in this filter - it just means this filter
+/// cannot lean on it, which is why the actual backstop is our own
+/// `resubscribe_if_stalled` instead.
+///
+/// `alloy_pubsub_giving_up_still_pages` documents the narrower case where
+/// `alloy_pubsub`'s give-up log does still apply - the connection attempt
+/// itself fails outright (DNS, refused, TLS) rather than flapping - which
+/// still pages correctly since this filter never touches that target either.
+/// It is not relied on as the general backstop.
+///
+/// Only `error!`-level `alloy_transport_ws` events are demoted: the noise
+/// this exists to quiet is specifically the `error!` call sites in
+/// `alloy_transport_ws::native`, not `debug!`/`trace!` chatter the same
+/// target might log, so this filter does not touch those.
+///
+/// `server::services::webhook::merchant_delivery_failed` is demoted the same
+/// way, for an unrelated reason: it's logged only when a webhook job
+/// exhausts every retry because the request never reached the merchant's
+/// endpoint at all (`WebhookError::Unreachable` - DNS, refused, or timed
+/// out) *and* the caller has already checked that failure isn't isolated to
+/// payserver's own egress (see
+/// `server::services::webhook::service::log_permanent_failure` and
+/// `recent_unreachable_are_one_merchant` for that check - a DNS/refused/
+/// timeout failure alone can't tell "one merchant is down" from "we can't
+/// reach anyone", so this target is only ever chosen once the caller has
+/// ruled the latter out). The demoted case is already fully captured by the
+/// `webhook_delivery_status="permanent_failed"` metric and the
+/// `webhook_deliveries` table row the same call site writes. A non-success
+/// response, a payload that failed to serialize, or an `Unreachable` failure
+/// that isn't isolated to one store webhook keeps the module's default
+/// target instead (see
+/// `server::services::webhook::service::permanent_failure_is_merchant_unreachable`), since
+/// each of those can reflect a fault in our own signing, request
+/// construction, or network egress just as easily as one in the merchant's
+/// server, and those must keep paging the same as `log_process_error`'s
+/// "Error processing webhook job". Paging on-call for the genuinely-isolated
+/// case teaches the same lesson as the WS noise above — ignore Sentry errors
+/// — for a condition no payserver engineer can act on.
+pub fn sentry_event_filter(
+    min_level: tracing::Level,
+) -> impl Fn(&tracing::Metadata<'_>) -> sentry_tracing::EventFilter + Send + Sync + 'static {
+    let log_gate = sentry_log_event_filter(min_level);
+    move |metadata| {
+        let filter = log_gate(metadata);
+        let demote = *metadata.level() == tracing::Level::ERROR
+            && (metadata.target() == "alloy_transport_ws"
+                || metadata.target().starts_with("alloy_transport_ws::")
+                || metadata.target() == "server::services::webhook::merchant_delivery_failed");
+        if demote {
+            (filter - sentry_tracing::EventFilter::Event) | sentry_tracing::EventFilter::Breadcrumb
+        } else {
+            filter
+        }
+    }
 }
 
 /// Log whether error reporting is on, at INFO, always — never the DSN itself
@@ -575,650 +787,8 @@ pub fn report_reporting_status(dsn_configured: bool, environment: &str) -> anyho
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Restores an env var to its pre-test value on drop, so a mid-test
-    /// panic (an assertion failing partway through a multi-step test) can't
-    /// leave the var set for every later test in the same process — env vars
-    /// are process-global and `cargo test`/`nextest` run tests in threads of
-    /// the same process, not one process per test.
-    struct RestoreEnvVar {
-        name: &'static str,
-        previous: Option<String>,
-    }
-
-    impl RestoreEnvVar {
-        fn capture(name: &'static str) -> Self {
-            Self {
-                name,
-                previous: std::env::var(name).ok(),
-            }
-        }
-    }
-
-    impl Drop for RestoreEnvVar {
-        fn drop(&mut self) {
-            // SAFETY: the env vars this guard restores are only ever touched
-            // by the single test that owns it.
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var(self.name, value),
-                    None => std::env::remove_var(self.name),
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn redacts_eth_private_key_and_address() {
-        let pk = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
-        let addr = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
-        let out = redact_secrets(&format!("signing with {pk} to {addr}"));
-        assert!(!out.contains("4c0883a6"), "private key leaked: {out}");
-        assert!(!out.contains("71C7656E"), "address leaked: {out}");
-        assert!(out.contains("[redacted-hex]"));
-    }
-
-    #[test]
-    fn redacts_bare_64_hex_private_key() {
-        let pk = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
-        let out = redact_secrets(&format!("key={pk}"));
-        assert!(!out.contains(pk), "bare key leaked: {out}");
-    }
-
-    #[test]
-    fn redacts_jwt() {
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmNHl0w5N";
-        let out = redact_secrets(&format!("auth failed for {jwt}"));
-        assert!(!out.contains("eyJ"), "jwt leaked: {out}");
-        assert!(out.contains("[redacted-jwt]"));
-    }
-
-    #[test]
-    fn redacts_mnemonic() {
-        let m = "legal winner thank year wave sausage worth useful legal winner thank yellow";
-        let out = redact_secrets(&format!("loaded wallet: {m}"));
-        assert!(!out.contains("sausage"), "mnemonic leaked: {out}");
-        assert!(out.contains("[redacted-mnemonic]"));
-    }
-
-    #[test]
-    fn redacts_email() {
-        let out = redact_secrets("customer alice@example.com paid invoice");
-        assert!(!out.contains("alice@example.com"), "email leaked: {out}");
-    }
-
-    #[test]
-    fn redacts_keyed_secrets() {
-        for input in [
-            "api_key=sk_live_abc123def456",
-            "Authorization: Bearer abc.def.ghi",
-            "password = hunter2",
-            "mnemonic: somesecretvalue",
-        ] {
-            let out = redact_secrets(input);
-            assert!(out.contains("[redacted]"), "not redacted: {input} -> {out}");
-            assert!(!out.contains("hunter2") || !input.contains("hunter2"));
-        }
-        let out = redact_secrets("password = hunter2");
-        assert!(!out.contains("hunter2"), "password leaked: {out}");
-    }
-
-    #[test]
-    fn redacts_api_key_in_rpc_url_path() {
-        for url in [
-            "https://eth-sepolia.g.alchemy.com/v2/alch_EPqFizwy30wuSFY4ewmD-",
-            "wss://eth-sepolia.g.alchemy.com/v2/alch_EPqFizwy30wuSFY4ewmD-",
-            "https://mainnet.infura.io/v3/0123456789abcdef0123456789abcdef",
-        ] {
-            let out = redact_secrets(url);
-            assert!(
-                out.contains("[redacted-rpc-key]"),
-                "not redacted: {url} -> {out}"
-            );
-            assert!(
-                !out.contains("alch_EPqFizwy30wuSFY4ewmD-"),
-                "key leaked: {out}"
-            );
-            assert!(!out.contains("0123456789abcdef"), "key leaked: {out}");
-        }
-    }
-
-    #[test]
-    fn redacts_rpc_key_inside_a_provider_error_string() {
-        // The shape alloy produces when a connection fails.
-        let msg = "error sending request for url \
-                   (https://eth-sepolia.g.alchemy.com/v2/alch_EPqFizwy30wuSFY4ewmD-)";
-        let out = redact_secrets(msg);
-        assert!(
-            !out.contains("alch_EPqFizwy30wuSFY4ewmD-"),
-            "key leaked: {out}"
-        );
-        assert!(
-            out.contains("eth-sepolia.g.alchemy.com"),
-            "host should survive for diagnosis: {out}"
-        );
-    }
-
-    #[test]
-    fn keeps_keyless_rpc_urls_readable() {
-        for url in [
-            "https://eth.llamarpc.com",
-            "https://polygon-rpc.com/",
-            "http://192.168.1.10:8545/",
-            "https://api.coingecko.com/api/v3/simple/price",
-            "https://api.coingecko.com/api/v3/coins/ethereum/market_chart",
-            "https://api.kraken.com/0/public/Ticker",
-        ] {
-            assert_eq!(redact_secrets(url), url, "over-redacted: {url}");
-        }
-    }
-
-    #[test]
-    fn scrub_event_redacts_logentry_params_and_frame_vars() {
-        use sentry::protocol::{Exception, Frame, LogEntry, Stacktrace};
-
-        let mut event = Event {
-            logentry: Some(LogEntry {
-                message: "connecting to %s".to_string(),
-                params: vec![Value::String(
-                    "https://eth-sepolia.g.alchemy.com/v2/alch_supersecretkey".to_string(),
-                )],
-            }),
-            ..Default::default()
-        };
-        let mut frame = Frame::default();
-        frame
-            .vars
-            .insert("password".to_string(), Value::String("hunter2".to_string()));
-        event.exception.values.push(Exception {
-            stacktrace: Some(Stacktrace {
-                frames: vec![frame],
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-
-        let scrubbed = scrub_event(event).expect("event passes through");
-        let params = &scrubbed.logentry.as_ref().unwrap().params;
-        assert!(
-            !format!("{params:?}").contains("alch_supersecretkey"),
-            "logentry param leaked: {params:?}"
-        );
-        let vars = &scrubbed.exception.values[0]
-            .stacktrace
-            .as_ref()
-            .unwrap()
-            .frames[0]
-            .vars;
-        assert!(
-            !format!("{vars:?}").contains("hunter2"),
-            "frame var leaked: {vars:?}"
-        );
-    }
-
-    #[test]
-    fn keeps_innocuous_text() {
-        let msg = "failed to connect to database after 3 retries";
-        assert_eq!(redact_secrets(msg), msg);
-    }
-
-    #[test]
-    fn scrub_event_drops_request_user_and_server_name() {
-        let event = Event {
-            request: Some(sentry::protocol::Request::default()),
-            user: Some(sentry::protocol::User::default()),
-            server_name: Some("payserver-prod-01".into()),
-            ..Default::default()
-        };
-
-        let scrubbed = scrub_event(event).expect("event passes through");
-        assert!(scrubbed.request.is_none());
-        assert!(scrubbed.user.is_none());
-        assert!(scrubbed.server_name.is_none());
-    }
-
-    #[test]
-    fn scrub_event_redacts_message_and_extra() {
-        let mut event = Event {
-            message: Some(
-                "panic: invalid key \
-                 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
-                    .to_string(),
-            ),
-            ..Default::default()
-        };
-        event.extra.insert(
-            "ctx".to_string(),
-            Value::String("token=sk_live_supersecret".to_string()),
-        );
-
-        let scrubbed = scrub_event(event).expect("event passes through");
-        assert!(!scrubbed.message.unwrap().contains("4c0883a6"));
-        let extra = scrubbed.extra.get("ctx").and_then(Value::as_str).unwrap();
-        assert!(!extra.contains("supersecret"), "extra leaked: {extra}");
-    }
-
-    #[test]
-    fn scrub_transaction_drops_request_user_server_name_and_redacts_free_text() {
-        use sentry::protocol::{Request, Span, Transaction, User};
-
-        let mut span = Span {
-            description: Some(
-                "connecting to https://eth-sepolia.g.alchemy.com/v2/alch_supersecretkey"
-                    .to_string(),
-            ),
-            ..Default::default()
-        };
-        span.tags
-            .insert("note".to_string(), "password = hunter2".to_string());
-        span.data.insert(
-            "detail".to_string(),
-            Value::String("token=sk_live_supersecret".to_string()),
-        );
-
-        let mut transaction = Transaction {
-            name: Some("GET /api/invoices/{id}".to_string()),
-            request: Some(Request::default()),
-            user: Some(User::default()),
-            server_name: Some("payserver-prod-01".into()),
-            spans: vec![span],
-            ..Default::default()
-        };
-        transaction
-            .tags
-            .insert("path".to_string(), "email alice@example.com".to_string());
-        transaction.extra.insert(
-            "ctx".to_string(),
-            Value::String("token=sk_live_supersecret".to_string()),
-        );
-
-        scrub_transaction(&mut transaction);
-
-        assert!(transaction.request.is_none());
-        assert!(transaction.user.is_none());
-        assert!(transaction.server_name.is_none());
-        assert_eq!(
-            transaction.name.as_deref(),
-            Some("GET /api/invoices/{id}"),
-            "a route pattern must survive redaction unchanged"
-        );
-        assert!(!transaction.tags["path"].contains("alice@example.com"));
-        let extra = transaction
-            .extra
-            .get("ctx")
-            .and_then(Value::as_str)
-            .unwrap();
-        assert!(!extra.contains("supersecret"), "extra leaked: {extra}");
-        let span = &transaction.spans[0];
-        assert!(
-            !span
-                .description
-                .as_ref()
-                .unwrap()
-                .contains("supersecretkey"),
-            "span description leaked: {:?}",
-            span.description
-        );
-        assert!(!span.tags["note"].contains("hunter2"));
-        let span_detail = span.data.get("detail").and_then(Value::as_str).unwrap();
-        assert!(
-            !span_detail.contains("supersecret"),
-            "span data leaked: {span_detail}"
-        );
-    }
-
-    fn poisoned_contexts() -> Map<String, Context> {
-        use sentry::protocol::{ResponseContext, RuntimeContext, TraceContext};
-
-        let mut contexts = Map::new();
-        let mut runtime = RuntimeContext {
-            name: Some("rustc".to_string()),
-            ..Default::default()
-        };
-        runtime
-            .other
-            .insert("token".to_string(), Value::String("sk_live_x".to_string()));
-        contexts.insert("runtime".to_string(), Context::Runtime(Box::new(runtime)));
-        contexts.insert(
-            "response".to_string(),
-            Context::Response(Box::new(ResponseContext {
-                cookies: Some("session=abc123".to_string()),
-                data: Some(Value::String("body".to_string())),
-                ..Default::default()
-            })),
-        );
-        let mut other = Map::new();
-        other.insert("password".to_string(), Value::String("hunter2".to_string()));
-        contexts.insert("plugin".to_string(), Context::Other(other));
-        let mut trace = TraceContext {
-            description: Some("token=sk_live_x".to_string()),
-            ..Default::default()
-        };
-        trace
-            .data
-            .insert("secret".to_string(), Value::String("hunter2".to_string()));
-        contexts.insert("trace".to_string(), Context::Trace(Box::new(trace)));
-        contexts
-    }
-
-    fn assert_context_containers_are_clean(contexts: &Map<String, Context>) {
-        let Context::Runtime(runtime) = &contexts["runtime"] else {
-            panic!("expected runtime context")
-        };
-        assert_eq!(
-            runtime.other.get("token").and_then(Value::as_str),
-            Some("[redacted]"),
-            "runtime.other leaked a secret key"
-        );
-        let Context::Response(response) = &contexts["response"] else {
-            panic!("expected response context")
-        };
-        assert!(response.cookies.is_none());
-        assert!(response.data.is_none());
-        let Context::Other(plugin) = &contexts["plugin"] else {
-            panic!("expected other context")
-        };
-        assert_eq!(
-            plugin.get("password").and_then(Value::as_str),
-            Some("[redacted]")
-        );
-        let Context::Trace(trace) = &contexts["trace"] else {
-            panic!("expected trace context")
-        };
-        let description = trace.description.as_ref().unwrap();
-        assert!(
-            !description.contains("sk_live_x"),
-            "trace.description leaked a secret: {description}"
-        );
-        assert_eq!(
-            trace.data.get("secret").and_then(Value::as_str),
-            Some("[redacted]"),
-            "trace.data leaked a secret key"
-        );
-    }
-
-    #[test]
-    fn scrub_event_and_transaction_redact_contexts() {
-        use sentry::protocol::Transaction;
-
-        let event = Event {
-            contexts: poisoned_contexts(),
-            ..Default::default()
-        };
-        let scrubbed = scrub_event(event).expect("event passes through");
-        assert_context_containers_are_clean(&scrubbed.contexts);
-
-        let mut transaction = Transaction {
-            contexts: poisoned_contexts(),
-            ..Default::default()
-        };
-        scrub_transaction(&mut transaction);
-        assert_context_containers_are_clean(&transaction.contexts);
-    }
-
-    #[test]
-    fn scrubbing_transport_scrubs_transactions_before_forwarding() {
-        use std::sync::Mutex;
-
-        use sentry::Transport;
-        use sentry::protocol::{Envelope, EnvelopeItem, Event, Request, Transaction};
-
-        #[derive(Default)]
-        struct RecordingTransport {
-            envelopes: Mutex<Vec<Envelope>>,
-        }
-
-        impl Transport for RecordingTransport {
-            fn send_envelope(&self, envelope: Envelope) {
-                self.envelopes.lock().unwrap().push(envelope);
-            }
-        }
-
-        let recorder = Arc::new(RecordingTransport::default());
-        let scrubber = ScrubbingTransport {
-            inner: recorder.clone(),
-        };
-
-        let mut envelope = Envelope::new();
-        envelope.add_item(Transaction {
-            request: Some(Request::default()),
-            ..Default::default()
-        });
-        envelope.add_item(Event::default());
-        scrubber.send_envelope(envelope);
-
-        let forwarded = recorder.envelopes.lock().unwrap();
-        assert_eq!(
-            forwarded.len(),
-            1,
-            "the envelope itself must still be forwarded"
-        );
-        let mut saw_transaction = false;
-        for item in forwarded[0].items() {
-            match item {
-                EnvelopeItem::Transaction(transaction) => {
-                    saw_transaction = true;
-                    assert!(
-                        transaction.request.is_none(),
-                        "transaction request must be scrubbed before forwarding"
-                    );
-                }
-                EnvelopeItem::Event(_) => {}
-                other => panic!("unexpected envelope item: {other:?}"),
-            }
-        }
-        assert!(
-            saw_transaction,
-            "the transaction item must be forwarded, not dropped"
-        );
-    }
-
-    /// Asserts the dependency-free scanners in payserver-commons `scrub` produce
-    /// byte-identical output to the regex table above, across a corpus chosen to
-    /// hit every rule plus the boundaries between them (rule ordering, adjacent
-    /// matches, non-ASCII neighbours, empty and truncated inputs).
-    ///
-    /// This is the only place both can be compiled. If it fails, the two
-    /// implementations have diverged and the browser is redacting differently
-    /// from the servers — fix `scrub`, do not delete the case.
-    #[test]
-    fn parity_with_shared_scrubber() {
-        const CORPUS: &[&str] = &[
-            "",
-            "plain message with no secrets",
-            "failed to fetch /api/invoices/inv_001: HTTP 502",
-            "auth failed for eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc-_123 (401)",
-            "eyJ.a.b eyJa..b eyJa.b.c",
-            "0x742d35Cc6634C0532925a3b844Bc454e4438f44e paid 0x1234",
-            "tx 4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 mined",
-            "zz4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318zz",
-            "GET https://eth-mainnet.g.alchemy.com/v2/9f8e7d6c5b4a3210zz failed",
-            "wss://polygon-mainnet.infura.io:443/ws/v3/0123456789abcdefzz closed",
-            "https://api.coingecko.com/api/v3/simple/price?ids=ethereum",
-            "https://telemetry.example.com/api/random.cash/envelope/",
-            "no store for merchant@example.com or a@b.co.uk or bad@b.c",
-            "Authorization: Bearer rc_live_opaque123",
-            "authorization=eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig; token: abc, secret = \"s3cr3t\"",
-            "api-key: k1 apikey:k2 API_KEY = k3 private-key k4 passwd:\tk5",
-            "secretariat: not a secret keyword",
-            "seed abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            "twelve plain lowercase words here really do trip the mnemonic rule ok now",
-            "façade ↔ merchant@example.com ↔ 0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
-            "token",
-            "token=",
-        ];
-        for input in CORPUS {
-            assert_eq!(
-                redact_secrets(input),
-                scrub::redact_secrets(input),
-                "shared `scrub` diverged from the audited regex table on: {input}"
-            );
-        }
-    }
-
-    #[test]
-    fn no_dsn_is_disabled_but_permitted_outside_mainnet() {
-        assert_eq!(
-            reporting_status(false, "testnet"),
-            ReportingStatus::DisabledPermitted
-        );
-        assert_eq!(
-            reporting_status(false, "dev"),
-            ReportingStatus::DisabledPermitted
-        );
-    }
-
-    #[test]
-    fn no_dsn_in_mainnet_is_refused() {
-        assert_eq!(
-            reporting_status(false, "mainnet"),
-            ReportingStatus::DisabledRefused
-        );
-    }
-
-    #[test]
-    fn no_dsn_with_unset_or_unrecognised_environment_fails_closed() {
-        // The exact shape of the incident this exists for: nothing said the
-        // environment was wrong, so an absent or misspelled
-        // `SENTRY_ENVIRONMENT` must not be treated as a known-safe one.
-        for environment in ["", "mainet", "prod", "MAINNET"] {
-            assert_eq!(
-                reporting_status(false, environment),
-                ReportingStatus::DisabledRefused,
-                "environment={environment:?} should fail closed"
-            );
-        }
-    }
-
-    #[test]
-    fn a_configured_dsn_flips_every_environment_to_enabled() {
-        for environment in ["mainnet", "testnet", "dev"] {
-            assert_eq!(
-                reporting_status(true, environment),
-                ReportingStatus::Enabled,
-                "environment={environment}"
-            );
-        }
-    }
-
-    #[test]
-    fn report_reporting_status_is_ok_when_permitted_and_err_when_refused() {
-        assert!(report_reporting_status(true, "mainnet").is_ok());
-        assert!(report_reporting_status(false, "testnet").is_ok());
-        assert!(report_reporting_status(false, "dev").is_ok());
-        assert!(report_reporting_status(false, "mainnet").is_err());
-        assert!(report_reporting_status(false, "").is_err());
-    }
-
-    #[test]
-    fn resolve_environment_does_not_default_an_absent_var_to_a_permitted_value() {
-        // Owns SENTRY_ENVIRONMENT for the duration of the test; restored on
-        // drop (including on panic) since this is a process-global var and
-        // no other test touches it.
-        let _restore = RestoreEnvVar::capture("SENTRY_ENVIRONMENT");
-
-        // SAFETY: no other test reads or writes SENTRY_ENVIRONMENT.
-        unsafe {
-            std::env::remove_var("SENTRY_ENVIRONMENT");
-        }
-        let absent = resolve_environment();
-        assert_ne!(
-            absent, "dev",
-            "an absent SENTRY_ENVIRONMENT must not resolve to a permitted value"
-        );
-        assert_eq!(
-            reporting_status(false, &absent),
-            ReportingStatus::DisabledRefused,
-            "the resolved value for an absent var must fail closed, not boot disabled on mainnet"
-        );
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("SENTRY_ENVIRONMENT", "testnet");
-        }
-        assert_eq!(resolve_environment(), "testnet");
-    }
-
-    #[test]
-    fn resolve_traces_sample_rate_defaults_to_zero() {
-        // Owns SENTRY_TRACES_SAMPLE_RATE for the duration of the test;
-        // restored on drop (including on panic) since this is a
-        // process-global var and no other test touches it.
-        let _restore = RestoreEnvVar::capture("SENTRY_TRACES_SAMPLE_RATE");
-
-        // SAFETY: no other test reads or writes SENTRY_TRACES_SAMPLE_RATE.
-        unsafe {
-            std::env::remove_var("SENTRY_TRACES_SAMPLE_RATE");
-        }
-        assert_eq!(
-            resolve_traces_sample_rate(),
-            0.0,
-            "unset must default to 0.0"
-        );
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "not-a-number");
-        }
-        assert_eq!(
-            resolve_traces_sample_rate(),
-            0.0,
-            "unparseable must fall back to 0.0, not panic"
-        );
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "0.1");
-        }
-        assert_eq!(resolve_traces_sample_rate(), 0.1);
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "10");
-        }
-        assert_eq!(
-            resolve_traces_sample_rate(),
-            1.0,
-            "a parseable but out-of-range value (e.g. \"10\" typed for \"0.1\") must clamp, not pass through"
-        );
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "-3");
-        }
-        assert_eq!(
-            resolve_traces_sample_rate(),
-            0.0,
-            "a negative value must clamp to 0.0, not go negative"
-        );
-
-        // SAFETY: see above.
-        unsafe {
-            std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "nan");
-        }
-        assert_eq!(
-            resolve_traces_sample_rate(),
-            0.0,
-            "\"nan\" parses to f32::NAN, which clamp() passes through unchanged; must fall back to 0.0 instead"
-        );
-    }
-
-    #[test]
-    fn client_options_carry_the_sample_rate_and_the_scrubbing_transport() {
-        let options = build_client_options(None, None, "testnet".to_string(), 0.42);
-        assert_eq!(
-            options.traces_sample_rate, 0.42,
-            "resolved sample rate must reach the struct sentry::init actually receives"
-        );
-        assert!(
-            options.transport.is_some(),
-            "ScrubbingTransportFactory must be wired in, or performance transactions ship unscrubbed"
-        );
-        assert!(
-            options.before_send.is_some(),
-            "scrub_event must be wired in, or error events ship unscrubbed"
-        );
-    }
-}
+mod alloy_filter_tests;
+#[cfg(test)]
+mod reporting_tests;
+#[cfg(test)]
+mod tests;

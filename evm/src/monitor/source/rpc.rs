@@ -9,12 +9,13 @@ use crate::metrics as rpc_metrics;
 use alloy::consensus::Transaction as TransactionTrait;
 use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, U256};
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
+use alloy::providers::{ConnectionConfig, Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::{Block, BlockNumberOrTag, BlockTransactionsKind, Filter, Log};
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
@@ -132,6 +133,27 @@ impl RpcSourceConfig {
         }
         rendered
     }
+
+    /// Translate `max_reconnect_attempts`/`reconnect_delay_ms` into alloy's
+    /// [`ConnectionConfig`], so a WS backend that misses a keepalive pong and
+    /// drops actually reconnects on the budget this config declares, instead
+    /// of on alloy's own hardcoded default (10 attempts, 3s apart).
+    ///
+    /// `max_reconnect_attempts: 0` is documented on this struct as "infinite",
+    /// but alloy's retry loop reads a literal 0 as "give up after the first
+    /// failed attempt" (`retry_count >= max_retries` is true as soon as one
+    /// attempt fails). Passed through unchanged, our "infinite" default would
+    /// silently become the least resilient setting alloy has. `u32::MAX`
+    /// attempts is what "infinite" actually has to mean to alloy's counter.
+    fn ws_connection_config(&self) -> ConnectionConfig {
+        let max_retries = match self.max_reconnect_attempts {
+            0 => u32::MAX,
+            n => n,
+        };
+        ConnectionConfig::new()
+            .with_max_retries(max_retries)
+            .with_retry_interval(Duration::from_millis(self.reconnect_delay_ms))
+    }
 }
 
 impl RpcBlockSource {
@@ -196,10 +218,11 @@ impl RpcBlockSource {
 
         self.status.store(STATUS_CONNECTING, Ordering::SeqCst);
 
-        // Connect via WebSocket
+        // Connect via WebSocket, with our own reconnect budget rather than
+        // alloy's hardcoded default - see `ws_connection_config`.
         let ws_provider = ProviderBuilder::new()
             .disable_recommended_fillers()
-            .connect(ws_url.expose_secret())
+            .connect_with_config(ws_url.expose_secret(), self.config.ws_connection_config())
             .await
             .map_err(|e| {
                 self.status.store(STATUS_DISCONNECTED, Ordering::SeqCst);
@@ -776,6 +799,46 @@ mod tests {
         let rendered = redact_err(format!("error sending request for url ({})", url), url);
         assert!(!rendered.contains("alch_supersecretkey"));
         assert!(rendered.contains("https://eth-sepolia.g.alchemy.com"));
+    }
+
+    /// The documented "0 = infinite" reconnect budget must not reach alloy as
+    /// a literal 0 - alloy's own retry loop treats `max_retries: 0` as "give
+    /// up after the first failed reconnect", the opposite of infinite.
+    #[test]
+    fn ws_connection_config_maps_infinite_to_a_budget_alloy_will_not_exhaust() {
+        let config = RpcSourceConfig::with_websocket(
+            "wss://eth.example/v2/key",
+            "https://eth.example/v2/key",
+            1,
+        );
+        assert_eq!(
+            config.max_reconnect_attempts, 0,
+            "precondition: default is 0/infinite"
+        );
+
+        let conn = config.ws_connection_config();
+        assert_eq!(
+            conn.max_retries,
+            Some(u32::MAX),
+            "a literal 0 would make alloy give up after one failed reconnect attempt"
+        );
+    }
+
+    /// A finite, explicitly configured retry budget and delay pass through
+    /// unchanged into the connection config alloy actually reconnects with.
+    #[test]
+    fn ws_connection_config_passes_through_a_finite_retry_budget() {
+        let mut config = RpcSourceConfig::with_websocket(
+            "wss://eth.example/v2/key",
+            "https://eth.example/v2/key",
+            1,
+        );
+        config.max_reconnect_attempts = 5;
+        config.reconnect_delay_ms = 1500;
+
+        let conn = config.ws_connection_config();
+        assert_eq!(conn.max_retries, Some(5));
+        assert_eq!(conn.retry_interval, Some(Duration::from_millis(1500)));
     }
 
     #[test]

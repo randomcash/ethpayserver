@@ -47,10 +47,17 @@
 //! - `ETHPAY_DISABLE_PLUGINS` - Safe mode: boot with every plugin disabled
 //!   (default: false). Same effect as the `--disable-plugins` CLI flag.
 //! - `ETHPAY_PLUGIN_DIR` - Where installed plugins' wasm lives
-//! - `ETHPAY_BILLING_STORE_ID` - The store this instance bills its own
-//!   subscriptions through. Unset on any instance that sells nothing to
-//!   itself; a plugin is told about payments on this store and no other.
-//!   (default: ./plugins)
+//! - `ETHPAY_OPERATOR_STORE_ID` - The operator's own store: where this
+//!   instance issues and settles its own invoices, if it issues any to
+//!   itself at all. Unset on any instance that does not; a plugin is told
+//!   about payments on this store and no other. (default: ./plugins)
+//!   `ETHPAY_BILLING_STORE_ID` is read as a deprecated fallback when this is
+//!   unset, so an instance still running the old variable name keeps
+//!   working until its deploy config catches up.
+//! - `ETHPAY_OPERATOR_ACCOUNT_ID` - The account that may own
+//!   `ETHPAY_OPERATOR_STORE_ID`. Unset refuses every nomination of an
+//!   operator store, since an unowned nomination is exactly the thing that
+//!   must never pass by default.
 
 use secrecy::{ExposeSecret, SecretString};
 use std::env;
@@ -98,13 +105,25 @@ pub struct Config {
     /// it is what a server with no plugins installed looks like.
     pub plugin_dir: PathBuf,
 
-    /// The store this instance issues, and settles, its own invoices on.
+    /// The operator's own store: where this instance issues, and settles,
+    /// its own invoices.
     ///
-    /// `None` on an instance that sells nothing to itself, which is every
-    /// deployment without a billing plugin. It must stay `None` rather than
-    /// defaulting to anything: a wrong value here would hand a plugin a
-    /// merchant's payments, and there is no value that is safely wrong.
-    pub billing_store_id: Option<types::StoreId>,
+    /// `None` on an instance that issues no invoices to itself, which is
+    /// every deployment without a plugin that needs one. It must stay `None`
+    /// rather than defaulting to anything: a wrong value here would hand a
+    /// plugin a merchant's payments, and there is no value that is safely
+    /// wrong.
+    pub operator_store_id: Option<types::StoreId>,
+
+    /// The account `operator_store_id` must be owned by.
+    ///
+    /// Set once, outside the admin settings API, so that nominating an
+    /// operator store answers "does this belong to the operator" against a
+    /// value nobody can move by saving a settings form. `None` refuses every
+    /// nomination - the same "no value is safely wrong" reasoning as
+    /// `operator_store_id` above, since a missing operator account is
+    /// indistinguishable from one an attacker chose not to set.
+    pub operator_account_id: Option<types::UserId>,
 }
 
 /// Valid log levels.
@@ -160,7 +179,8 @@ impl Config {
             enable_swagger,
             safe_mode,
             plugin_dir,
-            billing_store_id: billing_store_id_from(|key| env::var(key).ok()),
+            operator_store_id: operator_store_id_from(|key| env::var(key).ok()),
+            operator_account_id: operator_account_id_from(|key| env::var(key).ok()),
         };
 
         config.validate()?;
@@ -269,20 +289,36 @@ where
         .map_or_else(|| PathBuf::from(DEFAULT_PLUGIN_DIR), PathBuf::from)
 }
 
-/// The store this instance bills its own subscriptions through, from
-/// `ETHPAY_BILLING_STORE_ID`.
+/// The operator's own store, from `ETHPAY_OPERATOR_STORE_ID`, falling back to
+/// the deprecated `ETHPAY_BILLING_STORE_ID` when the new name is unset.
+///
+/// The fallback exists because a rename of this variable is not something a
+/// running instance's deploy config picks up on its own: an instance still
+/// injecting the old name would otherwise silently lose its own-store
+/// reporting on next restart, with no error and no way to tell "never
+/// configured" apart from "config went stale under a rename". Once every
+/// deployment's config carries the new name, the fallback and this comment
+/// can go.
 ///
 /// Absent, blank and unparseable all yield `None`, and all three are logged as
 /// nothing rather than guessed at. This id decides which payments a plugin is
-/// told about, so the failure mode for a typo has to be "the billing plugin
-/// hears nothing" - noticed quickly and harmlessly - rather than "the billing
-/// plugin hears about some merchant's store", which is a disclosure nobody
-/// would spot.
-pub fn billing_store_id_from<F>(lookup: F) -> Option<types::StoreId>
+/// told about, so the failure mode for a typo has to be "the plugin hears
+/// nothing" - noticed quickly and harmlessly - rather than "the plugin hears
+/// about some merchant's store", which is a disclosure nobody would spot.
+pub fn operator_store_id_from<F>(lookup: F) -> Option<types::StoreId>
 where
     F: Fn(&str) -> Option<String>,
 {
-    let raw = lookup("ETHPAY_BILLING_STORE_ID")?;
+    let raw = match lookup("ETHPAY_OPERATOR_STORE_ID") {
+        Some(raw) => raw,
+        None => {
+            let raw = lookup("ETHPAY_BILLING_STORE_ID")?;
+            tracing::warn!(
+                "ETHPAY_BILLING_STORE_ID is deprecated; rename it to ETHPAY_OPERATOR_STORE_ID"
+            );
+            raw
+        }
+    };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -292,7 +328,35 @@ where
         Err(e) => {
             tracing::error!(
                 error = %e,
-                "ETHPAY_BILLING_STORE_ID is not a UUID; this instance will report no own-store payments"
+                "ETHPAY_OPERATOR_STORE_ID is not a UUID; this instance will report no own-store payments"
+            );
+            None
+        }
+    }
+}
+
+/// The account that may own the operator store, from
+/// `ETHPAY_OPERATOR_ACCOUNT_ID`.
+///
+/// Absent, blank and unparseable all yield `None`, the same treatment
+/// [`operator_store_id_from`] gives its variable and for the same reason: a
+/// typo here must fail closed (every nomination refused) rather than fail
+/// open (nobody's account required).
+pub fn operator_account_id_from<F>(lookup: F) -> Option<types::UserId>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let raw = lookup("ETHPAY_OPERATOR_ACCOUNT_ID")?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match uuid::Uuid::parse_str(trimmed) {
+        Ok(id) => Some(types::UserId(id)),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "ETHPAY_OPERATOR_ACCOUNT_ID is not a UUID; this instance will refuse every operator store nomination"
             );
             None
         }
@@ -340,7 +404,8 @@ mod tests {
             enable_swagger: false,
             safe_mode: false,
             plugin_dir: PathBuf::from(DEFAULT_PLUGIN_DIR),
-            billing_store_id: None,
+            operator_store_id: None,
+            operator_account_id: None,
         };
         let rendered = format!("{config:?}");
         assert!(
@@ -548,5 +613,79 @@ mod tests {
     fn safe_mode_via_cli_flag() {
         let args = vec!["ethpayserver".to_string(), "--disable-plugins".to_string()];
         assert!(safe_mode_requested(lookup(&[]), &args));
+    }
+
+    // ========================================================================
+    // Operator store resolution
+    // ========================================================================
+
+    #[test]
+    fn operator_store_id_unset_is_none() {
+        assert_eq!(operator_store_id_from(lookup(&[])), None);
+    }
+
+    #[test]
+    fn operator_store_id_valid_uuid_is_parsed() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            operator_store_id_from(lookup(&[("ETHPAY_OPERATOR_STORE_ID", &id.to_string())])),
+            Some(types::StoreId(id))
+        );
+    }
+
+    #[test]
+    fn operator_store_id_falls_back_to_deprecated_billing_var() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            operator_store_id_from(lookup(&[("ETHPAY_BILLING_STORE_ID", &id.to_string())])),
+            Some(types::StoreId(id))
+        );
+    }
+
+    #[test]
+    fn operator_store_id_prefers_new_var_over_deprecated_one() {
+        let new_id = uuid::Uuid::new_v4();
+        let old_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            operator_store_id_from(lookup(&[
+                ("ETHPAY_OPERATOR_STORE_ID", &new_id.to_string()),
+                ("ETHPAY_BILLING_STORE_ID", &old_id.to_string()),
+            ])),
+            Some(types::StoreId(new_id))
+        );
+    }
+
+    // ========================================================================
+    // Operator account resolution
+    // ========================================================================
+
+    #[test]
+    fn operator_account_id_unset_is_none() {
+        assert_eq!(operator_account_id_from(lookup(&[])), None);
+    }
+
+    #[test]
+    fn operator_account_id_blank_is_none() {
+        assert_eq!(
+            operator_account_id_from(lookup(&[("ETHPAY_OPERATOR_ACCOUNT_ID", "   ")])),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_account_id_unparseable_is_none() {
+        assert_eq!(
+            operator_account_id_from(lookup(&[("ETHPAY_OPERATOR_ACCOUNT_ID", "not-a-uuid")])),
+            None
+        );
+    }
+
+    #[test]
+    fn operator_account_id_valid_uuid_is_parsed() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            operator_account_id_from(lookup(&[("ETHPAY_OPERATOR_ACCOUNT_ID", &id.to_string())])),
+            Some(types::UserId(id))
+        );
     }
 }

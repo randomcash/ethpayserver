@@ -17,7 +17,7 @@ path = "src/bin/migrate_postgres.rs"
 # Internal crates
 auth = { workspace = true, features = ["metrics", "captcha"] }
 crypto = { workspace = true }
-data-service = { path = "../data-service" }
+data-service = { path = "../data-service", features = ["redis"] }
 evm = { path = "../evm", features = ["api", "redis", "sentry-scrub"] }
 rates = { workspace = true }
 api-types = { workspace = true, features = ["openapi"] }
@@ -60,8 +60,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # route pattern (`/api/invoices/{id}`), not the request URI. Without it every
 # distinct invoice/store/etc. id creates its own transaction name, which is
 # unbounded cardinality and an unreadable performance page.
-sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "tower-axum-matched-path"] }
-sentry-tracing = "0.47"
+#
+# `logs`: the structured-log pipeline `sentry_log_event_filter` gates. Both
+# features are needed - tracing names the transaction, logs carries the
+# records - and dropping either on a merge silently turns off a whole pipeline.
+sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "tower-axum-matched-path", "logs"] }
+sentry-tracing = { version = "0.47", features = ["logs"] }
 
 # Metrics
 metrics = "0.24"
@@ -109,7 +113,10 @@ wasmtime = { version = "47.0.4", default-features = false, features = ["runtime"
 [dev-dependencies]
 tokio = { version = "1.42", features = ["test-util"] }
 tokio-tungstenite = "0.28"
-data-service = { path = "../data-service", features = ["test-utils"] }
+# `redis` here, not in the dependency above: the live watched-address reader the
+# watch-reconciliation test compares against is behind that feature, and this
+# keeps it a test-only build. The running server links data-service without it.
+data-service = { path = "../data-service", features = ["test-utils", "redis"] }
 evm = { path = "../evm", features = ["api", "redis", "test-utils"] }
 wat = "1.259.0"
 tempfile = "3"

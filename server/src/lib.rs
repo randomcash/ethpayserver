@@ -39,6 +39,7 @@ pub mod config;
 pub mod metrics;
 pub mod services;
 pub mod state;
+pub mod tracing_init;
 
 pub use config::Config;
 pub use services::{
@@ -49,9 +50,9 @@ pub use services::{
     PluginBootReport, PluginCallError, PluginEngine, PluginHost, PluginHostError, PluginInstance,
     PluginLoadError, PluginPools, PluginRegistry, PluginSchema, PluginStatusSnapshot,
     PluginStorage, PluginStorageError, PluginWasmError, RedisEVMMonitor, Viewer, WatchRetryConfig,
-    WatchRetryService, WebhookConfig, WebhookService, WebhookSink, host_version,
-    invoice_creation_filters, load_installed_plugins, own_store_payment_reporting,
-    payment_observers, report_boot,
+    WatchRetryService, WebhookConfig, WebhookOutboxDrainConfig, WebhookOutboxDrainService,
+    WebhookService, WebhookSink, account_closed_observers, host_version, invoice_creation_filters,
+    load_installed_plugins, own_store_payment_reporting, payment_observers, report_boot,
 };
 pub use state::{AppDataService, AppDataServiceReader, AppState};
 

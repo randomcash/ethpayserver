@@ -53,7 +53,7 @@ not that anything deployed — which is what the health gate below is for.
 For **testnet**, the `Verify testnet deploy` job runs
 `scripts/health-gate.sh` against
 `https://testnet.random.cash/api/health/deep` after the dispatch, polling
-for up to 600 seconds (`HEALTH_TIMEOUT`).
+for up to 900 seconds (`HEALTH_TIMEOUT`).
 
 The `/api` prefix matters: `testnet.random.cash` serves the client, whose
 SPA fallback answers `/health/deep` with HTTP 200 and a page of HTML. A
@@ -76,7 +76,7 @@ To check a mainnet deploy by hand:
 ```bash
 HEALTH_URL=https://pay.random.cash/api/health/deep \
 EXPECTED_SHA=$(git rev-parse --short=7 HEAD) \
-HEALTH_TIMEOUT=600 ./scripts/health-gate.sh
+HEALTH_TIMEOUT=900 ./scripts/health-gate.sh
 ```
 
 The gate passes when ALL of the following are true:
@@ -84,9 +84,14 @@ The gate passes when ALL of the following are true:
 1. `/health/deep` returns HTTP 200.
 2. `build_sha` in the response matches the commit being deployed
    (`EXPECTED_SHA`, the first 7 of `GITHUB_SHA`).
-3. Postgres reports `status: "ok"`.
-4. Redis reports `status: "ok"`.
-5. All RPC chains report `status: "ok"` (no chain in error, disconnected,
+3. The `x-sentry-release` response header matches `build_sha`. The two are
+   set by separate CI steps from the same commit sha, so they can drift
+   apart (a rename, a typo, a rebuild stage that drops the env var) without
+   either build step failing — this catches that on the deployed binary,
+   not the build log.
+4. Postgres reports `status: "ok"`.
+5. Redis reports `status: "ok"`.
+6. All RPC chains report `status: "ok"` (no chain in error, disconnected,
    or connecting state).
 
 If the gate does not pass within the timeout, the job fails. Because
@@ -94,10 +99,19 @@ Docker Compose keeps the old container running until the new one passes
 its own health check, a failed gate means the old version is still
 serving traffic — no rollback is needed in this case.
 
+A SHA-mismatch timeout logs which of three situations it saw, since they
+call for opposite responses: no response ever reported a `build_sha`
+(endpoint unreachable, or the deploy hasn't started responding at all — wait
+and check again), the sha never moved from what was running before the
+poll started (the new build hasn't landed yet — wait), or the sha changed
+but to something other than `EXPECTED_SHA` (something is actually wrong —
+investigate). Only the last of these means the deploy itself is broken.
+
 ### Post-deploy smoke test
 
-After the health gate passes, `post-deploy:smoke` runs the full smoke
-test suite (`scripts/smoke-prod.sh`) against the deployed instance:
+There is no automated smoke job in `ci.yml` — after the health gate passes,
+an operator runs `scripts/smoke-prod.sh` by hand against the deployed
+instance:
 
 - `/health/live` — process is running
 - `/health/ready` — DB, Redis, and all RPC chains reachable
@@ -105,14 +119,16 @@ test suite (`scripts/smoke-prod.sh`) against the deployed instance:
 - Invoice create/read cycle via API key
 - Checkout page load for the created invoice
 
-### Required CI variables
+### Environment variables for the scripts above
 
-| Variable | Description |
-|----------|-------------|
-| `DEPLOY_HEALTH_URL` | Full URL to `/health/deep` on the target env |
-| `DEPLOY_SMOKE_URL` | Base URL for smoke tests (e.g. `https://pay.random.cash`) |
-| `DEPLOY_SMOKE_API_KEY` | API key with invoice create/read permissions |
-| `DEPLOY_SMOKE_STORE_ID` | Store UUID the smoke API key is scoped to |
+| Variable | Used by | Description |
+|----------|---------|-------------|
+| `HEALTH_URL` | `health-gate.sh` | Full URL to `/health/deep` on the target env |
+| `HEALTH_TIMEOUT` | `health-gate.sh` | Seconds to poll before failing (default 60) |
+| `EXPECTED_SHA` | `health-gate.sh` | Commit the deploy should be serving, first 7 of the sha. Unset means gate condition 2 is skipped, so the gate passes against a server that never restarted — set it |
+| `SMOKE_BASE_URL` | `smoke-prod.sh` | Base URL for smoke tests (e.g. `https://pay.random.cash`) |
+| `SMOKE_API_KEY` | `smoke-prod.sh` | API key with invoice create/read permissions |
+| `SMOKE_STORE_ID` | `smoke-prod.sh` | Store UUID the smoke API key is scoped to |
 
 ## Container registry tagging
 
@@ -185,6 +201,21 @@ short commit SHA baked into the binary at compile time. This allows:
 
 - The health-gate script to confirm the new version is actually running.
 - Operators to quickly confirm which version is live.
+
+The same response also carries an `x-sentry-release` header — the value
+compiled into the binary via `option_env!("SENTRY_RELEASE")`, i.e. what this
+process hands Sentry as its `release` tag. `build_sha` and the Sentry
+release are set by separate CI steps from the same commit sha and can drift
+apart without either step failing, so the health gate compares them on the
+running process rather than trusting that the build succeeded.
+
+evmmonitor is a second binary that tags its own Sentry events from the same
+`SENTRY_RELEASE`, compiled in its own CI step, and has no HTTP endpoint of
+its own to check directly. When it's configured, the response carries its
+compiled release too, relayed through the same Redis channel evmmonitor
+already reports chain health over, as `x-evmmonitor-sentry-release`. The
+health gate compares that against `build_sha` the same way, so a drift in
+evmmonitor's build step is caught on the deployed process as well.
 
 ```json
 {

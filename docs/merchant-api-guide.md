@@ -10,7 +10,18 @@ ETHPayServer is a self-hosted Ethereum and EVM-chain payment processor. It is
 **non-custodial**: a merchant registers an extended public key (an **xpub**,
 never a private key), and every payment address is derived from it. The
 server can compute addresses and watch the chain for payments to them, but it
-holds no spending key for any of them.
+holds no spending key for any of them. (The `evm` crate carries a
+signing/broadcasting module behind a `hot-wallet` Cargo feature, reserved for
+a possible future opt-in mode; it is off by default, and no `Cargo.toml`,
+Dockerfile or CI workflow anywhere in this repository enables it, so no
+binary built from this repository turns it on — see `evm/README.md`'s crate
+table. That gating predates this documentation pass: it shipped, reviewed,
+in the same change that removed the module's last callers. Confirm it
+yourself rather than trusting this paragraph: `git grep -n hot-wallet` across
+every `Cargo.toml` and `.github/workflows/*.yml` in this repository turns up
+only the feature's own off-by-default declaration, the `#[cfg(...)]` gate on
+`evm::transaction`, and this paragraph — no crate depends on `evm` with that
+feature enabled, and no CI job passes it.)
 
 Two consequences that follow directly from that, not incidentally:
 
@@ -58,20 +69,20 @@ places a plausible-looking guess is wrong.
     send a pre-converted (smallest-unit) value as the request `amount`; a
     same-asset invoice runs it through `convert_human_to_smallest_unit`
     server-side (`server/src/api/invoices/crud.rs`). The upstream doc comment
-    on `CreateInvoiceRequest.amount` in `payserver-commons` was
-    self-contradictory on this exact point; it is fixed at the source
-    (`api-types/src/invoice.rs`), and the generated spec will carry the
-    correct description once this repo's commons pin moves to that revision.
-    Until then, trust this page and the linked server code over the spec's
-    field description for this one field.
+    on `CreateInvoiceRequest.amount` in `payserver-commons` used to be
+    self-contradictory on this exact point; it was fixed at the source
+    (`api-types/src/invoice.rs`), and this repo's commons pin already carries
+    that revision, so `GET /api-docs/openapi.json`'s field description agrees
+    with this page.
   - `PaymentOption.amount`, `Payment.amount`, and refund/payout `amount`
     fields are integer strings in the asset's **smallest unit** (wei for
     ETH, the ERC20's own base unit for a token) — divide by `10^decimals` to
     get a display value, using integer or bignum arithmetic. Never parse
     either kind as a float: float rounding on a value that settles a payment
     is a bug, not a rounding error.
-- **The server never sends funds.** `POST /invoices/{id}/refund` and
-  `POST /stores/{id}/payouts` create ledger records only. See
+- **The server never sends funds.** `POST /invoices/{id}/refund` always
+  refuses (501) and creates nothing; `POST /stores/{id}/payouts` creates a
+  ledger record only. See
   [What ETHPayServer does not do](#10-what-ethpayserver-does-not-do).
 - **Chain IDs are [CAIP-2](https://standards.chainagnostic.org/CAIPs/caip-2)
   strings** (`"eip155:1"`), not bare integers. See
@@ -196,6 +207,52 @@ Response (`201 Created`):
 ETHPayServer derives unique payment addresses from an extended public key
 (BIP-32 xpub). This means the server never holds private keys.
 
+### Where do I get an xpub?
+
+Not from MetaMask - it has no export flow for one. That is architectural, not
+an oversight: Ethereum's account model gives it nothing to export. A Bitcoin
+wallet's UI shows an xpub because many receiving addresses unlock from that
+one key; MetaMask shows you a single address per account instead. Hardware
+wallets are no different for the same reason - neither Trezor Suite nor
+Ledger Live has an "export xpub" control for an Ethereum account. Look at
+either one's advanced account view and you will find that control for
+Bitcoin, and nothing for Ethereum. Checked against both vendors' own support
+documentation (2026-09-23), not assumed: Ledger's ["Extended public key
+(xPub)"](https://support.ledger.com/article/360011069619-zd) article scopes
+the feature to "your Bitcoin account(s)"; Trezor's [own xpub
+explainer](https://trezor.io/learn/supported-assets/bitcoin/what-is-a-public-key-xpub)
+scopes it to "Bitcoin & other coins that use Bitcoin's UTXO-based model" -
+Ethereum's account model isn't one of them. If either vendor adds Ethereum
+xpub export later, this paragraph is what needs updating.
+
+Two ways to actually get one, in the order worth trying:
+
+1. **Generate a dedicated receiving wallet.** Run the offline tool in this
+   repository - `cargo run --bin derive-xpub -- generate` (from `evm/`, or
+   pass `-p evm` from the workspace root). It links no HTTP client, so it has
+   no way to transmit anything, and it prints a fresh BIP-39 mnemonic, the
+   account xpub derived from it, and the first three receiving addresses so
+   you can sanity-check them against `verification_addresses` below before
+   trusting the key with a single invoice. This should be a wallet made for
+   receiving payments, not the one holding your other funds - the practice a
+   payout wallet should follow regardless of where the key comes from.
+2. **Derive from a seed phrase you already hold**, as a last resort. The same
+   tool takes it: `cargo run --bin derive-xpub -- from-existing` reads a
+   mnemonic from stdin, one line, and never as a command-line argument -
+   arguments end up in shell history and process listings, a mnemonic should
+   end up in neither. It then asks for the wallet's BIP-39 passphrase (the
+   "25th word"), if it has one - leave it blank if it doesn't. Getting this
+   wrong doesn't error, it silently derives a different, wrong xpub, so check
+   the printed addresses against your own wallet before trusting either.
+   MetaMask derives its accounts at `m/44'/60'/0'/0/i`, so the account-level
+   extended key sitting above every address it shows you is at `m/44'/60'/0'`
+   - the same path this tool and this server both use. Do this only on a
+   machine you trust, offline if you can manage it: typing a seed phrase into
+   any piece of software is indistinguishable, to your future self, from the
+   exact thing every wallet-draining phishing site asks for. If that risk is
+   not one you are willing to take, use option 1
+   instead and set up the new wallet as your store's payout destination.
+
 Wallets belong to the account, not to a store. Every store uses the account's
 primary wallet for a chain family unless it is pinned to a different one.
 
@@ -203,6 +260,12 @@ A wallet belongs to one **chain family**, named by its CAIP-2 namespace -
 `eip155` for Ethereum and every EVM chain, `tron` for Tron. `namespace`
 defaults to `eip155`, so a request that does not mention it means what it
 always meant.
+
+**`tron` is derivation and storage plumbing only.** No Tron chain is enabled
+or monitored today, so a `tron` wallet can be created but no store can add a
+`tron:` payment method against it - the API refuses those until a Tron chain
+adapter exists. Everything below that mentions `tron` describes the shape of
+that future support, not something reachable yet.
 
 ```bash
 curl -X POST https://your-instance.example.com/wallets \
@@ -906,14 +969,17 @@ reproduce it: address, amount, asset, chain.
 Restated plainly, because a model asked to fill a gap will otherwise invent
 a plausible-sounding answer:
 
-- **No custody, ever.** The server never holds a spending key for any
-  merchant funds. See [What this is](#what-this-is).
-- **No refunds are sent.** `POST /invoices/{invoice_id}/refund` validates the
-  request (invoice is paid, amount doesn't exceed what's left after prior
-  refunds, a destination address is known) and writes a `Refund` record with
-  status `Pending`. **That is all it does.** No transaction is signed or
-  broadcast — the server holds no spending key to sign one with. The record
-  exists so you have somewhere to track a refund you send yourself, from
+- **No custody in the shipped build.** The server never holds a spending key
+  for any merchant funds. See [What this is](#what-this-is) for the one
+  reserved, off-by-default exception and why it doesn't change this.
+- **No refunds are sent, and none are recorded either.** `POST
+  /invoices/{invoice_id}/refund` always returns `501 Not Implemented` and
+  writes nothing. An earlier version wrote a `Refund` record with status
+  `Pending` that nothing downstream ever moved past that status — worse than
+  refusing, since it told you a refund was in flight when none was and never
+  would be. `GET /invoices/{invoice_id}/refunds` still lists any refund
+  records left over from that era; going forward none will be created
+  through this API. To refund a customer, send funds back yourself, from
   whatever wallet actually holds the funds. Refunds are the merchant's job.
 - **No payouts are sent.** `POST /stores/{store_id}/payouts` is the same
   shape: it validates which confirmed, unclaimed invoice payments the

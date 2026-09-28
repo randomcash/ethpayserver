@@ -45,6 +45,8 @@ Always returns **200** with a JSON body containing per-dependency status and lat
 
 ```json
 {
+  "build_sha": "a1b2c3d",
+  "version": "0.1.0",
   "postgres": {"status": "ok", "latency_ms": 3},
   "redis": {"status": "ok", "latency_ms": 1},
   "rpcs": {
@@ -55,20 +57,88 @@ Always returns **200** with a JSON body containing per-dependency status and lat
 }
 ```
 
+The response also carries an `x-sentry-release` header with the compiled
+`SENTRY_RELEASE`, so a deploy check can compare it against `build_sha` from
+the same running process — see `docs/deployment/mainnet-gate.md`.
+
 | Field | Description |
 |-------|-------------|
+| `build_sha` | Short commit sha baked in at compile time. What `deploy-verify-testnet` and the mainnet gate poll for to confirm a deploy landed. |
+| `version` | `CARGO_PKG_VERSION` of the running binary |
 | `postgres.latency_ms` | Round-trip time for a Postgres `SELECT 1` |
 | `redis.latency_ms` | Round-trip time for a Redis `PING` |
 | `rpcs.<chain_id>.last_block` | Latest block number reported by evmmonitor for this chain |
 | `rpcs.<chain_id>.error` | Present only when the chain is unhealthy |
 | `monitor.data_fresh` | `true` if evmmonitor has published health data to Redis |
 
-### Existing admin-only endpoints
+### Existing endpoints with admin-gated detail
 
-These require a `Bearer` token with server admin privileges:
+- `GET /health/chains` — per-chain health from evmmonitor. Public: chain
+  identity and up/down only. With a `Bearer` token carrying server admin
+  privileges: block heights, watched-address counts and failure reasons too
+  (same underlying data as `/health/deep`'s RPCs section).
+- `GET /metrics` — Prometheus exposition format for scraping. Admin-only, no
+  unauthenticated response at all.
 
-- `GET /health/chains` — detailed per-chain health from evmmonitor (same data as `/health/deep` RPCs section, but includes watched address counts)
-- `GET /metrics` — Prometheus exposition format for scraping
+## Watching `/health/deep` between deploys
+
+A 200 from `/health/live` or `/health/ready` does not mean payments are being
+detected — the process can be up while `monitor.data_fresh` is false or an RPC
+has gone quiet, and a check that only reads the status code stays green
+through that. Two things exist so far that touch `/health/deep`, and both are
+deploy-triggered, not continuous:
+
+- `scripts/health-gate.sh`, run by `deploy-verify-testnet` in `ci.yml` on every
+  push to `testnet`, and manually against mainnet per
+  `docs/deployment/mainnet-gate.md`. Gates a rollout; does nothing once the
+  rollout has succeeded.
+- `scripts/smoke-prod.sh`, run manually per the same checklist.
+
+Between deploys, coverage is `.github/workflows/health-monitor.yml`: it runs
+`scripts/check-health-deep.sh` against both `testnet.random.cash` and
+`pay.random.cash` every 5 minutes on a GitHub-hosted runner, asserts
+`postgres`, `redis`, `monitor.data_fresh` and every `rpcs.*.status`, and checks
+in to a Sentry Cron Monitor (`SENTRY_CRON_HEALTH_TESTNET_URL` /
+`SENTRY_CRON_HEALTH_MAINNET_URL`) so a missed or failing check pages through
+Sentry's alerting rather than sitting unread in the Actions tab. The scheduled
+e2e workflow's dead-man's-switch moved onto the same vendor, checking in to
+`SENTRY_CRON_E2E_URL`.
+
+Both Sentry URLs are **required**, not optional. A watchdog that quietly skips
+the check-in when its secret is unset would pass, deploy, and run indefinitely
+detecting real outages while paging nobody — a dashboard nobody is watching is
+not alerting, and neither is a red Actions run nobody has that tab open for.
+Until the two monitors below exist and the secrets are set,
+`health-monitor.yml` fails on **every** run — loudly, in the Actions tab, on a
+5-minute cycle — rather than silently degrading to a no-op. That is
+deliberate: it is the loudest signal code in this repo can produce for "the
+alert path is not wired up yet," short of actually wiring it up, which needs
+a human with Sentry dashboard access this repository does not have.
+
+`rpcs.*.status` alone misses a chain whose indexer has wedged while the RPC
+connection itself stays up — `status: ok` with `last_block` frozen. Each job
+restores `.health-state/<env>.json` from an `actions/cache` entry keyed on the
+environment (an ordinary GitHub Actions run has no other persistence between
+schedule ticks), passes it to `check-health-deep.sh` as `HEALTH_STATE_FILE`,
+and saves it back afterwards regardless of pass/fail. The script tracks how
+many consecutive checks a chain's `last_block` has repeated and fails once
+that exceeds `STALL_THRESHOLD` (default 3 — i.e. ~15-20 minutes flat at the
+5-minute cadence).
+
+Five minutes is GitHub Actions' practical floor, not the 30-60s this ticket
+asked for — schedule intervals shorter than that are not reliable, and GitHub
+can delay a scheduled run further under load. The two Sentry Cron Monitor
+URLs above have to be created by hand in Sentry (Crons → new monitor → "check
+in via HTTP") and the resulting URLs stored as repo secrets; that account
+setup is outside what a commit here can do.
+
+For the faster cadence, also add a Sentry **Uptime Check** (not a Cron
+Monitor) against `/api/health/deep`, run from Sentry's own checkers at 30-60s.
+As of this writing it was not confirmed whether Sentry's uptime check can
+assert on the response body rather than just the status code — if it can,
+point its alert at the same field failures; if it can't, the workflow above is
+the fallback that actually reads the body, and is why it stays regardless of
+what the uptime check can do.
 
 ## Editing a migration that has already run
 
