@@ -25,10 +25,11 @@
 //! build for `wasm32`, which is the whole reason there are two.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 use regex::Regex;
-use sentry::protocol::{Event, Log, Value};
+use sentry::protocol::{Context, Event, Log, Map, Value};
 
 /// Ordered `(pattern, replacement)` redaction rules applied to every free-text
 /// field. Compiled once and reused for the life of the process.
@@ -154,6 +155,90 @@ fn is_sensitive_key(key: &str) -> bool {
     SENSITIVE.iter().any(|needle| key.contains(needle))
 }
 
+/// Redact the open-ended parts of a `contexts` map (present on both
+/// [`Event`] and `Transaction`) — every typed variant (`os`, `runtime`,
+/// `device`, ...) carries an `other: Map<String, Value>` catch-all for
+/// forward compatibility, `Context::Other` is fully free-form,
+/// `Context::Response` carries HTTP response cookies/headers/body, and
+/// `Context::Trace` carries a free-text `description` plus its own open
+/// `data` map. Nothing in this codebase calls `Scope::set_context` today, so
+/// these are populated only by Sentry's own integrations: `contexts`
+/// (OS/runtime/device introspection — fixed, not secret-shaped fields, so
+/// left alone here) and `sentry-tower` (attaches `Context::Trace` to every
+/// transaction, which *is* closed below since it carries free text and an
+/// open map like the others). Any context variant not named above is dropped
+/// rather than forwarded — see the wildcard arm below.
+fn redact_contexts(contexts: &mut Map<String, Context>) {
+    // `Context` is `#[non_exhaustive]` upstream, so this match can never be
+    // exhaustive over its variants and a future SDK bump can add one we've
+    // never seen. The wildcard arm can't reach into an unrecognised
+    // variant's fields to redact them — it can only see that the variant
+    // exists — so rather than pass it through unscrubbed, drop it and log
+    // which type name got dropped.
+    contexts.retain(|_, context| match context {
+        Context::Other(map) => {
+            redact_map(map.iter_mut());
+            true
+        }
+        Context::Device(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Os(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Runtime(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::App(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Browser(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Gpu(c) => {
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Otel(c) => {
+            redact_map(c.attributes.iter_mut());
+            redact_map(c.resource.iter_mut());
+            redact_map(c.other.iter_mut());
+            true
+        }
+        Context::Response(c) => {
+            // Same reasoning as `event.request`/`transaction.request`:
+            // an HTTP response container routinely holds cookies/headers.
+            c.cookies = None;
+            c.headers.clear();
+            c.data = None;
+            true
+        }
+        Context::Trace(c) => {
+            // `sentry-tower` attaches one of these to every transaction,
+            // so once tracing is on this ships on essentially every
+            // envelope. `description` is free text and `data` is an open
+            // catch-all, same shape as the other variants above.
+            if let Some(description) = c.description.as_mut() {
+                *description = redact_secrets(description);
+            }
+            redact_map(c.data.iter_mut());
+            true
+        }
+        other => {
+            tracing::warn!(
+                context_type = %other.type_name(),
+                "dropping Sentry context of a type with no redaction rule"
+            );
+            false
+        }
+    });
+}
+
 /// Sentry `before_send` hook: strip PII/secrets before an event leaves the
 /// process. Returning `Some(event)` lets the (scrubbed) event through;
 /// returning `None` would drop it entirely.
@@ -167,6 +252,7 @@ pub fn scrub_event(mut event: Event<'static>) -> Option<Event<'static>> {
     event.request = None; // HTTP method/url/headers/cookies/body
     event.user = None; // id / email / ip / username
     event.server_name = None; // host identity
+    redact_contexts(&mut event.contexts);
 
     // Redact secret-shaped text from remaining free-text fields.
     for text in [
@@ -210,6 +296,103 @@ pub fn scrub_event(mut event: Event<'static>) -> Option<Event<'static>> {
     }
 
     Some(event)
+}
+
+/// Applies [`scrub_event`]'s policy to a performance transaction.
+///
+/// `ClientOptions::before_send` (and `Scope`'s event processors) only run for
+/// error events: a `Transaction` is built, filled in by the `sentry-tower`
+/// integration — including the request URL and headers, via
+/// `TransactionOrSpan::set_request` — and handed straight to the transport in
+/// `Span::finish`, with no callback in between. Turning on
+/// `traces_sample_rate` therefore opens a second, unscrubbed path off the
+/// host unless something scrubs the transaction itself; [`ScrubbingTransport`]
+/// calls this just before an envelope is sent.
+fn scrub_transaction(transaction: &mut sentry::protocol::Transaction<'static>) {
+    // Same containers scrub_event drops: the request the tower integration
+    // attaches carries the raw URL and headers, not the route pattern.
+    transaction.request = None;
+    transaction.user = None;
+    transaction.server_name = None;
+    redact_contexts(&mut transaction.contexts);
+
+    if let Some(name) = transaction.name.as_mut() {
+        *name = redact_secrets(name);
+    }
+    for tag_value in transaction.tags.values_mut() {
+        *tag_value = redact_secrets(tag_value);
+    }
+    redact_map(transaction.extra.iter_mut());
+
+    for span in &mut transaction.spans {
+        if let Some(description) = span.description.as_mut() {
+            *description = redact_secrets(description);
+        }
+        for tag_value in span.tags.values_mut() {
+            *tag_value = redact_secrets(tag_value);
+        }
+        redact_map(span.data.iter_mut());
+    }
+}
+
+/// Wraps the real transport so every outgoing envelope's `Transaction` items
+/// pass through [`scrub_transaction`] first. This is the only seam available
+/// for that in this SDK version — see [`scrub_transaction`] for why
+/// `before_send` doesn't reach transactions.
+struct ScrubbingTransport {
+    inner: Arc<dyn sentry::Transport>,
+}
+
+impl sentry::Transport for ScrubbingTransport {
+    fn send_envelope(&self, envelope: sentry::protocol::Envelope) {
+        let mut scrubbed =
+            sentry::protocol::Envelope::new().with_headers(envelope.headers().clone());
+        for item in envelope.into_items() {
+            match item {
+                sentry::protocol::EnvelopeItem::Transaction(mut transaction) => {
+                    scrub_transaction(&mut transaction);
+                    // 0.49 holds the transaction boxed inside the variant and
+                    // no longer converts a `Box<Transaction>` on its own, so
+                    // re-wrap explicitly rather than leaning on `Into`.
+                    scrubbed.add_item(sentry::protocol::EnvelopeItem::Transaction(transaction));
+                }
+                other => scrubbed.add_item(other),
+            }
+        }
+        self.inner.send_envelope(scrubbed);
+    }
+
+    fn flush(&self, timeout: std::time::Duration) -> bool {
+        self.inner.flush(timeout)
+    }
+
+    fn shutdown(&self, timeout: std::time::Duration) -> bool {
+        self.inner.shutdown(timeout)
+    }
+}
+
+/// Builds the real (reqwest) transport and wraps it in [`ScrubbingTransport`].
+/// Installed as `ClientOptions::transport` in [`init_sentry`] instead of
+/// leaving it `None`, which would fall back to the same reqwest transport
+/// unscrubbed.
+struct ScrubbingTransportFactory;
+
+impl sentry::TransportFactory for ScrubbingTransportFactory {
+    // `create_transport_with_options`, not the older `create_transport`: as of
+    // 0.49 this is the method the SDK actually calls, and the older one is
+    // documented as not called at all. A factory that implements only the old
+    // one still works today, through a default that round-trips the options
+    // back into a `ClientOptions` - but it is reached by a deprecated
+    // compatibility shim, and the day that shim goes, the scrubber goes with
+    // it and every performance transaction ships unscrubbed with nothing red.
+    fn create_transport_with_options(
+        &self,
+        options: sentry::TransportOptions,
+    ) -> Arc<dyn sentry::Transport> {
+        Arc::new(ScrubbingTransport {
+            inner: Arc::new(sentry::transports::ReqwestHttpTransportOptions::from(options).build()),
+        })
+    }
 }
 
 /// Sentry `before_send_log` hook: strip PII/secrets before a structured log
@@ -286,6 +469,51 @@ pub fn resolve_environment() -> String {
     std::env::var("SENTRY_ENVIRONMENT").unwrap_or_default()
 }
 
+/// Resolve `SENTRY_TRACES_SAMPLE_RATE`: the fraction of requests sampled for
+/// performance tracing, from `0.0` (none) to `1.0` (all). Defaults to `0.0`
+/// — no transactions leave the process — so tracing stays off until an
+/// environment opts in. An unset value falls back to `0.0` silently (that's
+/// the expected "not configured" state); an unparseable one also falls back
+/// to `0.0` rather than failing boot over it, since sending no transactions
+/// is always a safe default, but logs a warning first — otherwise a typo'd
+/// value is indistinguishable from an intentional `0.0` and can sit
+/// unnoticed indefinitely. A parseable but out-of-range value (e.g. `"1"`
+/// typed for `"0.1"`, or a negative number) is clamped into `0.0..=1.0` with
+/// the same warning, rather than handed to `ClientOptions` as-is — otherwise
+/// that exact typo silently reproduces the unbounded-cost failure this
+/// ticket exists to close. `NaN` parses successfully (`"nan"` is a valid
+/// `f32`) but compares `false` against every bound, so it would skip the
+/// range check and `f32::clamp` passes it through unchanged — it is treated
+/// as unparseable rather than trusted to `clamp`.
+#[must_use]
+pub fn resolve_traces_sample_rate() -> f32 {
+    match std::env::var("SENTRY_TRACES_SAMPLE_RATE") {
+        Ok(raw) => {
+            let parsed: f32 = raw
+                .parse()
+                .ok()
+                .filter(|value: &f32| !value.is_nan())
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        value = %raw,
+                        "SENTRY_TRACES_SAMPLE_RATE is not a valid number; falling back to 0.0"
+                    );
+                    0.0
+                });
+            if (0.0..=1.0).contains(&parsed) {
+                parsed
+            } else {
+                tracing::warn!(
+                    value = %raw,
+                    "SENTRY_TRACES_SAMPLE_RATE is outside 0.0..=1.0; clamping"
+                );
+                parsed.clamp(0.0, 1.0)
+            }
+        }
+        Err(_) => 0.0,
+    }
+}
+
 /// Builds the `ClientOptions` [`init_sentry`] hands to `sentry::init`. Split
 /// out so a test can construct the exact options production uses — via
 /// `sentry::test::with_captured_envelopes_options` — instead of hand-rolling
@@ -295,6 +523,7 @@ fn client_options(
     dsn: Option<sentry::types::Dsn>,
     release: Option<Cow<'static, str>>,
     environment: String,
+    traces_sample_rate: f32,
 ) -> sentry::ClientOptions {
     // `ClientOptions` is `#[non_exhaustive]` as of 0.49, which makes the old
     // struct-literal (`..Default::default()` included) construction illegal
@@ -306,6 +535,14 @@ fn client_options(
         // Never attach default PII (IP, cookies, request bodies). This is a
         // payment processor.
         .send_default_pii(false)
+        // 0.49 made this a builder method that *panics* outside 0.0..=1.0,
+        // so the clamping in `resolve_traces_sample_rate` is what keeps a
+        // malformed env var from taking the process down at startup rather
+        // than merely being tidy. Note also that 0.49 treats an explicit
+        // `0.0` as a fixed rate of zero, which is distinct from leaving
+        // sampling unset - same effect, nothing sampled, but it is a
+        // deliberate "off", not a default.
+        .traces_sample_rate(traces_sample_rate)
         // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
         // API keys, emails and on-chain addresses before events leave the host.
         .before_send(scrub_event)
@@ -314,6 +551,11 @@ fn client_options(
         // hook logs go through.
         .before_send_log(scrub_log);
     options.dsn = dsn;
+    // `before_send` does not run for performance transactions in this SDK
+    // version (see `scrub_transaction`), so the transport scrubs them
+    // instead - otherwise the mandatory scrubber is only half applied once
+    // `traces_sample_rate` can be nonzero.
+    options.transport = Some(Arc::new(ScrubbingTransportFactory));
     // `enable_logs` is deprecated as of 0.49: "logs captured manually are
     // always sent; only automatic capture by integrations respects this
     // option". `sentry_tracing::layer()` is exactly such an integration - it
@@ -343,12 +585,6 @@ fn client_options(
     options
 }
 
-/// Initialise Sentry from `SENTRY_DSN`, installing [`scrub_event`] as the
-/// `before_send` hook and tagging events with [`resolve_environment`]. Shared
-/// by the `server` and `evmmonitor` binaries so the mainnet boot-gate and the
-/// PII scrubber live in exactly one place each, instead of two copies that
-/// can quietly diverge.
-///
 /// Returns the init guard, whether a DSN was actually configured, and the
 /// resolved environment tag — pass the latter two to
 /// [`report_reporting_status`].
@@ -358,7 +594,12 @@ pub fn init_sentry(release: Option<Cow<'static, str>>) -> (sentry::ClientInitGua
         .and_then(|s| s.parse().ok());
     let dsn_configured = dsn.is_some();
     let environment = resolve_environment();
-    let guard = sentry::init(client_options(dsn, release, environment.clone()));
+    let guard = sentry::init(client_options(
+        dsn,
+        release,
+        environment.clone(),
+        resolve_traces_sample_rate(),
+    ));
     (guard, dsn_configured, environment)
 }
 

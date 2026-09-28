@@ -137,7 +137,7 @@ fn alloy_ws_frame_noise_does_not_reach_a_real_sentry_client_as_an_event() {
                 "WebSocket subscription ended"
             );
         },
-        client_options(None, None, "test".to_string()),
+        client_options(None, None, "test".to_string(), 0.0),
     );
 
     let events: Vec<_> = envelopes

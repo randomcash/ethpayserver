@@ -278,7 +278,7 @@ fn scrub_log_redacts_a_secret_through_the_real_capture_pipeline() {
         || {
             tracing::info!("loaded key {pk}");
         },
-        client_options(None, None, "test".to_string()),
+        client_options(None, None, "test".to_string(), 0.0),
     );
 
     let logs = captured_logs(&envelopes);
@@ -300,3 +300,352 @@ fn scrub_log_redacts_a_secret_through_the_real_capture_pipeline() {
 mod capture_tests;
 #[cfg(test)]
 mod event_filter_tests;
+
+// --- ported from this branch's inline `mod tests`, which testnet moved out
+// into this file. De-indented deliberately: this file's contents sit at
+// column 0, and pasting an indented block here nests it inside whatever
+// precedes it, which compiles and silently never runs.
+
+/// Restores an env var to its pre-test value on drop, so a mid-test
+/// panic (an assertion failing partway through a multi-step test) can't
+/// leave the var set for every later test in the same process — env vars
+/// are process-global and `cargo test`/`nextest` run tests in threads of
+/// the same process, not one process per test.
+struct RestoreEnvVar {
+    name: &'static str,
+    previous: Option<String>,
+}
+
+impl RestoreEnvVar {
+    fn capture(name: &'static str) -> Self {
+        Self {
+            name,
+            previous: std::env::var(name).ok(),
+        }
+    }
+}
+
+impl Drop for RestoreEnvVar {
+    fn drop(&mut self) {
+        // SAFETY: the env vars this guard restores are only ever touched
+        // by the single test that owns it.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+}
+
+#[test]
+fn scrub_transaction_drops_request_user_server_name_and_redacts_free_text() {
+    use sentry::protocol::{Request, Span, Transaction, User};
+
+    let mut span = Span {
+        description: Some(
+            "connecting to https://eth-sepolia.g.alchemy.com/v2/alch_supersecretkey".to_string(),
+        ),
+        ..Default::default()
+    };
+    span.tags
+        .insert("note".to_string(), "password = hunter2".to_string());
+    span.data.insert(
+        "detail".to_string(),
+        Value::String("token=sk_live_supersecret".to_string()),
+    );
+
+    let mut transaction = Transaction {
+        name: Some("GET /api/invoices/{id}".to_string()),
+        request: Some(Request::default()),
+        user: Some(User::default()),
+        server_name: Some("payserver-prod-01".into()),
+        spans: vec![span],
+        ..Default::default()
+    };
+    transaction
+        .tags
+        .insert("path".to_string(), "email alice@example.com".to_string());
+    transaction.extra.insert(
+        "ctx".to_string(),
+        Value::String("token=sk_live_supersecret".to_string()),
+    );
+
+    scrub_transaction(&mut transaction);
+
+    assert!(transaction.request.is_none());
+    assert!(transaction.user.is_none());
+    assert!(transaction.server_name.is_none());
+    assert_eq!(
+        transaction.name.as_deref(),
+        Some("GET /api/invoices/{id}"),
+        "a route pattern must survive redaction unchanged"
+    );
+    assert!(!transaction.tags["path"].contains("alice@example.com"));
+    let extra = transaction
+        .extra
+        .get("ctx")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert!(!extra.contains("supersecret"), "extra leaked: {extra}");
+    let span = &transaction.spans[0];
+    assert!(
+        !span
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("supersecretkey"),
+        "span description leaked: {:?}",
+        span.description
+    );
+    assert!(!span.tags["note"].contains("hunter2"));
+    let span_detail = span.data.get("detail").and_then(Value::as_str).unwrap();
+    assert!(
+        !span_detail.contains("supersecret"),
+        "span data leaked: {span_detail}"
+    );
+}
+
+fn poisoned_contexts() -> Map<String, Context> {
+    use sentry::protocol::{ResponseContext, RuntimeContext, TraceContext};
+
+    let mut contexts = Map::new();
+    let mut runtime = RuntimeContext {
+        name: Some("rustc".to_string()),
+        ..Default::default()
+    };
+    runtime
+        .other
+        .insert("token".to_string(), Value::String("sk_live_x".to_string()));
+    contexts.insert("runtime".to_string(), Context::Runtime(Box::new(runtime)));
+    contexts.insert(
+        "response".to_string(),
+        Context::Response(Box::new(ResponseContext {
+            cookies: Some("session=abc123".to_string()),
+            data: Some(Value::String("body".to_string())),
+            ..Default::default()
+        })),
+    );
+    let mut other = Map::new();
+    other.insert("password".to_string(), Value::String("hunter2".to_string()));
+    contexts.insert("plugin".to_string(), Context::Other(other));
+    let mut trace = TraceContext {
+        description: Some("token=sk_live_x".to_string()),
+        ..Default::default()
+    };
+    trace
+        .data
+        .insert("secret".to_string(), Value::String("hunter2".to_string()));
+    contexts.insert("trace".to_string(), Context::Trace(Box::new(trace)));
+    contexts
+}
+
+fn assert_context_containers_are_clean(contexts: &Map<String, Context>) {
+    let Context::Runtime(runtime) = &contexts["runtime"] else {
+        panic!("expected runtime context")
+    };
+    assert_eq!(
+        runtime.other.get("token").and_then(Value::as_str),
+        Some("[redacted]"),
+        "runtime.other leaked a secret key"
+    );
+    let Context::Response(response) = &contexts["response"] else {
+        panic!("expected response context")
+    };
+    assert!(response.cookies.is_none());
+    assert!(response.data.is_none());
+    let Context::Other(plugin) = &contexts["plugin"] else {
+        panic!("expected other context")
+    };
+    assert_eq!(
+        plugin.get("password").and_then(Value::as_str),
+        Some("[redacted]")
+    );
+    let Context::Trace(trace) = &contexts["trace"] else {
+        panic!("expected trace context")
+    };
+    let description = trace.description.as_ref().unwrap();
+    assert!(
+        !description.contains("sk_live_x"),
+        "trace.description leaked a secret: {description}"
+    );
+    assert_eq!(
+        trace.data.get("secret").and_then(Value::as_str),
+        Some("[redacted]"),
+        "trace.data leaked a secret key"
+    );
+}
+
+#[test]
+fn scrub_event_and_transaction_redact_contexts() {
+    use sentry::protocol::Transaction;
+
+    let event = Event {
+        contexts: poisoned_contexts(),
+        ..Default::default()
+    };
+    let scrubbed = scrub_event(event).expect("event passes through");
+    assert_context_containers_are_clean(&scrubbed.contexts);
+
+    let mut transaction = Transaction {
+        contexts: poisoned_contexts(),
+        ..Default::default()
+    };
+    scrub_transaction(&mut transaction);
+    assert_context_containers_are_clean(&transaction.contexts);
+}
+
+#[test]
+fn scrubbing_transport_scrubs_transactions_before_forwarding() {
+    use std::sync::Mutex;
+
+    use sentry::Transport;
+    use sentry::protocol::{Envelope, EnvelopeItem, Event, Request, Transaction};
+
+    #[derive(Default)]
+    struct RecordingTransport {
+        envelopes: Mutex<Vec<Envelope>>,
+    }
+
+    impl Transport for RecordingTransport {
+        fn send_envelope(&self, envelope: Envelope) {
+            self.envelopes.lock().unwrap().push(envelope);
+        }
+    }
+
+    let recorder = Arc::new(RecordingTransport::default());
+    let scrubber = ScrubbingTransport {
+        inner: recorder.clone(),
+    };
+
+    let mut envelope = Envelope::new();
+    envelope.add_item(Transaction {
+        request: Some(Request::default()),
+        ..Default::default()
+    });
+    envelope.add_item(Event::default());
+    scrubber.send_envelope(envelope);
+
+    let forwarded = recorder.envelopes.lock().unwrap();
+    assert_eq!(
+        forwarded.len(),
+        1,
+        "the envelope itself must still be forwarded"
+    );
+    let mut saw_transaction = false;
+    for item in forwarded[0].items() {
+        match item {
+            EnvelopeItem::Transaction(transaction) => {
+                saw_transaction = true;
+                assert!(
+                    transaction.request.is_none(),
+                    "transaction request must be scrubbed before forwarding"
+                );
+            }
+            EnvelopeItem::Event(_) => {}
+            other => panic!("unexpected envelope item: {other:?}"),
+        }
+    }
+    assert!(
+        saw_transaction,
+        "the transaction item must be forwarded, not dropped"
+    );
+}
+
+/// Asserts the dependency-free scanners in payserver-commons `scrub` produce
+/// byte-identical output to the regex table above, across a corpus chosen to
+/// hit every rule plus the boundaries between them (rule ordering, adjacent
+/// matches, non-ASCII neighbours, empty and truncated inputs).
+///
+/// This is the only place both can be compiled. If it fails, the two
+/// implementations have diverged and the browser is redacting differently
+/// from the servers — fix `scrub`, do not delete the case.
+
+#[test]
+fn resolve_traces_sample_rate_defaults_to_zero() {
+    // Owns SENTRY_TRACES_SAMPLE_RATE for the duration of the test;
+    // restored on drop (including on panic) since this is a
+    // process-global var and no other test touches it.
+    let _restore = RestoreEnvVar::capture("SENTRY_TRACES_SAMPLE_RATE");
+
+    // SAFETY: no other test reads or writes SENTRY_TRACES_SAMPLE_RATE.
+    unsafe {
+        std::env::remove_var("SENTRY_TRACES_SAMPLE_RATE");
+    }
+    assert_eq!(
+        resolve_traces_sample_rate(),
+        0.0,
+        "unset must default to 0.0"
+    );
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "not-a-number");
+    }
+    assert_eq!(
+        resolve_traces_sample_rate(),
+        0.0,
+        "unparseable must fall back to 0.0, not panic"
+    );
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "0.1");
+    }
+    assert_eq!(resolve_traces_sample_rate(), 0.1);
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "10");
+    }
+    assert_eq!(
+        resolve_traces_sample_rate(),
+        1.0,
+        "a parseable but out-of-range value (e.g. \"10\" typed for \"0.1\") must clamp, not pass through"
+    );
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "-3");
+    }
+    assert_eq!(
+        resolve_traces_sample_rate(),
+        0.0,
+        "a negative value must clamp to 0.0, not go negative"
+    );
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::set_var("SENTRY_TRACES_SAMPLE_RATE", "nan");
+    }
+    assert_eq!(
+        resolve_traces_sample_rate(),
+        0.0,
+        "\"nan\" parses to f32::NAN, which clamp() passes through unchanged; must fall back to 0.0 instead"
+    );
+}
+
+#[test]
+fn client_options_carry_the_sample_rate_and_the_scrubbing_transport() {
+    let options = client_options(None, None, "testnet".to_string(), 0.42);
+    // 0.49 keeps the rate inside a sampling *strategy* rather than a plain
+    // field, so this reads the strategy back. `FixedRate` specifically:
+    // `Disabled` and `FixedRate(0.0)` both sample nothing, and asserting only
+    // on the effect would not tell them apart.
+    assert!(
+        matches!(
+            options.traces_sampling_strategy,
+            sentry::TracesSamplingStrategy::FixedRate(rate) if rate == 0.42
+        ),
+        "resolved sample rate must reach the options sentry::init actually receives; got {:?}",
+        options.traces_sampling_strategy
+    );
+    assert!(
+        options.transport.is_some(),
+        "ScrubbingTransportFactory must be wired in, or performance transactions ship unscrubbed"
+    );
+    assert!(
+        options.before_send.is_some(),
+        "scrub_event must be wired in, or error events ship unscrubbed"
+    );
+}
