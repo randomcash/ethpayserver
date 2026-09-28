@@ -450,18 +450,29 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
         Ok(count)
     }
 
-    /// Deactivate the address in the database, then send the unwatch command.
+    /// Send the unwatch command, then deactivate the address in the database.
     ///
-    /// Postgres before Redis, matching the ordering `unwatch_after_delete`
-    /// already uses elsewhere: the unwatch is best-effort and asynchronous -
-    /// published over a Redis pub/sub channel and applied later by a separate
-    /// monitor process, not applied synchronously here. Flipping `is_active`
-    /// first guarantees the reconciler's "expected" set (which reads
-    /// `is_active`) stops listing this address no later than the "actual"
-    /// watch set does. Reversed, a Postgres write slower than the monitor's
-    /// own pub/sub round trip could make a still-genuinely-watched address
-    /// look missed instead of merely stale - the worse of the two false
-    /// positives this reconciler exists to tell apart.
+    /// Redis before Postgres, deliberately kept this way and not reordered
+    /// to close the tiny cancelled-branch false-"missed" race a review
+    /// raised (see the `expected_watched_addresses` migration's comment on
+    /// why the `cancelled` branch has no grace window). Deactivating first
+    /// was tried and reverted: it makes `is_active` flip unconditionally
+    /// before the unwatch is even attempted, which (a) drops the retry a
+    /// failed unwatch currently gets for free - the next cleanup poll only
+    /// re-selects rows still `is_active = TRUE` - turning a self-healing
+    /// failure into a permanently orphaned Redis watch, and (b) widens the
+    /// window in which Postgres already reports an address inactive while
+    /// Redis, which only learns about the unwatch asynchronously over
+    /// pub/sub, is still actually watching it: `event_consumer`'s payment
+    /// handler looks up the payment option through an `is_active`-gated
+    /// query, so a payment landing in that window is detected but not
+    /// credited. That is strictly worse than the race being traded away,
+    /// which requires the monitor to consume and apply the unwatch message
+    /// faster than this function's own subsequent Postgres write commits -
+    /// a narrow ordering between two calls inside one function, not a
+    /// window that persists for any observable duration. Trading a real,
+    /// money-adjacent regression for a narrower detection-only false
+    /// positive is the wrong side of that trade.
     async fn unwatch_and_deactivate(
         &self,
         address: &str,
@@ -481,12 +492,12 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
             .evm_chain_id()
             .ok_or_else(|| CleanupError::NotAnEvmChain(chain_id.to_string()))?;
 
-        // Deactivate in database first
-        WatchedAddressWriter::deactivate(&*self.data_service, address, chain_id, token_address)
-            .await?;
-
         self.evm_monitor
             .unwatch_address_by_chain_id(eip155, addr, token_contract)
+            .await?;
+
+        // Deactivate in database
+        WatchedAddressWriter::deactivate(&*self.data_service, address, chain_id, token_address)
             .await?;
 
         Ok(())
@@ -875,16 +886,14 @@ mod tests {
         assert_eq!(unwatched.as_slice(), [address.parse::<Address>().unwrap()]);
     }
 
-    /// A failed Redis unwatch must not leave Postgres still listing the
-    /// address as active - see `unwatch_and_deactivate`'s ordering comment.
-    /// Deactivating first means a failed unwatch can only ever make the
-    /// *actual* Redis side lag behind Postgres, which the reconciler reports
-    /// as a stale watch; reversed, it would leave Postgres still expecting a
-    /// watch Redis was never told to keep, and the failure mode this ticket
-    /// exists to catch - a live-looking address reported missed - is exactly
-    /// backwards from a merely stale one.
+    /// A failed Redis unwatch must leave Postgres still listing the address
+    /// as active, so the next cleanup poll retries it - see
+    /// `unwatch_and_deactivate`'s ordering comment. Deactivating
+    /// unconditionally on a failed unwatch would turn a self-healing retry
+    /// into a permanently orphaned Redis watch with no path back to a clean
+    /// state.
     #[tokio::test]
-    async fn a_failed_unwatch_does_not_leave_the_address_looking_still_watched() {
+    async fn a_failed_unwatch_leaves_the_address_active_for_retry() {
         let ds = Arc::new(InMemoryDataService::new());
         let chain_id = ChainId::parse("eip155:1").unwrap();
         let address = "0x3333333333333333333333333333333333333333".to_string();
@@ -952,9 +961,10 @@ mod tests {
         let still_active = WatchedAddressReader::get_cancelled_for_cleanup(&*ds)
             .await
             .unwrap();
-        assert!(
-            still_active.is_empty(),
-            "the address must already be deactivated even though the unwatch failed"
+        assert_eq!(
+            still_active.len(),
+            1,
+            "the failed unwatch must not be deactivated - it needs to be retried"
         );
     }
 }
