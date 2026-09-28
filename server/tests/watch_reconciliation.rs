@@ -14,6 +14,7 @@
 //! ignored integration test in this crate follows.
 
 use auth::{Store, UserId};
+use data_service::invoice_creation::InvoiceCreationWriter;
 use data_service::store_creation::StoreCreationWriter;
 use data_service::{
     ExpectedWatch, LiveWatchedAddressReader, LiveWatchedAddressWriter, PgDataService,
@@ -21,7 +22,10 @@ use data_service::{
 };
 use server::services::{RedisEVMMonitor, reconcile_watches};
 use sqlx::PgPool;
-use types::{ChainId, InvoiceId};
+use types::{
+    ChainId, InvoiceData, InvoiceId, InvoiceStatus, InvoiceWriter, PaymentMethodId,
+    PaymentOptionData, PaymentOptionId, StoreId,
+};
 use uuid::Uuid;
 
 async fn service() -> Option<PgDataService> {
@@ -63,6 +67,45 @@ async fn seed_pending_invoice(pool: &PgPool, store: Uuid) -> String {
     .await
     .expect("seed invoice");
     id
+}
+
+/// An invoice and its single native-asset option, shaped for
+/// `InvoiceCreationWriter::create_invoice_with_options` - the real entry
+/// point a new invoice is created through, as opposed to `seed_pending_invoice`
+/// and `seed_payment_option` below, which write rows directly and skip it.
+fn an_invoice_and_option(store: Uuid, address: &str) -> (InvoiceData, PaymentOptionData) {
+    let chain = ChainId::evm(11155111);
+    let invoice = InvoiceData {
+        id: InvoiceId(format!("inv-{}", Uuid::new_v4())),
+        store_id: StoreId(store),
+        currency: "USD".to_string(),
+        status: InvoiceStatus::Pending,
+        amount: "10".to_string(),
+        amount_received: "0".to_string(),
+        created_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        metadata: None,
+        customer_email: None,
+        extra: None,
+    };
+    let option = PaymentOptionData {
+        id: PaymentOptionId(Uuid::new_v4()),
+        invoice_id: invoice.id.clone(),
+        payment_method_id: PaymentMethodId::new("ETH", &chain),
+        chain_id: chain,
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        decimals: 18,
+        payment_address: address.to_string(),
+        wallet_id: None,
+        derivation_index: None,
+        amount: "1".to_string(),
+        rate: None,
+        rate_at: None,
+        is_active: true,
+        created_at: chrono::Utc::now(),
+    };
+    (invoice, option)
 }
 
 async fn seed_payment_option(pool: &PgPool, invoice: &str, address: &str) -> Uuid {
@@ -211,10 +254,18 @@ async fn reconcile_watches_reports_a_stale_watch_and_a_missed_watch() {
 /// reporting nothing for that key (proving the key-only comparison does not
 /// need the invoice id to be safe here).
 ///
-/// `watched_addresses` has an unconditional `UNIQUE (address, chain_id,
-/// token_address)` constraint, so the first invoice's row has to be gone
-/// before a second invoice can claim the same address - the delete below
-/// stands in for that, without needing to delete a whole invoice.
+/// Invoice B is created through `create_invoice_with_options`, the same
+/// entry point a real invoice goes through, rather than by hand-inserting a
+/// `watched_addresses` row: that function's `ON CONFLICT (address, chain_id,
+/// token_address) DO UPDATE` is what actually reassigns the row in
+/// production, and it never touches the row's `invoice_id` column directly -
+/// only `payment_option_id`, which the `expected_watched_addresses` view
+/// joins through to get the invoice. Exercising anything less than the real
+/// upsert would not prove the thing this test exists to prove.
+///
+/// Invoice A is resolved rather than deleted, for the same reason: deleting
+/// its row would remove the very conflict this test needs invoice B's write
+/// to hit, and would prove the easier, less realistic case instead.
 #[tokio::test]
 #[ignore]
 #[allow(clippy::too_many_lines)] // integration test with multi-step setup + assertions
@@ -245,9 +296,12 @@ async fn a_reused_address_resolves_to_the_new_invoice_not_the_stale_one() {
     let address = format!("0x{:040x}", Uuid::new_v4().as_u128());
     let chain = ChainId::evm(11155111);
 
-    // Invoice A watches the address, then its Postgres row disappears (the
-    // shape a delete's cascade leaves behind) while Redis is never told -
-    // the exact stale-watch fault this ticket exists to catch.
+    // Invoice A watches the address, then resolves (paid) while its
+    // `watched_addresses` row stays `is_active = TRUE` - the cleanup-lag
+    // window the view's doc comment describes - and Redis is never told.
+    // The row is not deleted: production reuse never deletes it either (see
+    // below), so leaving it in place is what makes the second half of this
+    // test exercise the real code path instead of an easier one.
     let invoice_a = seed_pending_invoice(pg.pool(), store.id.0).await;
     let payment_option_a = seed_payment_option(pg.pool(), &invoice_a, &address).await;
     seed_watched_address(pg.pool(), &invoice_a, payment_option_a, &address).await;
@@ -260,11 +314,13 @@ async fn a_reused_address_resolves_to_the_new_invoice_not_the_stale_one() {
         )
         .await
         .expect("seed invoice A's watch");
-    sqlx::query("DELETE FROM watched_addresses WHERE invoice_id = $1")
-        .bind(&invoice_a)
-        .execute(pg.pool())
-        .await
-        .expect("drop invoice A's watched_addresses row, as a delete's cascade would");
+    InvoiceWriter::update_status(
+        &pg,
+        &InvoiceId::from_string(invoice_a.clone()),
+        InvoiceStatus::Paid,
+    )
+    .await
+    .expect("resolve invoice A without touching its watched_addresses row");
 
     let key = WatchKey::new(chain.clone(), &address, None);
     let stale_counts = reconcile_watches(&pg, &monitor)
@@ -275,21 +331,26 @@ async fn a_reused_address_resolves_to_the_new_invoice_not_the_stale_one() {
         "invoice A's watch must be reported stale before the address is reused"
     );
 
-    // Invoice B legitimately rewatches the same address - allowed now that
-    // invoice A's row is gone, and the code path that creates a payment
-    // option always re-issues `watch_address` for it.
-    let invoice_b = seed_pending_invoice(pg.pool(), store.id.0).await;
-    let payment_option_b = seed_payment_option(pg.pool(), &invoice_b, &address).await;
-    seed_watched_address(pg.pool(), &invoice_b, payment_option_b, &address).await;
-    live_watches
-        .watch_address(
-            &address,
-            &InvoiceId::from_string(invoice_b.clone()),
-            &chain,
-            None,
-        )
+    // Invoice B legitimately rewatches the same address through the real
+    // write path (`InvoiceCreationWriter::create_invoice_with_options`),
+    // not a hand-written INSERT. That function's `ON CONFLICT (address,
+    // chain_id, token_address) DO UPDATE` fires here because invoice A's row
+    // is still physically present, and its `SET` clause only ever touches
+    // `payment_option_id` - never `invoice_id` - so the same underlying row
+    // that used to belong to invoice A is repointed to invoice B's option
+    // without the `invoice_id` column itself ever being written. Proving the
+    // reconciler goes quiet after this is what proves dropping `invoice_id`
+    // from `WatchKey` is safe against the actual conflict-update path, not
+    // just a delete-then-insert that never exercises it.
+    let (invoice_b, option_b) = an_invoice_and_option(store.id.0, &address);
+    let invoice_b_id = invoice_b.id.clone();
+    pg.create_invoice_with_options(&invoice_b, std::slice::from_ref(&option_b))
         .await
-        .expect("legitimately rewatch the address for invoice B");
+        .expect("legitimately rewatch the address for invoice B via the real write path");
+    live_watches
+        .watch_address(&address, &invoice_b_id, &chain, None)
+        .await
+        .expect("the app's post-write watch_address call for invoice B");
 
     let redis_value = live_watches
         .get_watched_invoice(&address, &chain, None)
@@ -298,7 +359,7 @@ async fn a_reused_address_resolves_to_the_new_invoice_not_the_stale_one() {
         .expect("the address is still watched");
     assert_eq!(
         redis_value.as_str(),
-        invoice_b,
+        invoice_b_id.as_str(),
         "the Redis value must have moved to invoice B, not stayed on the stale invoice A"
     );
 
