@@ -137,13 +137,14 @@ human-reviewed without exception.
   the wrong reason — an endpoint that 401s regardless of state, a duplicate-id
   case that fails at the first statement so there is nothing to roll back.
 - **A unit test does not prove the feature is reachable.** Test the thing
-  through the entry point a user or a caller actually reaches it by. Three
-  separate pieces of this repo have shipped fully tested and wired to nothing:
-  `scripts/health-gate.sh` (documented as a CI job that did not exist),
-  `api::plugins::router()` (nine passing tests, mounted in no router), and
-  `services/plugins/core_data.rs` (151 lines, referenced only by its own
-  re-export). Every one had green tests. `pub` is not reachability — Rust's
-  `dead_code` lint says nothing about an exported item nothing imports.
+  through the entry point a user or a caller actually reaches it by. This repo
+  has shipped fully tested code wired to nothing more than once:
+  `scripts/health-gate.sh` sat in the tree unreferenced by any CI job until
+  `deploy-verify-testnet` finally called it, and `services/plugins/core_data.rs`
+  (151 lines, referenced only by its own re-export) was later deleted outright
+  as dead code. `api::plugins::router()` (nine passing tests) is still mounted
+  in no router today. Every one had green tests. `pub` is not reachability —
+  Rust's `dead_code` lint says nothing about an exported item nothing imports.
 - **Two migrations must never share a version.** sqlx keys applied migrations
   by the number in the filename; the second file to claim one is refused on
   every startup from then on, not just the first, and recovering means editing
