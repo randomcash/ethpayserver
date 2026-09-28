@@ -87,8 +87,8 @@ pub struct EventConsumer<D: EventConsumerDataService, M: EVMMonitor, W: WebhookD
     email_sender: Arc<dyn EmailSender>,
     /// Capability 4 observers, and the one store they may hear about.
     ///
-    /// Both default to "nothing": an instance that does not sell
-    /// subscriptions to itself has no own store and no observers, and
+    /// Both default to "nothing": an instance with no configured operator
+    /// store has no observers either, and
     /// `own_store_id: None` reports nothing even if an observer is somehow
     /// registered. See `plugins::payment_observer`.
     payment_observers: Vec<Arc<dyn OwnStorePaymentObserver>>,

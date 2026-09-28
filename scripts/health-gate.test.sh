@@ -177,6 +177,67 @@ cat > "$BODY_FILE" <<'JSON'
 JSON
 check "an unhealthy chain is refused" 1
 
+# A timeout with EXPECTED_SHA set reports which of three situations it saw,
+# not a single generic "SHA mismatch" - see the header comment in
+# health-gate.sh for why the distinction matters. These reuse a real HTTP
+# server rather than checking the SHA-tracking logic in isolation, because the
+# thing worth proving is that the categorization survives contact with the
+# actual poll loop, headers file and JSON parsing.
+
+healthy
+
+# No response ever carries a build_sha: point at a port nothing is listening
+# on, so curl fails on every attempt.
+DEAD_PORT=$((PORT + 1))
+LOG=$(env HEALTH_URL="http://127.0.0.1:$DEAD_PORT/health/deep" HEALTH_TIMEOUT=1 EXPECTED_SHA=zzzzzzz bash "$GATE" 2>&1)
+if echo "$LOG" | grep -q "no response ever reported a build_sha"; then
+  echo "ok: an unreachable endpoint is reported as 'no response', not a bare SHA mismatch"
+else
+  echo "FAIL: expected the 'no response' timeout message, got:"; echo "$LOG"; fail=1
+fi
+
+# The sha is observed but never matches, and never changes either: the old
+# build is still running.
+cat > "$BODY_FILE" <<'JSON'
+{"build_sha":"abc1234","postgres":{"status":"ok"},"redis":{"status":"ok"},
+ "monitor":{"status":"ok","data_fresh":true},
+ "rpcs":{"eip155:11155111":{"status":"ok","last_block":100}}}
+JSON
+LOG=$(env HEALTH_URL="http://127.0.0.1:$PORT/health/deep" HEALTH_TIMEOUT=1 EXPECTED_SHA=zzzzzzz bash "$GATE" 2>&1)
+if echo "$LOG" | grep -q "sha stayed at abc1234" && echo "$LOG" | grep -q "hasn't landed yet"; then
+  echo "ok: a sha that never moves is reported as not landed yet, not investigate"
+else
+  echo "FAIL: expected the 'sha stayed' timeout message, got:"; echo "$LOG"; fail=1
+fi
+
+# The sha changes mid-poll to a third value that is neither the old build nor
+# EXPECTED_SHA: the one case that actually means something is wrong. Needs two
+# poll iterations, so the body flips in the background partway through the
+# first iteration's sleep.
+cat > "$BODY_FILE" <<'JSON'
+{"build_sha":"abc1234","postgres":{"status":"ok"},"redis":{"status":"ok"},
+ "monitor":{"status":"ok","data_fresh":true},
+ "rpcs":{"eip155:11155111":{"status":"ok","last_block":100}}}
+JSON
+(
+  sleep 3
+  cat > "$BODY_FILE" <<'JSON'
+{"build_sha":"def5678","postgres":{"status":"ok"},"redis":{"status":"ok"},
+ "monitor":{"status":"ok","data_fresh":true},
+ "rpcs":{"eip155:11155111":{"status":"ok","last_block":100}}}
+JSON
+) &
+FLIPPER=$!
+LOG=$(env HEALTH_URL="http://127.0.0.1:$PORT/health/deep" HEALTH_TIMEOUT=8 EXPECTED_SHA=zzzzzzz bash "$GATE" 2>&1)
+wait "$FLIPPER"
+if echo "$LOG" | grep -q "sha changed during the poll (from abc1234, last seen def5678)" && echo "$LOG" | grep -q "investigate"; then
+  echo "ok: a sha that moves to a third, unexpected build is reported as investigate"
+else
+  echo "FAIL: expected the 'sha changed' timeout message, got:"; echo "$LOG"; fail=1
+fi
+
+healthy
+
 if [ "$fail" -ne 0 ]; then
   echo "health-gate.sh does NOT behave as documented"; exit 1
 fi
