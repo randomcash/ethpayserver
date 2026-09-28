@@ -166,9 +166,38 @@ async fn validate_session<A>(
 where
     A: SessionService + 'static,
 {
-    validate_session_with_scope(parts, state)
-        .await
-        .map(|(user_info, _is_operator, _scope)| user_info)
+    let (user_info, _is_operator, scope) = validate_session_with_scope(parts, state).await?;
+
+    // A key that carries a narrowed scope must not reach a caller that did
+    // not ask for one.
+    //
+    // This function is, by construction, the "I do not handle scope" path:
+    // the extractors that do handle it (`StoreScopedUser`,
+    // `AuthenticatedCaller`) call `validate_session_with_scope` directly and
+    // get the scope to enforce. Everything reaching *here* discards it, and
+    // discarding a restriction grants everything it was meant to withhold -
+    // most of this API is still on that path, key management and account
+    // deletion included. Narrowing a key would then be reversible by using
+    // it: one call to an unmigrated route is enough to act outside the scope,
+    // or to mint a second key carrying none.
+    //
+    // Refusing is the safe direction, and it is free right now because
+    // narrowed keys are new: no key in existence has a scope to be refused
+    // for. It also fails in the direction a caller can see and report, rather
+    // than silently granting more than the owner asked to give. The cost is
+    // that migrating a route to honour scope is now the only way to make it
+    // reachable by a scoped key, which is the incentive pointing the right
+    // way.
+    //
+    // A session carries no scope at all, so this never affects one.
+    if !key_retains_unrestricted_access(scope.as_deref()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This API key is limited to specific store permissions and cannot be used here",
+        ));
+    }
+
+    Ok(user_info)
 }
 
 /// Same as `validate_session`, but also returns whether the credential is

@@ -110,9 +110,22 @@ where
     })
 }
 
+/// Stands in for the many handlers still taking `AuthenticatedUser`, which
+/// carries no scope and therefore cannot enforce one.
+async fn echo_authenticated_user<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(_): State<PgAppState<A>>,
+) -> axum::Json<Uuid>
+where
+    A: SessionService + 'static,
+{
+    axum::Json(user.id.0)
+}
+
 fn echo_app(state: PgAppState<NoSessionService>) -> Router {
     Router::new()
         .route("/echo", get(echo_store_scope::<NoSessionService>))
+        .route("/whoami", get(echo_authenticated_user::<NoSessionService>))
         .with_state(state)
 }
 
@@ -394,4 +407,123 @@ async fn an_explicitly_unrestricted_admin_key_still_has_the_bare_role_bypass() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
+}
+
+/// A narrowed key must not authenticate at a handler that cannot enforce its
+/// scope.
+///
+/// `AuthenticatedUser` carries no scope, so every handler taking it would
+/// treat a narrowed key as if it carried none - and "no scope" means inherit
+/// the owner's role in full. Most of this API still takes it, key management
+/// and account deletion included, so without this the narrowing is undone by
+/// using the key: one call to any such route acts outside the scope, and the
+/// key-creation route in particular hands back a fresh key carrying no scope
+/// at all. Refusing here is what makes a narrowed key narrow everywhere
+/// rather than only on the routes that happen to ask.
+#[tokio::test]
+#[ignore]
+async fn a_narrowed_key_is_refused_where_the_scope_cannot_be_enforced() {
+    let Some(service) = test_service().await else {
+        return;
+    };
+    let pool = service.pool().clone();
+    let user_id = seed_user(&pool).await;
+    let raw_key = format!("ak_narrow_{}", Uuid::new_v4());
+    seed_api_key(
+        &pool,
+        user_id,
+        &raw_key,
+        &[Policies::STORE_CREATE_INVOICE.to_string()],
+    )
+    .await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/whoami")
+        .header("Authorization", format!("Bearer {raw_key}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = echo_app(test_state(service)).oneshot(req).await.unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a key narrowed to one store permission must not pass an extractor that discards its scope"
+    );
+}
+
+/// The other direction, and the one that would break every existing caller if
+/// the refusal above were written too broadly: a key with no stored scope
+/// inherits its owner's role, which is what every key issued before scoping
+/// existed looks like. It must still authenticate exactly as it did.
+#[tokio::test]
+#[ignore]
+async fn a_key_with_no_stored_scope_still_authenticates_unchanged() {
+    let Some(service) = test_service().await else {
+        return;
+    };
+    let pool = service.pool().clone();
+    let user_id = seed_user(&pool).await;
+    let raw_key = format!("ak_unscoped_{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, is_active, created_at, permissions) \
+         VALUES ($1, $2, 'unscoped test key', $3, 'ak_test****', true, NOW(), NULL)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(hash_api_key(&raw_key))
+    .execute(&pool)
+    .await
+    .expect("seed a key with no stored scope");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/whoami")
+        .header("Authorization", format!("Bearer {raw_key}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = echo_app(test_state(service)).oneshot(req).await.unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a key that was never narrowed must keep working on every route it worked on before"
+    );
+}
+
+/// An explicitly unrestricted key is a narrowed-shaped value that means the
+/// opposite, so it must be admitted rather than caught by the shape.
+#[tokio::test]
+#[ignore]
+async fn an_explicitly_unrestricted_key_still_authenticates() {
+    let Some(service) = test_service().await else {
+        return;
+    };
+    let pool = service.pool().clone();
+    let user_id = seed_user(&pool).await;
+    let raw_key = format!("ak_unrestricted_{}", Uuid::new_v4());
+    seed_api_key(
+        &pool,
+        user_id,
+        &raw_key,
+        &[Policies::UNRESTRICTED.to_string()],
+    )
+    .await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/whoami")
+        .header("Authorization", format!("Bearer {raw_key}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = echo_app(test_state(service)).oneshot(req).await.unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an explicit unrestricted scope grants everything, so it must not be refused"
+    );
 }
