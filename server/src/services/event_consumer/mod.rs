@@ -247,7 +247,7 @@ impl<
             }
         };
 
-        let mut resume_from = match self.reconcile_cursors(&mut cursors, bridge_epoch).await {
+        let resume_from = match self.reconcile_cursors(&mut cursors, bridge_epoch).await {
             Ok(r) => r,
             // `reconcile_cursors` already logged and called `fatal` for
             // whatever went wrong; in production that already exited the
@@ -255,34 +255,29 @@ impl<
             Err(()) => return,
         };
 
-        // Bounded to one retry: `subscribe_from` only ever reports
-        // out-of-range for a `Some(cursor)` resume target, and the retry
-        // below always resumes with `None` - a second out-of-range report
-        // after that would mean the bridge itself is broken, not something
-        // re-arming watch_retry again can fix.
-        let mut retried = false;
-        let mut event_stream = loop {
-            match self.bridge.subscribe_from(resume_from).await {
-                Ok(stream) => break stream,
-                Err(EvmError::EventStreamOutOfRange(reason)) if !retried => {
-                    tracing::error!(
-                        reason = %reason,
-                        "resume position no longer retained; re-arming watch_retry and \
-                         resuming from the outbox's new oldest entry"
-                    );
-                    let chain_ids: Vec<u64> = cursors.keys().copied().collect();
-                    if !self.break_lineage(&mut cursors, &chain_ids).await {
-                        // `break_lineage` already logged and called `fatal`.
-                        return;
-                    }
-                    resume_from = None;
-                    retried = true;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to subscribe to events");
-                    self.fatal("failed to subscribe to events");
-                    return;
-                }
+        // An out-of-range resume position means events between the last
+        // committed cursor and the oldest retained entry are gone. Carrying
+        // on from the oldest retained entry would be exactly the silent
+        // "start from now" this mechanism exists to rule out: `watch_retry`
+        // only re-drives watches that are still active, so a payment that
+        // confirmed in the gap on a since-expired watch would never be
+        // credited. Fail loudly instead, so a human is paged.
+        let mut event_stream = match self.bridge.subscribe_from(resume_from).await {
+            Ok(stream) => stream,
+            Err(EvmError::EventStreamOutOfRange(reason)) => {
+                tracing::error!(
+                    reason = %reason,
+                    "resume position no longer retained; events since the last committed \
+                     cursor cannot be replayed. Refusing to resume from the oldest retained \
+                     entry - audit the gap before restarting."
+                );
+                self.fatal("event resume position is out of range");
+                return;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to subscribe to events");
+                self.fatal("failed to subscribe to events");
+                return;
             }
         };
 
@@ -394,14 +389,11 @@ impl<
 
     /// Re-arm `watch_retry` for `chain_ids`, then forget their cursors.
     ///
-    /// Shared by [`Self::reconcile_cursors`] (a subset of chains whose
-    /// stored epoch no longer matches the outbox's) and [`Self::run`]'s
-    /// resume loop (the outbox reported the requested position as trimmed,
-    /// which [`evm::monitor::bridge::EventBridge::subscribe_from`] already
-    /// turned into a fresh epoch on its side, invalidating every chain at
-    /// once) - both mean the gap since the last commit cannot be replayed
-    /// for the given chains, and re-driving every live watch within
-    /// `watch_retry`'s normal cycle is the best available recovery.
+    /// Used by [`Self::reconcile_cursors`] for chains whose stored epoch no
+    /// longer matches the outbox's: the gap since the last commit cannot be
+    /// replayed for them, and re-driving every live watch within
+    /// `watch_retry`'s normal cycle is the best available recovery. There is
+    /// no rescan-from-`block_height` fallback yet.
     ///
     /// `watch_retry` is the *only* safety net for whatever confirmed inside a
     /// gap this replaces - see the module's own notes on the epoch mechanism.

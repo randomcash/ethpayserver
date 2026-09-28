@@ -119,7 +119,7 @@ async fn a_failed_epoch_read_halts_before_ever_subscribing() {
 }
 
 /// A bridge whose `subscribe_from` always reports the resume position as
-/// out of range, so `run`'s bounded one-retry loop always exhausts itself.
+/// out of range, as a trimmed outbox does.
 struct AlwaysOutOfRangeBridge;
 
 #[async_trait]
@@ -160,7 +160,7 @@ impl EventBridge for AlwaysOutOfRangeBridge {
 }
 
 #[tokio::test]
-async fn a_second_out_of_range_after_the_one_retry_halts_rather_than_looping_forever() {
+async fn an_out_of_range_resume_halts_rather_than_resuming_from_the_oldest_entry() {
     let ds = Arc::new(InMemoryDataService::new());
     let bridge = Arc::new(AlwaysOutOfRangeBridge);
 
@@ -172,7 +172,10 @@ async fn a_second_out_of_range_after_the_one_retry_halts_rather_than_looping_for
 
     let task = tokio::spawn(consumer.run());
     let reason = wait_for_reason(&reasons).await;
-    assert!(reason.contains("subscribe"), "unexpected reason: {reason}");
+    assert!(
+        reason.contains("out of range"),
+        "unexpected reason: {reason}"
+    );
     let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
 }
 

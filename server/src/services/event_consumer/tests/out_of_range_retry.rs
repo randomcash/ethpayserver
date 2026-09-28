@@ -1,16 +1,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! `EventConsumer::run` has a second recovery path besides the epoch check
-//! in `reconcile_cursors`: the outbox can report a stored position as
-//! trimmed - `Err(EvmError::EventStreamOutOfRange)` from `subscribe_from`
+//! Besides the epoch check in `reconcile_cursors`, the outbox can report a
+//! stored position as trimmed - `Err(EvmError::EventStreamOutOfRange)` from `subscribe_from`
 //! itself - even when the epoch it was committed under still matches, since
-//! retention trims independently of the epoch key. Every other consumer
-//! test runs against an unbounded `MemoryBridge`, which can never take this
-//! branch; this one gives the bridge a real retention cap so the retry loop
-//! in `run` - re-arm watch_retry, clear cursors, resume with `None`, and
-//! not loop a second time - is exercised through the real entry point
-//! rather than assumed correct because it type-checks.
+//! retention trims independently of the epoch key. The consumer must not
+//! resume from the oldest retained entry then: the events in between are
+//! gone, and only a halt (which pages someone) keeps that from being silent.
+//! This test gives `MemoryBridge` a real retention cap to drive that branch.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -58,10 +56,8 @@ async fn wait_for_payment(ds: &InMemoryDataService, invoice_id: &InvoiceId) {
 }
 
 #[tokio::test]
-async fn a_resume_position_trimmed_out_from_under_the_consumer_re_arms_watch_retry_and_recovers() {
+async fn a_resume_position_trimmed_out_from_under_the_consumer_halts_instead_of_skipping_the_gap() {
     let ds = Arc::new(InMemoryDataService::new());
-    // Retains only the last 2 entries - small enough that the events
-    // published while the consumer is down below blow straight past it.
     let bridge = Arc::new(MemoryBridge::with_max_retained(2));
     let store_id = StoreId::new();
 
@@ -79,15 +75,13 @@ async fn a_resume_position_trimmed_out_from_under_the_consumer_re_arms_watch_ret
     let consumer1 = create_test_consumer(ds.clone(), bridge.clone());
     let task1 = tokio::spawn(consumer1.run());
     wait_for_payment(&ds, &warm_invoice_id).await;
-    // Let the cursor commit that follows the apply actually land before the
-    // kill below.
+    // Let the cursor commit that follows the apply land before the kill.
     tokio::time::sleep(Duration::from_millis(50)).await;
     task1.abort();
     let _ = task1.await;
 
-    // Publish enough while nothing is subscribed to push the committed
-    // cursor's position out of the retention window entirely - the epoch
-    // never changes here, only retention does.
+    // Push the committed cursor out of the retention window while nothing is
+    // subscribed; the epoch never changes here, only retention does.
     let invoice_id = InvoiceId::new();
     create_test_invoice(&ds, &invoice_id, store_id).await;
     for i in 0..5u8 {
@@ -109,23 +103,25 @@ async fn a_resume_position_trimmed_out_from_under_the_consumer_re_arms_watch_ret
         .await
         .unwrap();
 
-    // Restart: the stored cursor's epoch still matches, but `subscribe_from`
-    // must reject it as trimmed rather than silently resuming from whatever
-    // the outbox happens to retain now - and `run` must retry once, not die.
-    let consumer2 = create_test_consumer(ds.clone(), bridge.clone());
-    let task2 = tokio::spawn(consumer2.run());
-    wait_for_payment(&ds, &invoice_id).await;
-    task2.abort();
-    let _ = task2.await;
-
-    assert!(
-        ds.watch_reset_calls() > 0,
-        "a trimmed resume position must re-arm watch_retry the same as an epoch mismatch does"
+    let reasons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = reasons.clone();
+    let consumer2 = create_test_consumer(ds.clone(), bridge.clone()).with_resume_failure_hook(
+        Arc::new(move |reason| recorded.lock().unwrap().push(reason.to_string())),
     );
+    let task2 = tokio::spawn(consumer2.run());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while reasons.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("an out-of-range resume never invoked the failure hook");
+    let _ = tokio::time::timeout(Duration::from_secs(1), task2).await;
 
+    assert!(reasons.lock().unwrap()[0].contains("out of range"));
+    // Nothing past the gap may have been applied on the way out.
     let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
         .await
         .unwrap();
-    assert_eq!(payments.len(), 1);
-    assert_eq!(payments[0].amount, "500000000000000000");
+    assert!(payments.is_empty(), "the consumer resumed past the gap");
 }
