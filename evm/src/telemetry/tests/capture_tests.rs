@@ -60,7 +60,7 @@ fn scrub_log_redacts_a_sensitive_key_attribute_through_the_real_capture_pipeline
         || {
             tracing::info!(mnemonic = %m, "loaded wallet");
         },
-        client_options(None, None, "test".to_string()),
+        client_options(None, None, "test".to_string(), 0.0),
     );
 
     let logs = captured_logs(&envelopes);
@@ -112,7 +112,7 @@ fn scrub_log_redacts_a_secret_shaped_attribute_value_through_the_real_capture_pi
         || {
             tracing::info!(context = %pk, "loaded wallet");
         },
-        client_options(None, None, "test".to_string()),
+        client_options(None, None, "test".to_string(), 0.0),
     );
 
     let logs = captured_logs(&envelopes);
@@ -170,7 +170,7 @@ fn scrub_log_redacts_a_debug_formatted_secret_attribute_through_the_real_capture
             // a caller logs a secret through a Debug-only type.
             tracing::info!(context = ?Some(pk), "loaded wallet");
         },
-        client_options(None, None, "test".to_string()),
+        client_options(None, None, "test".to_string(), 0.0),
     );
 
     let logs = captured_logs(&envelopes);
@@ -212,7 +212,7 @@ fn disabling_enable_logs_suppresses_automatic_integration_capture() {
         .with(sentry_tracing::layer().event_filter(sentry_log_event_filter(tracing::Level::INFO)))
         .set_default();
 
-    let mut options = client_options(None, None, "test".to_string());
+    let mut options = client_options(None, None, "test".to_string(), 0.0);
     options.enable_logs = false;
 
     let envelopes = sentry::test::with_captured_envelopes_options(
