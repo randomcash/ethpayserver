@@ -1,7 +1,7 @@
 //! Payment integration tests.
 
 use chrono::Utc;
-use types::{InvoiceWriter, PaymentQueryParams, PaymentReader, PaymentWriter};
+use types::{InvoiceReader, InvoiceWriter, PaymentQueryParams, PaymentReader, PaymentWriter};
 
 use crate::{PaymentTxIndexWriter, WebhookOutboxReader, WebhookOutboxWriter};
 
@@ -462,7 +462,8 @@ async fn integration_redelivered_payment_reuses_the_original_row_id_and_does_not
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
-    let first = test_payment(&invoice.id);
+    let mut first = test_payment(&invoice.id);
+    first.credited_amount = Some("100.5".to_string());
     PaymentTxIndexWriter::upsert_with_tx_index_and_obligation(
         &service,
         &first,
@@ -478,6 +479,7 @@ async fn integration_redelivered_payment_reuses_the_original_row_id_and_does_not
     let mut redelivered = test_payment(&invoice.id);
     redelivered.tx_hash = first.tx_hash.clone();
     redelivered.chain_id = first.chain_id.clone();
+    redelivered.credited_amount = first.credited_amount.clone();
     assert_ne!(
         redelivered.id, first.id,
         "the redelivery must generate its own fresh id, as a real redelivery does"
@@ -502,7 +504,9 @@ async fn integration_redelivered_payment_reuses_the_original_row_id_and_does_not
     );
     let real_id = payments[0].id;
 
-    let obligations = WebhookOutboxReader::claim_undispatched_obligations(&service, 10, 30)
+    // The batch must be larger than any backlog other tests leave on the shared
+    // database, or this invoice's obligation is simply not in it.
+    let obligations = WebhookOutboxReader::claim_undispatched_obligations(&service, 10_000, 30)
         .await
         .unwrap();
     let matching: Vec<_> = obligations
@@ -517,6 +521,18 @@ async fn integration_redelivered_payment_reuses_the_original_row_id_and_does_not
     assert_eq!(
         matching[0].payment_id, real_id,
         "the obligation must name the real, persisted payment row"
+    );
+
+    // The invoice total is the sum of payment rows, so a redelivery that
+    // updated the existing row must leave it at one payment's credit, not two.
+    let fetched = InvoiceReader::get(&service, &invoice.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_amount_eq(
+        &fetched.amount_received,
+        "100.5",
+        "amount_received after a redelivery",
     );
 }
 
