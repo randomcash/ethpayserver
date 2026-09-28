@@ -60,7 +60,7 @@ pub use api_types::webhook::{
     WEBHOOK_PAYLOAD_VERSION, WebhookEventType, WebhookPayload, WebhookPaymentInfo, idempotency_key,
 };
 pub use config::WebhookConfig;
-pub use dispatch::queue_for_store;
+pub use dispatch::{QueueOutcome, queue_for_store};
 pub use error::WebhookError;
 pub use job::WebhookJob;
 pub use service::{WebhookDataService, WebhookService, WebhookSink};

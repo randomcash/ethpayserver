@@ -5,7 +5,7 @@
 //! shape that can still close the loop — an observation of work already
 //! committed, not a step in it.
 //!
-//! The instance sells subscriptions to itself, so a plugin that issued an
+//! A plugin can invoice the instance's own store, so a plugin that issued an
 //! invoice through capability 3 has to learn that it was paid. That is the
 //! whole job. Three properties keep it from becoming anything more:
 //!
