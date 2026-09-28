@@ -93,8 +93,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optio
 dotenvy = { version = "0.15", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 anyhow = { version = "1.0", optional = true }
-sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "logs"], optional = true }
-sentry-tracing = { version = "0.47", features = ["logs"], optional = true }
+sentry = { version = "0.49.3", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "logs"], optional = true }
+sentry-tracing = { version = "0.49.3", features = ["logs"], optional = true }
 
 # PII/secret scrubber for Sentry error payloads (sentry-scrub feature)
 regex = { version = "1", optional = true }
@@ -123,7 +123,7 @@ tokio = { version = "1.42", features = ["full", "test-util"] }
 # hooks `tracing::info!` up to that pipeline in the first place, and also
 # lets `sentry_event_filter`'s tests observe a real `tracing::Event` through
 # an installed layer instead of hand-building `tracing::Metadata`.
-sentry = { version = "0.47", default-features = false, features = ["test"] }
+sentry = { version = "0.49.3", default-features = false, features = ["logs", "test"] }
 # `env-filter` builds the same `LOG_LEVEL` filter `server.rs` and
 # `evmmonitor/main.rs` do, so a test can construct their real layer stack
 # instead of a lookalike missing the filter that caused the independence bug.
