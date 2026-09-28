@@ -181,18 +181,6 @@ impl PgDataService {
             .create_api_key_with_permissions(key, permissions)
             .await
     }
-
-    /// Update the per-key permission scope for an API key. `None` clears it
-    /// back to "inherit the owner's role in full".
-    pub async fn update_api_key_permissions(
-        &self,
-        id: ::auth::ApiKeyId,
-        permissions: Option<&[String]>,
-    ) -> ::auth::error::Result<()> {
-        PostgresApiKeyRepository::new(self.pool.clone())
-            .update_permissions(id, permissions)
-            .await
-    }
 }
 
 // === API Key Rotation / Deprecation ===

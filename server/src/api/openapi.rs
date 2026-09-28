@@ -6,9 +6,7 @@
 
 use utoipa::OpenApi;
 
-use super::{
-    admin, api_key_permissions, dashboard, health, invoices, plugins, rates, stores, users,
-};
+use super::{admin, dashboard, health, invoices, plugins, rates, stores, users};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -76,7 +74,6 @@ use super::{
         users::api_keys::create_api_key,
         users::api_keys::revoke_api_key,
         users::api_keys::update_api_key,
-        api_key_permissions::update_api_key_permissions,
         users::api_keys::rotate_api_key,
         users::wallets::list_wallet_credentials,
         users::wallets::create_wallet_reauth_challenge,
@@ -151,7 +148,6 @@ use super::{
         users::CreateApiKeyPayload,
         users::CreateApiKeyResponsePayload,
         users::UpdateApiKeyPayload,
-        api_key_permissions::UpdateApiKeyPermissionsPayload,
         users::RotateApiKeyResponsePayload,
         users::WalletCredentialResponse,
         users::WalletReauthChallengeResponse,

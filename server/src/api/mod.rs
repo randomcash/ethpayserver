@@ -288,10 +288,6 @@ where
             axum::routing::patch(users::update_api_key::<A>),
         )
         .route(
-            "/api-keys/{id}/permissions",
-            axum::routing::patch(api_key_permissions::update_api_key_permissions::<A>),
-        )
-        .route(
             "/api-keys/{id}/rotate",
             axum::routing::post(users::rotate_api_key::<A>),
         )

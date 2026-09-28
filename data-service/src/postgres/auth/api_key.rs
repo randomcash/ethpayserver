@@ -263,25 +263,4 @@ impl PostgresApiKeyRepository {
 
         Ok(())
     }
-
-    /// Update the per-key permission scope. `None` clears it back to
-    /// "inherit the owner's role in full".
-    pub async fn update_permissions(
-        &self,
-        id: ApiKeyId,
-        permissions: Option<&[String]>,
-    ) -> Result<()> {
-        let result = sqlx::query("UPDATE api_keys SET permissions = $1 WHERE id = $2")
-            .bind(permissions)
-            .bind(id.0)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AuthError::Repository(e.to_string()))?;
-
-        if result.rows_affected() == 0 {
-            return Err(AuthError::ApiKeyNotFound("Key not found".to_string()));
-        }
-
-        Ok(())
-    }
 }
