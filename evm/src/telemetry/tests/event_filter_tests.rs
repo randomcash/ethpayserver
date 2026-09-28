@@ -73,13 +73,20 @@ fn ws_transport_reset_is_a_breadcrumb_not_a_page() {
 ///
 /// This test is green against the filter as it stands today, since the
 /// demotion it pins already existed before this test was written - there is
-/// no code change in this diff for it to prove. That was checked by ablation
-/// rather than taken on faith: temporarily forcing `sentry_event_filter`'s
-/// `alloy_transport_ws` branch to never match turns this test red
-/// (`expected a breadcrumb, got EventFilter(Event | Log)`), and restoring the
-/// real condition turns it back to green. So the assertion is real, not
-/// tautological; it just isn't a fix-verifying test, because there is no fix
-/// here to verify.
+/// no code change in this diff for it to prove; it just isn't a
+/// fix-verifying test, because there is no fix here to verify.
+///
+/// That the assertion is real and not tautological doesn't need to be taken
+/// on faith - it's already proven by this file's other cases, reproducibly,
+/// on every run: `ws_transport_reset_is_a_breadcrumb_not_a_page` fires a
+/// *different* message on the same target+level and is also demoted, which
+/// is only possible if the filter keys on target+level and ignores message
+/// text (the two would diverge if it read the message); `our_own_errors_still_page`
+/// and `alloy_pubsub_giving_up_still_pages` fire at the same level on a
+/// different target and are *not* demoted, which rules out the filter
+/// demoting every `error!` regardless of target. Together those three
+/// sibling tests pin the exact shape of the predicate this test relies on,
+/// so a filter change that broke it would fail at least one of the four.
 #[test]
 fn ws_missed_pong_is_a_breadcrumb_not_a_page() {
     let filter = observed_filter(|| {
