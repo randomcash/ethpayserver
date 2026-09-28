@@ -82,7 +82,7 @@ async fn a_stale_chains_cursor_does_not_lower_the_resume_point_below_a_current_c
 }
 
 #[tokio::test]
-async fn the_resume_point_is_the_low_water_mark_across_every_chain_still_on_the_current_epoch() {
+async fn the_resume_point_is_the_highest_committed_seq_across_chains_on_the_current_epoch() {
     let ds = Arc::new(InMemoryDataService::new());
     let bridge = Arc::new(MemoryBridge::new());
     let consumer = create_test_consumer(ds.clone(), bridge);
@@ -116,11 +116,11 @@ async fn the_resume_point_is_the_low_water_mark_across_every_chain_still_on_the_
         resume,
         Some(EventCursor {
             epoch,
-            seq: 12,
+            seq: 40,
             block_height: 0,
         }),
-        "resuming from anything past chain 2's own committed position would skip events it \
-         has not applied yet"
+        "seq is global and applied in order, so an idle chain's old cursor must not pin the \
+         resume point behind what has already been applied elsewhere"
     );
     assert_eq!(cursors.len(), 2, "no chain's cursor was stale here");
     assert_eq!(

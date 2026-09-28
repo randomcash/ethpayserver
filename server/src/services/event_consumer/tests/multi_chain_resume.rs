@@ -1,17 +1,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! The low-water mark in `reconcile_cursors` resumes every chain from the
-//! *slowest* chain's committed position, so a chain further ahead re-sees
-//! entries it already applied. `apply_envelope`'s dedup check exists to
-//! make that safe. Every other consumer test uses a single chain, where the
-//! low-water mark trivially equals that chain's own cursor and the dedup
-//! branch is never taken - this uses two chains at different committed
-//! positions so it actually is.
+//! `seq` is one counter for the whole outbox but cursors are per chain, and
+//! a chain's cursor only moves when an event for that chain arrives. The
+//! resume point must therefore be the highest committed `seq`, not the
+//! lowest: an idle chain's old cursor would otherwise pin the resume point
+//! behind the retention window and make ordinary traffic on other chains
+//! look like a lost gap (`OUT_OF_RANGE`) on every restart.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
-use data_service::{InMemoryDataService, WebhookOutboxReader};
+use data_service::InMemoryDataService;
 use evm::monitor::bridge::{EventBridge, MemoryBridge};
 use evm::monitor::events::{MonitorEvent, PaymentDetected};
 use evm::{Address, B256, U256};
@@ -86,96 +85,43 @@ async fn wait_for_payment(ds: &InMemoryDataService, invoice_id: &InvoiceId) {
 }
 
 #[tokio::test]
-async fn a_chain_further_ahead_than_the_low_water_mark_does_not_double_credit_on_resume() {
+async fn an_idle_chain_does_not_pin_the_resume_point_behind_retention() {
     let ds = Arc::new(InMemoryDataService::new());
-    let bridge = Arc::new(MemoryBridge::new());
+    // Retains only 3 entries, so the idle chain's seq is trimmed away below.
+    let bridge = Arc::new(MemoryBridge::with_max_retained(3));
     let store_id = StoreId::new();
 
-    // Chain 2 gets one payment (it will be the low-water mark); chain 1
-    // gets two, published *after* chain 2's, so chain 1's committed cursor
-    // ends up ahead of chain 2's in the shared `seq` numbering the
-    // `MemoryBridge` outbox assigns in publish order. That is what makes
-    // chain 1's own already-applied entries land above the low-water mark
-    // and actually get redelivered on resume - reversed, chain 1's entries
-    // never leave the low-water mark behind and the redelivery this test
-    // means to cover never happens.
-    let chain2_first = create_and_publish(&ds, &bridge, store_id, 2, 3, 3).await;
-    let chain1_first = create_and_publish(&ds, &bridge, store_id, 1, 1, 1).await;
-    let chain1_second = create_and_publish(&ds, &bridge, store_id, 1, 2, 2).await;
+    let idle = create_and_publish(&ds, &bridge, store_id, 2, 3, 3).await;
+    let task1 = tokio::spawn(create_test_consumer(ds.clone(), bridge.clone()).run());
+    wait_for_payment(&ds, &idle).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let consumer1 = create_test_consumer(ds.clone(), bridge.clone());
-    let task1 = tokio::spawn(consumer1.run());
-    wait_for_payment(&ds, &chain2_first).await;
-    wait_for_payment(&ds, &chain1_second).await;
-    // Let both cursor commits land: chain 1 at the shared outbox's newest
-    // seq, chain 2 at an older one - the low-water mark on restart is
-    // chain 2's, strictly behind chain 1's own committed position.
+    // Chain 1 then moves on far enough to trim chain 2's committed seq out
+    // of the outbox, while chain 2 sees nothing further.
+    // One at a time: a burst would trim entries the live consumer has not
+    // read yet, which is a different (and correctly fatal) gap.
+    for i in 0..5u8 {
+        let id = create_and_publish(&ds, &bridge, store_id, 1, 1 + u64::from(i), 10 + i).await;
+        wait_for_payment(&ds, &id).await;
+    }
     tokio::time::sleep(Duration::from_millis(50)).await;
     task1.abort();
     let _ = task1.await;
 
-    // Restart: resuming from the low-water mark re-delivers both of chain
-    // 1's already-applied entries to the new consumer, since both sit above
-    // chain 2's cursor.
-    let chain2_second = create_and_publish(&ds, &bridge, store_id, 2, 4, 4).await;
-
-    let consumer2 = create_test_consumer(ds.clone(), bridge.clone());
+    let after = create_and_publish(&ds, &bridge, store_id, 1, 9, 99).await;
+    let reasons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = reasons.clone();
+    let consumer2 = create_test_consumer(ds.clone(), bridge.clone()).with_resume_failure_hook(
+        Arc::new(move |reason| recorded.lock().unwrap().push(reason.to_string())),
+    );
     let task2 = tokio::spawn(consumer2.run());
-    wait_for_payment(&ds, &chain2_second).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_payment(&ds, &after).await;
     task2.abort();
     let _ = task2.await;
 
-    // The payment row upsert is keyed on `(chain_id, tx_hash, tx_index)`, so
-    // a redelivered entry is absorbed into the same row and this count would
-    // read 1 whether or not the dedup guard exists - it does not, on its
-    // own, prove anything. The webhook obligation is separately protected:
-    // `handle_payment_detected` mints a fresh payment id on every call, but
-    // `upsert_with_tx_index_and_obligation` resolves the obligation's
-    // `payment_id` to whichever row `(chain_id, tx_hash, tx_index)` actually
-    // owns - the same existing row a redelivery's upsert lands on - and
-    // `webhook_outbox`'s `UNIQUE (payment_id, event_type)` absorbs the
-    // second write. See `resume_after_uncommitted_cursor.rs` for a test that
-    // redelivers through that path directly, with `apply_envelope`'s own
-    // guard never in play at all.
-    let chain1_first_payments = PaymentReader::get_for_invoice(&*ds, &chain1_first)
-        .await
-        .unwrap();
-    assert_eq!(
-        chain1_first_payments.len(),
-        1,
-        "chain 1's first already-applied entry must not be re-credited when re-seen via the \
-         shared low-water mark"
-    );
-
-    let chain1_second_payments = PaymentReader::get_for_invoice(&*ds, &chain1_second)
-        .await
-        .unwrap();
-    assert_eq!(
-        chain1_second_payments.len(),
-        1,
-        "chain 1's second already-applied entry must not be re-credited either"
-    );
-
-    // No assertion on `chain2_first` here: it sits exactly at the low-water
-    // mark, and `subscribe_from` resumes *strictly after* its `from` cursor,
-    // so chain 2's own last-applied entry is never resent to consumer2 at
-    // all. An assertion that it "is not double-credited" would pass whether
-    // or not the dedup guard exists, for the same reason the pre-fix version
-    // of this test's chain-1 assertion did.
-
-    let chain2_second_payments = PaymentReader::get_for_invoice(&*ds, &chain2_second)
-        .await
-        .unwrap();
-    assert_eq!(chain2_second_payments.len(), 1);
-    assert_eq!(chain2_second_payments[0].amount, "4");
-
-    let obligations = ds.claim_undispatched_obligations(100, 300).await.unwrap();
-    assert_eq!(
-        obligations.len(),
-        4,
-        "one webhook obligation per invoice, however many times its entry was redelivered - a \
-         second, orphaned obligation from a redelivered entry would mean the dedup guard did \
-         not actually stop the reapply"
+    assert!(
+        reasons.lock().unwrap().is_empty(),
+        "nothing was missed, so the restart must not fail: {:?}",
+        reasons.lock().unwrap()
     );
 }

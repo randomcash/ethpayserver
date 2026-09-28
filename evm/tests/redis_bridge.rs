@@ -161,7 +161,7 @@ async fn live_events_published_after_subscribing_are_still_delivered() {
 
 #[tokio::test]
 #[ignore]
-async fn resuming_past_the_retention_window_bumps_the_epoch_and_fails_out_of_range() {
+async fn resuming_past_the_retention_window_fails_out_of_range_without_changing_the_epoch() {
     let suffix = Uuid::new_v4();
     // A tiny cap so trimming is provoked by a handful of publishes rather
     // than the real 200,000-entry default.
@@ -200,9 +200,9 @@ async fn resuming_past_the_retention_window_bumps_the_epoch_and_fails_out_of_ran
     }
 
     let epoch_after = bridge.current_epoch().await.unwrap();
-    assert_ne!(
+    assert_eq!(
         epoch_before, epoch_after,
-        "a retention gap must bump the epoch so every other resumer sees the break too"
+        "bumping the epoch would turn the next start into a silent resume past the gap"
     );
 }
 

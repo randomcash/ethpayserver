@@ -166,10 +166,13 @@ impl EventBridge for MemoryBridge {
             if let Some(oldest) = oldest_retained
                 && oldest > cursor.seq + 1
             {
-                let new_epoch = self.bump_epoch().await?;
+                // The epoch is deliberately left alone: bumping it would make
+                // the consumer's next start read an epoch mismatch and
+                // resume past this gap without an error. Left unchanged,
+                // every restart fails the same way until an operator has
+                // audited the gap.
                 return Err(EvmError::EventStreamOutOfRange(format!(
-                    "resume at seq {} is behind the oldest retained entry (seq {oldest}); \
-                     the outbox has moved to epoch {new_epoch}",
+                    "resume at seq {} is behind the oldest retained entry (seq {oldest})",
                     cursor.seq
                 )));
             }

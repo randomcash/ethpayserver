@@ -329,11 +329,14 @@ impl<
     /// below it forever, with no error - exactly the failure this whole
     /// mechanism exists to rule out.
     ///
-    /// A chain whose epoch still matches is trustworthy: its `seq` names a
-    /// position in the current lineage, so resuming from the lowest `seq`
-    /// across every matching chain - the low-water mark - is enough, since
-    /// a chain further ahead simply re-sees (and idempotently re-skips, in
-    /// [`Self::apply_envelope`]) entries it has already applied.
+    /// `seq` is one counter for the whole outbox, and this consumer applies
+    /// envelopes strictly in `seq` order across every chain, stopping at the
+    /// first failure. So the highest `seq` committed by any chain still on
+    /// the current epoch is the global applied position: everything at or
+    /// below it, on any chain, was applied. Resuming from it is exact.
+    /// Resuming from the *lowest* chain cursor instead would let one idle
+    /// chain pin the resume point behind the retention window and turn
+    /// ordinary traffic on other chains into a false `OUT_OF_RANGE`.
     ///
     /// A chain whose epoch does not match means the outbox lost continuity
     /// for it specifically - `seq` numbers from before the break name a
@@ -379,8 +382,8 @@ impl<
             }
         }
 
-        let min_seq = cursors.values().map(|c| c.seq).min();
-        Ok(min_seq.map(|seq| EventCursor {
+        let max_seq = cursors.values().map(|c| c.seq).max();
+        Ok(max_seq.map(|seq| EventCursor {
             epoch: bridge_epoch,
             seq,
             block_height: 0,

@@ -286,11 +286,22 @@ impl RedisBridge {
             .await
             .map_err(|e| EvmError::Monitor(format!("redis XRANGE failed: {}", e)))?;
 
-        Ok(reply
+        // An id that does not parse must fail, not read as "nothing
+        // retained": that would switch the out-of-range guard off.
+        reply
             .ids
             .first()
-            .and_then(|entry| entry.id.split('-').next())
-            .and_then(|seq| seq.parse().ok()))
+            .map(|entry| {
+                entry
+                    .id
+                    .split('-')
+                    .next()
+                    .and_then(|seq| seq.parse().ok())
+                    .ok_or_else(|| {
+                        EvmError::Monitor(format!("unparseable stream entry id {:?}", entry.id))
+                    })
+            })
+            .transpose()
     }
 }
 
@@ -339,17 +350,15 @@ impl EventBridge for RedisBridge {
         // moved. Left unchecked, the `XREAD` below would silently resume
         // from whatever the stream happens to retain next - exactly the
         // "starting from wherever" failure this whole mechanism exists to
-        // rule out. Bumping the epoch here, rather than only reporting the
-        // gap, means every other caller sharing this outbox also sees the
-        // lineage break the next time it checks, not just this one.
+        // rule out. The epoch is left alone on purpose: bumping it would make
+        // the next start read a mismatch and resume past the gap silently,
+        // so instead every restart fails until an operator audits the gap.
         if let Some(cursor) = from
             && let Some(oldest) = self.oldest_retained_seq().await?
             && oldest > cursor.seq + 1
         {
-            let new_epoch = self.bump_epoch().await?;
             return Err(EvmError::EventStreamOutOfRange(format!(
-                "resume at seq {} is behind the oldest retained entry (seq {oldest}); \
-                 the outbox has moved to epoch {new_epoch}",
+                "resume at seq {} is behind the oldest retained entry (seq {oldest})",
                 cursor.seq
             )));
         }
