@@ -796,9 +796,9 @@ where
     // this string match.
     if !validate_xpub(&req.xpub) {
         let reason = if looks_like_a_private_key(&req.xpub) {
-            "invalid_xpub: this looks like a private key (xprv), not a public one - rotation \
-             needs an extended PUBLIC key, and the private key must never leave the wallet \
-             software that holds it"
+            "invalid_xpub: this looks like a private key, not a public one - rotation needs an \
+             extended PUBLIC key, and the private key must never leave the wallet software \
+             that holds it"
         } else {
             "invalid_xpub: not a valid base58-encoded extended public key"
         };

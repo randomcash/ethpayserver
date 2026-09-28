@@ -400,16 +400,23 @@ pub fn validate_xpub(xpub_str: &str) -> bool {
 }
 
 /// Names the more likely reason a string failed `validate_xpub`: it looks
-/// like a pasted extended *private* key rather than a typo or truncation.
+/// like a pasted *private* key rather than a typo or truncation - either an
+/// extended private key (`xprv`/`tprv`) or the raw 32-byte secp256k1 key a
+/// wallet like MetaMask exports as `0x`-prefixed hex.
 ///
-/// `validate_xpub` already refuses this on the version byte - decoding it as
-/// an xpub fails - so this takes no part in that boundary. It exists only so
-/// a caller can tell an operator what they actually pasted instead of a bare
-/// refusal, which matters because the more specific message is what stops
-/// someone from trying the same private key again with a typo "fixed".
+/// `validate_xpub` already refuses this on the version byte (for the `xprv`
+/// case) or because it isn't base58 at all (for raw hex) - so this takes no
+/// part in that boundary. It exists only so a caller can tell an operator
+/// what they actually pasted instead of a bare refusal, which matters
+/// because the more specific message is what stops someone from trying the
+/// same private key again with a typo "fixed".
 pub fn looks_like_a_private_key(xpub_str: &str) -> bool {
     let trimmed = xpub_str.trim();
-    trimmed.starts_with("xprv") || trimmed.starts_with("tprv")
+    if trimmed.starts_with("xprv") || trimmed.starts_with("tprv") {
+        return true;
+    }
+    let hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]

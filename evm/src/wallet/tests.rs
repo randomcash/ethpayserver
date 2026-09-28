@@ -348,3 +348,19 @@ fn looks_like_a_private_key_flags_mainnet_and_testnet_prefixes() {
     assert!(!looks_like_a_private_key("not-a-key-at-all"));
     assert!(!looks_like_a_private_key(""));
 }
+
+#[test]
+fn looks_like_a_private_key_flags_raw_hex_secp256k1_keys() {
+    // The shape MetaMask and similar wallets export a raw private key in:
+    // 32 bytes as hex, with or without the `0x` prefix.
+    const HEX_64: &str = "5176b09f63694525911cea338ef089c6c304288e3c769bbb4e99d23d1a1e4f68";
+
+    assert!(looks_like_a_private_key(HEX_64));
+    assert!(looks_like_a_private_key(&format!("0x{HEX_64}")));
+    assert!(looks_like_a_private_key(&format!("  0x{HEX_64}  ")));
+    // One character short or long is no longer a plausible 32-byte key.
+    assert!(!looks_like_a_private_key(&HEX_64[1..]));
+    assert!(!looks_like_a_private_key(&format!("{HEX_64}a")));
+    // Right length, but not hex - `g` is outside the hex alphabet.
+    assert!(!looks_like_a_private_key(&"g".repeat(64)));
+}
