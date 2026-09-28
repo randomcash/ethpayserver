@@ -49,6 +49,31 @@ fn subscription_end_is_fault(shutting_down: bool) -> bool {
     !shutting_down
 }
 
+/// Whether a freshly read entry continues cleanly from `expected_seq`,
+/// logging a detected gap before reporting it.
+///
+/// Split out of `subscribe_from`'s stream body so the mid-batch check - not
+/// just the once-before-the-loop retention check above it - can run on
+/// every entry without pushing that function over the line-count lint.
+/// `expected_seq` is `None` only before the first entry, when any starting
+/// point is valid.
+fn is_seq_gap(stream_key: &str, expected_seq: Option<i64>, seq: i64) -> bool {
+    let Some(expected) = expected_seq else {
+        return false;
+    };
+    if seq == expected {
+        return false;
+    }
+    error!(
+        expected_seq = expected,
+        seq,
+        stream = %stream_key,
+        "event stream gap detected mid-subscription; ending the stream rather than silently \
+         skipping the trimmed entries"
+    );
+    true
+}
+
 /// Log a subscription stream ending at the level its cause deserves.
 ///
 /// `kind` names the stream ("events" or "commands") for the log message.
@@ -341,6 +366,10 @@ impl EventBridge for RedisBridge {
             Some(cursor) => format!("{}-0", cursor.seq),
             None => "0-0".to_string(),
         };
+        // The check above only runs once, before this generator starts - it
+        // does not cover a reader that falls behind *while already
+        // subscribed*. `is_seq_gap` below closes that for every batch.
+        let mut expected_seq = from.map(|cursor| cursor.seq + 1);
 
         let s = stream! {
             let mut conn = match client.get_multiplexed_async_connection().await {
@@ -401,6 +430,15 @@ impl EventBridge for RedisBridge {
                             error!(id = %entry.id, "malformed stream entry; ending the stream rather than skipping it");
                             return;
                         };
+
+                        // Ending here sends the consumer back through
+                        // `subscribe_from`, whose retention check above
+                        // turns this into the same `EventStreamOutOfRange`
+                        // a resume-time gap gets.
+                        if is_seq_gap(&stream_key, expected_seq, seq) {
+                            return;
+                        }
+                        expected_seq = Some(seq + 1);
 
                         match serde_json::from_str::<MonitorEvent>(&payload) {
                             Ok(event) => yield EventEnvelope {

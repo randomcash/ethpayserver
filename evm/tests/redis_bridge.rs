@@ -206,6 +206,69 @@ async fn resuming_past_the_retention_window_bumps_the_epoch_and_fails_out_of_ran
     );
 }
 
+/// The retention check in `subscribe_from` only runs once, before the
+/// stream starts - it does not cover a reader that falls behind *while
+/// already subscribed*. A consumer that stalls applying one envelope for
+/// long enough lets `XADD ... MAXLEN ~` trim entries it has not read yet;
+/// without a check on every batch, the next `XREAD` would just hand back
+/// whatever survives past `last_id`, silently skipping the gap.
+#[tokio::test]
+#[ignore]
+async fn a_gap_that_opens_while_already_subscribed_ends_the_stream() {
+    let suffix = Uuid::new_v4();
+    let bridge = RedisBridge::new_with_maxlen(
+        &redis_url(),
+        &format!("test:durable_resume:{suffix}:events"),
+        &format!("test:durable_resume:{suffix}:commands"),
+        3,
+    )
+    .await
+    .expect("connect to REDIS_URL");
+
+    for i in 0..3u8 {
+        bridge
+            .publish(&make_event(B256::from([i; 32])))
+            .await
+            .unwrap();
+    }
+
+    let mut stream = bridge.subscribe_from(None).await.unwrap();
+
+    // Drain everything published so far, so the stream's internal position
+    // is caught up to seq 3 before the reader "stalls".
+    for expected_seq in 1..=3i64 {
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(envelope.cursor.seq, expected_seq);
+    }
+
+    // While the reader is stalled (not polling `.next()`), enough publishes
+    // land to trim seq 4 and beyond out of the 3-entry retention window -
+    // the same volume the sibling out-of-range test above needs to force
+    // real trimming with this maxlen.
+    for i in 3..23u8 {
+        bridge
+            .publish(&make_event(B256::from([i; 32])))
+            .await
+            .unwrap();
+    }
+
+    // Before the fix this silently resumed at whatever seq survived
+    // trimming, skipping every entry between 4 and it with no error. It
+    // must end the stream instead.
+    let next = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await;
+    match next {
+        Ok(Some(envelope)) => panic!(
+            "expected the stream to end on a mid-subscription gap, got seq {}",
+            envelope.cursor.seq
+        ),
+        Ok(None) => {}
+        Err(_) => panic!("stream neither ended nor delivered an envelope within the timeout"),
+    }
+}
+
 /// A total Redis data loss (restart with no AOF/RDB, an evicted keyspace)
 /// must not let the outbox mint the same epoch it had before. If it did, a
 /// cursor persisted before the loss would compare equal to the "fresh" one

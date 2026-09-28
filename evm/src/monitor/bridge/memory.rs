@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tracing::error;
 
 /// The event outbox: every retained published envelope, in publish order.
 ///
@@ -163,6 +164,14 @@ impl EventBridge for MemoryBridge {
         let outbox = Arc::clone(&self.outbox);
         let notify = Arc::clone(&self.notify);
         let mut next_seq = from.map(|c| c.seq + 1).unwrap_or(0);
+        // Separate from `next_seq`: `None` means "never yielded an entry
+        // yet," which is the one case a low `next_seq` against a
+        // higher-than-zero `oldest_retained` is *not* a gap - a fresh
+        // `from: None` subscriber is supposed to start wherever the outbox
+        // currently retains, same as `next_seq`'s `.unwrap_or(0)` above.
+        // Once the first entry is yielded this tracks the real expectation,
+        // the same way `RedisBridge::subscribe_from`'s `expected_seq` does.
+        let mut expected_seq = from.map(|c| c.seq + 1);
 
         let s = stream! {
             loop {
@@ -173,6 +182,25 @@ impl EventBridge for MemoryBridge {
                 let batch: Vec<EventEnvelope> = {
                     let guard = outbox.lock().expect("outbox mutex poisoned");
                     let oldest_retained = guard.next_seq - guard.entries.len() as i64;
+                    // A reader that falls behind while already subscribed
+                    // (stalled long enough that `max_retained` trims entries
+                    // it hasn't read yet) must not have that gap clamped
+                    // away by `.max(0)` below: that would silently resume
+                    // from whatever is still retained, skipping the trimmed
+                    // entries with no error - the "starting from wherever"
+                    // failure this outbox exists to rule out, just reached
+                    // mid-stream instead of at resume time.
+                    if let Some(expected) = expected_seq
+                        && expected < oldest_retained
+                    {
+                        error!(
+                            expected_seq = expected,
+                            oldest_retained,
+                            "event stream gap detected mid-subscription; ending the stream \
+                             rather than silently skipping the trimmed entries"
+                        );
+                        return;
+                    }
                     let start = (next_seq - oldest_retained).max(0) as usize;
                     guard.entries.range(start..).cloned().collect()
                 };
@@ -184,6 +212,7 @@ impl EventBridge for MemoryBridge {
 
                 for envelope in batch {
                     next_seq = envelope.cursor.seq + 1;
+                    expected_seq = Some(next_seq);
                     yield envelope;
                 }
             }
@@ -366,6 +395,47 @@ mod tests {
             }
             _ => panic!("unexpected command type"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_reader_stalled_past_the_retention_window_sees_the_stream_end_not_a_gap() {
+        let bridge = MemoryBridge::with_max_retained(3);
+
+        bridge.publish(&make_event()).await.unwrap(); // seq 0
+        bridge.publish(&make_event()).await.unwrap(); // seq 1
+        bridge.publish(&make_event()).await.unwrap(); // seq 2
+
+        let mut stream = bridge.subscribe_from(None).await.unwrap();
+        // Drain everything retained so far - the point where the generator
+        // goes back to sleep waiting for the next publish, mirroring a
+        // consumer that is caught up and then stalls.
+        for expected_seq in 0..3 {
+            let envelope =
+                tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(envelope.cursor.seq, expected_seq);
+        }
+
+        // While the reader is stalled (not polling `.next()`), enough
+        // publishes land to evict seq 0 through 4 out of the 3-entry
+        // retention window - the same effect a real outbox's `MAXLEN` trim
+        // has on a consumer that falls behind.
+        for _ in 0..5 {
+            bridge.publish(&make_event()).await.unwrap(); // seq 3..=7
+        }
+
+        // Before the fix this silently resumed at seq 5 (the oldest still
+        // retained), skipping seq 3 and 4 with no error. It must end the
+        // stream instead.
+        let next = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .unwrap();
+        assert!(
+            next.is_none(),
+            "expected the stream to end on a mid-subscription gap, got {next:?}"
+        );
     }
 
     #[tokio::test]
