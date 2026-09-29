@@ -125,8 +125,9 @@ async fn an_explicitly_scoped_key_is_persisted_with_exactly_that_scope() {
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
-        response.permissions, requested,
-        "the response must describe the scope that was asked for"
+        response.permissions,
+        Some(requested.clone()),
+        "the response must describe the scope that was stored"
     );
 
     let persisted = pg
@@ -171,9 +172,12 @@ async fn an_absent_scope_is_persisted_as_inherit_rather_than_as_an_empty_scope()
     .await
     .expect("creating a key with no explicit scope must succeed");
 
-    assert!(
-        response.permissions.is_empty(),
-        "the response must not invent a scope the caller did not ask for"
+    assert_eq!(
+        response.permissions, None,
+        "an inherited key must be reported as inherited, the same way list and rotate report it. \
+         Echoing back the empty list that was sent would tell a caller who asked for a \
+         least-privilege key that it can do nothing, while handing them one that can do \
+         everything its owner can - the response saying the opposite of what was stored"
     );
 
     let persisted = pg

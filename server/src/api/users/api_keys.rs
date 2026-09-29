@@ -36,8 +36,17 @@ pub struct CreateApiKeyResponsePayload {
     pub expires_at: Option<DateTime<Utc>>,
     /// The plaintext API key. Store this securely — it cannot be retrieved again.
     pub key: String,
-    /// The scope actually granted, echoing back what was requested.
-    pub permissions: Vec<String>,
+    /// The scope actually granted.
+    ///
+    /// `None` means the key inherits the owner's role in full - the same
+    /// thing `list_api_keys` and the rotate response report as `null` for
+    /// such a key. It is deliberately not an echo of the request: an absent
+    /// or empty `permissions` is stored as `NULL`, so echoing `[]` back would
+    /// tell a caller who asked for a least-privilege key that it can do
+    /// nothing, while handing them one that can do everything its owner can.
+    /// Of the three responses that report a key's scope, this was the only
+    /// one that could say the opposite of what was stored.
+    pub permissions: Option<Vec<String>>,
 }
 
 /// Response after rotating an API key. See `CreateApiKeyResponsePayload` for
@@ -217,7 +226,10 @@ where
             created_at: api_key.created_at,
             expires_at: api_key.expires_at,
             key: raw_key,
-            permissions: payload.permissions,
+            // What was stored, not what was asked for. `requested_scope`
+            // maps an empty request to `None`, and that is the value the
+            // caller needs to see.
+            permissions: requested.map(<[String]>::to_vec),
         }),
     ))
 }
