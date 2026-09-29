@@ -7,7 +7,12 @@
 CREATE TABLE IF NOT EXISTS store_settlement_settings (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id           UUID NOT NULL UNIQUE REFERENCES stores(id) ON DELETE CASCADE,
-    tolerance_percent  NUMERIC(78,18) NOT NULL CHECK (tolerance_percent >= 0 AND tolerance_percent <= 1),
+    -- Ceiling matches MAX_TOLERANCE_PERCENT in `settlement_tolerance.rs`. A
+    -- backstop looser than the rule it backs up is not a backstop: a row
+    -- between the two would be legal here and refused by the API, and since
+    -- settlement fails closed on an unreadable tolerance, that store's
+    -- invoices would stop settling rather than settle too easily.
+    tolerance_percent  NUMERIC(78,18) NOT NULL CHECK (tolerance_percent >= 0 AND tolerance_percent <= 0.1),
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
