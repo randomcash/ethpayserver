@@ -4,21 +4,3 @@
 # through): the list may only shrink. Write the two tests, then
 # delete the line - the guard fails if a listed name is in fact covered.
 # A new handler must not be added here; give it its tests instead.
-add_store_member
-configure_store_wallet
-configure_store_webhook
-create_payment_method
-delete_payment_method
-delete_store_wallet
-delete_store_webhook
-delete_token_policy
-get_invoice_settlement_allowance
-get_payment_method
-get_store_webhook
-get_token_policy
-list_payment_methods
-remove_store_member
-rotate_store_wallet
-set_token_policy
-update_payment_method
-update_store_settings
