@@ -31,6 +31,7 @@ mod account_deletion;
 mod aggregation;
 mod analytics;
 mod backfill_truncated_payment_symbols;
+mod chain_cursor;
 mod email_change;
 mod expected_watch;
 mod installed_plugins;

@@ -356,6 +356,31 @@ async fn main() -> Result<()> {
         Some((store_id, observers)) => event_consumer.with_own_store_payments(store_id, observers),
         None => event_consumer,
     };
+    // An outbox lineage break can hide lost payments; the consumer refuses to
+    // resume across one until an operator has audited the gap and opts in.
+    // An unrecognised value is refused rather than read as "no": an operator
+    // who typed `TRUE` or `yes` meant to opt in and should be told it did not
+    // take, not left to work that out from the consumer halting.
+    let accept_lineage_break = match std::env::var("EVENT_ACCEPT_LINEAGE_BREAK") {
+        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "" | "false" | "0" => false,
+            other => {
+                anyhow::bail!("EVENT_ACCEPT_LINEAGE_BREAK must be true or false, got {other:?}")
+            }
+        },
+        Err(_) => false,
+    };
+    let event_consumer = event_consumer.with_accepted_lineage_break(accept_lineage_break);
+    // A poison event halts the consumer on every restart; the operator names
+    // it (from the halt log) here once the deposit is handled by hand.
+    let skipped_events = match std::env::var("EVENT_SKIP_EVENTS") {
+        Ok(raw) => server::services::event_consumer::parse_skip_events(&raw).map_err(|e| {
+            anyhow::anyhow!("EVENT_SKIP_EVENTS must be chain_id:epoch:seq[,...]: {e}")
+        })?,
+        Err(_) => Vec::new(),
+    };
+    let event_consumer = event_consumer.with_skipped_events(skipped_events);
     let mut event_consumer_handle = tokio::spawn(event_consumer.run());
     tracing::info!("Event consumer started");
 
