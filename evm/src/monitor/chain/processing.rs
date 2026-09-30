@@ -85,6 +85,17 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             }
         }
 
+        // Blocks between the last one processed and this one were never
+        // delivered (a resubscribe after a stall starts from the new head).
+        // The reorg check above only asks whether the old block is still
+        // canonical; it says nothing about what those blocks contained, so
+        // read them here. Nothing else ever will: the cursor moves past them
+        // below.
+        let missed = match *self.last_block.read().await {
+            Some(last_num) if block.number > last_num + 1 => Some((last_num + 1, block.number - 1)),
+            _ => None,
+        };
+
         // Get watched addresses (read lock)
         {
             let watched = self.watched.read().await;
@@ -94,14 +105,24 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 return Ok(());
             }
 
+            if let Some((from, to)) = missed {
+                info!(
+                    chain_id,
+                    from, to, "scanning blocks missed while the block stream was down"
+                );
+                self.backfill_missed_blocks(&watched, from, to).await?;
+            }
+
             // Check for native transfers
             if self.config.monitor_native {
-                self.check_native_payments(&watched, block).await?;
+                self.check_native_payments(&watched, block.number, block.hash)
+                    .await?;
             }
 
             // Check for ERC20 transfers
             if self.config.monitor_erc20 {
-                self.check_erc20_payments(&watched, block).await?;
+                self.check_erc20_payments(&watched, block.number, block.number)
+                    .await?;
             }
         } // Release read lock
 
@@ -111,7 +132,42 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         Ok(())
     }
 
-    /// Check for native currency payments.
+    /// Scan `from..=to`, blocks the stream skipped, through both detection
+    /// paths. A failure propagates so `last_block` stays put and the same
+    /// range is retried on the next block.
+    async fn backfill_missed_blocks(
+        &self,
+        watched: &HashMap<WatchKey, WatchedAddress>,
+        from: u64,
+        to: u64,
+    ) -> EvmResult<()> {
+        if self.config.monitor_native {
+            for number in from..=to {
+                // The hash is only used to label a detected payment; a node
+                // that cannot name the block cannot be trusted to have
+                // answered for it either, so retry rather than guess.
+                let Some(hash) = self.source.get_block_hash(number).await? else {
+                    return Err(crate::error::EvmError::Rpc(format!(
+                        "block {number} not available while backfilling a gap"
+                    )));
+                };
+                self.check_native_payments(watched, number, hash).await?;
+            }
+        }
+        if self.config.monitor_erc20 {
+            // Providers cap the span of a single log query.
+            const LOG_SPAN: u64 = 500;
+            let mut start = from;
+            while start <= to {
+                let end = to.min(start + LOG_SPAN - 1);
+                self.check_erc20_payments(watched, start, end).await?;
+                start = end + 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Check for native currency payments in one block.
     ///
     /// Reads the block once and matches its transfers against the watched
     /// set, which is one RPC call per block however many addresses are
@@ -137,7 +193,8 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     async fn check_native_payments(
         &self,
         watched: &HashMap<WatchKey, WatchedAddress>,
-        block: &BlockNotification,
+        block_number: u64,
+        block_hash: B256,
     ) -> EvmResult<()> {
         // Every watched native address, not only ones something changed for:
         // the block is read once regardless, so narrowing the set first would
@@ -155,7 +212,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         let addresses: Vec<Address> = invoice_map.keys().copied().collect();
         let transfers = self
             .source
-            .find_native_transfers_to(block.number, &addresses)
+            .find_native_transfers_to(block_number, &addresses)
             .await?;
 
         // Process each transfer found
@@ -170,8 +227,8 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 payment_address: transfer.to,
                 amount: transfer.value,
                 tx_hash: transfer.tx_hash,
-                block_number: block.number,
-                block_hash: block.hash,
+                block_number,
+                block_hash,
                 log_index: None,
                 is_native: true,
                 token_address: None,
@@ -201,7 +258,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                     (event.tx_hash, tx_index),
                     PendingPayment {
                         event: event.clone(),
-                        last_check_block: block.number,
+                        last_check_block: block_number,
                     },
                 );
             }
@@ -212,11 +269,12 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         Ok(())
     }
 
-    /// Check for ERC20 token payments.
+    /// Check for ERC20 token payments in blocks `from..=to`.
     async fn check_erc20_payments(
         &self,
         watched: &HashMap<WatchKey, WatchedAddress>,
-        block: &BlockNotification,
+        from: u64,
+        to: u64,
     ) -> EvmResult<()> {
         // Collect unique addresses we're watching (for ERC20, token must be Some)
         let watch_addresses: Vec<Address> = watched
@@ -228,9 +286,9 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             return Ok(());
         }
 
-        // Query Transfer logs for this block
-        let filter = LogFilter::erc20_transfers_to(watch_addresses.clone())
-            .with_block_range(block.number, block.number);
+        // Query Transfer logs for the range
+        let filter =
+            LogFilter::erc20_transfers_to(watch_addresses.clone()).with_block_range(from, to);
 
         let logs = self.source.get_logs(&filter).await?;
 
@@ -253,6 +311,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             if let Some(watch) = watched.get(&key) {
                 let from_address = Address::from_slice(&log.topics()[1].as_slice()[12..]);
                 let amount = U256::from_be_slice(log.data().data.as_ref());
+                let log_block = log.block_number.unwrap_or(to);
 
                 let event = PaymentDetected {
                     chain_id: self.chain_id(),
@@ -260,7 +319,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                     payment_address: to_address,
                     amount,
                     tx_hash: log.transaction_hash.unwrap_or(B256::ZERO),
-                    block_number: block.number,
+                    block_number: log_block,
                     block_hash: log.block_hash.unwrap_or(B256::ZERO),
                     log_index: log.log_index.map(|i| i as u32),
                     is_native: false,
@@ -292,7 +351,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                             (event.tx_hash, tx_index),
                             PendingPayment {
                                 event: event.clone(),
-                                last_check_block: block.number,
+                                last_check_block: log_block,
                             },
                         );
                     }

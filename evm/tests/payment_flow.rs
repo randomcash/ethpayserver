@@ -1068,3 +1068,134 @@ async fn a_block_that_could_not_be_read_is_reported_rather_than_treated_as_empty
          Nothing re-reads it, so the payment inside it is gone with no trace."
     );
 }
+
+// ============================================================================
+// Blocks skipped by a stream that went down and resubscribed
+// ============================================================================
+
+/// Watch one address, process block 100, then deliver block 103 with a
+/// payment sitting in block 101 or 102. With `stalled` the stream never
+/// delivered 101/102 (a resubscribe starts from the new head); without it they
+/// arrive normally, which is the control: that the payment is found there
+/// proves the fixture pays into a watched address, so a pass under a stall
+/// means the gap was read and not that anything is reported regardless.
+///
+/// Returns the payments detected as `(block_number, tx_hash)`.
+async fn payments_detected_across_a_stall(stalled: bool, erc20: bool) -> Vec<(u64, B256)> {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let token_contract = Address::random();
+    let sender = Address::random();
+    let amount = U256::from(1_000_000u64);
+    let tx_hash = B256::random();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: Some(amount),
+            token_contract: erc20.then_some(token_contract),
+            created_at: Utc::now(),
+        })
+        .await;
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    test_source.push_block(make_block(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The payment lands in block 101, inside what the stream skipped.
+    if erc20 {
+        test_source
+            .add_log(
+                101,
+                make_erc20_transfer_log(
+                    token_contract,
+                    sender,
+                    payment_address,
+                    amount,
+                    101,
+                    tx_hash,
+                    0,
+                ),
+            )
+            .await;
+    } else {
+        test_source
+            .add_native_transfer(
+                101,
+                make_native_transfer(sender, payment_address, amount, tx_hash),
+            )
+            .await;
+    }
+
+    if stalled {
+        // The chain has them; the subscription never delivered them.
+        test_source.set_block_hash(101, B256::random());
+        test_source.set_block_hash(102, B256::random());
+    } else {
+        test_source.push_block(make_block(101));
+        test_source.push_block(make_block(102));
+    }
+    test_source.push_block(make_block(103));
+
+    let mut detected = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(MonitorEvent::PaymentDetected(p))) =
+            tokio::time::timeout(Duration::from_millis(200), event_rx.recv()).await
+        {
+            detected.push((p.block_number, p.tx_hash));
+        }
+    }
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+    detected
+}
+
+/// Nothing backfilled the blocks a resubscribe skipped: the cursor moved to
+/// the new head and a payment in the gap was never credited.
+#[tokio::test]
+async fn test_native_payment_in_a_stalled_gap_is_detected() {
+    let control = payments_detected_across_a_stall(false, false).await;
+    assert!(
+        control.len() == 1 && control[0].0 == 101,
+        "control (no gap) must detect the payment exactly once, got {control:?}"
+    );
+
+    let detected = payments_detected_across_a_stall(true, false).await;
+    assert_eq!(
+        detected.len(),
+        1,
+        "a native payment in blocks the stream skipped must still be detected, got {detected:?}"
+    );
+    assert_eq!(detected[0].0, 101, "credited against the block it was in");
+}
+
+#[tokio::test]
+async fn test_erc20_payment_in_a_stalled_gap_is_detected() {
+    let control = payments_detected_across_a_stall(false, true).await;
+    assert!(
+        control.len() == 1 && control[0].0 == 101,
+        "control (no gap) must detect the payment exactly once, got {control:?}"
+    );
+
+    let detected = payments_detected_across_a_stall(true, true).await;
+    assert_eq!(
+        detected.len(),
+        1,
+        "an ERC20 payment in blocks the stream skipped must still be detected, got {detected:?}"
+    );
+    assert_eq!(detected[0].0, 101, "credited against the block it was in");
+}
