@@ -133,7 +133,7 @@ that figure will drift. The `*/5` cron therefore does not hold a 5-minute
 cadence.
 
 **Where the 5-minute cadence actually comes from.** Not from this workflow.
-The deploy host runs a one-minute systemd timer that polls
+The deploy repository defines a one-minute systemd timer that polls
 `/api/health/deep`, requires the same fields to be healthy (plus a
 flat-block check across polls), and reports success to a dead-man's switch,
 so a down service, a broken watcher and a dead box all surface as a late
@@ -141,14 +141,17 @@ check-in. That is the alerting path for prompt outage detection. The timer's
 unit and script are `systemd/rcs-health-watch@.timer` (`OnUnitActiveSec=1min`)
 and `scripts/health-watch.sh` in the private deploy repository, deliberately:
 they depend on host paths and credentials that must not be published here.
-Whether `rcs-health-watch@testnet.timer` is enabled is a host fact, checked
-with `systemctl list-timers` on the deploy host.
+Whether `rcs-health-watch@testnet.timer` is installed and enabled is
+**unverified from this repository**: enabling it is the deploy-repository
+owner's job, and it can be checked with `systemctl list-timers` on the host.
+Until that is confirmed, treat prompt outage detection as not yet in place.
 
 Consequences for this workflow's Sentry Cron Monitors: their check-ins come
 only from the GitHub schedule, so a window sized for 5 minutes alarms
 constantly, and one widened to match delivery cannot tell "testnet is down"
 from "GitHub skipped runs". Size the monitors' expected interval to hours and
 treat them as a backstop for the workflow itself, not as outage detection.
+Resizing the monitors is a manual Sentry change owned by the operator.
 `STALL_THRESHOLD` counts checks, not minutes, so it stretches the same way;
 the host timer's minutes-based stale-block check is the one that bounds
 stall time. The scheduled end-to-end workflow is subject to the same
