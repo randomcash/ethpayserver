@@ -504,3 +504,116 @@ async fn a_key_scoped_to_one_store_is_refused_update_member_on_another() {
         "a key scoped to store A's canmodifystoreusers must be refused on store B"
     );
 }
+
+async fn is_member(pg: &PgDataService, store_id: Uuid, user: Uuid) -> bool {
+    pg.get_user_store(UserId(user), StoreId(store_id))
+        .await
+        .expect("read membership")
+        .is_some()
+}
+
+/// The refusal `a_key_scoped_to_modify_users_can_add_a_member` needs beside
+/// it. The owner holds `canmodifystoreusers`, but the key is scoped to
+/// something else, so `add_store_member` must refuse it - and must not have
+/// added the member anyway.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_something_else_is_refused_add_member() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let new_member = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    seed_owner_with_permissions(
+        &pg,
+        owner,
+        store.id.0,
+        vec!["ethpay.store.canmodifystoreusers".to_string()],
+    )
+    .await;
+
+    let state = app_state(Arc::new(pg));
+
+    let result = add_store_member(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
+        ),
+        State(state.clone()),
+        Path(store.id.0),
+        Json(api_types::AddMemberRequest {
+            user_id: new_member,
+            role: "Guest".to_string(),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        result.err(),
+        Some(StatusCode::FORBIDDEN),
+        "a key not scoped to canmodifystoreusers must be refused by add_store_member"
+    );
+    assert!(
+        !is_member(&state.data_service, store.id.0, new_member).await,
+        "a refused add must not have added the member"
+    );
+}
+
+/// The grant `a_key_scoped_to_one_store_is_refused_remove_member_on_another`
+/// needs beside it. The target is not the store owner, whom the handler
+/// refuses for its own reason, so a 204 can only come from the scope check
+/// admitting the key.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_modify_users_can_remove_a_member() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let member = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    seed_owner_with_permissions(
+        &pg,
+        owner,
+        store.id.0,
+        vec!["ethpay.store.canmodifystoreusers".to_string()],
+    )
+    .await;
+    let guest = pg
+        .get_default_role_by_name("Guest")
+        .await
+        .expect("look up the Guest role")
+        .expect("Guest role is seeded");
+    pg.add_user_to_store(&UserStore::new(UserId(member), store.id, guest.id))
+        .await
+        .expect("seed the member to remove");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = remove_store_member(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec!["ethpay.store.canmodifystoreusers".to_string()]),
+        ),
+        State(state.clone()),
+        Path((store.id.0, member)),
+    )
+    .await;
+
+    assert_eq!(
+        result.ok(),
+        Some(StatusCode::NO_CONTENT),
+        "a key scoped to canmodifystoreusers must be able to remove a member"
+    );
+    assert!(
+        !is_member(&state.data_service, store.id.0, member).await,
+        "the admitted removal must actually remove the member"
+    );
+}
