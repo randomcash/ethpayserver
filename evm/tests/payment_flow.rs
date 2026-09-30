@@ -1199,3 +1199,77 @@ async fn test_erc20_payment_in_a_stalled_gap_is_detected() {
     );
     assert_eq!(detected[0].0, 101, "credited against the block it was in");
 }
+
+/// A backfill that fails part-way is retried from the same height on the next
+/// block. Payments the failed attempt had already read must not be announced
+/// again by the retry: block 102 cannot be named, so the scan fails after
+/// reading 101, and it fails again on the next block before finally succeeding.
+#[tokio::test]
+async fn test_failed_backfill_retry_reports_a_payment_once() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let amount = U256::from(1_000_000u64);
+    let tx_hash = B256::random();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: Some(amount),
+            token_contract: None,
+            created_at: Utc::now(),
+        })
+        .await;
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    test_source.push_block(make_block(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    test_source
+        .add_native_transfer(
+            101,
+            make_native_transfer(sender, payment_address, amount, tx_hash),
+        )
+        .await;
+    // 101 is readable; 102 is not, so every backfill attempt fails after 101.
+    test_source.set_block_hash(101, B256::random());
+    test_source.push_block(make_block(103));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_source.push_block(make_block(104));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    test_source.set_block_hash(102, B256::random());
+    test_source.push_block(make_block(105));
+
+    let mut detected = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(MonitorEvent::PaymentDetected(p))) =
+            tokio::time::timeout(Duration::from_millis(200), event_rx.recv()).await
+        {
+            detected.push((p.block_number, p.tx_hash));
+        }
+    }
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+
+    assert_eq!(
+        detected,
+        vec![(101, tx_hash)],
+        "a payment read by a backfill attempt that then failed must be reported once, \
+         when the range finally succeeds"
+    );
+}

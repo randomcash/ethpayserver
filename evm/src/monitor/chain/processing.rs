@@ -96,35 +96,45 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             _ => None,
         };
 
-        // Get watched addresses (read lock)
-        {
-            let watched = self.watched.read().await;
-            if watched.is_empty() {
-                *self.last_block.write().await = Some(block.number);
-                *self.last_block_hash.write().await = Some(block.hash);
-                return Ok(());
-            }
+        // Snapshot the watched set so a long backfill does not hold the read
+        // lock and stall `watch()` for every new invoice meanwhile.
+        let watched = self.watched.read().await.clone();
+        if watched.is_empty() {
+            *self.last_block.write().await = Some(block.number);
+            *self.last_block_hash.write().await = Some(block.hash);
+            return Ok(());
+        }
 
-            if let Some((from, to)) = missed {
-                info!(
-                    chain_id,
-                    from, to, "scanning blocks missed while the block stream was down"
-                );
-                self.backfill_missed_blocks(&watched, from, to).await?;
-            }
+        // Everything detected is collected first and emitted only once every
+        // scan has succeeded. A failure part-way returns before `last_block`
+        // moves, so the whole range is read again on the next block; emitting
+        // as each payment was found would report the ones already seen twice.
+        let mut detected = Vec::new();
 
-            // Check for native transfers
-            if self.config.monitor_native {
-                self.check_native_payments(&watched, block.number, block.hash)
-                    .await?;
-            }
+        if let Some((from, to)) = missed {
+            info!(
+                chain_id,
+                from, to, "scanning blocks missed while the block stream was down"
+            );
+            self.backfill_missed_blocks(&watched, from, to, &mut detected)
+                .await?;
+        }
 
-            // Check for ERC20 transfers
-            if self.config.monitor_erc20 {
-                self.check_erc20_payments(&watched, block.number, block.number)
-                    .await?;
-            }
-        } // Release read lock
+        // Check for native transfers
+        if self.config.monitor_native {
+            self.check_native_payments(&watched, block.number, block.hash, &mut detected)
+                .await?;
+        }
+
+        // Check for ERC20 transfers
+        if self.config.monitor_erc20 {
+            self.check_erc20_payments(&watched, block.number, block.number, &mut detected)
+                .await?;
+        }
+
+        for event in detected {
+            self.record_detected(event).await;
+        }
 
         *self.last_block.write().await = Some(block.number);
         *self.last_block_hash.write().await = Some(block.hash);
@@ -133,13 +143,15 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
     }
 
     /// Scan `from..=to`, blocks the stream skipped, through both detection
-    /// paths. A failure propagates so `last_block` stays put and the same
-    /// range is retried on the next block.
+    /// paths, appending what it finds to `detected`. A failure propagates so
+    /// `last_block` stays put and the same range is retried on the next block;
+    /// the caller emits nothing from a failed attempt.
     async fn backfill_missed_blocks(
         &self,
         watched: &HashMap<WatchKey, WatchedAddress>,
         from: u64,
         to: u64,
+        detected: &mut Vec<PaymentDetected>,
     ) -> EvmResult<()> {
         if self.config.monitor_native {
             for number in from..=to {
@@ -151,7 +163,8 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                         "block {number} not available while backfilling a gap"
                     )));
                 };
-                self.check_native_payments(watched, number, hash).await?;
+                self.check_native_payments(watched, number, hash, detected)
+                    .await?;
             }
         }
         if self.config.monitor_erc20 {
@@ -160,7 +173,8 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             let mut start = from;
             while start <= to {
                 let end = to.min(start + LOG_SPAN - 1);
-                self.check_erc20_payments(watched, start, end).await?;
+                self.check_erc20_payments(watched, start, end, detected)
+                    .await?;
                 start = end + 1;
             }
         }
@@ -195,6 +209,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         watched: &HashMap<WatchKey, WatchedAddress>,
         block_number: u64,
         block_hash: B256,
+        detected: &mut Vec<PaymentDetected>,
     ) -> EvmResult<()> {
         // Every watched native address, not only ones something changed for:
         // the block is read once regardless, so narrowing the set first would
@@ -238,32 +253,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                 detected_at: Utc::now(),
             };
 
-            info!(
-                chain_id = self.chain_id(),
-                invoice_id = %invoice_id,
-                address = %transfer.to,
-                amount = %transfer.value,
-                tx = %transfer.tx_hash,
-                from = %transfer.from,
-                "native payment detected"
-            );
-
-            // Add to pending for confirmation tracking, keyed by the
-            // transfer rather than the transaction: one transaction can carry
-            // two transfers to two different watched addresses, and keying by
-            // hash alone meant the second detection evicted the first, so only
-            // one of them was ever confirmed.
-            if let Some(tx_index) = event.tx_index() {
-                self.pending.write().await.insert(
-                    (event.tx_hash, tx_index),
-                    PendingPayment {
-                        event: event.clone(),
-                        last_check_block: block_number,
-                    },
-                );
-            }
-
-            let _ = self.event_tx.send(MonitorEvent::PaymentDetected(event));
+            detected.push(event);
         }
 
         Ok(())
@@ -275,6 +265,7 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         watched: &HashMap<WatchKey, WatchedAddress>,
         from: u64,
         to: u64,
+        detected: &mut Vec<PaymentDetected>,
     ) -> EvmResult<()> {
         // Collect unique addresses we're watching (for ERC20, token must be Some)
         let watch_addresses: Vec<Address> = watched
@@ -311,7 +302,13 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             if let Some(watch) = watched.get(&key) {
                 let from_address = Address::from_slice(&log.topics()[1].as_slice()[12..]);
                 let amount = U256::from_be_slice(log.data().data.as_ref());
-                let log_block = log.block_number.unwrap_or(to);
+                // A range query cannot attribute a log to `to` by guessing:
+                // the wrong block means the wrong confirmation depth.
+                let Some(log_block) = log.block_number else {
+                    return Err(crate::error::EvmError::Rpc(format!(
+                        "transfer log in blocks {from}..={to} has no block number"
+                    )));
+                };
 
                 let event = PaymentDetected {
                     chain_id: self.chain_id(),
@@ -330,44 +327,64 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
                     detected_at: Utc::now(),
                 };
 
-                info!(
-                    chain_id = self.chain_id(),
-                    invoice_id = %watch.invoice_id,
-                    %to_address,
-                    token = %log.address(),
-                    amount = %amount,
-                    tx = %event.tx_hash,
-                    "ERC20 payment detected"
-                );
-
-                // Add to pending, keyed by the transfer. `tx_index` is
-                // `None` only for an ERC20 log the node returned without a log
-                // index, which is malformed rather than native - tracking it
-                // on the native sentinel would evict a real native transfer in
-                // the same transaction.
-                match event.tx_index() {
-                    Some(tx_index) => {
-                        self.pending.write().await.insert(
-                            (event.tx_hash, tx_index),
-                            PendingPayment {
-                                event: event.clone(),
-                                last_check_block: log_block,
-                            },
-                        );
-                    }
-                    None => {
-                        warn!(
-                            chain_id = self.chain_id(),
-                            tx = %event.tx_hash,
-                            "ERC20 transfer has no log index; not tracking it for confirmation"
-                        );
-                    }
-                }
-
-                let _ = self.event_tx.send(MonitorEvent::PaymentDetected(event));
+                detected.push(event);
             }
         }
 
         Ok(())
+    }
+
+    /// Log a detected payment, track it for confirmation and announce it.
+    async fn record_detected(&self, event: PaymentDetected) {
+        if event.is_native {
+            info!(
+                chain_id = self.chain_id(),
+                invoice_id = %event.invoice_id,
+                address = %event.payment_address,
+                amount = %event.amount,
+                tx = %event.tx_hash,
+                from = %event.from_address,
+                "native payment detected"
+            );
+        } else {
+            info!(
+                chain_id = self.chain_id(),
+                invoice_id = %event.invoice_id,
+                to_address = %event.payment_address,
+                token = ?event.token_address,
+                amount = %event.amount,
+                tx = %event.tx_hash,
+                "ERC20 payment detected"
+            );
+        }
+
+        // Add to pending for confirmation tracking, keyed by the transfer
+        // rather than the transaction: one transaction can carry two
+        // transfers to two different watched addresses, and keying by hash
+        // alone meant the second detection evicted the first, so only one of
+        // them was ever confirmed. `tx_index` is `None` only for an ERC20 log
+        // the node returned without a log index, which is malformed rather
+        // than native - tracking it on the native sentinel would evict a real
+        // native transfer in the same transaction.
+        match event.tx_index() {
+            Some(tx_index) => {
+                self.pending.write().await.insert(
+                    (event.tx_hash, tx_index),
+                    PendingPayment {
+                        last_check_block: event.block_number,
+                        event: event.clone(),
+                    },
+                );
+            }
+            None => {
+                warn!(
+                    chain_id = self.chain_id(),
+                    tx = %event.tx_hash,
+                    "ERC20 transfer has no log index; not tracking it for confirmation"
+                );
+            }
+        }
+
+        let _ = self.event_tx.send(MonitorEvent::PaymentDetected(event));
     }
 }
