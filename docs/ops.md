@@ -132,22 +132,27 @@ observed dispatching only a small fraction of its runs, with gaps of hours, and
 that figure will drift. The `*/5` cron therefore does not hold a 5-minute
 cadence.
 
-**Open gap: nothing currently delivers a 5-minute Sentry check-in.** The
-Sentry monitors are fed only by the GitHub schedule, so a window sized for 5
-minutes alarms constantly and one widened to hours cannot tell "testnet is
-down" from "GitHub skipped runs". `STALL_THRESHOLD` counts checks, not minutes,
-so it stretches the same way. Do not assume some other box-side poller covers
-this gap: none is known to feed these monitors.
+**Where the 5-minute cadence actually comes from.** Not from this workflow.
+The deploy host runs a one-minute systemd timer that polls
+`/api/health/deep`, requires the same fields to be healthy (plus a
+flat-block check across polls), and reports success to a dead-man's switch,
+so a down service, a broken watcher and a dead box all surface as a late
+check-in. That is the alerting path for prompt outage detection. The timer's
+unit and script live in the private deploy repository, deliberately: they
+depend on host paths and credentials that must not be published here.
 
-Closing it means running `scripts/check-health-deep.sh` itself from a timer on
-the deploy host (it is environment-driven and needs only `HEALTH_URL`,
-`SENTRY_CRON_URL` and a persistent `HEALTH_STATE_FILE`), then setting the
-monitor's expected interval to that timer's cadence. That change belongs in the
-private deploy repository and is not made here. Until it is, testnet health
-through this path is verified a handful of times a day. The two Sentry Cron
-Monitor URLs above have to be created by hand in Sentry (Crons → new monitor →
-"check in via HTTP") and the resulting URLs stored as repo secrets; that
-account setup is outside what a commit here can do.
+Consequences for this workflow's Sentry Cron Monitors: their check-ins come
+only from the GitHub schedule, so a window sized for 5 minutes alarms
+constantly, and one widened to match delivery cannot tell "testnet is down"
+from "GitHub skipped runs". Size the monitors' expected interval to hours and
+treat them as a backstop for the workflow itself, not as outage detection.
+`STALL_THRESHOLD` counts checks, not minutes, so it stretches the same way;
+the host timer's minutes-based stale-block check is the one that bounds
+stall time. The scheduled end-to-end workflow is subject to the same
+best-effort dispatch and is a separate problem, not addressed here. The two
+Sentry Cron Monitor URLs above have to be created by hand in Sentry (Crons →
+new monitor → "check in via HTTP") and the resulting URLs stored as repo
+secrets; that account setup is outside what a commit here can do.
 
 For the faster cadence, also add a Sentry **Uptime Check** (not a Cron
 Monitor) against `/api/health/deep`, run from Sentry's own checkers at 30-60s.

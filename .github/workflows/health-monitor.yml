@@ -14,13 +14,16 @@ name: Health monitor (deep)
 # large majority of scheduled runs are never dispatched, with gaps of hours
 # against a 5-minute cron. Nothing time-sensitive may rely on this schedule.
 #
-# Known gap, not a solved problem: nothing else feeds the Sentry monitors, so
-# their window cannot be both 5 minutes and honest until the check-in moves
-# to a timer on the deploy host. See "Open gap" in docs/ops.md.
+# The 5-minute cadence is held elsewhere: the deploy host runs a one-minute
+# systemd timer that polls the same endpoint and reports to a dead-man's
+# switch. That timer, not this schedule, is what notices an outage promptly.
+# This workflow remains for manual dispatch and as a second, body-asserting
+# check. Its Sentry cron monitor must therefore be sized to what GitHub
+# actually delivers (hours), or be treated as advisory; it cannot be a
+# 5-minute dead-man's switch. See docs/ops.md.
 #
-# Every 5 minutes is the shortest interval GitHub Actions schedules
-# meaningfully — not the 30-60s a real uptime checker gives you. This is the
-# fallback documented in docs/ops.md: it exists to assert on the response
+# This is a body-asserting fallback rather than a real uptime checker (30-60s
+# cadence): it exists to assert on the response
 # body (monitor.data_fresh, per-chain rpc status), which a status-code-only
 # uptime check cannot do. Configure a real Sentry Uptime Check against the
 # same URL for the faster cadence; keep this running regardless, since it is
