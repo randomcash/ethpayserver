@@ -86,10 +86,17 @@ reading the chain again can.
   unconfirmed. The rescan must start from the lowest block among payments not
   yet confirmed (and pending watches), or the margin must cover confirmation
   depth plus the longest pending lifetime. Cursor height alone is not enough.
-- The claims in "What already exists" were re-read against
-  `reset_chain_watch_notifications` (`WHERE ... is_active = TRUE`),
-  `break_lineage`, and the absence of any reader of `block_height`. They are
-  claims about the repository at this commit, not pinned by a test.
+- The claims that the re-arm reset and the payment-option lookup both skip
+  inactive watches are pinned by the ignored integration test
+  `inactive_watch_is_neither_rearmed_nor_resolved_to_a_payment_option`
+  (data-service; removing the `is_active` filter from the lookup turns it red).
+  That test asserts today's behaviour: whoever makes replay credit expired
+  watches will change it deliberately. That a replay must publish detection
+  before confirmation, and that re-applying is idempotent, are still asserted
+  here without a test.
+- Policy, to settle before building the apply-path change: whether a late
+  payment on an expired or closed invoice is credited, or only flagged for the
+  merchant.
 
 ## Why this is not done in one step
 

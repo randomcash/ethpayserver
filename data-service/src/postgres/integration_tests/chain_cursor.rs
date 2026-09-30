@@ -226,3 +226,60 @@ async fn resetting_watch_notifications_only_touches_the_named_chain() {
         "a different chain's watch must be left alone"
     );
 }
+
+/// A watch that expired (is inactive) is invisible to both the re-arm reset
+/// and the payment-option lookup the apply path uses. Recovering a payment that
+/// confirmed on an expired watch therefore cannot rely on either; this pins
+/// that boundary so a change to it is a decision, not an accident.
+#[tokio::test]
+#[ignore]
+async fn inactive_watch_is_neither_rearmed_nor_resolved_to_a_payment_option() {
+    let service = create_test_service().await.expect("DATABASE_URL required");
+
+    let invoice = seeded_test_invoice(&service).await;
+    InvoiceWriter::upsert(&service, &invoice).await.unwrap();
+
+    let chain = ChainId::evm(1);
+    let po = test_payment_option(&invoice.id, &chain);
+    PaymentOptionWriter::create(&service, &po).await.unwrap();
+
+    let address = unique_address();
+    WatchedAddressWriter::upsert(&service, &address, &po.id, &chain, None)
+        .await
+        .unwrap();
+    WatchedAddressWriter::mark_notified(&service, &address, &chain, None)
+        .await
+        .unwrap();
+
+    // While active the lookup resolves.
+    assert_eq!(
+        WatchedAddressReader::get_payment_option_id(&service, &address, &chain, None)
+            .await
+            .unwrap(),
+        Some(po.id.clone())
+    );
+
+    assert!(
+        WatchedAddressWriter::deactivate(&service, &address, &chain, None)
+            .await
+            .unwrap()
+    );
+
+    service
+        .reset_chain_watch_notifications(chain.evm_chain_id().unwrap())
+        .await
+        .unwrap();
+
+    let pending = WatchedAddressReader::get_pending(&service).await.unwrap();
+    assert!(
+        !pending.iter().any(|w| w.address == address),
+        "an inactive watch must not be re-armed by the reset"
+    );
+    assert_eq!(
+        WatchedAddressReader::get_payment_option_id(&service, &address, &chain, None)
+            .await
+            .unwrap(),
+        None,
+        "an inactive watch must not resolve to a payment option"
+    );
+}
