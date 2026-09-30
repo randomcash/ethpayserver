@@ -9,8 +9,8 @@ use ::types::InvoiceReader;
 use auth::{SessionService, repository::UserStoreRepository};
 use data_service::PaymentOptionReader;
 
-use super::{InvoiceResponse, TxHashLookupResponse, customer_email_of};
-use crate::api::extractors::AuthenticatedUser;
+use super::{InvoiceResponse, TxHashLookupResponse, VIEW_INVOICES, customer_email_of};
+use crate::api::extractors::{StoreScopedUser, key_grants_store_permission};
 use crate::state::PgAppState;
 
 /// Validate a tx hash: must be 0x followed by 64 hex characters.
@@ -59,8 +59,9 @@ fn parse_path_chain_id(raw: &str) -> Result<types::ChainId, (StatusCode, Json<se
         (status = 404, description = "No invoice found for this transaction"),
     )
 )]
+#[allow(clippy::too_many_lines)] // one lookup chain: payment, invoice, store access, key scope
 pub async fn lookup_by_tx_hash<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(path): Path<TxHashLookupPath>,
 ) -> Result<Json<TxHashLookupResponse>, (StatusCode, Json<serde_json::Value>)>
@@ -131,6 +132,13 @@ where
                 Json(serde_json::json!({"error": "not_found"})),
             ));
         }
+    }
+
+    if !key_grants_store_permission(key_scope.as_deref(), VIEW_INVOICES, invoice.store_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not_found"})),
+        ));
     }
 
     // Get payment options for the invoice

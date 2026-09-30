@@ -41,7 +41,7 @@ use rates::NoOpRateProvider;
 use server::api::ApiErr;
 use server::api::invoices::{CreateInvoiceRequest, create_invoice};
 use server::api::stores::{RotateWalletRequest, RotateWalletResponse, rotate_store_wallet};
-use server::api::{AuthenticatedCaller, AuthenticatedUser};
+use server::api::{AuthenticatedCaller, StoreScopedUser};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 use types::{ChainId, InvoiceId, PaymentOptionReader, StorePaymentMethodWriter};
@@ -123,6 +123,9 @@ fn merchant_caller(owner: uuid::Uuid) -> AuthenticatedCaller {
     AuthenticatedCaller {
         user: user_info(owner),
         is_operator: false,
+        // A session caller, not an API key, so there is no key scope to narrow
+        // by. An API-key caller would carry the key's stored permissions here.
+        key_scope: None,
     }
 }
 
@@ -211,7 +214,10 @@ async fn rotation_moves_new_invoices_but_not_a_pending_ones_address() {
     );
 
     let rotated = rotate_store_wallet(
-        AuthenticatedUser(user_info(owner)),
+        // `None` key scope: the owner acting directly through a session, which
+        // is what `AuthenticatedUser` meant before this handler became
+        // store-scoped. An API-key caller would carry `Some(..)` here.
+        StoreScopedUser(user_info(owner), None),
         State(app_state(Arc::clone(&ds))),
         Path(store.id.0),
         Json(RotateWalletRequest {
@@ -301,7 +307,10 @@ async fn rotation_refuses_a_malformed_xpub_with_a_specific_message() {
     let ds = Arc::new(pg);
 
     let err = rotate_store_wallet(
-        AuthenticatedUser(user_info(owner)),
+        // `None` key scope: the owner acting directly through a session, which
+        // is what `AuthenticatedUser` meant before this handler became
+        // store-scoped. An API-key caller would carry `Some(..)` here.
+        StoreScopedUser(user_info(owner), None),
         State(app_state(Arc::clone(&ds))),
         Path(store.id.0),
         Json(RotateWalletRequest {
@@ -342,7 +351,10 @@ async fn rotation_refuses_an_xprv_with_a_message_naming_it_a_private_key() {
     const XPRV: &str = "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi";
 
     let err = rotate_store_wallet(
-        AuthenticatedUser(user_info(owner)),
+        // `None` key scope: the owner acting directly through a session, which
+        // is what `AuthenticatedUser` meant before this handler became
+        // store-scoped. An API-key caller would carry `Some(..)` here.
+        StoreScopedUser(user_info(owner), None),
         State(app_state(Arc::clone(&ds))),
         Path(store.id.0),
         Json(RotateWalletRequest {

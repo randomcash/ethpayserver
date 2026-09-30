@@ -14,9 +14,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use uuid::Uuid;
 
-use server::api::AuthenticatedUser;
+use server::api::StoreScopedUser;
 
-use crate::support::{app_state, seed_tenant, service, status_of, user_info, user_info_with_role};
+use crate::support::{
+    app_state, seed_tenant, service, status_of, store_scoped_user_info, user_info_with_role,
+};
 
 #[tokio::test]
 #[ignore]
@@ -29,7 +31,7 @@ async fn list_invoices_with_no_store_id_shows_only_the_callers_own() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::list_invoices(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: None,
@@ -65,7 +67,7 @@ async fn list_invoices_with_another_tenants_store_id_is_refused() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::list_invoices(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: Some(b.store.id.0),
@@ -88,7 +90,7 @@ async fn list_invoices_with_another_tenants_store_id_is_refused() {
     // store_id, including the caller's own, would pass the assertion above
     // for the wrong reason.
     let own = server::api::invoices::list_invoices(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: Some(a.store.id.0),
@@ -124,7 +126,7 @@ async fn list_invoices_with_a_nil_store_id_is_refused_like_any_foreign_store() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::list_invoices(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: Some(Uuid::nil()),
@@ -160,7 +162,10 @@ async fn list_invoices_with_no_store_id_as_server_admin_sees_every_tenant() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::list_invoices(
-        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        StoreScopedUser(
+            user_info_with_role(a.user_id, auth::Role::ServerAdmin),
+            None,
+        ),
         State(state),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: None,
@@ -196,7 +201,7 @@ async fn get_invoice_by_id_across_tenants_is_refused() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::get_invoice(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Path(b.invoice.id.0.clone()),
     )
@@ -214,7 +219,7 @@ async fn get_invoice_by_id_across_tenants_is_refused() {
     // regardless of ownership would still pass the assertion above for the
     // wrong reason.
     let own = server::api::invoices::get_invoice(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Path(a.invoice.id.0.clone()),
     )
@@ -238,7 +243,10 @@ async fn get_invoice_across_tenants_is_permitted_for_a_server_admin() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::get_invoice(
-        AuthenticatedUser(user_info_with_role(a.user_id, auth::Role::ServerAdmin)),
+        StoreScopedUser(
+            user_info_with_role(a.user_id, auth::Role::ServerAdmin),
+            None,
+        ),
         State(state),
         Path(b.invoice.id.0.clone()),
     )
@@ -259,7 +267,7 @@ async fn get_invoice_payments_across_tenants_is_refused() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::get_invoice_payments(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Path(b.invoice.id.0.clone()),
     )
@@ -274,7 +282,7 @@ async fn get_invoice_payments_across_tenants_is_refused() {
     // Positive control: without this, an endpoint that 404s regardless of
     // caller would pass the assertion above for the wrong reason.
     let own = server::api::invoices::get_invoice_payments(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Path(a.invoice.id.0.clone()),
     )
@@ -294,7 +302,7 @@ async fn get_invoice_status_across_tenants_is_refused() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::get_invoice_status(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Path(b.invoice.id.0.clone()),
     )
@@ -309,7 +317,7 @@ async fn get_invoice_status_across_tenants_is_refused() {
     // Positive control: without this, an endpoint that 404s regardless of
     // caller would pass the assertion above for the wrong reason.
     let own = server::api::invoices::get_invoice_status(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Path(a.invoice.id.0.clone()),
     )

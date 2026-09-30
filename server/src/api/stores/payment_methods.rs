@@ -18,7 +18,7 @@ use auth::{ServerSettings, ServerSettingsRepository, SessionService, StoreId};
 use data_service::{self, StorePaymentMethodReader, StorePaymentMethodWriter};
 use evm::validate_xpub;
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::StoreScopedUser;
 use super::{ApiErr, repository_error, require_store_settings_permission};
 use crate::state::PgAppState;
 pub use api_types::{
@@ -151,14 +151,14 @@ pub(crate) fn update_should_check_chain(requested_enabled: Option<bool>) -> bool
     )
 )]
 pub async fn list_payment_methods<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<Vec<PaymentMethodResponse>>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let methods = StorePaymentMethodReader::get_payment_methods(&*state.data_service, store_id)
         .await
@@ -188,7 +188,7 @@ where
     )
 )]
 pub async fn create_payment_method<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<CreatePaymentMethodRequest>,
@@ -196,7 +196,7 @@ pub async fn create_payment_method<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // A key is optional now: omitted means "use the one this store already
     // resolves to", so a merchant pastes it once rather than per chain, per
@@ -264,14 +264,14 @@ where
     )
 )]
 pub async fn get_payment_method<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path((store_id, method_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<PaymentMethodResponse>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let method = StorePaymentMethodReader::get_payment_method(&*state.data_service, method_id)
         .await
@@ -308,7 +308,7 @@ where
     )
 )]
 pub async fn update_payment_method<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path((store_id, method_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdatePaymentMethodRequest>,
@@ -316,7 +316,7 @@ pub async fn update_payment_method<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // Validate xpub if provided
     if let Some(ref xpub) = req.xpub
@@ -388,14 +388,14 @@ where
     )
 )]
 pub async fn delete_payment_method<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path((store_id, method_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // Verify method exists and belongs to this store
     let existing = StorePaymentMethodReader::get_payment_method(&*state.data_service, method_id)

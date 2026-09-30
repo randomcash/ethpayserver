@@ -6,7 +6,7 @@ use auth::{SessionService, repository::UserStoreRepository};
 use data_service::StorePaymentMethodReader;
 use rust_decimal::Decimal;
 
-use crate::api::extractors::AuthenticatedCaller;
+use crate::api::extractors::{AuthenticatedCaller, key_grants_store_permission};
 use crate::metrics;
 use crate::services::plugins::{
     FilterVerdict, InvoiceCreationFilterRequest, run_invoice_creation_filters,
@@ -40,21 +40,19 @@ use super::{
 )]
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // validation + payment-option setup is one logical flow
 pub async fn create_invoice<A>(
-    AuthenticatedCaller { user, is_operator }: AuthenticatedCaller,
+    caller: AuthenticatedCaller,
     State(state): State<PgAppState<A>>,
     Json(req): Json<CreateInvoiceRequest>,
 ) -> Result<(StatusCode, Json<InvoiceResponse>), (StatusCode, Json<serde_json::Value>)>
 where
     A: SessionService + 'static,
 {
-    // Check permission on the store
+    // The owner must have this AND the key (if any) must grant it - never the key alone.
+    const CREATE_INVOICE: &str = "ethpay.store.cancreateinvoice";
+    let store_id = StoreId(req.store_id);
     let has_permission = state
         .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(req.store_id),
-            "ethpay.store.cancreateinvoice",
-        )
+        .user_has_store_permission(caller.user.id, store_id, CREATE_INVOICE)
         .await
         .map_err(|_| {
             invoice_error(
@@ -62,7 +60,8 @@ where
                 "internal_error",
                 "Failed to check store permissions",
             )
-        })?;
+        })?
+        && key_grants_store_permission(caller.key_scope.as_deref(), CREATE_INVOICE, store_id);
 
     if !has_permission {
         return Err(invoice_error(
@@ -96,7 +95,7 @@ where
     // - so a filter needs the owner, not just the store. That costs a read,
     // and this is the invoice-creation path, so no plugin installed means no
     // read: the common case, and every deployment today.
-    let account_id = if is_operator || state.invoice_creation_filters.is_empty() {
+    let account_id = if caller.is_operator || state.invoice_creation_filters.is_empty() {
         None
     } else {
         match auth::StoreRepository::get_store(&*state.data_service, StoreId(req.store_id)).await {

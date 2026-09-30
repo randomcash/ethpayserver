@@ -13,10 +13,9 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use uuid::Uuid;
 
-use server::api::AuthenticatedUser;
-
 use crate::support::{
-    app_state, authenticate_via_bearer, seed_tenant, service, status_of, user_info,
+    app_state, authenticate_via_bearer_scoped, seed_tenant, service, status_of,
+    store_scoped_user_info,
 };
 
 #[tokio::test]
@@ -30,7 +29,7 @@ async fn export_invoices_csv_with_another_tenants_store_id_is_refused() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::export_invoices_csv(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: Some(b.store.id.0),
@@ -52,7 +51,7 @@ async fn export_invoices_csv_with_another_tenants_store_id_is_refused() {
     // store_id, including the caller's own, would pass the assertion above
     // for the wrong reason.
     let own = server::api::invoices::export_invoices_csv(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: Some(a.store.id.0),
@@ -81,7 +80,7 @@ async fn export_invoices_csv_with_a_nil_store_id_is_refused_like_any_foreign_sto
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::export_invoices_csv(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Query(server::api::invoices::ListInvoicesQuery {
             store_id: Some(Uuid::nil()),
@@ -112,7 +111,7 @@ async fn export_payments_csv_with_another_tenants_store_id_is_refused() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::export_payments_csv(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Query(server::api::invoices::ListPaymentsQuery {
             store_id: Some(b.store.id.0),
@@ -131,7 +130,7 @@ async fn export_payments_csv_with_another_tenants_store_id_is_refused() {
 
     // Positive control, same reasoning as the invoice export above.
     let own = server::api::invoices::export_payments_csv(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Query(server::api::invoices::ListPaymentsQuery {
             store_id: Some(a.store.id.0),
@@ -157,7 +156,7 @@ async fn export_payments_csv_with_a_nil_store_id_is_refused_like_any_foreign_sto
     let state = app_state(Arc::new(pg));
 
     let result = server::api::invoices::export_payments_csv(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Query(server::api::invoices::ListPaymentsQuery {
             store_id: Some(Uuid::nil()),
@@ -176,11 +175,12 @@ async fn export_payments_csv_with_a_nil_store_id_is_refused_like_any_foreign_sto
     );
 }
 
-/// Both export handlers take the same `AuthenticatedUser` extractor as every
-/// other endpoint in this suite, so an API key reaches them the same way a
-/// session does - this is the export side of the same "carries less than its
-/// owner's scope" check `api_keys::cross_tenant_reads` runs for other
-/// resources.
+/// Both export handlers take `StoreScopedUser`, so an API key's own
+/// permission scope narrows what it can reach here too - this is the export
+/// side of the same "carries less than its owner's scope" check
+/// `api_keys::cross_tenant_reads` runs for other resources. This suite only
+/// grants the default/unrestricted scope, so it still exercises tenant
+/// isolation rather than per-key narrowing.
 #[tokio::test]
 #[ignore]
 async fn csv_export_via_api_key_cannot_reach_another_tenants_store() {
@@ -191,7 +191,7 @@ async fn csv_export_via_api_key_cannot_reach_another_tenants_store() {
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let result = server::api::invoices::export_invoices_csv(
         a_via_key,
         State(state.clone()),
@@ -214,7 +214,7 @@ async fn csv_export_via_api_key_cannot_reach_another_tenants_store() {
     // Positive control: without this, an endpoint that refuses every API-key
     // caller, including the owner's own store, would pass the assertion above
     // for the wrong reason.
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let own = server::api::invoices::export_invoices_csv(
         a_via_key,
         State(state.clone()),
@@ -231,7 +231,7 @@ async fn csv_export_via_api_key_cannot_reach_another_tenants_store() {
     .expect("an API key must be able to export its owner's own store's invoices");
     assert_eq!(own.status(), StatusCode::OK);
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let result = server::api::invoices::export_payments_csv(
         a_via_key,
         State(state.clone()),
@@ -251,7 +251,7 @@ async fn csv_export_via_api_key_cannot_reach_another_tenants_store() {
     );
 
     // Positive control, same reasoning as above.
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let own = server::api::invoices::export_payments_csv(
         a_via_key,
         State(state),

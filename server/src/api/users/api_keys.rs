@@ -8,24 +8,76 @@ use axum::{
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Policies, Role, SessionService};
+use auth::{ApiKey, ApiKeyId, ApiKeyInfo, ApiKeyRepository, Role, SessionService};
 use data_service::ApiKeyFullInfo;
 
 use super::key_material::build_api_key;
-use super::{
-    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
-    RotateApiKeyResponsePayload, UpdateApiKeyPayload,
-};
+use super::{ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, UpdateApiKeyPayload};
+use crate::api::api_key_permissions::validate_requested_permissions;
 use crate::api::extractors::AuthenticatedUser;
 use crate::state::PgAppState;
 
-/// Build from an `ApiKey` plus the ancillary rate-limit / deprecation fields
-/// not present on the auth-crate struct. Used by endpoints that already
-/// have an `ApiKey` in hand (e.g. update_api_key after a mutation).
+/// Response after creating an API key (includes plaintext key).
+///
+/// Hand-mirrored from the pinned `api-types` crate rather than imported from
+/// it: that crate's `CreateApiKeyResponsePayload` predates per-key scoping and
+/// carries no `permissions` field, and adding one there is the three-step
+/// dance (merge in `payserver-commons`, bump the pinned rev, `cargo update`)
+/// this repo's `CLAUDE.md` describes - a cross-repo change this pass cannot
+/// complete alone. Hand-mirroring only grows the wire shape by a field, so a
+/// client still built against the pinned type keeps working unchanged.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct CreateApiKeyResponsePayload {
+    pub id: Uuid,
+    pub name: String,
+    pub key_prefix: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    /// The plaintext API key. Store this securely — it cannot be retrieved again.
+    pub key: String,
+    /// The scope actually granted.
+    ///
+    /// `None` means the key inherits the owner's role in full - the same
+    /// thing `list_api_keys` and the rotate response report as `null` for
+    /// such a key. It is deliberately not an echo of the request: an absent
+    /// or empty `permissions` is stored as `NULL`, so echoing `[]` back would
+    /// tell a caller who asked for a least-privilege key that it can do
+    /// nothing, while handing them one that can do everything its owner can.
+    /// Of the three responses that report a key's scope, this was the only
+    /// one that could say the opposite of what was stored.
+    pub permissions: Option<Vec<String>>,
+}
+
+/// Response after rotating an API key. See `CreateApiKeyResponsePayload` for
+/// why this is hand-mirrored rather than extending the pinned type.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct RotateApiKeyResponsePayload {
+    /// The new API key's ID.
+    pub id: Uuid,
+    pub name: String,
+    pub key_prefix: String,
+    pub created_at: DateTime<Utc>,
+    /// The new plaintext API key. Store this securely.
+    pub key: String,
+    /// When the old key was deprecated (grace window starts here).
+    pub old_key_deprecated_at: DateTime<Utc>,
+    /// When the old key's grace window ends and it stops authenticating.
+    /// Clients should show this directly instead of hardcoding "48 hours".
+    pub old_key_grace_expires_at: DateTime<Utc>,
+    /// Permission scope carried over from the key being rotated.
+    pub permissions: Option<Vec<String>>,
+}
+
+/// Build from an `ApiKey` plus the ancillary rate-limit / deprecation /
+/// permission fields not present on the auth-crate struct. Used by
+/// endpoints that already have an `ApiKey` in hand (e.g. update_api_key
+/// after a mutation).
 pub(crate) fn api_key_info_with_rate_limit(
     key: &ApiKey,
     rate_limit_rpm: Option<i32>,
     deprecated_at: Option<DateTime<Utc>>,
+    permissions: Option<Vec<String>>,
 ) -> ApiKeyInfoResponse {
     let info = ApiKeyInfo::from(key);
     ApiKeyInfoResponse {
@@ -39,19 +91,15 @@ pub(crate) fn api_key_info_with_rate_limit(
         rate_limit_rpm,
         deprecated_at,
         deprecation_expires_at: deprecated_at.map(deprecation_expires_at),
-        // No per-key scoping is stored here: a key carries its owner's role in
-        // full, which is what `None` means on the wire. `Some(vec![])` would
-        // claim the opposite - a key that can do nothing.
-        permissions: None,
+        permissions,
     }
 }
 
 /// Build the wire shape from the `auth` domain type.
 ///
-/// A free function rather than a `From` impl: `ApiKeyFullInfo` belongs to `auth` and
-/// `ApiKeyInfoResponse` to `api-types`, so neither is local here. `api-types` does not
-/// depend on `auth` deliberately - it is compiled into the browser bundle and
-/// `auth` is a server-side crate.
+/// A free function rather than a `From` impl: `ApiKeyFullInfo` belongs to
+/// `data_service` and `ApiKeyInfoResponse` to `api-types`, so neither owns
+/// the other.
 pub(crate) fn api_key_info_response(info: ApiKeyFullInfo) -> ApiKeyInfoResponse {
     ApiKeyInfoResponse {
         id: info.id,
@@ -64,17 +112,14 @@ pub(crate) fn api_key_info_response(info: ApiKeyFullInfo) -> ApiKeyInfoResponse 
         rate_limit_rpm: info.rate_limit_rpm,
         deprecated_at: info.deprecated_at,
         deprecation_expires_at: info.deprecated_at.map(deprecation_expires_at),
-        // No per-key scoping is stored here: a key carries its owner's role in
-        // full, which is what `None` means on the wire. `Some(vec![])` would
-        // claim the opposite - a key that can do nothing.
-        permissions: None,
+        permissions: info.permissions,
     }
 }
 
 /// Translate a `deprecated_at` into the grace-window deadline. Uses the same
 /// grace-seconds value as the auth extractor, so the client-visible expiry
 /// matches when the server actually starts rejecting the key.
-fn deprecation_expires_at(deprecated_at: DateTime<Utc>) -> DateTime<Utc> {
+pub(crate) fn deprecation_expires_at(deprecated_at: DateTime<Utc>) -> DateTime<Utc> {
     deprecated_at + chrono::Duration::seconds(crate::api::extractors::deprecation_grace_secs())
 }
 
@@ -107,19 +152,29 @@ where
     Ok(Json(ApiKeyListResponse { keys }))
 }
 
-/// Whether a create request asks for a key narrower than this server can make.
+/// An empty list is persisted as NULL - "inherits the owner's role in full" -
+/// not as `Some([])`, which means "can do nothing".
 ///
-/// No per-key permission scoping is stored here, so every key carries its
-/// owner's role in full. An empty list is accepted for callers written before
-/// the field existed, and an explicit `["unrestricted"]` asks for exactly what
-/// this server does. Anything else is a narrowing request that cannot be
-/// honoured - and ignoring it would hand back a key wider than the caller
-/// asked for, so it is refused instead.
-fn asks_to_narrow_the_key(permissions: &[String]) -> bool {
-    match permissions {
-        [] => false,
-        [only] => only != Policies::UNRESTRICTED,
-        _ => true,
+/// The wire type cannot tell the two apart. `CreateApiKeyPayload.permissions`
+/// is a `Vec<String>` with `#[serde(default)]`, so a request that omits the
+/// field entirely and one that sends `[]` both arrive here as an empty vec.
+/// Something has to be chosen for that case, and the choice decides whether
+/// existing callers keep working: the dashboard posts `{name, expires_at}`
+/// and no `permissions` at all, so persisting `Some([])` would make every key
+/// it creates authenticate and then be refused every permission check -
+/// `key_retains_unrestricted_access(Some(&[]))` and
+/// `key_grants_store_permission(Some(&[]), ..)` are both false - while the
+/// request still returned 201 and showed the user a key to save.
+///
+/// Narrowing therefore has to be asked for explicitly. Once the field can
+/// distinguish "absent" from "deliberately empty" - an `Option<Vec<String>>`
+/// in the shared type - the stricter reading becomes available for the
+/// explicitly-empty case without breaking callers that never send it.
+fn requested_scope(permissions: &[String]) -> Option<&[String]> {
+    if permissions.is_empty() {
+        None
+    } else {
+        Some(permissions)
     }
 }
 
@@ -149,15 +204,15 @@ where
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    if asks_to_narrow_the_key(&payload.permissions) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    validate_requested_permissions(&payload.permissions)?;
 
     let (raw_key, api_key) = build_api_key(&name, user.id, payload.expires_at);
 
+    let requested = requested_scope(&payload.permissions);
+
     state
         .data_service
-        .create_api_key(&api_key)
+        .create_api_key_with_permissions(&api_key, requested)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -171,6 +226,10 @@ where
             created_at: api_key.created_at,
             expires_at: api_key.expires_at,
             key: raw_key,
+            // What was stored, not what was asked for. `requested_scope`
+            // maps an empty request to `None`, and that is the value the
+            // caller needs to see.
+            permissions: requested.map(<[String]>::to_vec),
         }),
     ))
 }
@@ -275,21 +334,24 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Preserve any existing deprecation state in the response rather than
-    // always returning None — prevents a stale-UI bug where the client
-    // thinks the key was un-deprecated after a rate-limit update.
-    let deprecated_at = state
+    // Preserve any existing deprecation/permission state in the response
+    // rather than always returning None — prevents a stale-UI bug where the
+    // client thinks the key was un-deprecated, or reset to full access,
+    // after a rate-limit update.
+    let auth_info = state
         .data_service
         .get_api_key_auth_info_by_id(id)
         .await
         .ok()
-        .flatten()
-        .and_then(|info| info.deprecated_at);
+        .flatten();
+    let deprecated_at = auth_info.as_ref().and_then(|info| info.deprecated_at);
+    let permissions = auth_info.and_then(|info| info.permissions);
 
     Ok(Json(api_key_info_with_rate_limit(
         &key,
         payload.rate_limit_rpm,
         deprecated_at,
+        permissions,
     )))
 }
 
@@ -354,13 +416,16 @@ where
     // Without a transaction a partial failure (new key created, deprecation
     // fails) would leave TWO active keys on the account — the explicit
     // enemy of rotation.
+    //
+    // The new key carries over the old key's permission scope: rotation
+    // swaps the secret, it does not widen what the key can do.
     let new_name = format!("{} (rotated)", key.name);
     let (raw_key, new_api_key) = build_api_key(&new_name, user.id, key.expires_at);
     let now = Utc::now();
 
     state
         .data_service
-        .rotate_api_key_atomic(&new_api_key, id, now)
+        .rotate_api_key_atomic(&new_api_key, auth_info.permissions.as_deref(), id, now)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -374,6 +439,7 @@ where
             key: raw_key,
             old_key_deprecated_at: now,
             old_key_grace_expires_at: deprecation_expires_at(now),
+            permissions: auth_info.permissions,
         }),
     ))
 }

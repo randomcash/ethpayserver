@@ -13,11 +13,9 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 
-use server::api::AuthenticatedUser;
-
 use crate::support::{
-    app_state, authenticate_via_bearer, grant_store_permission, seed_tenant, seed_webhook_delivery,
-    service, user_info,
+    app_state, authenticate_via_bearer_scoped, grant_store_permission, seed_tenant,
+    seed_webhook_delivery, service, store_scoped_user_info,
 };
 
 #[tokio::test]
@@ -35,7 +33,7 @@ async fn list_store_members_refuses_a_non_members_store() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::stores::list_store_members(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Path(b.store.id.0),
     )
@@ -49,7 +47,7 @@ async fn list_store_members_refuses_a_non_members_store() {
     // Positive control: without this, an endpoint that refuses every caller
     // would pass the assertion above for the wrong reason.
     let _ = server::api::stores::list_store_members(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Path(a.store.id.0),
     )
@@ -72,7 +70,7 @@ async fn get_store_webhook_refuses_a_non_members_store() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::stores::get_store_webhook(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Path(b.store.id.0),
     )
@@ -85,7 +83,7 @@ async fn get_store_webhook_refuses_a_non_members_store() {
 
     // Positive control, same reasoning as above.
     let own = server::api::stores::get_store_webhook(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Path(a.store.id.0),
     )
@@ -105,7 +103,7 @@ async fn get_token_policy_refuses_a_non_members_store() {
     let state = app_state(Arc::new(pg));
 
     let result = server::api::stores::get_token_policy(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Path(b.store.id.0),
     )
@@ -120,7 +118,7 @@ async fn get_token_policy_refuses_a_non_members_store() {
     // would pass the assertion above for the wrong reason. No policy is
     // configured, so success here is `Ok(None)`, not an error.
     let _ = server::api::stores::get_token_policy(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Path(a.store.id.0),
     )
@@ -128,11 +126,10 @@ async fn get_token_policy_refuses_a_non_members_store() {
     .expect("A must be able to read A's own store's token policy");
 }
 
-/// All three handlers above take the same `AuthenticatedUser` extractor as
-/// every other endpoint in this suite, so an API key reaches store settings
-/// the same way a session does - member lists, webhook config and token
-/// policy are exactly the kind of store-scoped data an under-scoped key
-/// should not be able to widen its reach into.
+/// All three handlers above take `StoreScopedUser`, so an API key's own
+/// permission scope narrows what it can reach here on top of the tenant
+/// check above - this suite only grants the default/unrestricted scope, so
+/// it still exercises tenant isolation rather than per-key narrowing.
 #[tokio::test]
 #[ignore]
 async fn store_settings_via_api_key_cannot_reach_another_tenants_store() {
@@ -148,7 +145,7 @@ async fn store_settings_via_api_key_cannot_reach_another_tenants_store() {
     // `grant_store_permission` below replaces A's role on A's own store, so
     // the webhook and token-policy checks - which rely on the default role
     // `seed_tenant` grants - run first, before that swap happens.
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let result =
         server::api::stores::get_store_webhook(a_via_key, State(state.clone()), Path(b.store.id.0))
             .await;
@@ -158,7 +155,7 @@ async fn store_settings_via_api_key_cannot_reach_another_tenants_store() {
         "an API key must not read another tenant's store's webhook configuration"
     );
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let own =
         server::api::stores::get_store_webhook(a_via_key, State(state.clone()), Path(a.store.id.0))
             .await
@@ -167,7 +164,7 @@ async fn store_settings_via_api_key_cannot_reach_another_tenants_store() {
             );
     assert_eq!(own.store_id, a.store.id.0);
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let result =
         server::api::stores::get_token_policy(a_via_key, State(state.clone()), Path(b.store.id.0))
             .await;
@@ -177,7 +174,7 @@ async fn store_settings_via_api_key_cannot_reach_another_tenants_store() {
         "an API key must not read another tenant's store's token policy"
     );
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let _ =
         server::api::stores::get_token_policy(a_via_key, State(state.clone()), Path(a.store.id.0))
             .await
@@ -189,7 +186,7 @@ async fn store_settings_via_api_key_cannot_reach_another_tenants_store() {
     // session-based test above.
     grant_store_permission(&state.data_service, &a, "ethpay.store.canviewstoreusers").await;
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let result = server::api::stores::list_store_members(
         a_via_key,
         State(state.clone()),
@@ -202,7 +199,7 @@ async fn store_settings_via_api_key_cannot_reach_another_tenants_store() {
         "an API key must not list another tenant's store's members"
     );
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let _ = server::api::stores::list_store_members(a_via_key, State(state), Path(a.store.id.0))
         .await
         .expect("an API key must be able to list its owner's own store's members");

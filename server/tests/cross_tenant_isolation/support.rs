@@ -23,7 +23,7 @@ use data_service::{
     WebhookDeliveryWriter,
 };
 use rates::NoOpRateProvider;
-use server::api::AuthenticatedUser;
+use server::api::{AuthenticatedUser, StoreScopedUser};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 use types::{
@@ -350,6 +350,33 @@ pub(crate) async fn authenticate_via_bearer<A: SessionService + 'static>(
     AuthenticatedUser::from_request_parts(&mut parts, state)
         .await
         .expect("bearer token authenticates")
+}
+
+/// Same as `authenticate_via_bearer`, for the handlers under test that take
+/// `StoreScopedUser` instead of `AuthenticatedUser` - the ones that gate a
+/// store-scoped action and so must see the key's own permission scope, not
+/// just who it authenticates as.
+pub(crate) async fn authenticate_via_bearer_scoped<A: SessionService + 'static>(
+    state: &PgAppState<A>,
+    raw_token: &str,
+) -> StoreScopedUser {
+    let request = HttpRequest::builder()
+        .header("authorization", format!("Bearer {raw_token}"))
+        .body(())
+        .expect("build request");
+    let (mut parts, ()) = request.into_parts();
+    StoreScopedUser::from_request_parts(&mut parts, state)
+        .await
+        .expect("bearer token authenticates")
+}
+
+/// A plain, unscoped `StoreScopedUser` for a session-style caller in tests
+/// that exercise a handler which now requires `StoreScopedUser` - `None`
+/// matches a real session's own scope (see `validate_session_with_scope`)
+/// and preserves this suite's original "ownership only, no key narrowing"
+/// intent for those cases.
+pub(crate) fn store_scoped_user_info(id: Uuid) -> StoreScopedUser {
+    StoreScopedUser(user_info(id), None)
 }
 
 pub(crate) fn status_of<T>(result: Result<T, server::api::ApiErr>) -> StatusCode {

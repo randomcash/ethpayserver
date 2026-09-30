@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use server::api::AuthenticatedUser;
 use server::api::stores::{SetStoreWalletRequest, StoreWalletResult};
 
-use crate::support::{app_state, seed_tenant, service, user_info};
+use crate::support::{app_state, seed_tenant, service, store_scoped_user_info, user_info};
 
 #[tokio::test]
 #[ignore]
@@ -77,7 +77,7 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
     let state = app_state(Arc::new(pg));
 
     let get_result = server::api::stores::get_store_wallet(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Path(b.store.id.0),
         Query(server::api::stores::StoreWalletQuery {
@@ -96,7 +96,7 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
     );
 
     let configure_result = server::api::stores::configure_store_wallet(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Path(b.store.id.0),
         axum::Json(SetStoreWalletRequest {
@@ -114,7 +114,7 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
     // caller, including one asking about their own store, would pass the
     // assertion above for the wrong reason.
     let own = server::api::stores::get_store_wallet(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Path(a.store.id.0),
         Query(server::api::stores::StoreWalletQuery {
@@ -146,7 +146,7 @@ async fn store_wallet_override_refuses_a_wallet_from_another_account() {
     // A owns this store, so the permission check passes; the repository is
     // what must refuse pointing it at a wallet from B's account.
     let result = server::api::stores::configure_store_wallet(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state.clone()),
         Path(a.store.id.0),
         axum::Json(SetStoreWalletRequest {
@@ -165,7 +165,7 @@ async fn store_wallet_override_refuses_a_wallet_from_another_account() {
     // every wallet id, including the caller's own, would pass the
     // assertion above for the wrong reason.
     let own = server::api::stores::configure_store_wallet(
-        AuthenticatedUser(user_info(a.user_id)),
+        store_scoped_user_info(a.user_id),
         State(state),
         Path(a.store.id.0),
         axum::Json(SetStoreWalletRequest {

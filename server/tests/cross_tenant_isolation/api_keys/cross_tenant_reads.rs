@@ -10,8 +10,8 @@ use uuid::Uuid;
 use server::api::stores::StoreWalletResult;
 
 use crate::support::{
-    app_state, authenticate_via_bearer, seed_payout, seed_refund, seed_tenant,
-    seed_webhook_delivery, service,
+    app_state, authenticate_via_bearer, authenticate_via_bearer_scoped, seed_payout, seed_refund,
+    seed_tenant, seed_webhook_delivery, service,
 };
 
 /// The payment side of `scope_parity::an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session`.
@@ -34,7 +34,7 @@ async fn an_api_key_cannot_reach_another_tenants_payments() {
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let result =
         server::api::invoices::get_payment(a_via_key, State(state.clone()), Path(b.payment_id))
             .await;
@@ -44,7 +44,7 @@ async fn an_api_key_cannot_reach_another_tenants_payments() {
         "an API key must not fetch another tenant's payment by id"
     );
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let result = server::api::invoices::get_invoice_payments(
         a_via_key,
         State(state.clone()),
@@ -57,7 +57,7 @@ async fn an_api_key_cannot_reach_another_tenants_payments() {
         "an API key must not list another tenant's invoice's payments"
     );
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let result = server::api::invoices::get_invoice_status(
         a_via_key,
         State(state.clone()),
@@ -70,7 +70,7 @@ async fn an_api_key_cannot_reach_another_tenants_payments() {
         "an API key must not read another tenant's invoice status"
     );
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let listed = server::api::invoices::list_payments(
         a_via_key,
         State(state),
@@ -128,7 +128,7 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
         "an API key must not fetch another tenant's wallet by id"
     );
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let result = server::api::stores::get_store_wallet(
         a_via_key,
         State(state.clone()),
@@ -151,7 +151,7 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
     // Positive control: without this, `get_store_wallet` refusing every
     // caller, API-key included, would pass the assertion above for the
     // wrong reason.
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let own = server::api::stores::get_store_wallet(
         a_via_key,
         State(state),

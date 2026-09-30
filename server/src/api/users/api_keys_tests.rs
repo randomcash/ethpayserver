@@ -1,38 +1,29 @@
 use super::*;
+use auth::Policies;
 
-/// A caller written before the permissions field existed sends no list at all,
-/// and must still be able to create a key.
+/// The dashboard posts `{name, expires_at}` and no `permissions` at all, which
+/// `#[serde(default)]` turns into an empty vec. Persisting that as `Some([])`
+/// would hand back a key that authenticates and is then refused every
+/// permission check, with a 201 and a key on screen to save.
 #[test]
-fn an_omitted_scope_is_not_a_narrowing_request() {
-    assert!(!asks_to_narrow_the_key(&[]));
+fn an_absent_scope_is_stored_as_inherit_not_as_an_empty_scope() {
+    assert_eq!(requested_scope(&[]), None);
 }
 
-/// `["unrestricted"]` asks for the owner's role in full, which is what every
-/// key this server issues actually carries.
+/// An explicit scope passes through unchanged - this is the only way to get a
+/// narrowed key, and it has to be asked for.
 #[test]
-fn an_explicit_unrestricted_scope_is_honoured() {
-    assert!(!asks_to_narrow_the_key(&[
-        Policies::UNRESTRICTED.to_string()
-    ]));
+fn an_explicit_scope_is_passed_through() {
+    let asked = [Policies::STORE_VIEW_INVOICES.to_string()];
+    assert_eq!(requested_scope(&asked), Some(asked.as_slice()));
 }
 
-/// A real policy string asks for less than the owner's role. This server
-/// cannot issue such a key, so the request is refused rather than served with
-/// a wider one than was asked for.
+/// `["unrestricted"]` is an explicit scope too and must not collapse into the
+/// absent case. It means the same thing today, but it says so deliberately, and
+/// a reader of the row can tell a key nobody scoped from one scoped to
+/// everything on purpose.
 #[test]
-fn a_real_policy_is_a_narrowing_request() {
-    assert!(asks_to_narrow_the_key(&[
-        Policies::STORE_VIEW_INVOICES.to_string()
-    ]));
-}
-
-/// `unrestricted` alongside anything else is still narrowing: the caller is
-/// describing a set of policies, and the only set this server can produce is
-/// the owner's whole role.
-#[test]
-fn unrestricted_mixed_with_a_policy_is_still_narrowing() {
-    assert!(asks_to_narrow_the_key(&[
-        Policies::UNRESTRICTED.to_string(),
-        Policies::STORE_VIEW_INVOICES.to_string(),
-    ]));
+fn an_explicit_unrestricted_scope_is_not_flattened_to_absent() {
+    let asked = [Policies::UNRESTRICTED.to_string()];
+    assert_eq!(requested_scope(&asked), Some(asked.as_slice()));
 }

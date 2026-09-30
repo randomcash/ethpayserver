@@ -23,7 +23,12 @@ pub use wallets::{
     create_wallet_reauth_challenge, list_wallet_credentials, set_primary_wallet_credential,
 };
 
+// `ApiKeyInfoResponse` and `CreateApiKeyPayload` now carry `permissions` in
+// the pinned `api-types` crate itself, so both come straight from there.
+// `CreateApiKeyResponsePayload`/`RotateApiKeyResponsePayload` still don't -
+// see `api_keys`'s hand-mirrored versions for why - so those two come from
+// this repo instead.
+pub use api_keys::{CreateApiKeyResponsePayload, RotateApiKeyResponsePayload};
 pub use api_types::{
-    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, CreateApiKeyResponsePayload,
-    RotateApiKeyResponsePayload, UpdateApiKeyPayload,
+    ApiKeyInfoResponse, ApiKeyListResponse, CreateApiKeyPayload, UpdateApiKeyPayload,
 };

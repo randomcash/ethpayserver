@@ -9,8 +9,8 @@ use axum::http::StatusCode;
 use auth::UserId;
 
 use crate::support::{
-    app_state, authenticate_via_bearer, seed_payout, seed_refund, seed_tenant,
-    seed_webhook_delivery, service,
+    app_state, authenticate_via_bearer, authenticate_via_bearer_scoped, seed_payout, seed_refund,
+    seed_tenant, seed_webhook_delivery, service,
 };
 
 #[tokio::test]
@@ -23,7 +23,7 @@ async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     assert_eq!(
         a_via_key.0.id,
         UserId(a.user_id),
@@ -44,7 +44,7 @@ async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
 
     // Positive control: without this, `get_invoice` refusing every caller,
     // API-key included, would pass the assertion above for the wrong reason.
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let own = server::api::invoices::get_invoice(
         a_via_key,
         State(state.clone()),
@@ -54,7 +54,7 @@ async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
     .expect("an API key must be able to fetch its owner's own invoice by id");
     assert_eq!(own.id, a.invoice.id.0);
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let listed = server::api::invoices::list_invoices(
         a_via_key,
         State(state),
@@ -91,14 +91,14 @@ async fn an_api_keys_own_payment_reads_remain_reachable() {
     let a = seed_tenant(&pg, "a").await;
     let state = app_state(Arc::new(pg));
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let own =
         server::api::invoices::get_payment(a_via_key, State(state.clone()), Path(a.payment_id))
             .await
             .expect("an API key must be able to fetch its owner's own payment by id");
     assert_eq!(own.id, a.payment_id.to_string());
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let own = server::api::invoices::get_invoice_payments(
         a_via_key,
         State(state.clone()),
@@ -108,7 +108,7 @@ async fn an_api_keys_own_payment_reads_remain_reachable() {
     .expect("an API key must be able to list payments on its owner's own invoice");
     assert!(own.iter().any(|p| p.id == a.payment_id.to_string()));
 
-    let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
+    let a_via_key = authenticate_via_bearer_scoped(&state, &a.api_key_raw).await;
     let own = server::api::invoices::get_invoice_status(
         a_via_key,
         State(state),

@@ -31,7 +31,7 @@ use data_service::{
 use evm::{XpubDeriver, looks_like_a_private_key, validate_xpub};
 use types::NAMESPACE_EIP155;
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::{AuthenticatedUser, StoreScopedUser, key_grants_store_permission};
 use super::{ApiErr, mask_xpub, repository_error, require_store_settings_permission};
 use crate::state::PgAppState;
 pub use api_types::{
@@ -526,7 +526,7 @@ where
     )
 )]
 pub async fn get_store_wallet<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Query(query): Query<StoreWalletQuery>,
@@ -534,15 +534,13 @@ pub async fn get_store_wallet<A>(
 where
     A: SessionService + 'static,
 {
+    const VIEW_SETTINGS: &str = "ethpay.store.canviewstoresettings";
     let has_permission = state
         .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(store_id),
-            "ethpay.store.canviewstoresettings",
-        )
+        .user_has_store_permission(user.id, StoreId(store_id), VIEW_SETTINGS)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        && key_grants_store_permission(key_scope.as_deref(), VIEW_SETTINGS, StoreId(store_id));
 
     if !has_permission {
         return Err(StatusCode::FORBIDDEN);
@@ -655,7 +653,7 @@ where
     )
 )]
 pub async fn configure_store_wallet<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<SetStoreWalletRequest>,
@@ -663,7 +661,7 @@ pub async fn configure_store_wallet<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let _ = state
         .data_service
@@ -716,7 +714,7 @@ where
     )
 )]
 pub async fn delete_store_wallet<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Query(query): Query<StoreWalletQuery>,
@@ -724,7 +722,7 @@ pub async fn delete_store_wallet<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // Scoped to one family, mirroring `PUT`. Clearing every override would
     // move where a store's Ethereum payments go in response to a request about
@@ -778,7 +776,7 @@ where
     )
 )]
 pub async fn rotate_store_wallet<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<RotateWalletRequest>,
@@ -786,7 +784,7 @@ pub async fn rotate_store_wallet<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // Validate the new xpub. The bare 400 this used to return said nothing,
     // so a dashboard could only ever show a generic failure for a typo and

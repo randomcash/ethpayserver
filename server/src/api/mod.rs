@@ -20,7 +20,10 @@ use crate::state::PgAppState;
 pub mod admin;
 pub mod api_key_deprecation;
 pub mod api_key_hash;
+pub mod api_key_permissions;
 pub mod api_key_rate_limit;
+pub mod api_key_scope;
+pub mod auth_freshness;
 pub mod checkout;
 pub mod dashboard;
 pub mod extractors;
@@ -39,7 +42,9 @@ pub mod users;
 pub mod webhook_deliveries;
 pub mod ws;
 
-pub use extractors::{AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser};
+pub use extractors::{
+    AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser, StoreScopedUser,
+};
 pub use openapi::ApiDoc;
 
 /// A status, optionally with a reason the caller can read.
@@ -273,7 +278,7 @@ where
         // `users` cascades through `stores` into `invoices` and `payments`, so
         // deleting a merchant who traded would erase their financial history.
         .route("/me", delete(users::delete_account::<A>))
-        // Email change (sensitive - see server/src/api/users.rs).
+        // Email change (sensitive - see server/src/api/users/email.rs).
         // Set/change and remove require a fresh passkey or wallet login
         // (`FreshlyAuthenticatedUser`); confirm is unauthenticated by design
         // and gated on the verification token alone.
