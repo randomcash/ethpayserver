@@ -122,8 +122,9 @@ environment (an ordinary GitHub Actions run has no other persistence between
 schedule ticks), passes it to `check-health-deep.sh` as `HEALTH_STATE_FILE`,
 and saves it back afterwards regardless of pass/fail. The script tracks how
 many consecutive checks a chain's `last_block` has repeated and fails once
-that exceeds `STALL_THRESHOLD` (default 3 — i.e. ~15-20 minutes flat, *if*
-every 5-minute run is actually dispatched; see the next paragraph).
+that exceeds `STALL_THRESHOLD` (default 3 checks — about 15-20 minutes flat
+only if every 5-minute run is dispatched, which GitHub does not do; at the
+delivered cadence it is many hours. See the next paragraph).
 
 Five minutes is GitHub Actions' practical floor, and it is a floor, not a
 delivery guarantee. Scheduled workflows are best-effort: this one has been
@@ -132,22 +133,22 @@ that figure will drift. The `*/5` cron therefore does not hold a 5-minute
 cadence.
 
 **Open gap: nothing currently delivers a 5-minute Sentry check-in.** The
-only other poller is the `rcs-health-watch@<env>` systemd timer in the private
-`central-infrastructure` repository (`systemd/rcs-health-watch@.timer` and
-`scripts/health-watch.sh`, every minute). It pings a healthchecks-style
-dead-man's switch, not the Sentry Cron Monitors, and it does not keep
-`STALL_THRESHOLD` state. Check that it is running with
-`systemctl --user status rcs-health-watch@testnet.timer` as the runner user; a
-system-scope `list-timers` will not show it. The Sentry monitors remain fed only
-by the GitHub schedule, so a window sized for 5 minutes alarms constantly and one
-widened to hours cannot tell "testnet is down" from "GitHub skipped runs".
-`STALL_THRESHOLD` counts checks, not minutes, so it stretches the same way when
-runs are skipped. Closing the gap means moving the Sentry check-in (and the
-stall state) onto a box-side timer and then sizing the monitor to that cadence;
-neither is done here. The two Sentry Cron Monitor URLs above have to be created
-by hand in Sentry (Crons → new monitor → "check in via HTTP") and the resulting
-URLs stored as repo secrets; that account setup is outside what a commit here
-can do.
+Sentry monitors are fed only by the GitHub schedule, so a window sized for 5
+minutes alarms constantly and one widened to hours cannot tell "testnet is
+down" from "GitHub skipped runs". `STALL_THRESHOLD` counts checks, not minutes,
+so it stretches the same way. A separate box-side poller exists in the private
+deploy repository, but it reports to a different dead-man's switch and does not
+feed these monitors; do not read it as covering this gap.
+
+Closing it means running `scripts/check-health-deep.sh` itself from a timer on
+the deploy host (it is environment-driven and needs only `HEALTH_URL`,
+`SENTRY_CRON_URL` and a persistent `HEALTH_STATE_FILE`), then setting the
+monitor's expected interval to that timer's cadence. That change belongs in the
+private deploy repository and is not made here. Until it is, testnet health
+through this path is verified a handful of times a day. The two Sentry Cron
+Monitor URLs above have to be created by hand in Sentry (Crons → new monitor →
+"check in via HTTP") and the resulting URLs stored as repo secrets; that
+account setup is outside what a commit here can do.
 
 For the faster cadence, also add a Sentry **Uptime Check** (not a Cron
 Monitor) against `/api/health/deep`, run from Sentry's own checkers at 30-60s.
