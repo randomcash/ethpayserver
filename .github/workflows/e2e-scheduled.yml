@@ -13,9 +13,12 @@ name: Scheduled E2E (testnet)
 
 on:
   schedule:
-    # 06:00 UTC daily — an hour before the Monday audit, so a red testnet is
+    # 05:37 UTC daily — before the Monday audit, so a red testnet is
     # already on the desk when the weekly retro starts.
-    - cron: "0 6 * * *"
+    # An odd minute on purpose: the top of the hour, 06:00 especially, is the
+    # most contended scheduled slot, and at 0 6 this was dispatched 4-7 hours
+    # late every day, which made the Sentry cron monitor miss its window daily.
+    - cron: "37 5 * * *"
   workflow_dispatch:
 
 permissions:
