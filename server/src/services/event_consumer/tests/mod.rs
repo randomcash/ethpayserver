@@ -4,6 +4,7 @@ mod own_store_payments;
 mod payment_confirmed;
 mod payment_detected;
 mod reorg;
+mod settlement_tolerance;
 
 use std::sync::Arc;
 

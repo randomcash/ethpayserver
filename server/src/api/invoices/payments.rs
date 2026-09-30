@@ -301,3 +301,43 @@ where
         payments: payments.into_iter().map(|p| p.into()).collect(),
     }))
 }
+
+/// The shortfall a settlement tolerance accepted on an invoice, and the
+/// setting that allowed it.
+#[derive(Debug, serde::Serialize)]
+pub struct SettlementAllowanceResponse {
+    pub invoice_id: String,
+    pub shortfall: String,
+    pub tolerance_percent: String,
+    /// `"store"` or `"default"`.
+    pub source: String,
+    pub recorded_at: String,
+}
+
+/// Get the tolerance allowance recorded for an invoice, if it settled short.
+pub async fn get_invoice_settlement_allowance<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(invoice_id): Path<String>,
+) -> Result<Json<Option<SettlementAllowanceResponse>>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let id = InvoiceId::from_string(invoice_id);
+    get_invoice_with_permission(&state, &user, &id).await?;
+
+    let allowance = data_service::SettlementToleranceReader::get_settlement_allowance(
+        &*state.data_service,
+        &id,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(allowance.map(|a| SettlementAllowanceResponse {
+        invoice_id: a.invoice_id,
+        shortfall: a.shortfall,
+        tolerance_percent: a.tolerance_percent,
+        source: a.source,
+        recorded_at: a.recorded_at.to_rfc3339(),
+    })))
+}

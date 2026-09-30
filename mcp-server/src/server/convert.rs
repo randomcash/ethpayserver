@@ -17,7 +17,9 @@ pub(super) fn convert_to_crypto_smallest_unit(
         .checked_mul(rate)
         .ok_or_else(|| "Overflow in rate multiplication".to_string())?;
     let smallest = multiply_by_decimals(crypto_amount, decimals)?;
-    decimal_to_integer_string(smallest)
+    // Round up: a floored quote converts back to slightly less than the
+    // invoice amount, which settlement would refuse even when paid exactly.
+    decimal_to_integer_string(smallest.ceil())
 }
 
 pub(super) fn convert_human_to_smallest_unit(amount: &str, decimals: u8) -> Result<String, String> {
@@ -111,7 +113,16 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_floors_result() {
+    fn test_convert_rounds_quote_up() {
+        // 20 * rate = 7470603176500482.469 base units; paying the quote must
+        // cover the invoice, so it rounds up.
+        let rate = Decimal::from_str_exact("0.00037353015882502412345").unwrap();
+        let result = convert_to_crypto_smallest_unit("20", rate, 18).unwrap();
+        assert_eq!(result, "7470603176500483");
+    }
+
+    #[test]
+    fn test_convert_exact_result_unchanged() {
         let rate = Decimal::from_str_exact("0.0005").unwrap();
         let result = convert_to_crypto_smallest_unit("1.001", rate, 18).unwrap();
         assert_eq!(result, "500500000000000");

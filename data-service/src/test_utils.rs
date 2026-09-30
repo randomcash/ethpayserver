@@ -28,6 +28,8 @@ use crate::{UpsertDeliveryParams, WebhookDeliveryWriter};
 pub struct InMemoryDataService {
     invoices: RwLock<HashMap<String, InvoiceData>>,
     payments: RwLock<HashMap<Uuid, PaymentData>>,
+    settlement_tolerances: RwLock<HashMap<Uuid, String>>,
+    settlement_allowances: RwLock<HashMap<String, crate::SettlementAllowance>>,
     // Key: (chain_id, tx_hash, tx_index) -> payment id. Mirrors the real
     // `unique_payment_tx` constraint, for `PaymentTxIndexWriter::upsert_with_tx_index`
     // below. The plain `PaymentWriter::upsert` above does not consult this index,
@@ -406,6 +408,73 @@ impl PaymentWriter for InMemoryDataService {
             }
         }
         Ok(count)
+    }
+}
+
+#[async_trait]
+impl crate::SettlementToleranceReader for InMemoryDataService {
+    async fn get_settlement_tolerance(&self, store_id: Uuid) -> RepositoryResult<Option<String>> {
+        Ok(self
+            .settlement_tolerances
+            .read()
+            .unwrap()
+            .get(&store_id)
+            .cloned())
+    }
+
+    async fn get_settlement_allowance(
+        &self,
+        invoice_id: &types::InvoiceId,
+    ) -> RepositoryResult<Option<crate::SettlementAllowance>> {
+        Ok(self
+            .settlement_allowances
+            .read()
+            .unwrap()
+            .get(invoice_id.as_str())
+            .cloned())
+    }
+}
+
+#[async_trait]
+impl crate::SettlementToleranceWriter for InMemoryDataService {
+    async fn set_settlement_tolerance(
+        &self,
+        store_id: Uuid,
+        tolerance_percent: &str,
+    ) -> RepositoryResult<()> {
+        self.settlement_tolerances
+            .write()
+            .unwrap()
+            .insert(store_id, tolerance_percent.to_string());
+        Ok(())
+    }
+
+    async fn clear_settlement_tolerance(&self, store_id: Uuid) -> RepositoryResult<()> {
+        self.settlement_tolerances
+            .write()
+            .unwrap()
+            .remove(&store_id);
+        Ok(())
+    }
+
+    async fn record_settlement_allowance(
+        &self,
+        invoice_id: &types::InvoiceId,
+        shortfall: &str,
+        tolerance_percent: &str,
+        source: &str,
+    ) -> RepositoryResult<()> {
+        self.settlement_allowances.write().unwrap().insert(
+            invoice_id.as_str().to_string(),
+            crate::SettlementAllowance {
+                invoice_id: invoice_id.as_str().to_string(),
+                shortfall: shortfall.to_string(),
+                tolerance_percent: tolerance_percent.to_string(),
+                source: source.to_string(),
+                recorded_at: Utc::now(),
+            },
+        );
+        Ok(())
     }
 }
 
