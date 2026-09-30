@@ -30,8 +30,9 @@ reading the chain again can.
    command (`RescanFrom { chain_id, block }`), carried over the same command
    channel as `WatchAddress`, that walks `[block, tip]` for native transfers and
    for token `Transfer` logs (`LogFilter::from_block` exists) and publishes
-   through the normal outbox, so the existing idempotent apply path credits
-   the payments.
+   through the normal outbox, so the apply path sees them. Note the apply path
+   does not credit inactive watches today (see below), so this alone is not
+   enough.
 2. **A watch set that includes expired watches.** The rescan must match against
    watches that were active at any point in the window, not only the current
    in-memory set. That means loading recently-expired `watched_addresses` rows
@@ -50,9 +51,17 @@ reading the chain again can.
 ## Questions the review raised, checked against the source
 
 - **Does the apply path accept a credit for a watch that has since
-  expired?** Not established. The consumer resolves by `invoice_id` and
-  `tx_index`, not by watch state, but this has not been tested with an
-  inactive watch. It must be, before replay is trusted.
+  expired?** No, verified in source. `handle_payment_detected` resolves the
+  payment option through `WatchedAddressReader::get_payment_option_id`, whose
+  queries filter `is_active = TRUE`. For an expired watch it returns `None`,
+  the handler logs "no payment option found", and the payment is recorded with
+  no `credited_amount`, so it never counts toward `amount_received`. Publishing
+  rescanned transfers through the normal outbox therefore does **not** recover
+  the expired-watch case: it would apply cleanly and still under-credit, with
+  only a warning. Replay needs either a payment-option lookup that also
+  resolves inactive watches within the replay window, or the rescan to carry
+  the payment option id itself. This is the first thing to design and test, and
+  "What replay needs" items 1-2 are not sufficient without it.
 - **A replay must emit the detection before the confirmation.**
   `handle_payment_confirmed` looks the payment up by
   `(invoice_id, tx_hash, tx_index)` and, when no row exists, logs at debug and
@@ -60,18 +69,27 @@ reading the chain again can.
   missed entirely would be applied, committed, and credit nothing, with no
   error. The rescan must publish `PaymentDetected` first.
 - **Deduplication of re-emitted events.** Payment rows are upserted on
-  `(chain_id, tx_hash, tx_index)`, and `mark_confirmed` is a no-op once set, so
-  re-applying a payment that was already credited does not double-credit. The
-  ordering rule stays as it is in `apply_envelope`: apply, then commit the
+  `(chain_id, tx_hash, tx_index)` (`upsert_payment_row`), and `mark_confirmed`
+  is a no-op once set, so re-applying a payment that was already credited does
+  not double-credit. The confirmation handler looks the row up by
+  `(invoice_id, tx_hash, tx_index)` instead; the two agree only while a
+  transfer belongs to one invoice, which holds because a payment address maps
+  to one watch. That assumption should be tested before replay relies on it.
+  The ordering rule stays as in `apply_envelope`: apply, then commit the
   cursor, so a crash in between redelivers rather than loses.
-- **Cursor `block_height` ahead of what was applied.** The cursor is
-  committed only after the apply succeeds, so its height is a lower bound on
-  what was applied, not an upper one. Subtracting the reorg margin and
-  rescanning from there is safe given the upsert above; the cost is repeated
-  work, not lost payments.
+- **Cursor `block_height` versus what was applied.** The cursor is committed
+  only after the apply succeeds, so its height is a lower bound on what was
+  applied. But a reorg-depth margin is **not** a safe rescan start. A payment
+  detected at block N is confirmed at N+k; if the outbox is lost before the
+  confirmation is emitted, and the cursor has moved more than the margin past
+  N, a rescan from `cursor - margin` never re-reads N and the payment stays
+  unconfirmed. The rescan must start from the lowest block among payments not
+  yet confirmed (and pending watches), or the margin must cover confirmation
+  depth plus the longest pending lifetime. Cursor height alone is not enough.
 - The claims in "What already exists" were re-read against
   `reset_chain_watch_notifications` (`WHERE ... is_active = TRUE`),
-  `break_lineage`, and the absence of any reader of `block_height`; they hold.
+  `break_lineage`, and the absence of any reader of `block_height`. They are
+  claims about the repository at this commit, not pinned by a test.
 
 ## Why this is not done in one step
 
@@ -82,3 +100,10 @@ mock chain source (a payment on an expired watch inside the gap is the
 regression to pin) and a human review of the scan window logic. Shipping a
 half-version that reads `block_height` but rescans nothing would look like
 recovery while still losing payments, which is worse than halting.
+
+## Status of the ticket
+
+This note is not the ticket's deliverable. The ticket stays open: nothing reads
+`block_height`, nothing rescans, and the flag is unchanged. Suggested split:
+(1) apply-path credit for expired watches within a window, with a test;
+(2) the monitor rescan command; (3) resume position and the flag inversion.
