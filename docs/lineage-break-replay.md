@@ -55,22 +55,15 @@ reading the chain again can.
 ## Questions the review raised, checked against the source
 
 - **Does the apply path accept a credit for a watch that has since
-  expired?** It now does (update: `handle_payment_detected` falls back to the
-  invoice's own payment options when the active-watch lookup finds nothing, and
-  credits with no grace window; the late-payment flag is the existing
-  `late_paid` transition at confirmation). The note below is the analysis that
-  led there and describes the lookup itself, which is unchanged and still
-  active-only. Originally: no, verified in source. `handle_payment_detected` resolves the
-  payment option through `WatchedAddressReader::get_payment_option_id`, whose
-  queries filter `is_active = TRUE`. For an expired watch it returns `None`,
-  the handler logs "no payment option found", and the payment is recorded with
-  no `credited_amount`, so it never counts toward `amount_received`. Publishing
-  rescanned transfers through the normal outbox therefore does **not** recover
-  the expired-watch case: it would apply cleanly and still under-credit, with
-  only a warning. Replay needs either a payment-option lookup that also
-  resolves inactive watches within the replay window, or the rescan to carry
-  the payment option id itself. This is the first thing to design and test, and
-  "What replay needs" items 1-2 are not sufficient without it.
+  expired?** Yes. `handle_payment_detected` first resolves the payment option
+  through `WatchedAddressReader::get_payment_option_id`, whose queries filter
+  `is_active = TRUE`, so an expired watch yields `None`. The handler then falls
+  back to the invoice's own payment options, matching address, chain and token
+  case-insensitively, and credits the payment with no grace window; the
+  existing late-payment transition to `late_paid` flags it at confirmation. The
+  fallback is covered by a test in `event_consumer/tests/payment_detected.rs`. Replaying rescanned
+  transfers through the normal outbox therefore credits the expired-watch case,
+  so the replay design does not need a separate inactive-watch lookup.
 - **A replay must emit the detection before the confirmation.**
   `handle_payment_confirmed` looks the payment up by
   `(invoice_id, tx_hash, tx_index)` and, when no row exists, logs at debug and
