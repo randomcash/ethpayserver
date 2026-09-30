@@ -136,9 +136,8 @@ cadence.
 Sentry monitors are fed only by the GitHub schedule, so a window sized for 5
 minutes alarms constantly and one widened to hours cannot tell "testnet is
 down" from "GitHub skipped runs". `STALL_THRESHOLD` counts checks, not minutes,
-so it stretches the same way. A separate box-side poller exists in the private
-deploy repository, but it reports to a different dead-man's switch and does not
-feed these monitors; do not read it as covering this gap.
+so it stretches the same way. Do not assume some other box-side poller covers
+this gap: none is known to feed these monitors.
 
 Closing it means running `scripts/check-health-deep.sh` itself from a timer on
 the deploy host (it is environment-driven and needs only `HEALTH_URL`,
