@@ -47,6 +47,32 @@ reading the chain again can.
 5. **Then revisit the flag.** Once replay is the default, invert
    `EVENT_ACCEPT_LINEAGE_BREAK` into an opt-out (halt and audit by hand).
 
+## Questions the review raised, checked against the source
+
+- **Does the apply path accept a credit for a watch that has since
+  expired?** Not established. The consumer resolves by `invoice_id` and
+  `tx_index`, not by watch state, but this has not been tested with an
+  inactive watch. It must be, before replay is trusted.
+- **A replay must emit the detection before the confirmation.**
+  `handle_payment_confirmed` looks the payment up by
+  `(invoice_id, tx_hash, tx_index)` and, when no row exists, logs at debug and
+  returns `Ok(())`. A rescan that published only a confirmation for a payment
+  missed entirely would be applied, committed, and credit nothing, with no
+  error. The rescan must publish `PaymentDetected` first.
+- **Deduplication of re-emitted events.** Payment rows are upserted on
+  `(chain_id, tx_hash, tx_index)`, and `mark_confirmed` is a no-op once set, so
+  re-applying a payment that was already credited does not double-credit. The
+  ordering rule stays as it is in `apply_envelope`: apply, then commit the
+  cursor, so a crash in between redelivers rather than loses.
+- **Cursor `block_height` ahead of what was applied.** The cursor is
+  committed only after the apply succeeds, so its height is a lower bound on
+  what was applied, not an upper one. Subtracting the reorg margin and
+  rescanning from there is safe given the upsert above; the cost is repeated
+  work, not lost payments.
+- The claims in "What already exists" were re-read against
+  `reset_chain_watch_notifications` (`WHERE ... is_active = TRUE`),
+  `break_lineage`, and the absence of any reader of `block_height`; they hold.
+
 ## Why this is not done in one step
 
 Items 1 and 2 are new scanning code in `evm/`, a sensitive path that decides
