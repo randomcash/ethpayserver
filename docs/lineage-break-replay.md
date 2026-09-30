@@ -64,7 +64,11 @@ reading the chain again can.
   fallback is covered by `payment_to_an_expired_watch_is_credited_and_settles_late`
   and `erc20_payment_to_an_expired_watch_is_credited` in
   `server/src/services/event_consumer/tests/payment_detected.rs` (landed as
-  #310). What the fallback is bounded by: it only looks at the payment options
+  #310; both deactivate the watch first, and both go red with the fallback
+  removed, the ERC-20 one asserting `credited_amount`). The address and token
+  comparison is case-insensitive, which is sound only because every chain the
+  server enables today uses hex EVM addresses; a chain with case-sensitive
+  addresses would need an exact comparison here. What the fallback is bounded by: it only looks at the payment options
   of the invoice the event names, and only credits on an address, chain and
   token match, so it cannot attribute a transfer to another invoice; it then
   goes through the same credited-amount path as an active watch. Replay
