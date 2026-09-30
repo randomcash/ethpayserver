@@ -10,13 +10,17 @@ name: Health monitor (deep)
 # e2e-scheduled.yml: the deploy host cannot be trusted to report on itself
 # being down.
 #
-# GitHub scheduled workflows are best-effort. Observed on this workflow: about
-# one run in fifty is actually dispatched, with gaps of 3-7 hours against a
-# 5-minute cron. Nothing time-sensitive may rely on this schedule alone, so the
-# cadence is held by a timer on the deploy host (rcs-health-watch, every
-# minute, in the private deploy-config repository); this workflow is the manual-dispatch path and a
-# coarse second opinion. A Sentry monitor fed by this schedule must size its
-# window to the real cadence, not the cron expression, or it cries wolf.
+# GitHub scheduled workflows are best-effort. Observed on this workflow: the
+# large majority of scheduled runs are never dispatched, with gaps of hours
+# against a 5-minute cron. Nothing time-sensitive may rely on this schedule.
+#
+# Known gap, not a solved problem: the only other poller is the
+# rcs-health-watch@<env> systemd timer in the private central-infrastructure
+# repository (systemd/, every minute). It reports to a healthchecks-style
+# dead-man's switch, NOT to the Sentry Cron Monitors below, and whether it is
+# enabled on the box is not something this repository can show. So the Sentry
+# monitors are still fed only by this schedule, and their window cannot be both
+# 5 minutes and honest until the check-in moves off GitHub's scheduler.
 #
 # Every 5 minutes is the shortest interval GitHub Actions schedules
 # meaningfully — not the 30-60s a real uptime checker gives you. This is the
