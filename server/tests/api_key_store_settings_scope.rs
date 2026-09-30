@@ -30,7 +30,8 @@ use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
 use server::api::StoreScopedUser;
 use server::api::stores::{
-    SetSettlementToleranceRequest, get_store_settings, set_settlement_tolerance,
+    SetSettlementToleranceRequest, delete_settlement_tolerance, get_settlement_tolerance,
+    get_store_settings, set_settlement_tolerance,
 };
 use server::state::PgAppState;
 
@@ -282,6 +283,130 @@ async fn a_key_scoped_to_modify_settings_can_set_the_settlement_tolerance() {
     assert!(
         result.is_ok(),
         "a key scoped to canmodifystoresettings must be able to set the tolerance: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_create_invoice_is_refused_reading_the_settlement_tolerance() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = get_settlement_tolerance(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
+        ),
+        State(state),
+        Path(store.id.0),
+    )
+    .await;
+
+    assert_eq!(
+        result.err(),
+        Some(StatusCode::FORBIDDEN),
+        "a key not scoped to canmodifystoresettings must be refused"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_modify_settings_can_read_the_settlement_tolerance() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = get_settlement_tolerance(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_MODIFY_SETTINGS.to_string()]),
+        ),
+        State(state),
+        Path(store.id.0),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a key scoped to canmodifystoresettings must be admitted: {:?}",
+        result.err()
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_create_invoice_is_refused_clearing_the_settlement_tolerance() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = delete_settlement_tolerance(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
+        ),
+        State(state),
+        Path(store.id.0),
+    )
+    .await;
+
+    assert_eq!(
+        result.err(),
+        Some(StatusCode::FORBIDDEN),
+        "a key not scoped to canmodifystoresettings must be refused"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_modify_settings_can_clear_the_settlement_tolerance() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = delete_settlement_tolerance(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_MODIFY_SETTINGS.to_string()]),
+        ),
+        State(state),
+        Path(store.id.0),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a key scoped to canmodifystoresettings must be admitted: {:?}",
         result.err()
     );
 }
