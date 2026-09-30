@@ -541,3 +541,27 @@ async fn payment_matching_no_option_of_the_invoice_stays_uncredited() {
         assert_eq!(p.credited_amount, None);
     }
 }
+
+/// A replay re-delivers transfers already applied. Applying the same
+/// detection twice must leave one payment row with the amount credited once,
+/// or a rescan would double-credit merchants.
+#[tokio::test]
+async fn reapplying_the_same_detection_credits_once() {
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+    let (invoice_id, _po_id, address) = expired_watch_fixture(&ds, None).await;
+
+    let event = detected(&invoice_id, address, None);
+    consumer
+        .handle_payment_detected(event.clone())
+        .await
+        .unwrap();
+    consumer.handle_payment_detected(event).await.unwrap();
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert_eq!(payments.len(), 1);
+    assert_eq!(payments[0].credited_amount.as_deref(), Some("1"));
+}

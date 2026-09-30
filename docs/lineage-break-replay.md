@@ -73,7 +73,7 @@ reading the chain again can.
   token match, so it cannot attribute a transfer to another invoice; it then
   goes through the same credited-amount path as an active watch. Replay
   idempotence is expected to come from the payment upsert described below
-  (by design, not yet covered by a test; see the last bullet of this list). Status effects
+  (the apply path is covered by `reapplying_the_same_detection_credits_once` against the in-memory store; the Postgres upsert itself is not). Status effects
   are those of `handle_payment_confirmed`: an expired invoice the payment
   fully covers becomes `late_paid`, a cancelled, refunded or already-paid
   invoice keeps its status, and a partial payment counts toward
@@ -110,8 +110,7 @@ reading the chain again can.
   (data-service; the re-arm half reads `monitor_notified` off the row, so dropping the `is_active` filter from the reset turns it red, and dropping it from the lookup turns the second half red).
   That test asserts today's behaviour: whoever makes replay credit expired
   watches will change it deliberately. That a replay must publish detection
-  before confirmation, and that re-applying is idempotent, are still asserted
-  here without a test.
+  before confirmation is still asserted here without a test.
 - Policy, settled in #310: a late payment is credited and then flagged
   (`late_paid`) for the merchant, with no grace window. A replay over a wide
   gap applies this to every rescanned transfer to an expired invoice.
