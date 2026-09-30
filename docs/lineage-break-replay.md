@@ -1,7 +1,7 @@
 # Recovering from an event-outbox lineage break
 
 Status: **design only, not implemented.** The apply-path prerequisite (crediting
-a payment to an expired watch) has since landed; the monitor rescan (items 1-3
+a payment to an expired watch, #310) has landed; the monitor rescan (items 1-3
 below) has not, and is the remaining work. Today a lineage break (stored cursor
 epoch differs from the outbox's, or the cursor is below retention) halts the
 consumer with `process::exit(1)`. An operator audits the gap and may set
@@ -61,9 +61,20 @@ reading the chain again can.
   back to the invoice's own payment options, matching address, chain and token
   case-insensitively, and credits the payment with no grace window; the
   existing late-payment transition to `late_paid` flags it at confirmation. The
-  fallback is covered by a test in `event_consumer/tests/payment_detected.rs`. Replaying rescanned
-  transfers through the normal outbox therefore credits the expired-watch case,
-  so the replay design does not need a separate inactive-watch lookup.
+  fallback is covered by `payment_to_an_expired_watch_is_credited_and_settles_late`
+  and `erc20_payment_to_an_expired_watch_is_credited` in
+  `server/src/services/event_consumer/tests/payment_detected.rs` (landed as
+  #310). What the fallback is bounded by: it only looks at the payment options
+  of the invoice the event names, and only credits on an address, chain and
+  token match, so it cannot attribute a transfer to another invoice; it then
+  goes through the same credited-amount path as an active watch. Replay
+  idempotence comes from the payment upsert described below. Status effects
+  are those of `handle_payment_confirmed`: an expired invoice the payment
+  fully covers becomes `late_paid`, a cancelled, refunded or already-paid
+  invoice keeps its status, and a partial payment counts toward
+  `amount_received` without changing status. Replaying rescanned transfers
+  through the normal outbox therefore credits the expired-watch case, so the
+  replay design does not need a separate inactive-watch lookup.
 - **A replay must emit the detection before the confirmation.**
   `handle_payment_confirmed` looks the payment up by
   `(invoice_id, tx_hash, tx_index)` and, when no row exists, logs at debug and
@@ -96,9 +107,9 @@ reading the chain again can.
   watches will change it deliberately. That a replay must publish detection
   before confirmation, and that re-applying is idempotent, are still asserted
   here without a test.
-- Policy, to settle before building the apply-path change: whether a late
-  payment on an expired or closed invoice is credited, or only flagged for the
-  merchant.
+- Policy, settled in #310: a late payment is credited and then flagged
+  (`late_paid`) for the merchant, with no grace window. A replay over a wide
+  gap applies this to every rescanned transfer to an expired invoice.
 
 ## Why this is not done in one step
 
