@@ -73,7 +73,7 @@ reading the chain again can.
   token match, so it cannot attribute a transfer to another invoice; it then
   goes through the same credited-amount path as an active watch. Replay
   idempotence is expected to come from the payment upsert described below
-  (the apply path is covered by `reapplying_the_same_detection_credits_once` against the in-memory store, and the Postgres upsert by
+  (`reapplying_the_same_detection_credits_once` covers the in-memory store's dedup on `(chain, tx_hash, tx_index)`, which mirrors the Postgres upsert but does not prove it; the Postgres upsert is covered by the Postgres upsert by
   `integration_redelivered_payment_reuses_the_original_row_id_and_does_not_duplicate_the_obligation`,
   which asserts one row and one credit). Status effects
   are those of `handle_payment_confirmed`: an expired invoice the payment

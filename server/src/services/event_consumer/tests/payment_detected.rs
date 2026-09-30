@@ -564,4 +564,13 @@ async fn reapplying_the_same_detection_credits_once() {
         .unwrap();
     assert_eq!(payments.len(), 1);
     assert_eq!(payments[0].credited_amount.as_deref(), Some("1"));
+    // `amount_received` is the sum of `credited_amount` over the invoice's
+    // payment rows (a database trigger in production), so assert that sum:
+    // a second credit under a new row id would show up here.
+    let total: u128 = payments
+        .iter()
+        .filter_map(|p| p.credited_amount.as_deref())
+        .map(|c| c.parse::<u128>().unwrap())
+        .sum();
+    assert_eq!(total, 1);
 }
