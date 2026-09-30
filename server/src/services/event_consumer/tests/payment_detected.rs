@@ -330,3 +330,75 @@ async fn test_handle_payment_detected_erc20_resolves_seeded_token_symbol() {
          recorded for a contract the tokens table has no row for"
     );
 }
+
+/// A payment to an address whose watch has expired is on chain and belongs to
+/// the invoice. It must be credited, not recorded and left uncounted.
+#[tokio::test]
+async fn payment_to_an_expired_watch_is_credited() {
+    use types::{
+        AssetType, PaymentMethodId, PaymentOptionData, PaymentOptionId, PaymentOptionWriter,
+        WatchedAddressWriter,
+    };
+
+    let ds = Arc::new(InMemoryDataService::new());
+    let bridge = Arc::new(MemoryBridge::new());
+    let consumer = create_test_consumer(ds.clone(), bridge.clone());
+
+    let invoice_id = InvoiceId::new();
+    create_test_invoice(&ds, &invoice_id, StoreId::new()).await;
+
+    let chain = ChainId::parse("eip155:1").unwrap();
+    let address = Address::repeat_byte(0x42);
+    let address_str = format!("{:#x}", address);
+    let po = PaymentOptionData {
+        id: PaymentOptionId(uuid::Uuid::new_v4()),
+        invoice_id: invoice_id.clone(),
+        payment_method_id: PaymentMethodId::new("ETH", &chain),
+        chain_id: chain.clone(),
+        asset_symbol: "ETH".to_string(),
+        token_address: None,
+        decimals: 18,
+        payment_address: address_str.clone(),
+        wallet_id: None,
+        derivation_index: None,
+        amount: "1".to_string(),
+        rate: None,
+        rate_at: None,
+        is_active: true,
+        created_at: Utc::now(),
+    };
+    PaymentOptionWriter::create(&*ds, &po).await.unwrap();
+    WatchedAddressWriter::upsert(&*ds, &address_str, &po.id, &chain, None)
+        .await
+        .unwrap();
+    // The watch expires.
+    WatchedAddressWriter::deactivate(&*ds, &address_str, &chain, None)
+        .await
+        .unwrap();
+
+    let event = PaymentDetected {
+        chain_id: 1,
+        invoice_id: uuid::Uuid::parse_str(invoice_id.as_str()).unwrap(),
+        payment_address: address,
+        amount: U256::from(1_000_000_000_000_000_000u64),
+        tx_hash: B256::ZERO,
+        block_number: 1,
+        block_hash: B256::ZERO,
+        log_index: None,
+        is_native: true,
+        token_address: None,
+        from_address: Address::repeat_byte(0xab),
+        confirmations: 1,
+        required_confirmations: 12,
+        detected_at: Utc::now(),
+    };
+    consumer.handle_payment_detected(event).await.unwrap();
+
+    let payments = PaymentReader::get_for_invoice(&*ds, &invoice_id)
+        .await
+        .unwrap();
+    assert_eq!(payments.len(), 1);
+    assert_eq!(payments[0].asset_type, AssetType::Native);
+    assert_eq!(payments[0].payment_option_id, Some(po.id.0));
+    assert_eq!(payments[0].credited_amount.as_deref(), Some("1"));
+}
