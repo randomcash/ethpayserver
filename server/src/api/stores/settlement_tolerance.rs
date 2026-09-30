@@ -19,7 +19,7 @@ use data_service::{
     SettlementToleranceWriter,
 };
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::StoreScopedUser;
 use super::require_store_settings_permission;
 use crate::services::settlement::parse_tolerance_percent;
 use crate::state::PgAppState;
@@ -53,12 +53,17 @@ fn response(store_id: Uuid, own: Option<String>) -> SettlementToleranceResponse 
 async fn authorize<A>(
     state: &PgAppState<A>,
     user: &auth::UserInfo,
+    key_scope: Option<&[String]>,
     store_id: Uuid,
 ) -> Result<(), StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(state, user, store_id).await?;
+    // The scope is checked, not dropped: this setting decides how far below
+    // the invoice amount a payment may fall and still settle, so a key that
+    // could widen it could make underpayments settle. It is store-settings
+    // authority like any other.
+    require_store_settings_permission(state, user, key_scope, store_id).await?;
     state
         .data_service
         .get_store(StoreId(store_id))
@@ -70,14 +75,14 @@ where
 
 /// Get the settlement tolerance in force for a store.
 pub async fn get_settlement_tolerance<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<SettlementToleranceResponse>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    authorize(&state, &user, store_id).await?;
+    authorize(&state, &user, key_scope.as_deref(), store_id).await?;
     let own = SettlementToleranceReader::get_settlement_tolerance(&*state.data_service, store_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -86,7 +91,7 @@ where
 
 /// Set the store's settlement tolerance. Refuses values above the ceiling.
 pub async fn set_settlement_tolerance<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<SetSettlementToleranceRequest>,
@@ -94,7 +99,7 @@ pub async fn set_settlement_tolerance<A>(
 where
     A: SessionService + 'static,
 {
-    authorize(&state, &user, store_id).await?;
+    authorize(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // Stored as the caller wrote it after validation, so what the store reads
     // back is what it set.
@@ -110,14 +115,14 @@ where
 
 /// Revert the store to the server default tolerance.
 pub async fn delete_settlement_tolerance<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode>
 where
     A: SessionService + 'static,
 {
-    authorize(&state, &user, store_id).await?;
+    authorize(&state, &user, key_scope.as_deref(), store_id).await?;
     SettlementToleranceWriter::clear_settlement_tolerance(&*state.data_service, store_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

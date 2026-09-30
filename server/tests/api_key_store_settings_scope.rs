@@ -29,7 +29,9 @@ use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
 use server::api::StoreScopedUser;
-use server::api::stores::get_store_settings;
+use server::api::stores::{
+    SetSettlementToleranceRequest, get_store_settings, set_settlement_tolerance,
+};
 use server::state::PgAppState;
 
 struct UnusedSessionService;
@@ -202,5 +204,84 @@ async fn a_key_scoped_to_one_store_is_refused_store_settings_on_another() {
         result.err(),
         Some(StatusCode::FORBIDDEN),
         "a key scoped to store A's settings permission must be refused on store B"
+    );
+}
+
+/// The settlement tolerance decides how far below the invoice amount a
+/// payment may fall and still settle it, so a key that could widen it could
+/// make underpayments settle. It is store-settings authority and must be
+/// scope-checked like the rest.
+///
+/// This endpoint arrived on a different branch, where it took
+/// `AuthenticatedUser` and so could not see a key's scope at all. Merged with
+/// scoping it did not compile, which is the only reason it was caught -
+/// neither branch was wrong on its own.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_create_invoice_is_refused_setting_the_settlement_tolerance() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = set_settlement_tolerance(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
+        ),
+        State(state),
+        Path(store.id.0),
+        axum::Json(SetSettlementToleranceRequest {
+            tolerance_percent: "0.05".to_string(),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        result.err(),
+        Some(StatusCode::FORBIDDEN),
+        "a key not scoped to canmodifystoresettings must not be able to widen what counts as paid"
+    );
+}
+
+/// The admitting direction, so the refusal above cannot pass by refusing
+/// everything.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_modify_settings_can_set_the_settlement_tolerance() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+
+    let state = app_state(Arc::new(pg));
+
+    let result = set_settlement_tolerance(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_MODIFY_SETTINGS.to_string()]),
+        ),
+        State(state),
+        Path(store.id.0),
+        axum::Json(SetSettlementToleranceRequest {
+            tolerance_percent: "0.05".to_string(),
+        }),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a key scoped to canmodifystoresettings must be able to set the tolerance: {:?}",
+        result.err()
     );
 }

@@ -316,7 +316,7 @@ pub struct SettlementAllowanceResponse {
 
 /// Get the tolerance allowance recorded for an invoice, if it settled short.
 pub async fn get_invoice_settlement_allowance<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<Option<SettlementAllowanceResponse>>, StatusCode>
@@ -324,7 +324,7 @@ where
     A: SessionService + 'static,
 {
     let id = InvoiceId::from_string(invoice_id);
-    get_invoice_with_permission(&state, &user, &id).await?;
+    get_invoice_with_permission(&state, &user, key_scope.as_deref(), &id).await?;
 
     let allowance = data_service::SettlementToleranceReader::get_settlement_allowance(
         &*state.data_service,
