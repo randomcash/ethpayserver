@@ -103,6 +103,44 @@ impl<
         )
         .await?;
 
+        // An expired watch is inactive, so the lookup above cannot see it - but
+        // the funds are on chain and the address is still the invoice's own.
+        // Resolve the option through the invoice the event names and credit it,
+        // however long after expiry it landed: there is no grace window. The
+        // merchant-visible record is made at confirmation, which moves an
+        // expired invoice that this payment fully covers to `late_paid`
+        // (with its webhook); a payment that does not cover it still counts
+        // toward `amount_received` and is on the invoice's payment list.
+        let payment_option_id = match payment_option_id {
+            Some(id) => Some(id),
+            None => {
+                let late = PaymentOptionReader::get_for_invoice(
+                    &*self.data_service,
+                    &InvoiceId::from_string(event.invoice_id.to_string()),
+                )
+                .await?
+                .into_iter()
+                .find(|po| {
+                    po.payment_address
+                        .eq_ignore_ascii_case(&payment_address_str)
+                        && po.chain_id == chain_id
+                        && po.token_address.as_deref().map(str::to_lowercase)
+                            == token_address.as_deref().map(str::to_lowercase)
+                })
+                .map(|po| po.id);
+                if late.is_some() {
+                    tracing::warn!(
+                        invoice_id = %event.invoice_id,
+                        address = %payment_address_str,
+                        chain_id = event.chain_id,
+                        amount = %event.amount,
+                        "Payment arrived after its watch expired - crediting it to the invoice"
+                    );
+                }
+                late
+            }
+        };
+
         if payment_option_id.is_none() {
             tracing::warn!(
                 invoice_id = %event.invoice_id,

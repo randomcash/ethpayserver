@@ -175,6 +175,15 @@ jobs:
       - name: Migration guard self-test
         run: ./scripts/check-migrations.test.sh
 
+      # A scope check with no test driving it in both directions is how a key
+      # came to exceed its owner without any test noticing. See the script for
+      # what it does and does not prove.
+      - name: Scope-gated call sites are tested both ways
+        run: ./scripts/check-scope-call-sites.sh
+
+      - name: Scope call-site guard self-test
+        run: ./scripts/check-scope-call-sites.test.sh
+
       # Proves check-health-deep.sh - the between-deploys watchdog for
       # /health/deep - actually goes red on the failure modes it claims to
       # catch (a stalled RPC, a monitor gone stale, its own state-tracking
