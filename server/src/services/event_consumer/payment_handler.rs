@@ -105,9 +105,12 @@ impl<
 
         // An expired watch is inactive, so the lookup above cannot see it - but
         // the funds are on chain and the address is still the invoice's own.
-        // Resolve the option through the invoice the event names, so a late
-        // payment is credited (and handled as late downstream) instead of
-        // being recorded and never counted.
+        // Resolve the option through the invoice the event names and credit it,
+        // however long after expiry it landed: there is no grace window. The
+        // merchant-visible record is made at confirmation, which moves an
+        // expired invoice that this payment fully covers to `late_paid`
+        // (with its webhook); a payment that does not cover it still counts
+        // toward `amount_received` and is on the invoice's payment list.
         let payment_option_id = match payment_option_id {
             Some(id) => Some(id),
             None => {
