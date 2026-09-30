@@ -69,12 +69,20 @@ fn test_convert_rejects_invalid_amount() {
 }
 
 #[test]
-fn test_convert_floors_result() {
-    // Ensure we floor (not round) to avoid overpaying
+fn test_convert_exact_result_unchanged() {
     // 1.001 USD at rate 0.0005 = 0.0005005 ETH = 500500000000000 wei
     let rate = Decimal::from_str_exact("0.0005").unwrap();
     let result = convert_to_crypto_smallest_unit("1.001", rate, 18).unwrap();
     assert_eq!(result, "500500000000000");
+}
+
+#[test]
+fn test_convert_rounds_quote_up() {
+    // 20 * rate = 7470603176500482.469 wei. Flooring quoted 7470603176500482,
+    // which converts back to less than 20 and could never settle.
+    let rate = Decimal::from_str_exact("0.00037353015882502412345").unwrap();
+    let result = convert_to_crypto_smallest_unit("20", rate, 18).unwrap();
+    assert_eq!(result, "7470603176500483");
 }
 
 // Tests for same-asset conversion (no rate needed)
