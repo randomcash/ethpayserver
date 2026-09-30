@@ -27,8 +27,12 @@
 # Limits, stated so nobody mistakes this for more than it is: it is a textual
 # check. It proves a test names the handler, passes a scope, and is labelled
 # for each direction; it does not prove the assertions are right. Break the
-# guard and watch the tests go red before trusting them. Inline test modules
-# are assumed to sit at the end of their file, after `#[cfg(test)]`.
+# guard and watch the tests go red before trusting them. A test that merely
+# names two handlers counts for both, and the `Some(scope)` need not be the
+# argument to that handler. Fns are keyed by bare name: a name defined in more
+# than one non-test file is refused as ambiguous rather than guessed at, and
+# `.method(` calls are never counted as callers. Inline test modules are
+# `#[cfg(test)] mod NAME {` blocks; any other `#[cfg(test)]` is ignored.
 #
 # git ls-files, not a bare recursive grep: grep on this box is ugrep and
 # honours .gitignore, which has already produced a false-clean scan.
@@ -36,8 +40,8 @@ set -uo pipefail
 
 cd "${SCOPE_GUARD_ROOT:-$(git rev-parse --show-toplevel)}" || exit 1
 
-if ! files="$(git ls-files -- 'server/*.rs')"; then
-  echo "::error::git ls-files failed while enumerating server sources" >&2
+if ! files="$(git ls-files -- '*.rs')"; then
+  echo "::error::git ls-files failed while enumerating Rust sources" >&2
   exit 1
 fi
 
@@ -56,23 +60,58 @@ def is_test_file(p):
     return ("/tests/" in p or p.endswith("/tests.rs") or p.endswith("_tests.rs")
             or p.startswith("server/tests/"))
 
-prod, tests = {}, {}
+def code(l):
+    return "" if l.lstrip().startswith("//") else l
+
+def indent(l):
+    return len(l) - len(l.lstrip())
+
+def split_inline_tests(lines):
+    """(production lines with test modules blanked, the lines of the test modules).
+
+    Only a `#[cfg(test)]` that introduces a `mod NAME {` block is a test module,
+    and it ends at the closing brace at the same indent. A `#[cfg(test)]` on a
+    helper, a `use` or an `impl` mid-file therefore hides nothing after it.
+    """
+    prod, test = list(lines), []
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == "#[cfg(test)]":
+            k = i + 1
+            while k < len(lines) and (not lines[k].strip() or lines[k].lstrip().startswith("#[")):
+                k += 1
+            if k < len(lines) and re.match(r"\s*(pub(\([^)]*\))?\s+)?mod\s+\w+\s*\{\s*$", lines[k]):
+                ind, end = indent(lines[k]), k + 1
+                while end < len(lines) and not (indent(lines[end]) == ind and lines[end].lstrip().startswith("}")):
+                    end += 1
+                for x in range(i, min(end + 1, len(lines))):
+                    test.append(lines[x])
+                    prod[x] = ""
+                i = end
+        i += 1
+    return prod, test
+
+prod, tests, elsewhere = {}, {}, []
 for p in sys.stdin.read().split():
     lines = open(p, encoding="utf-8").read().split("\n")
     if is_test_file(p):
         tests[p] = lines
+    elif not p.startswith("server/"):
+        # Handlers live in server/. A helper called from another crate would be
+        # invisible here, so it is reported rather than silently skipped.
+        prod_lines, _ = split_inline_tests(lines)
+        for i, l in enumerate(prod_lines):
+            if any(re.search(r"(?<![.\w])%s\s*(?:::<[^>]*>)?\(" % h, code(l)) for h in HELPERS):
+                elsewhere.append("%s:%d  scope helper called outside server/, which this guard does not scan" % (p, i + 1))
     else:
-        cut = next((i for i, l in enumerate(lines) if l.strip() == "#[cfg(test)]"), len(lines))
-        prod[p] = lines[:cut]
-        if cut < len(lines):
-            tests[p + " (inline tests)"] = lines[cut:]
-
-def code(l):
-    return "" if l.lstrip().startswith("//") else l
+        prod[p], inline = split_inline_tests(lines)
+        if inline:
+            tests[p + " (inline tests)"] = inline
 
 # Every fn in non-test code: name -> body text; and the fn enclosing each line.
 pub = set()
 home = {}
+defs = {}  # fn name -> files defining it in non-test code
 sites = []  # (helper, file, lineno, enclosing fn)
 for p, lines in prod.items():
     cur = None
@@ -82,10 +121,11 @@ for p, lines in prod.items():
         if m:
             cur = m.group(2)
             home.setdefault(cur, p)
+            defs.setdefault(cur, set()).add(p)
             if m.group(1):
                 pub.add(cur)
         for h in HELPERS:
-            for mm in re.finditer(r"\b%s\s*(?:::<[^>]*>)?\(" % h, l):
+            for mm in re.finditer(r"(?<![.\w])%s\s*(?:::<[^>]*>)?\(" % h, l):
                 if FN.match(l) and FN.match(l).group(2) == h:
                     continue
                 # The helpers call each other; their callers are the sites.
@@ -101,7 +141,8 @@ for p, lines in tests.items():
         m = FN.match(lines[i])
         if m and any(re.match(r"\s*#\[(tokio::)?test", lines[j]) for j in range(max(0, i - 4), i)):
             j = i + 1
-            while j < len(lines) and lines[j] != "}":
+            ind = indent(lines[i])
+            while j < len(lines) and not (indent(lines[j]) == ind and lines[j].lstrip().startswith("}")):
                 j += 1
             tfns.append((m.group(2), "\n".join(code(x) for x in lines[i:j + 1])))
             i = j
@@ -118,6 +159,14 @@ def directions(fn):
             grant = True
     return grant, refuse
 
+def calls(fn, l):
+    """True if l calls the free fn `fn`: not a method call, and not `Type::fn(`."""
+    for m in re.finditer(r"(?<![.\w])((?:\w+::)*)%s\s*(?:::<[^>]*>)?\(" % fn, l):
+        segs = [x for x in m.group(1).split("::") if x]
+        if not segs or not segs[-1][:1].isupper():
+            return True
+    return False
+
 def callers(fn):
     out = set()
     # A private fn can only be called from its own file; a pub one from anywhere.
@@ -130,23 +179,28 @@ def callers(fn):
             m = FN.match(l)
             if m:
                 cur = m.group(2)
-            elif cur and cur != fn and re.search(r"\b%s\s*(?:::<[^>]*>)?\(" % fn, l):
+            if cur and cur != fn and calls(fn, l):
                 out.add(cur)
     return out
 
 def missing(fn, seen):
-    """Directions still unproven for fn, descending into its callers."""
+    """(handler, direction) pairs still unproven for fn, descending into callers.
+
+    The handler is the outermost caller reached, so a baseline entry names the
+    handler and never silences a caller added to a helper later.
+    """
+    if len(defs.get(fn, ())) > 1:
+        return [(fn, "unambiguous name (defined in %s)" % ", ".join(sorted(defs[fn])))]
     g, r = directions(fn)
     if g and r:
         return []
     up = callers(fn) - seen
     if not up:
-        return [d for d, ok in (("grant", g), ("refusal", r)) if not ok]
+        return [(fn, d) for d, ok in (("grant", g), ("refusal", r)) if not ok]
     seen = seen | {fn}
     out = []
     for c in sorted(up):
-        out += ["%s via %s" % (d, c) for d in missing(c, seen)]
-    # A helper is fine if each caller is; report only the callers that are not.
+        out += missing(c, seen)
     return out
 
 try:
@@ -154,16 +208,16 @@ try:
 except FileNotFoundError:
     baseline = set()
 
-bad, gapped = [], set()
+bad, gapped = list(elsewhere), set()
 for h, p, ln, fn in sites:
     if fn is None:
         bad.append("%s:%d  %s called outside any fn" % (p, ln, h))
         continue
-    gaps = missing(fn, set())
-    if gaps and fn in baseline:
-        gapped.add(fn)
-    elif gaps:
-        bad.append("%s:%d  %s in `%s` - no test drives: %s" % (p, ln, h, fn, "; ".join(sorted(set(gaps)))))
+    for leaf, d in sorted(set(missing(fn, set()))):
+        if leaf in baseline:
+            gapped.add(leaf)
+        else:
+            bad.append("%s:%d  %s in `%s` - handler `%s` has no test driving: %s" % (p, ln, h, fn, leaf, d))
 
 # The baseline only ever shrinks: a handler that gained both tests must leave it.
 for fn in sorted(baseline - gapped):
