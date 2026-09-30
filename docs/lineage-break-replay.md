@@ -1,6 +1,8 @@
 # Recovering from an event-outbox lineage break
 
-Status: **design only, not implemented.** Today a lineage break (stored cursor
+Status: **design only, not implemented.** The apply-path prerequisite (crediting
+a payment to an expired watch) has since landed; the monitor rescan (items 1-3
+below) has not, and is the remaining work. Today a lineage break (stored cursor
 epoch differs from the outbox's, or the cursor is below retention) halts the
 consumer with `process::exit(1)`. An operator audits the gap and may set
 `EVENT_ACCEPT_LINEAGE_BREAK=true`. This note records what automatic recovery
@@ -53,7 +55,12 @@ reading the chain again can.
 ## Questions the review raised, checked against the source
 
 - **Does the apply path accept a credit for a watch that has since
-  expired?** No, verified in source. `handle_payment_detected` resolves the
+  expired?** It now does (update: `handle_payment_detected` falls back to the
+  invoice's own payment options when the active-watch lookup finds nothing, and
+  credits with no grace window; the late-payment flag is the existing
+  `late_paid` transition at confirmation). The note below is the analysis that
+  led there and describes the lookup itself, which is unchanged and still
+  active-only. Originally: no, verified in source. `handle_payment_detected` resolves the
   payment option through `WatchedAddressReader::get_payment_option_id`, whose
   queries filter `is_active = TRUE`. For an expired watch it returns `None`,
   the handler logs "no payment option found", and the payment is recorded with
