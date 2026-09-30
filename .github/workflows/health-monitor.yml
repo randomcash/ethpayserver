@@ -13,8 +13,8 @@ name: Health monitor (deep)
 # GitHub scheduled workflows are best-effort. Observed on this workflow: about
 # one run in fifty is actually dispatched, with gaps of 3-7 hours against a
 # 5-minute cron. Nothing time-sensitive may rely on this schedule alone, so the
-# 5-minute cadence is held by a timer on the deploy host (in the private
-# deploy-config repository); this workflow is the manual-dispatch path and a
+# cadence is held by a timer on the deploy host (rcs-health-watch, every
+# minute, in the private deploy-config repository); this workflow is the manual-dispatch path and a
 # coarse second opinion. A Sentry monitor fed by this schedule must size its
 # window to the real cadence, not the cron expression, or it cries wolf.
 #

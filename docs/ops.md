@@ -129,8 +129,9 @@ Five minutes is GitHub Actions' practical floor, not the 30-60s this ticket
 asked for — and it is a floor, not a delivery guarantee. Scheduled workflows
 are best-effort: this one has been observed dispatching roughly one run in
 fifty, with 3-7 hour gaps. Consequently the `*/5` cron cannot be what holds the
-5-minute cadence. The deploy host runs the same check from a systemd timer
-(configured in the private deploy-config repository), and any Sentry Cron
+5-minute cadence. The deploy host polls `/api/health/deep` from a systemd timer
+(`rcs-health-watch`, every minute, configured in the private deploy-config
+repository) and reports to its own dead-man's switch, and any Sentry Cron
 Monitor fed by the *scheduled workflow* must have its expected window sized to
 the cadence actually delivered; a window sized for 5 minutes alarms
 constantly, and one widened to hours cannot tell "testnet is down" from
