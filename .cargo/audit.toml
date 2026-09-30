@@ -15,4 +15,21 @@ ignore = [
     "RUSTSEC-2026-0012", # upstream transitive dep (warning)
     "RUSTSEC-2026-0002", # lru unsoundness (via alloy-provider)
     "RUSTSEC-2026-0235", # rkyv 0.7 via rust_decimal's optional `rkyv` feature — not enabled, never compiled
+    # wasmtime 47 via payserver-commons' plugin host. Both advisories are
+    # fuel-accounting bugs: `call_ref` and exception `catch` can drop fuel
+    # accounting, so a guest can burn far more than its budget. The host runs
+    # with fuel metering OFF — it bounds guest execution with
+    # `config.epoch_interruption(true)` and calls `consume_fuel` nowhere — so
+    # there is no fuel budget to escape. The two proposals involved are also
+    # both disabled: the config enables neither `wasm_function_references`
+    # (`call_ref`) nor `wasm_exceptions` (`catch`), and wasmtime defaults them
+    # off.
+    #
+    # REVISIT IF THE HOST EVER ENABLES FUEL. The real fix is a wasmtime bump,
+    # which cannot happen here: the dependency comes from commons, and
+    # wasmtime >=48 needs Rust 1.95 while rust-toolchain.toml pins 1.94.1. So
+    # it is a commons change, a toolchain bump and a pin bump, tracked
+    # separately.
+    "RUSTSEC-2026-0315", # wasmtime fuel accounting — fuel metering is not enabled
+    "RUSTSEC-2026-0316", # wasmtime fuel accounting — fuel metering is not enabled
 ]
