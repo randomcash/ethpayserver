@@ -14,6 +14,7 @@ mod reorg;
 mod resume_after_uncommitted_cursor;
 mod resume_failure_hook;
 mod resume_uses_persisted_cursor;
+mod settlement_tolerance;
 
 use std::sync::Arc;
 

@@ -18,7 +18,8 @@ use auth::StoreRepository;
 use bigdecimal::{BigDecimal, RoundingMode, Zero};
 use data_service::{
     ChainCursor, ChainCursorReader, ChainCursorWriter, PaymentOptionReader, PaymentTxIndexReader,
-    PaymentTxIndexWriter, ReorgCandidateReader, ReorgWriter,
+    PaymentTxIndexWriter, ReorgCandidateReader, ReorgWriter, SettlementToleranceReader,
+    SettlementToleranceWriter,
 };
 use evm::EvmError;
 use evm::monitor::bridge::{EventBridge, EventCursor, EventEnvelope};
@@ -51,6 +52,8 @@ pub trait EventConsumerDataService:
     + PaymentWriter
     + PaymentTxIndexWriter
     + PaymentTxIndexReader
+    + SettlementToleranceReader
+    + SettlementToleranceWriter
     + PaymentOptionReader
     + TokenReader
     + WatchedAddressReader
@@ -73,6 +76,8 @@ impl<T> EventConsumerDataService for T where
         + PaymentWriter
         + PaymentTxIndexWriter
         + PaymentTxIndexReader
+        + SettlementToleranceReader
+        + SettlementToleranceWriter
         + PaymentOptionReader
         + TokenReader
         + WatchedAddressReader

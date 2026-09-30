@@ -27,6 +27,7 @@ pub mod merchant_directory;
 pub mod payment_tx_index;
 pub mod payout_claims;
 pub mod reorg;
+pub mod settlement_tolerance;
 pub mod store_creation;
 pub mod watch_reconciliation;
 pub mod webhook_delivery;
@@ -45,6 +46,10 @@ pub use merchant_directory::{MerchantAccount, MerchantDirectoryReader, MerchantS
 pub use payment_tx_index::{PaymentTxIndexReader, PaymentTxIndexWriter};
 pub use payout_claims::PayoutClaimReader;
 pub use reorg::{ReorgCandidateReader, ReorgWriter};
+pub use settlement_tolerance::{
+    DEFAULT_TOLERANCE_PERCENT, MAX_TOLERANCE_PERCENT, SettlementAllowance,
+    SettlementToleranceReader, SettlementToleranceWriter,
+};
 pub use watch_reconciliation::{WatchKey, WatchReconciliation, reconcile};
 pub use webhook_delivery::{
     UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,

@@ -108,8 +108,11 @@ pub(crate) fn convert_to_crypto_smallest_unit(
     // Convert to smallest units by multiplying by 10^decimals
     let smallest_units = multiply_by_decimals(crypto_amount, decimals)?;
 
-    // Round to integer (floor to avoid overpaying)
-    decimal_to_integer_string(smallest_units)
+    // Round UP to a whole base unit. Settlement demands the amount received be
+    // at least the invoice amount, so a floored quote converts back to
+    // slightly less than the invoice and can never settle even when paid to
+    // the unit. Rounding up costs the customer at most one base unit.
+    decimal_to_integer_string(smallest_units.ceil())
 }
 
 /// Convert a human-readable amount to smallest units (no rate conversion).
