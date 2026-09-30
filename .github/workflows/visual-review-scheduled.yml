@@ -29,8 +29,9 @@ name: Nightly visual review (testnet)
 
 on:
   schedule:
-    # 06:40 UTC daily — after the 05:37 scheduled E2E run, so the two don't
-    # contend for the same testnet session budget.
+    # 06:40 UTC daily — normally after the 05:37 scheduled E2E run, so the two
+    # don't contend for the same testnet session budget. Dispatch delay is not
+    # bounded, so this is a preference, not a guarantee.
     - cron: "40 6 * * *"
   workflow_dispatch:
 
