@@ -126,8 +126,16 @@ that exceeds `STALL_THRESHOLD` (default 3 — i.e. ~15-20 minutes flat at the
 5-minute cadence).
 
 Five minutes is GitHub Actions' practical floor, not the 30-60s this ticket
-asked for — schedule intervals shorter than that are not reliable, and GitHub
-can delay a scheduled run further under load. The two Sentry Cron Monitor
+asked for — and it is a floor, not a delivery guarantee. Scheduled workflows
+are best-effort: this one has been observed dispatching roughly one run in
+fifty, with 3-7 hour gaps. Consequently the `*/5` cron cannot be what holds the
+5-minute cadence. The deploy host runs the same check from a systemd timer
+(configured in the private deploy-config repository), and any Sentry Cron
+Monitor fed by the *scheduled workflow* must have its expected window sized to
+the cadence actually delivered; a window sized for 5 minutes alarms
+constantly, and one widened to hours cannot tell "testnet is down" from
+"GitHub skipped runs". `STALL_THRESHOLD` counts checks, not minutes, so it
+stretches the same way when runs are skipped. The two Sentry Cron Monitor
 URLs above have to be created by hand in Sentry (Crons → new monitor → "check
 in via HTTP") and the resulting URLs stored as repo secrets; that account
 setup is outside what a commit here can do.
