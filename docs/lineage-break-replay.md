@@ -73,7 +73,8 @@ reading the chain again can.
   token match, so it cannot attribute a transfer to another invoice; it then
   goes through the same credited-amount path as an active watch. Replay
   idempotence is expected to come from the payment upsert described below
-  (`reapplying_the_same_detection_credits_once` covers the in-memory store's dedup on `(chain, tx_hash, tx_index)`, which mirrors the Postgres upsert but does not prove it; the Postgres upsert is covered by the Postgres upsert by
+  (`reapplying_the_same_detection_credits_once` covers the in-memory store's dedup on `(chain, tx_hash, tx_index)`, which mirrors the Postgres upsert but does not prove it; the Postgres upsert itself is covered by the ignored
+  integration test
   `integration_redelivered_payment_reuses_the_original_row_id_and_does_not_duplicate_the_obligation`,
   which asserts one row and one credit). Status effects
   are those of `handle_payment_confirmed`: an expired invoice the payment
@@ -117,7 +118,11 @@ reading the chain again can.
   before confirmation is still asserted here without a test.
 - Policy, settled in #310: a late payment is credited and then flagged
   (`late_paid`) for the merchant, with no grace window. A replay over a wide
-  gap applies this to every rescanned transfer to an expired invoice.
+  gap applies this to every rescanned transfer to an expired invoice. Whether
+  a merchant is notified of a replay-driven `late_paid` is not decided here;
+  `late_paid` is the only signal, and reconciling cancelled or refunded
+  invoices that gain `amount_received` is left to the merchant until the
+  rescan is built and reviewed.
 
 ## Why this is not done in one step
 
