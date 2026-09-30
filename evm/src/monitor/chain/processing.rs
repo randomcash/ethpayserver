@@ -9,6 +9,10 @@ use chrono::Utc;
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
+/// Most blocks scanned to close a gap in one `process_block` call. Kept below
+/// the span providers accept for a single log query.
+pub const BACKFILL_MAX_BLOCKS: u64 = 200;
+
 impl<S: BlockSource + 'static> ChainMonitor<S> {
     /// Process a new block.
     #[allow(clippy::cognitive_complexity)] // reorg check + watched-address scan is one logical unit
@@ -105,20 +109,13 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             return Ok(());
         }
 
-        // Everything detected is collected first and emitted only once every
-        // scan has succeeded. A failure part-way returns before `last_block`
-        // moves, so the whole range is read again on the next block; emitting
-        // as each payment was found would report the ones already seen twice.
-        let mut detected = Vec::new();
-
-        if let Some((from, to)) = missed {
-            info!(
-                chain_id,
-                from, to, "scanning blocks missed while the block stream was down"
-            );
-            self.backfill_missed_blocks(&watched, from, to, &mut detected)
-                .await?;
+        if let Some((from, to)) = missed
+            && !self.backfill_chunk(&watched, from, to, block).await?
+        {
+            return Ok(());
         }
+
+        let mut detected = Vec::new();
 
         // Check for native transfers
         if self.config.monitor_native {
@@ -142,43 +139,96 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
         Ok(())
     }
 
+    /// Read one bounded chunk of the gap `from..=to` before `block`, emit what
+    /// it found and move the cursor to the last block scanned. Returns whether
+    /// the chunk reached `to`; if not, the rest of the gap (and `block` with
+    /// it) is picked up on the next arrival.
+    ///
+    /// A long stall is worked off across the blocks that follow, so no single
+    /// handler runs for minutes and a failure costs at most the chunk in
+    /// flight, never the chunks already completed.
+    async fn backfill_chunk(
+        &self,
+        watched: &HashMap<WatchKey, WatchedAddress>,
+        from: u64,
+        to: u64,
+        block: &BlockNotification,
+    ) -> EvmResult<bool> {
+        let chain_id = self.chain_id();
+        let chunk_to = to.min(from + BACKFILL_MAX_BLOCKS - 1);
+        info!(
+            chain_id,
+            from,
+            to = chunk_to,
+            "scanning blocks missed while the block stream was down"
+        );
+        // Everything detected is collected first and emitted only once the
+        // whole chunk has been read. A failure part-way returns before
+        // `last_block` moves, so the chunk is read again on the next block;
+        // emitting as each payment was found would report the ones already
+        // seen twice.
+        let mut detected = Vec::new();
+        let chunk_hash = self
+            .backfill_missed_blocks(watched, from, chunk_to, &mut detected)
+            .await?;
+        for event in detected {
+            self.record_detected(event).await;
+        }
+        // The cursor names the last block actually scanned, and its hash is
+        // that block's, so the next arrival's continuity check asks about the
+        // right block.
+        *self.last_block.write().await = Some(chunk_to);
+        *self.last_block_hash.write().await = Some(chunk_hash);
+
+        if chunk_to < to {
+            warn!(
+                chain_id,
+                scanned_to = chunk_to,
+                head = block.number,
+                behind = block.number - chunk_to,
+                "backfill is still catching up after a block stream stall"
+            );
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     /// Scan `from..=to`, blocks the stream skipped, through both detection
-    /// paths, appending what it finds to `detected`. A failure propagates so
-    /// `last_block` stays put and the same range is retried on the next block;
-    /// the caller emits nothing from a failed attempt.
+    /// paths, appending what it finds to `detected`, and return the hash of
+    /// block `to`. The span must not exceed [`BACKFILL_MAX_BLOCKS`]. A failure
+    /// propagates so `last_block` stays put and the same range is retried on
+    /// the next block; the caller emits nothing from a failed attempt.
     async fn backfill_missed_blocks(
         &self,
         watched: &HashMap<WatchKey, WatchedAddress>,
         from: u64,
         to: u64,
         detected: &mut Vec<PaymentDetected>,
-    ) -> EvmResult<()> {
+    ) -> EvmResult<B256> {
         if self.config.monitor_native {
             for number in from..=to {
                 // The hash is only used to label a detected payment; a node
                 // that cannot name the block cannot be trusted to have
                 // answered for it either, so retry rather than guess.
-                let Some(hash) = self.source.get_block_hash(number).await? else {
-                    return Err(crate::error::EvmError::Rpc(format!(
-                        "block {number} not available while backfilling a gap"
-                    )));
-                };
+                let hash = self.block_hash_or_err(number).await?;
                 self.check_native_payments(watched, number, hash, detected)
                     .await?;
             }
         }
         if self.config.monitor_erc20 {
-            // Providers cap the span of a single log query.
-            const LOG_SPAN: u64 = 500;
-            let mut start = from;
-            while start <= to {
-                let end = to.min(start + LOG_SPAN - 1);
-                self.check_erc20_payments(watched, start, end, detected)
-                    .await?;
-                start = end + 1;
-            }
+            // The chunk is below providers' cap on the span of one log query.
+            self.check_erc20_payments(watched, from, to, detected)
+                .await?;
         }
-        Ok(())
+        self.block_hash_or_err(to).await
+    }
+
+    async fn block_hash_or_err(&self, number: u64) -> EvmResult<B256> {
+        self.source.get_block_hash(number).await?.ok_or_else(|| {
+            crate::error::EvmError::Rpc(format!(
+                "block {number} not available while backfilling a gap"
+            ))
+        })
     }
 
     /// Check for native currency payments in one block.
