@@ -27,13 +27,13 @@ use auth::{
     Policies, Result as AuthResult, Role, Session, SessionId, SessionService, Store, UserId,
     UserInfo,
 };
-use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
+use data_service::{PgDataService, SettlementToleranceWriter};
 use rates::NoOpRateProvider;
 use server::api::StoreScopedUser;
 use server::api::invoices::{
     ListInvoicesQuery, ListPaymentsQuery, export_invoices_csv, export_payments_csv, get_invoice,
-    list_invoices, list_payments,
+    get_invoice_settlement_allowance, list_invoices, list_payments,
 };
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
@@ -507,5 +507,92 @@ async fn a_key_scoped_to_view_invoices_can_export_payments_csv() {
     assert!(
         result.is_ok(),
         "a key scoped to canviewinvoices must be able to export payments"
+    );
+}
+
+/// Record the shortfall a tolerance accepted. A helper, so a test body does
+/// not name a repository method next to the handler it is driving.
+async fn seed_allowance(pg: &PgDataService, invoice: &InvoiceData) {
+    SettlementToleranceWriter::record_settlement_allowance(pg, &invoice.id, "1.00", "1", "store")
+        .await
+        .expect("seed the recorded allowance");
+}
+
+/// A key scoped to `canviewinvoices` reads the allowance recorded for an
+/// invoice on its store.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_view_invoices_can_read_the_settlement_allowance() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    let invoice = test_invoice(store.id);
+    InvoiceWriter::upsert(&pg, &invoice)
+        .await
+        .expect("seed invoice");
+    seed_allowance(&pg, &invoice).await;
+
+    let state = app_state(Arc::new(pg));
+
+    let result = get_invoice_settlement_allowance(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_VIEW_INVOICES.to_string()]),
+        ),
+        State(state),
+        Path(invoice.id.0.clone()),
+    )
+    .await;
+
+    let Ok(axum::Json(Some(allowance))) = result else {
+        panic!("a key scoped to canviewinvoices must be able to read the recorded allowance");
+    };
+    assert_eq!(allowance.invoice_id, invoice.id.0);
+    assert_eq!(allowance.source, "store");
+}
+
+/// The refusal: a key scoped only to `cancreateinvoice` must not read what an
+/// invoice on the store settled for. The invoice and the allowance both
+/// exist, so the 404 the handler answers with can only be the scope refusing
+/// it - the same answer as a missing invoice, by design, so the grant above
+/// is what shows the two apart.
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_create_invoice_is_refused_the_settlement_allowance() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    let invoice = test_invoice(store.id);
+    InvoiceWriter::upsert(&pg, &invoice)
+        .await
+        .expect("seed invoice");
+    seed_allowance(&pg, &invoice).await;
+
+    let state = app_state(Arc::new(pg));
+
+    let result = get_invoice_settlement_allowance(
+        StoreScopedUser(
+            user_info(owner),
+            Some(vec![Policies::STORE_CREATE_INVOICE.to_string()]),
+        ),
+        State(state),
+        Path(invoice.id.0.clone()),
+    )
+    .await;
+
+    assert_eq!(
+        result.err(),
+        Some(StatusCode::NOT_FOUND),
+        "a key not scoped to canviewinvoices must not see the allowance"
     );
 }
