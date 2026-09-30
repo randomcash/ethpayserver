@@ -167,6 +167,89 @@ pub fn create_test_consumer(
     ds: Arc<InMemoryDataService>,
     bridge: Arc<evm::monitor::bridge::MemoryBridge>,
 ) -> super::super::EventConsumer<InMemoryDataService, MockEVMMonitor> {
+    create_test_consumer_with_bridge(ds, bridge)
+}
+
+/// Records every cursor `subscribe_from` is called with, then delegates to
+/// the real bridge underneath.
+///
+/// Every other assertion available to a consumer test only sees the
+/// *outcome* of a resume - which envelopes end up applied - and an
+/// unbounded [`evm::monitor::bridge::MemoryBridge`] plus idempotent apply
+/// make "resumed from the persisted cursor" and "resumed from scratch and
+/// relied on dedup" produce the exact same outcome. Wrapping the bridge to
+/// record the actual argument is the only way to tell those two apart, so a
+/// future change that silently dropped the resume cursor (e.g. hardcoding
+/// `subscribe_from(None)`) has something in this suite that goes red for it
+/// specifically.
+pub struct RecordingBridge {
+    inner: Arc<dyn evm::monitor::bridge::EventBridge>,
+    subscribe_from_calls: std::sync::Mutex<Vec<Option<evm::monitor::bridge::EventCursor>>>,
+}
+
+impl RecordingBridge {
+    pub fn new(inner: Arc<dyn evm::monitor::bridge::EventBridge>) -> Self {
+        Self {
+            inner,
+            subscribe_from_calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every cursor passed to `subscribe_from`, in call order.
+    pub fn subscribe_from_calls(&self) -> Vec<Option<evm::monitor::bridge::EventCursor>> {
+        self.subscribe_from_calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl evm::monitor::bridge::EventBridge for RecordingBridge {
+    async fn publish(&self, event: &evm::monitor::events::MonitorEvent) -> evm::EvmResult<()> {
+        self.inner.publish(event).await
+    }
+
+    async fn subscribe_from(
+        &self,
+        from: Option<evm::monitor::bridge::EventCursor>,
+    ) -> evm::EvmResult<evm::monitor::bridge::DurableEventStream> {
+        self.subscribe_from_calls.lock().unwrap().push(from);
+        self.inner.subscribe_from(from).await
+    }
+
+    async fn current_epoch(&self) -> evm::EvmResult<i64> {
+        self.inner.current_epoch().await
+    }
+
+    async fn bump_epoch(&self) -> evm::EvmResult<i64> {
+        self.inner.bump_epoch().await
+    }
+
+    async fn publish_command(
+        &self,
+        command: &evm::monitor::events::MonitorCommand,
+    ) -> evm::EvmResult<()> {
+        self.inner.publish_command(command).await
+    }
+
+    async fn subscribe_commands(&self) -> evm::EvmResult<evm::monitor::bridge::CommandStream> {
+        self.inner.subscribe_commands().await
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn health_check(&self) -> evm::EvmResult<()> {
+        self.inner.health_check().await
+    }
+}
+
+/// Create a consumer against any [`evm::monitor::bridge::EventBridge`],
+/// rather than only the concrete [`evm::monitor::bridge::MemoryBridge`] -
+/// needed to hand it a [`RecordingBridge`] instead.
+pub fn create_test_consumer_with_bridge(
+    ds: Arc<InMemoryDataService>,
+    bridge: Arc<dyn evm::monitor::bridge::EventBridge>,
+) -> super::super::EventConsumer<InMemoryDataService, MockEVMMonitor> {
     super::super::EventConsumer::new(
         bridge,
         ds,

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::analytics::{
     PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery, StorePaymentVolumeBucket,
 };
+use crate::chain_cursor::{ChainCursor, ChainCursorReader, ChainCursorWriter};
 use crate::{UpsertDeliveryParams, WebhookDeliveryWriter};
 
 /// In-memory implementation of all repository traits for testing.
@@ -43,6 +44,29 @@ pub struct InMemoryDataService {
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
+    chain_cursors: RwLock<HashMap<(String, u64), ChainCursor>>,
+    // `reset_chain_watch_notifications` is otherwise a no-op here (see its
+    // impl below), so a test asserting a lineage break actually re-armed
+    // `watch_retry` has nothing else to check against.
+    watch_reset_calls: AtomicU64,
+    // Lets a test force `chain_cursors` to fail, to exercise how a consumer
+    // reacts to a DB error at startup - which is not the same thing as an
+    // empty result (see `ChainCursorReader::chain_cursors`'s own doc
+    // comment), and nothing else in this test double can produce it.
+    fail_chain_cursors: AtomicBool,
+    // Lets a test force `reset_chain_watch_notifications` to fail, to
+    // exercise a lineage break whose re-arm cannot be trusted to have
+    // happened - the one case this test double cannot otherwise reach, since
+    // it is normally a no-op that always succeeds.
+    fail_reset_chain_watch_notifications: AtomicBool,
+    // Lets a test force `commit_chain_cursor` to fail, to exercise a
+    // consumer whose event applied cleanly but whose durable cursor write
+    // did not - the one case this test double cannot otherwise reach, since
+    // it is normally an infallible map insert.
+    fail_commit_chain_cursor: AtomicBool,
+    // Separate from the commit flag so a test can fail only the stale-row
+    // delete that follows a successful re-arm.
+    fail_delete_chain_cursor: AtomicBool,
     webhook_outbox: RwLock<Vec<crate::WebhookObligation>>,
     /// Obligation id -> claim deadline, mirroring the Postgres
     /// implementation's `claimed_until` column so this double's
@@ -56,11 +80,45 @@ pub struct InMemoryDataService {
     /// since every other method here only ever returns `Ok`.
     fail_invoice_reads: AtomicBool,
     fail_payment_reads: AtomicBool,
+    fail_payment_writes: AtomicBool,
 }
 
 impl InMemoryDataService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How many times `reset_chain_watch_notifications` has been called.
+    pub fn watch_reset_calls(&self) -> u64 {
+        self.watch_reset_calls.load(Ordering::SeqCst)
+    }
+
+    /// Force the next (and every subsequent) `chain_cursors` call to fail.
+    pub fn set_fail_chain_cursors(&self, fail: bool) {
+        self.fail_chain_cursors.store(fail, Ordering::SeqCst);
+    }
+
+    /// Force the next (and every subsequent) `reset_chain_watch_notifications`
+    /// call to fail.
+    pub fn set_fail_reset_chain_watch_notifications(&self, fail: bool) {
+        self.fail_reset_chain_watch_notifications
+            .store(fail, Ordering::SeqCst);
+    }
+
+    /// Force the next (and every subsequent) `commit_chain_cursor` call to
+    /// fail.
+    pub fn set_fail_commit_chain_cursor(&self, fail: bool) {
+        self.fail_commit_chain_cursor.store(fail, Ordering::SeqCst);
+    }
+
+    /// Force every subsequent `delete_chain_cursor` call to fail.
+    pub fn set_fail_delete_chain_cursor(&self, fail: bool) {
+        self.fail_delete_chain_cursor.store(fail, Ordering::SeqCst);
+    }
+
+    /// Make every subsequent payment upsert fail with a transient error.
+    pub fn fail_payment_writes(&self) {
+        self.fail_payment_writes.store(true, Ordering::SeqCst);
     }
 
     /// Make every subsequent `InvoiceReader::get` call fail with a transient
@@ -553,6 +611,11 @@ impl crate::payment_tx_index::PaymentTxIndexWriter for InMemoryDataService {
         tx_index: i32,
         event_type: &str,
     ) -> RepositoryResult<()> {
+        if self.fail_payment_writes.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated transient payment write failure".to_string(),
+            ));
+        }
         // Not a real transaction - this double has no rollback to offer -
         // but the two writes below are the same two the Postgres
         // implementation makes atomic, so a test against this double still
@@ -560,14 +623,30 @@ impl crate::payment_tx_index::PaymentTxIndexWriter for InMemoryDataService {
         // call site, just not "or neither does".
         self.upsert_with_tx_index(payment, tx_index).await?;
 
+        // A redelivered event mints a fresh `payment.id` every call
+        // (`handle_payment_detected` calls `Uuid::new_v4()` unconditionally),
+        // so deduping on that id would never match and would requeue a
+        // second obligation on every redelivery. The real key is whichever
+        // row `(chain_id, tx_hash, tx_index)` resolved to just above -
+        // Postgres's `ON CONFLICT ... RETURNING id` returns exactly that
+        // existing row's id for the same reason. Looking it back up here is
+        // this double's equivalent.
+        let key = (payment.chain_id.clone(), payment.tx_hash.clone(), tx_index);
+        let resolved_payment_id = *self
+            .payment_tx_index
+            .read()
+            .unwrap()
+            .get(&key)
+            .unwrap_or(&payment.id);
+
         let mut outbox = self.webhook_outbox.write().unwrap();
         if !outbox
             .iter()
-            .any(|o| o.payment_id == payment.id && o.event_type == event_type)
+            .any(|o| o.payment_id == resolved_payment_id && o.event_type == event_type)
         {
             outbox.push(crate::WebhookObligation {
                 id: Uuid::new_v4(),
-                payment_id: payment.id,
+                payment_id: resolved_payment_id,
                 invoice_id: payment.invoice_id.as_str().to_string(),
                 event_type: event_type.to_string(),
                 created_at: Utc::now(),
@@ -607,6 +686,80 @@ impl crate::reorg::ReorgWriter for InMemoryDataService {
             payment.confirmed_at = None;
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ChainCursorReader for InMemoryDataService {
+    async fn chain_cursors(&self, adapter_id: &str) -> RepositoryResult<HashMap<u64, ChainCursor>> {
+        if self.fail_chain_cursors.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated chain_cursors failure".to_string(),
+            ));
+        }
+        let cursors = self.chain_cursors.read().unwrap();
+        Ok(cursors
+            .iter()
+            .filter(|((adapter, _), _)| adapter == adapter_id)
+            .map(|((_, chain_id), cursor)| (*chain_id, *cursor))
+            .collect())
+    }
+}
+
+#[async_trait]
+impl ChainCursorWriter for InMemoryDataService {
+    async fn commit_chain_cursor(
+        &self,
+        adapter_id: &str,
+        chain_id: u64,
+        cursor: ChainCursor,
+    ) -> RepositoryResult<()> {
+        if self.fail_commit_chain_cursor.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated commit_chain_cursor failure".to_string(),
+            ));
+        }
+        // Same guard as the Postgres upsert: within one epoch a cursor
+        // never moves backwards.
+        let mut cursors = self.chain_cursors.write().unwrap();
+        let key = (adapter_id.to_string(), chain_id);
+        let advances = cursors
+            .get(&key)
+            .is_none_or(|old| old.epoch != cursor.epoch || old.seq < cursor.seq);
+        if advances {
+            cursors.insert(key, cursor);
+        }
+        Ok(())
+    }
+
+    async fn delete_chain_cursor(&self, adapter_id: &str, chain_id: u64) -> RepositoryResult<()> {
+        if self.fail_delete_chain_cursor.load(Ordering::SeqCst) {
+            return Err(RepositoryError::Database(
+                "simulated delete_chain_cursor failure".to_string(),
+            ));
+        }
+        self.chain_cursors
+            .write()
+            .unwrap()
+            .remove(&(adapter_id.to_string(), chain_id));
+        Ok(())
+    }
+
+    async fn reset_chain_watch_notifications(&self, _chain_id: u64) -> RepositoryResult<u64> {
+        if self
+            .fail_reset_chain_watch_notifications
+            .load(Ordering::SeqCst)
+        {
+            return Err(RepositoryError::Database(
+                "simulated reset_chain_watch_notifications failure".to_string(),
+            ));
+        }
+        // `WatchedAddressWriter::mark_notified` is already a no-op above:
+        // this test double does not model `monitor_notified` at all. The
+        // call still counts, so a test can assert this was reached without
+        // needing to model the column it would flip.
+        self.watch_reset_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
     }
 }
 
