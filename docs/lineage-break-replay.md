@@ -38,8 +38,10 @@ reading the chain again can.
    in-memory set. That means loading recently-expired `watched_addresses` rows
    for the window from the database and passing them with the command.
 3. **A resume position under the new epoch.** Read the stored
-   `block_height` for the chain before deleting its cursor, subtract a
-   reorg-depth margin, and issue the rescan from there. The cursor must not be
+   `block_height` for the chain before deleting its cursor, and start the
+   rescan from the lowest block among payments not yet confirmed and pending
+   watches (see the cursor-height bullet below: cursor height minus a margin
+   is not a safe start). The cursor must not be
    deleted until the rescan command is accepted, or a failure between the two
    loses the only record of where to start.
 4. **Bounded cost.** A cursor from a long-dead deployment names a height that
@@ -89,7 +91,7 @@ reading the chain again can.
 - The claims that the re-arm reset and the payment-option lookup both skip
   inactive watches are pinned by the ignored integration test
   `inactive_watch_is_neither_rearmed_nor_resolved_to_a_payment_option`
-  (data-service; removing the `is_active` filter from the lookup turns it red).
+  (data-service; the re-arm half reads `monitor_notified` off the row, so dropping the `is_active` filter from the reset turns it red, and dropping it from the lookup turns the second half red).
   That test asserts today's behaviour: whoever makes replay credit expired
   watches will change it deliberately. That a replay must publish detection
   before confirmation, and that re-applying is idempotent, are still asserted

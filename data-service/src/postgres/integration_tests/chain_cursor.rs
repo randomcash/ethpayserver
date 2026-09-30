@@ -270,9 +270,19 @@ async fn inactive_watch_is_neither_rearmed_nor_resolved_to_a_payment_option() {
         .await
         .unwrap();
 
-    let pending = WatchedAddressReader::get_pending(&service).await.unwrap();
+    // Read the flag off the row itself: `get_pending` filters on `is_active`
+    // too, so asserting through it would pass even if the reset re-armed the
+    // inactive row.
+    let notified: bool = sqlx::query_scalar(
+        "SELECT monitor_notified FROM watched_addresses WHERE address = $1 AND chain_id = $2",
+    )
+    .bind(&address)
+    .bind(chain.as_str())
+    .fetch_one(service.pool())
+    .await
+    .unwrap();
     assert!(
-        !pending.iter().any(|w| w.address == address),
+        notified,
         "an inactive watch must not be re-armed by the reset"
     );
     assert_eq!(
