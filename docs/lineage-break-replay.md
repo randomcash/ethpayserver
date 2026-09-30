@@ -110,8 +110,10 @@ reading the chain again can.
   inactive watches are pinned by the ignored integration test
   `inactive_watch_is_neither_rearmed_nor_resolved_to_a_payment_option`
   (data-service; the re-arm half reads `monitor_notified` off the row, so dropping the `is_active` filter from the reset turns it red, and dropping it from the lookup turns the second half red).
-  That test asserts today's behaviour: whoever makes replay credit expired
-  watches will change it deliberately. That a replay must publish detection
+  That test covers the data-service layer only (watch re-arm and option
+  lookup skip inactive watches); the apply-path fallback that credits an
+  expired watch's payment is covered separately in the event consumer tests.
+  That a replay must publish detection
   before confirmation is still asserted here without a test.
 - Policy, settled in #310: a late payment is credited and then flagged
   (`late_paid`) for the merchant, with no grace window. A replay over a wide
