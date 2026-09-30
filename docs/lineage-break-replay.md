@@ -72,7 +72,8 @@ reading the chain again can.
   of the invoice the event names, and only credits on an address, chain and
   token match, so it cannot attribute a transfer to another invoice; it then
   goes through the same credited-amount path as an active watch. Replay
-  idempotence comes from the payment upsert described below. Status effects
+  idempotence is expected to come from the payment upsert described below
+  (by design, not yet covered by a test; see the last bullet of this list). Status effects
   are those of `handle_payment_confirmed`: an expired invoice the payment
   fully covers becomes `late_paid`, a cancelled, refunded or already-paid
   invoice keeps its status, and a partial payment counts toward
