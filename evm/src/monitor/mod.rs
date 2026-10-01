@@ -33,7 +33,7 @@
 //! //   EVMMONITOR_WS_1=wss://eth.llamarpc.com
 //!
 //! // API server subscribes to events:
-//! use evm::monitor::bridge::{EventBridge, RedisBridge};
+//! use evm::monitor::bridge::{EventBridge, RedisBridge, COMMANDS_CHANNEL, EVENTS_CHANNEL};
 //!
 //! let bridge = RedisBridge::new("redis://localhost:6379", EVENTS_CHANNEL, COMMANDS_CHANNEL).await?;
 //! let mut events = bridge.subscribe_from(None).await?;

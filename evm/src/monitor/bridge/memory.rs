@@ -170,7 +170,7 @@ impl EventBridge for MemoryBridge {
             // lifetime). Neither depends on `max_retained` being set, and
             // the second must be refused here: it would otherwise index
             // past the end of the retained entries.
-            if oldest > cursor.seq + 1 || cursor.seq + 1 > next_seq {
+            if cursor.seq < oldest - 1 || cursor.seq >= next_seq {
                 // The epoch is deliberately left alone: bumping it would make
                 // the consumer's next start read an epoch mismatch and
                 // resume past this gap without an error. Left unchanged,
@@ -487,7 +487,19 @@ mod tests {
             seq: 0,
             block_height: 0,
         };
-        assert!(bridge.subscribe_from(Some(ok)).await.is_ok());
+        let mut stream = bridge.subscribe_from(Some(ok)).await.unwrap();
+        bridge.publish(&make_event()).await.unwrap(); // seq 1
+        let next = stream.next().await.unwrap();
+        assert_eq!(next.cursor.seq, 1, "resume replays only what follows seq 0");
+
+        // A cursor at the extreme is refused, not an arithmetic overflow.
+        let max = EventCursor {
+            epoch: cursor.epoch,
+            seq: i64::MAX,
+            block_height: 0,
+        };
+        let res = bridge.subscribe_from(Some(max)).await;
+        assert!(matches!(res, Err(EvmError::EventStreamOutOfRange(_))));
     }
 
     #[tokio::test]
