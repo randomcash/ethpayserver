@@ -112,3 +112,42 @@ export function worstCaseRunCostWei(paymentCount: number, gasPriceWei: bigint): 
 export function remainingBudgetMs(deadlineAt: number, want: number, now = Date.now()): number {
   return Math.max(1_000, Math.min(want, deadlineAt - now));
 }
+
+/**
+ * After the archive: the store is archived, unlisted and still named for the
+ * synthetic stamp, and every payment the run saw go `paid` is still readable.
+ * A hard delete cascades through invoices and payments, so the store read and
+ * the checkout read would both 404 here.
+ *
+ * `get` is injected so the check can be exercised against a fake server; the
+ * flag says whether the read needs the E2E account's token.
+ */
+export async function expectRunSurvivedArchive(
+  storeId: string,
+  records: { invoiceId: string; hash: string }[],
+  expectedCount: number,
+  get: <T>(path: string, authed: boolean) => Promise<T>,
+): Promise<void> {
+  if (records.length !== expectedCount) {
+    throw new Error(
+      `the run recorded ${records.length} paid invoices, expected ${expectedCount}; ` +
+        `the survival check has nothing to verify`,
+    );
+  }
+  const store = await get<{ archived: boolean; name: string }>(`/stores/${storeId}`, true);
+  if (!store.name.startsWith('e2e-synthetic-')) {
+    throw new Error(`archived store ${storeId} is named '${store.name}', not an e2e-synthetic stamp`);
+  }
+  if (!store.archived) throw new Error(`store ${storeId} is not archived after the archive call`);
+  const listed = await get<{ id: string }[]>('/stores', true);
+  if (listed.some((s) => s.id === storeId)) {
+    throw new Error(`archived store ${storeId} is still in the default GET /stores listing`);
+  }
+  for (const { invoiceId, hash } of records) {
+    const checkout = await get<{ payments: { tx_hash: string }[] }>(`/checkout/${invoiceId}`, false);
+    const hashes = checkout.payments.map((p) => p.tx_hash.toLowerCase());
+    if (!hashes.includes(hash.toLowerCase())) {
+      throw new Error(`invoice ${invoiceId} no longer shows payment ${hash} after the archive`);
+    }
+  }
+}

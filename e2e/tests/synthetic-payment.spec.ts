@@ -39,6 +39,7 @@ import { mnemonicToSeedSync } from '@scure/bip39';
 
 import { api, wsUrl } from '../fixtures/api';
 import {
+  expectRunSurvivedArchive,
   randomInvoiceAmountWei,
   remainingBudgetMs,
   worstCaseRunCostWei,
@@ -249,6 +250,8 @@ async function waitForPaid(
  */
 let createdStoreId: string | null = null;
 let apiToken: string | null = null;
+/** Each invoice this run saw paid, with the transaction that paid it. */
+let paidRecords: { invoiceId: string; hash: string }[] = [];
 /**
  * The sink, exposed to `afterEach`.
  *
@@ -290,15 +293,17 @@ test.describe('Synthetic payment (live testnet)', () => {
    * original bug in a form nobody can see, which is the whole point of this
    * ticket.
    *
-   * `DELETE /admin/stores/{id}` (`hard_delete_store` in
-   * `server/src/api/admin/mod.rs`), not `DELETE /stores/{id}` — that one only
-   * archives (`archive_store`), which leaves an archived row behind forever
-   * rather than actually removing it. Reachable here because `apiToken` is
-   * the E2E account's key and that account is the deployment's
-   * `server_admin`. Admin-only *and* name-gated to the exact
-   * `e2e-synthetic-<ISO timestamp>` shape this run gives its own store, so a
-   * bug here can hard-delete this run's own store and nothing else on the
-   * server.
+   * `DELETE /stores/{id}`, which archives, not `DELETE /admin/stores/{id}`
+   * (`hard_delete_store`). The hard delete cascades through invoices and
+   * payments, so the proof that the money path works was erased minutes after
+   * it was produced and testnet showed an empty payment list on a green day
+   * and a dead monitor alike. An archived store keeps its payments, is hidden
+   * from `GET /stores` by default, and is told apart from merchant traffic by
+   * its `e2e-synthetic-<ISO timestamp>` name. Retention is
+   * `scripts/sweep-e2e-stores.mjs`, run deliberately.
+   *
+   * After archiving, a passing run checks the payments are still there. That
+   * is what fails if this ever goes back to a hard delete.
    */
   test.afterEach(async ({}, testInfo) => {
     // First, because it holds a port and a tunnel process. Only reached when a
@@ -316,20 +321,45 @@ test.describe('Synthetic payment (live testnet)', () => {
 
     const storeId = createdStoreId;
     createdStoreId = null;
-    if (!storeId || !apiToken) return;
+    const records = paidRecords;
+    paidRecords = [];
+    if (!storeId || !apiToken) {
+      // A passing run with nothing to archive means setup never recorded the
+      // store; saying nothing would look like a healthy run.
+      if (testInfo.status === 'passed') {
+        throw new Error('no synthetic store or API token was recorded, so nothing was archived or verified');
+      }
+      return;
+    }
 
     try {
-      await api(`/admin/stores/${storeId}`, { method: 'DELETE', token: apiToken });
-      console.log(`deleted store ${storeId}`);
+      await api(`/stores/${storeId}`, { method: 'DELETE', token: apiToken });
+      console.log(`archived store ${storeId}`);
+      // Only a passing run is held to this: a failed one has no promise to
+      // keep, and its own failure is the story.
+      if (testInfo.status === testInfo.expectedStatus) {
+        const token = apiToken;
+        await expectRunSurvivedArchive(
+          storeId,
+          records,
+          PAYMENT_COUNT,
+          <T>(path: string, authed: boolean) => api<T>(path, authed ? { token } : {}),
+        );
+      }
       return;
     } catch (err) {
       const msg =
-        `Failed to clean up synthetic-payment store ${storeId}: ${err}. ` +
-        `It is still on the server and will stay there — delete it with ` +
-        `\`node scripts/sweep-e2e-stores.mjs --execute\`.`;
-      console.log(`::error title=Synthetic payment store leaked::${msg}`);
+        `Synthetic-payment archive or survival check failed for store ${storeId}: ${err}. ` +
+        `If its payments are missing, suspect a hard delete or a cascade regression, not the ` +
+        `archive call. If the store is still listed, archive it with ` +
+        `\`DELETE /stores/${storeId}\`; \`node scripts/sweep-e2e-stores.mjs --execute\` ` +
+        `removes synthetic stores for good.`;
+      console.log(`::error title=Synthetic payment archive or survival check failed::${msg}`);
       if (process.env.GITHUB_STEP_SUMMARY) {
-        appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### \u274c Store leaked\n\n${msg}\n`);
+        appendFileSync(
+          process.env.GITHUB_STEP_SUMMARY,
+          `### \u274c Synthetic payment archive or survival check failed\n\n${msg}\n`,
+        );
       }
       if (testInfo.status === testInfo.expectedStatus) throw new Error(msg);
       console.log(
@@ -408,7 +438,7 @@ test.describe('Synthetic payment (live testnet)', () => {
       // Fresh store per run: the derivation index advances per payment method,
       // so reusing one would couple today's run to yesterday's state — and this
       // run asserts on how far the index moved, which only means anything from
-      // a known starting point. The afterEach hook above removes it again —
+      // a known starting point. The afterEach hook above archives it again —
       // keep the name on the `e2e-synthetic-` prefix that
       // `scripts/sweep-e2e-stores.mjs` matches, so a run that dies before
       // cleanup is still findable.
@@ -664,6 +694,7 @@ test.describe('Synthetic payment (live testnet)', () => {
           checkout.payments.map((p) => p.tx_hash.toLowerCase()),
           `invoice ${invoice.id} is paid, but not by the transaction sent to its own address`,
         ).toContain(hash.toLowerCase());
+        paidRecords.push({ invoiceId: invoice.id, hash: hash.toLowerCase() });
 
         // Attribution from the other side: an invoice sharing this one's
         // address would go `paid` on this transaction, having been sent nothing.

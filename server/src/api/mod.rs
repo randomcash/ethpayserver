@@ -128,6 +128,7 @@ where
         .route("/{store_id}", get(stores::get_store::<A>))
         .route("/{store_id}", put(stores::update_store::<A>))
         .route("/{store_id}", delete(stores::delete_store::<A>))
+        .route("/{store_id}/unarchive", post(stores::unarchive_store::<A>))
         .route("/{store_id}/members", get(stores::list_store_members::<A>))
         .route("/{store_id}/members", post(stores::add_store_member::<A>))
         .route(
