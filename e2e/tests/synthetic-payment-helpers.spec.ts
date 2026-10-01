@@ -12,6 +12,7 @@ import { formatEther, parseEther } from 'viem';
 
 import {
   AMOUNT_STEP_WEI,
+  expectRunSurvivedArchive,
   MAX_INVOICE_AMOUNT_WEI,
   MIN_INVOICE_AMOUNT_WEI,
   randomInvoiceAmountWei,
@@ -106,5 +107,55 @@ test.describe('worstCaseRunCostWei', () => {
         `at ${gwei} gwei the reserve does not even cover the transfers`,
       ).toBe(true);
     }
+  });
+});
+
+// The survival check against a fake server in each state the daily run can
+// leave behind. The hard-delete case is the ablation: it is what the run did
+// before the store was archived instead, and the check must go red on it.
+test.describe('expectRunSurvivedArchive', () => {
+  const STORE = 's1';
+  const records = [
+    { invoiceId: 'i1', hash: '0xaa' },
+    { invoiceId: 'i2', hash: '0xBB' },
+    { invoiceId: 'i3', hash: '0xcc' },
+  ];
+
+  type State = 'archived' | 'hard-deleted' | 'still-listed' | 'not-archived' | 'renamed';
+  function fake(state: State) {
+    return async <T>(path: string): Promise<T> => {
+      if (state === 'hard-deleted') throw new Error(`404 ${path}`);
+      if (path === `/stores/${STORE}`) {
+        return {
+          archived: state !== 'not-archived',
+          name: state === 'renamed' ? 'merchant shop' : 'e2e-synthetic-2026-10-01T00:00:00Z',
+        } as T;
+      }
+      if (path === '/stores') return (state === 'still-listed' ? [{ id: STORE }] : []) as T;
+      const inv = records.find((r) => path === `/checkout/${r.invoiceId}`)!;
+      return { payments: [{ tx_hash: inv.hash.toUpperCase() }] } as T;
+    };
+  }
+
+  test('passes on an archived, unlisted, stamped store with every payment', async () => {
+    await expectRunSurvivedArchive(STORE, records, 3, fake('archived'));
+  });
+
+  for (const state of ['hard-deleted', 'still-listed', 'not-archived', 'renamed'] as const) {
+    test(`fails when the store is ${state}`, async () => {
+      await expect(expectRunSurvivedArchive(STORE, records, 3, fake(state))).rejects.toThrow();
+    });
+  }
+
+  test('fails when a payment is missing from its invoice', async () => {
+    const get = async <T>(path: string): Promise<T> =>
+      (path.startsWith('/checkout/') ? { payments: [] } : fake('archived')<T>(path)) as Promise<T>;
+    await expect(expectRunSurvivedArchive(STORE, records, 3, get)).rejects.toThrow(/no longer shows/);
+  });
+
+  test('fails when the run recorded fewer payments than expected', async () => {
+    await expect(
+      expectRunSurvivedArchive(STORE, records.slice(0, 2), 3, fake('archived')),
+    ).rejects.toThrow(/recorded 2/);
   });
 });

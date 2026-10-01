@@ -39,6 +39,7 @@ import { mnemonicToSeedSync } from '@scure/bip39';
 
 import { api, wsUrl } from '../fixtures/api';
 import {
+  expectRunSurvivedArchive,
   randomInvoiceAmountWei,
   remainingBudgetMs,
   worstCaseRunCostWei,
@@ -185,41 +186,6 @@ interface Target {
 }
 
 /**
- * After the archive: the store is archived and unlisted, and every payment the
- * run saw go `paid` is still readable. A hard delete cascades through
- * invoices and payments, so `GET /checkout/{id}` would 404 here.
- */
-async function expectRunSurvivedArchive(
-  storeId: string,
-  records: { invoiceId: string; hash: string }[],
-  token: string,
-): Promise<void> {
-  if (records.length !== PAYMENT_COUNT) {
-    throw new Error(
-      `the run recorded ${records.length} paid invoices, expected ${PAYMENT_COUNT}; ` +
-        `the survival check has nothing to verify (the archive itself is not at fault)`,
-    );
-  }
-  const store = await api<{ archived: boolean; name: string }>(`/stores/${storeId}`, { token });
-  if (!store.name.startsWith('e2e-synthetic-')) {
-    throw new Error(`archived store ${storeId} is named '${store.name}', not an e2e-synthetic stamp`);
-  }
-  if (!store.archived) throw new Error(`store ${storeId} is not archived after the archive call`);
-  const listed = await api<{ id: string }[]>('/stores', { token });
-  if (listed.some((s) => s.id === storeId)) {
-    throw new Error(`archived store ${storeId} is still in the default GET /stores listing`);
-  }
-  for (const { invoiceId, hash } of records) {
-    const checkout = await api<Checkout>(`/checkout/${invoiceId}`);
-    const hashes = checkout.payments.map((p) => p.tx_hash.toLowerCase());
-    if (!hashes.includes(hash)) {
-      throw new Error(`invoice ${invoiceId} no longer shows payment ${hash} after the archive`);
-    }
-  }
-  console.log(`verified ${records.length} payments survive under archived store ${storeId}`);
-}
-
-/**
  * Subscribe to the public checkout socket and resolve once the invoice reports
  * `paid`.
  *
@@ -357,7 +323,14 @@ test.describe('Synthetic payment (live testnet)', () => {
     createdStoreId = null;
     const records = paidRecords;
     paidRecords = [];
-    if (!storeId || !apiToken) return;
+    if (!storeId || !apiToken) {
+      // A passing run with nothing to archive means setup never recorded the
+      // store; saying nothing would look like a healthy run.
+      if (testInfo.status === 'passed') {
+        throw new Error('no synthetic store or API token was recorded, so nothing was archived or verified');
+      }
+      return;
+    }
 
     try {
       await api(`/stores/${storeId}`, { method: 'DELETE', token: apiToken });
@@ -365,7 +338,13 @@ test.describe('Synthetic payment (live testnet)', () => {
       // Only a passing run is held to this: a failed one has no promise to
       // keep, and its own failure is the story.
       if (testInfo.status === testInfo.expectedStatus) {
-        await expectRunSurvivedArchive(storeId, records, apiToken);
+        const token = apiToken;
+        await expectRunSurvivedArchive(
+          storeId,
+          records,
+          PAYMENT_COUNT,
+          <T>(path: string, authed: boolean) => api<T>(path, authed ? { token } : {}),
+        );
       }
       return;
     } catch (err) {
