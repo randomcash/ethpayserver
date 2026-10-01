@@ -8,6 +8,20 @@ consumer with `process::exit(1)`. An operator audits the gap and may set
 `EVENT_ACCEPT_LINEAGE_BREAK=true`. This note records what automatic recovery
 needs, so the work can be scoped and reviewed on its own.
 
+## What ships today, and what does not
+
+Ships: halt-and-exit on a lineage break; the operator-set
+`EVENT_ACCEPT_LINEAGE_BREAK` override, which resets the chain's active watches
+and drops the stale cursor; and the expired-watch fallback in the apply path,
+which credits a payment whose watch has expired. The fallback matches the
+invoice's own payment options by address, chain and token, case-insensitively,
+so it is correct for hex EVM addresses only.
+
+Not built: reading `block_height` back, any rescan of the gap, replay under a
+new epoch, and a different default for the flag. A transfer that confirmed
+during the gap on an already-expired watch is therefore still lost after an
+accepted break; halting is the default for that reason.
+
 ## What already exists
 
 - On an accepted break, `break_lineage` calls
@@ -76,7 +90,8 @@ reading the chain again can.
   (no consumer-level test claims this: the in-memory data service dedups on its own, so a test against it would prove only the mock. The Postgres upsert is covered by the ignored
   integration test
   `integration_redelivered_payment_reuses_the_original_row_id_and_does_not_duplicate_the_obligation`,
-  which asserts one row and one credit). Status effects
+  which CI runs in its `--run-ignored only` step and which asserts one row and
+  one credit). Status effects
   are those of `handle_payment_confirmed`: an expired invoice the payment
   fully covers becomes `late_paid`, a cancelled, refunded or already-paid
   invoice keeps its status, and a partial payment counts toward
