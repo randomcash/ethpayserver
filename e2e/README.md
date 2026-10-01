@@ -189,7 +189,9 @@ self-service `DELETE /stores/{id}`. Archived stores drop out of `GET /stores`
 history; `POST /stores/{id}/unarchive` reverses it. Because it is reversible
 there is no timestamp-shape gate, and the token only needs to own the stores
 (it need not be `server_admin`). `GET /stores` returns only the token's own
-stores, so it cannot reach another account.
+stores, so it cannot reach another account. A real merchant store whose name
+starts with `e2e-` would be archived too, so `--execute` refuses any host other
+than `testnet.random.cash` or localhost unless you add `--force`.
 
 It no longer hard-deletes. `DELETE /admin/stores/{id}` (`hard_delete_store`)
 still exists as the escape hatch and still refuses any name that is not the

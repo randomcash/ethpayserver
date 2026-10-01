@@ -12,7 +12,8 @@
  *   E2E_API_TOKEN=ak_... node scripts/sweep-e2e-stores.mjs [--execute]
  *
  * Dry run by default: it lists what it would archive and changes nothing. Only
- * `--execute` archives, because this runs against a live server.
+ * `--execute` archives, because this runs against a live server. `--execute`
+ * refuses any host other than testnet.random.cash or localhost unless `--force`.
  *
  * - `GET /stores` returns only the live stores the token's own user can see, so
  *   this can never reach another account's stores, and an already-archived
@@ -38,12 +39,21 @@ function requireEnv(name, why) {
   return v;
 }
 
-const execute = process.argv.slice(2).includes('--execute');
+const argv = process.argv.slice(2);
+const execute = argv.includes('--execute');
+const force = argv.includes('--force');
 
 const apiUrl = requireEnv(
   'E2E_API_URL',
   'the server to sweep, e.g. https://testnet.random.cash',
 ).replace(/\/$/, '');
+// Archiving closes a store to new invoices, so pointing --execute at mainnet
+// with a real merchant's key could silence a live store whose name happens to
+// start with `e2e-`. Refuse anything that is not testnet or local unless forced.
+if (execute && !force && !/^https?:\/\/(testnet\.random\.cash|localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(apiUrl)) {
+  console.error(`refusing to --execute against ${apiUrl}: not testnet or local. Pass --force if you mean it.`);
+  process.exit(1);
+}
 const token = requireEnv(
   'E2E_API_TOKEN',
   'API key (ak_...) for the account that owns the stores — archiving is owner-only',
