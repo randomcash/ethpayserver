@@ -368,9 +368,12 @@ test.describe('Synthetic payment (live testnet)', () => {
         `survive the archive: ${err}. If the store is still listed, archive it with ` +
         `\`DELETE /stores/${storeId}\`; \`node scripts/sweep-e2e-stores.mjs --execute\` ` +
         `removes synthetic stores for good.`;
-      console.log(`::error title=Synthetic payment store leaked::${msg}`);
+      console.log(`::error title=Synthetic payment archive or survival check failed::${msg}`);
       if (process.env.GITHUB_STEP_SUMMARY) {
-        appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### \u274c Store leaked\n\n${msg}\n`);
+        appendFileSync(
+          process.env.GITHUB_STEP_SUMMARY,
+          `### \u274c Synthetic payment archive or survival check failed\n\n${msg}\n`,
+        );
       }
       if (testInfo.status === testInfo.expectedStatus) throw new Error(msg);
       console.log(
