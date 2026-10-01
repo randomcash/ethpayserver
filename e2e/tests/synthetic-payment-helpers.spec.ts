@@ -10,6 +10,7 @@
 import { test, expect } from '@playwright/test';
 import { formatEther, parseEther } from 'viem';
 
+import { ApiError } from '../fixtures/api';
 import {
   AMOUNT_STEP_WEI,
   expectRunSurvivedArchive,
@@ -124,7 +125,9 @@ test.describe('expectRunSurvivedArchive', () => {
   type State = 'archived' | 'hard-deleted' | 'still-listed' | 'not-archived' | 'renamed';
   function fake(state: State) {
     return async <T>(path: string): Promise<T> => {
-      if (state === 'hard-deleted') throw new Error(`404 ${path}`);
+      // What the real `api` helper throws on a non-2xx, which is what a hard
+      // delete turns the store read into.
+      if (state === 'hard-deleted') throw new ApiError('GET', path, 404, 'store not found');
       if (path === `/stores/${STORE}`) {
         return {
           archived: state !== 'not-archived',
@@ -141,9 +144,17 @@ test.describe('expectRunSurvivedArchive', () => {
     await expectRunSurvivedArchive(STORE, records, 3, fake('archived'));
   });
 
-  for (const state of ['hard-deleted', 'still-listed', 'not-archived', 'renamed'] as const) {
+  const expected = {
+    'hard-deleted': /GET \/stores\/s1 → 404/,
+    'still-listed': /still in the default GET \/stores listing/,
+    'not-archived': /is not archived/,
+    renamed: /not an e2e-synthetic stamp/,
+  } as const;
+  for (const state of Object.keys(expected) as (keyof typeof expected)[]) {
     test(`fails when the store is ${state}`, async () => {
-      await expect(expectRunSurvivedArchive(STORE, records, 3, fake(state))).rejects.toThrow();
+      await expect(expectRunSurvivedArchive(STORE, records, 3, fake(state))).rejects.toThrow(
+        expected[state],
+      );
     });
   }
 
