@@ -56,6 +56,7 @@ use clap::Parser;
 use data_service::RedisDataService;
 use evm::error::EvmResult;
 use evm::monitor::bridge::{EventBridge, RedisBridge};
+use evm::monitor::startup::{STARTUP_ATTEMPTS, STARTUP_INITIAL_DELAY, retry_startup};
 use evm::monitor::{
     CoordinatorConfig, EventHandler, LoggingHandler, MonitorCoordinator, MonitorEvent,
 };
@@ -186,19 +187,30 @@ async fn main() -> anyhow::Result<()> {
     // Add chain monitors
     let monitored_chain_ids: Vec<u64> = chain_configs.iter().map(|c| c.chain_id).collect();
     for chain_config in &chain_configs {
-        match create_chain_monitor(chain_config).await {
-            Ok(monitor) => {
-                coordinator.add_chain(monitor).await?;
-                info!(chain_id = chain_config.chain_id, "chain monitor started");
-            }
-            Err(e) => {
-                error!(
-                    chain_id = chain_config.chain_id,
-                    error = %e,
-                    "failed to create chain monitor"
-                );
-            }
-        }
+        // A monitor that failed to build is not a degraded mode: the process
+        // would stay up, report nothing, and detect no payments on that chain.
+        // Retry briefly for a transient RPC failure, then exit non-zero so the
+        // supervisor restarts us and the failure is visible.
+        let monitor = retry_startup(
+            "create chain monitor",
+            STARTUP_ATTEMPTS,
+            STARTUP_INITIAL_DELAY,
+            || create_chain_monitor(chain_config),
+        )
+        .await
+        .map_err(|e| {
+            error!(
+                chain_id = chain_config.chain_id,
+                error = %e,
+                "failed to create chain monitor"
+            );
+            anyhow::anyhow!(
+                "failed to create chain monitor for chain {}: {e}",
+                chain_config.chain_id
+            )
+        })?;
+        coordinator.add_chain(monitor).await?;
+        info!(chain_id = chain_config.chain_id, "chain monitor started");
     }
 
     // Restore watched addresses from Redis persistence
