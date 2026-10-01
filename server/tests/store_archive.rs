@@ -119,6 +119,15 @@ async fn seed_merchant(pg: &PgDataService, with_wallet: bool) -> Merchant {
     Merchant { store, key }
 }
 
+/// A second, live store for the merchant's user; returns its id.
+async fn seed_store_for(pg: &PgDataService, m: &Merchant) -> String {
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), m.store.owner_id);
+    pg.create_store_owned_by(&store, m.store.owner_id)
+        .await
+        .expect("seed second store");
+    store.id.0.to_string()
+}
+
 /// The router `main` serves, over the production auth-service type.
 fn app(pg: &Arc<PgDataService>) -> Router {
     let auth_service = Arc::new(AuthService::with_config(
@@ -203,8 +212,13 @@ async fn list_hides_archived_and_unarchive_brings_the_store_back() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     assert!(!store_ids(&app, &m.key, "/stores").await.contains(&id));
-    let archived = store_ids(&app, &m.key, "/stores?include_archived=true").await;
+    let archived = store_ids(&app, &m.key, "/stores?archived=true").await;
     assert!(archived.contains(&id));
+    // "Only": a live store must not appear in the archived list.
+    let live = seed_store_for(&pg, &m).await;
+    let archived = store_ids(&app, &m.key, "/stores?archived=true").await;
+    assert!(archived.contains(&id) && !archived.contains(&live));
+    assert!(store_ids(&app, &m.key, "/stores").await.contains(&live));
 
     let unarchive = format!("/stores/{id}/unarchive");
     let (status, _) = call(&app, &m.key, Method::POST, &unarchive, None).await;
@@ -226,15 +240,33 @@ async fn only_the_owner_can_unarchive() {
     let owner = seed_merchant(&pg, false).await;
     let stranger = seed_merchant(&pg, false).await;
     let app = app(&pg);
-    let uri = format!("/stores/{}/unarchive", owner.store.id.0);
+    let id = owner.store.id.0;
+    let uri = format!("/stores/{id}/unarchive");
+
+    let (status, _) = call(
+        &app,
+        &owner.key,
+        Method::DELETE,
+        &format!("/stores/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, _) = call(&app, &stranger.key, Method::POST, &uri, None).await;
-    assert_ne!(
-        status,
-        StatusCode::NO_CONTENT,
-        "a stranger must not unarchive"
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "a stranger must be refused, got {status}"
     );
-    assert!(status.is_client_error());
+    // Control: the same route works for the owner, so the refusal above is
+    // authorization and not an unmounted path; and it was still archived.
+    assert!(
+        store_ids(&app, &owner.key, "/stores?archived=true")
+            .await
+            .contains(&id.to_string())
+    );
+    let (status, _) = call(&app, &owner.key, Method::POST, &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
