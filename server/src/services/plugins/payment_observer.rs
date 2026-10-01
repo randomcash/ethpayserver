@@ -226,7 +226,7 @@ impl<A: SessionService + 'static> OwnStorePaymentReader for PluginHostApi<A> {
             }
         }
 
-        settled.sort_by(|a, b| b.settled_at.cmp(&a.settled_at));
+        settled.sort_by_key(|b| std::cmp::Reverse(b.settled_at));
         settled.truncate(usize::try_from(limit.max(0)).unwrap_or(usize::MAX));
         Ok(settled)
     }
