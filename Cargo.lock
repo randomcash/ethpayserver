@@ -6433,7 +6433,6 @@ dependencies = [
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
- "wasmtime",
  "wat",
 ]
 
