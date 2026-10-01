@@ -36,7 +36,6 @@ use super::{
         (status = 400, description = "Invalid request or no payment methods configured"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
-        (status = 409, description = "Store is archived"),
     )
 )]
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // validation + payment-option setup is one logical flow
@@ -72,20 +71,20 @@ where
         ));
     }
 
-    // An archived store takes no new invoices. Invoices it already has are
-    // untouched: they stay watched, credited and settled, so archiving never
-    // strands money already owed.
+    // An archived store is retired: it keeps its history but takes no new
+    // invoices. Checked after the permission gate so a caller without access
+    // learns nothing about the store's state.
     match auth::StoreRepository::get_store(&*state.data_service, store_id).await {
         Ok(Some(store)) if store.archived => {
             return Err(invoice_error(
                 StatusCode::CONFLICT,
                 "store_archived",
-                "This store is archived and cannot take new invoices. Unarchive it first.",
+                "This store is archived and cannot receive new invoices",
             ));
         }
         Ok(_) => {}
         Err(e) => {
-            tracing::error!(error = %e, %store_id, "failed to load store for invoice creation");
+            tracing::warn!(%store_id, error = %e, "failed to load store for invoice creation");
             return Err(invoice_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",

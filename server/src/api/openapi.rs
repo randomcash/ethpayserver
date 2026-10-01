@@ -26,11 +26,11 @@ use super::{admin, dashboard, health, invoices, plugins, rates, stores, users};
         health::prometheus_metrics,
         // Stores
         stores::list_stores,
-        stores::unarchive_store,
         stores::create_store,
         stores::get_store,
         stores::update_store,
         stores::delete_store,
+        stores::unarchive_store,
         stores::list_store_members,
         stores::add_store_member,
         stores::update_store_member,

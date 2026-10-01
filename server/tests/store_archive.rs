@@ -194,11 +194,6 @@ async fn list_hides_archived_and_unarchive_brings_the_store_back() {
     // Positive control: a live store is listed, so the absences below mean
     // "filtered", not "the list is empty for some other reason".
     assert!(store_ids(&app, &m.key, "/stores").await.contains(&id));
-    assert!(
-        !store_ids(&app, &m.key, "/stores?archived=true")
-            .await
-            .contains(&id)
-    );
 
     let uri = format!("/stores/{id}");
     let (status, _) = call(&app, &m.key, Method::DELETE, &uri, None).await;
@@ -208,22 +203,17 @@ async fn list_hides_archived_and_unarchive_brings_the_store_back() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     assert!(!store_ids(&app, &m.key, "/stores").await.contains(&id));
-    let archived = store_ids(&app, &m.key, "/stores?archived=true").await;
+    let archived = store_ids(&app, &m.key, "/stores?include_archived=true").await;
     assert!(archived.contains(&id));
 
     let unarchive = format!("/stores/{id}/unarchive");
     let (status, _) = call(&app, &m.key, Method::POST, &unarchive, None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     // Idempotent.
     let (status, _) = call(&app, &m.key, Method::POST, &unarchive, None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
 
     assert!(store_ids(&app, &m.key, "/stores").await.contains(&id));
-    assert!(
-        !store_ids(&app, &m.key, "/stores?archived=true")
-            .await
-            .contains(&id)
-    );
 }
 
 #[tokio::test]
@@ -291,7 +281,7 @@ async fn invoice_creation_is_refused_on_an_archived_store_and_works_when_unarchi
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
     let (status, body) = call(
         &app,
         &m.key,

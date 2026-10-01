@@ -201,9 +201,10 @@ async fn an_api_key_cannot_reach_another_tenants_stores() {
     assert_eq!(own.id, a.store.id.0);
 
     let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
-    let listed = server::api::stores::list_stores(a_via_key, State(state), Default::default())
-        .await
-        .expect("listing one's own stores via an api key must succeed");
+    let listed =
+        server::api::stores::list_stores(a_via_key, State(state), Query(Default::default()))
+            .await
+            .expect("listing one's own stores via an api key must succeed");
     let ids: Vec<Uuid> = listed.iter().map(|s| s.id).collect();
     assert!(
         ids.contains(&a.store.id.0),
