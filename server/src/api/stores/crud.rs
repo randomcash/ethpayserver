@@ -2,9 +2,11 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
+use serde::Deserialize;
+use utoipa::IntoParams;
 use uuid::Uuid;
 
 use auth::repository::{StoreRepository, UserStoreRepository};
@@ -33,12 +35,22 @@ pub(crate) fn store_response(store: Store) -> StoreResponse {
     }
 }
 
+/// Query for `GET /stores`.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+pub struct ListStoresQuery {
+    /// `true` returns only archived stores; absent or `false` returns only live ones.
+    pub archived: Option<bool>,
+}
+
 /// List stores for the authenticated user.
+///
+/// Archived stores are hidden unless `?archived=true`, which returns them alone.
 #[utoipa::path(
     get,
     path = "/stores",
     tag = "stores",
     security(("bearer_auth" = [])),
+    params(ListStoresQuery),
     responses(
         (status = 200, description = "List of stores", body = Vec<StoreResponse>),
         (status = 401, description = "Unauthorized"),
@@ -47,17 +59,25 @@ pub(crate) fn store_response(store: Store) -> StoreResponse {
 pub async fn list_stores<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
+    Query(query): Query<ListStoresQuery>,
 ) -> Result<Json<Vec<StoreResponse>>, StatusCode>
 where
     A: SessionService + 'static,
 {
+    let want_archived = query.archived.unwrap_or(false);
     let stores = state
         .data_service
         .get_stores_for_user(user.id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(stores.into_iter().map(store_response).collect()))
+    Ok(Json(
+        stores
+            .into_iter()
+            .filter(|s| s.archived == want_archived)
+            .map(store_response)
+            .collect(),
+    ))
 }
 
 /// Create a new store.
@@ -284,6 +304,56 @@ where
         .archive_store(StoreId(store_id))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Unarchive a store.
+///
+/// Same permission as archiving: only the store owner. Idempotent - an
+/// already-live store is a no-op success.
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/unarchive",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID")
+    ),
+    responses(
+        (status = 204, description = "Store is no longer archived"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Only store owner can unarchive"),
+        (status = 404, description = "Store not found"),
+    )
+)]
+pub async fn unarchive_store<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(store_id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let mut store = state
+        .data_service
+        .get_store(StoreId(store_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if store.owner_id != user.id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    if store.archived {
+        store.archived = false;
+        state
+            .data_service
+            .update_store(&store)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

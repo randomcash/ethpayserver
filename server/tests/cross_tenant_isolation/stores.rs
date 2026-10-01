@@ -58,10 +58,13 @@ async fn list_stores_never_includes_another_tenants_store() {
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
 
-    let result =
-        server::api::stores::list_stores(AuthenticatedUser(user_info(a.user_id)), State(state))
-            .await
-            .expect("listing one's own stores must succeed");
+    let result = server::api::stores::list_stores(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state),
+        Default::default(),
+    )
+    .await
+    .expect("listing one's own stores must succeed");
 
     let ids: Vec<Uuid> = result.iter().map(|s| s.id).collect();
     assert!(ids.contains(&a.store.id.0), "A's own store must be listed");

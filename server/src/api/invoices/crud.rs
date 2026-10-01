@@ -36,6 +36,7 @@ use super::{
         (status = 400, description = "Invalid request or no payment methods configured"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
+        (status = 409, description = "Store is archived"),
     )
 )]
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // validation + payment-option setup is one logical flow
@@ -69,6 +70,27 @@ where
             "forbidden",
             "Insufficient permissions to create invoices for this store",
         ));
+    }
+
+    // An archived store takes no new invoices. Invoices it already has are
+    // untouched: they stay watched, credited and settled, so archiving never
+    // strands money already owed.
+    match auth::StoreRepository::get_store(&*state.data_service, store_id).await {
+        Ok(Some(store)) if store.archived => {
+            return Err(invoice_error(
+                StatusCode::CONFLICT,
+                "store_archived",
+                "This store is archived and cannot take new invoices. Unarchive it first.",
+            ));
+        }
+        Ok(_) => {}
+        Err(_) => {
+            return Err(invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to load store",
+            ));
+        }
     }
 
     // A plugin (host capability 2) may refuse invoice creation - e.g. to
