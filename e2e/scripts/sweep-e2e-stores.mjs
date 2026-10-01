@@ -1,45 +1,34 @@
 #!/usr/bin/env node
 /**
- * Remove the stores the synthetic-payment test left behind.
+ * Archive the stores the e2e runs left behind.
  *
- * The spec creates `e2e-synthetic-<timestamp>` on every scheduled run and for
- * a long time deleted none of them — testnet gained one per day. The fix in
- * `tests/synthetic-payment.spec.ts` stops the bleeding; this clears what had
- * already piled up, and mops up after any run that dies before its cleanup hook.
+ * The synthetic-payment spec and the full e2e suite create stores on every run
+ * and for a long time removed none of them. This archives them: out of
+ * `GET /stores`, closed to new invoices, but the row and its payment history
+ * stay, and `POST /stores/{id}/unarchive` brings one back. Like BTCPay, nothing
+ * here destroys history.
  *
  *   E2E_API_URL=https://testnet.random.cash E2E_REMOTE=true \
  *   E2E_API_TOKEN=ak_... node scripts/sweep-e2e-stores.mjs [--execute]
  *
- * Dry run by default: it lists what it would remove and changes nothing. Only
- * `--execute` issues deletes, because this runs against a live server and the
- * rows are real.
+ * Dry run by default: it lists what it would archive and changes nothing. Only
+ * `--execute` archives, because this runs against a live server. `--execute`
+ * refuses any host other than testnet.random.cash or localhost unless `--force`.
  *
- * Two things worth knowing before reading the output:
- *
- * - `GET /stores` returns only the stores the token's own user can see, so this
- *   can never reach another account's stores however wrong the pattern goes.
- * - This calls `DELETE /admin/stores/{id}` — `hard_delete_store` in
- *   `server/src/api/admin/mod.rs` — not the self-service `DELETE /stores/{id}`,
- *   which only archives. The admin route actually removes the row, its
- *   invoices and its payments, which is the point: an archived store is still
- *   a row the daily count keeps growing by. `E2E_API_TOKEN` must be a
- *   `server_admin` token for this to work, same requirement as
- *   `sweep-e2e-accounts.mjs`. The endpoint independently refuses any store
- *   whose name is not this exact `e2e-synthetic-<ISO timestamp>` shape, so a
- *   loose pattern here can widen what this script *lists* but never what it
- *   can actually delete.
+ * - `GET /stores` returns only the live stores the token's own user can see, so
+ *   this can never reach another account's stores, and an already-archived
+ *   store is not listed again.
+ * - It calls the self-service `DELETE /stores/{id}`, which archives, so any
+ *   token able to manage the store works; no admin token is needed. Because
+ *   archiving is reversible the old exact-timestamp gate is gone: every store
+ *   named `e2e-...` is swept. A store without that prefix is never touched.
+ * - It does not call `DELETE /admin/stores/{id}` (a hard delete, still gated to
+ *   the synthetic name shape on the server). That is the escape hatch, not
+ *   this script's job.
  */
 
-/**
- * Anchored, and deliberately tighter than the `e2e-synthetic-%` the ticket
- * describes: the suffix must be the exact ISO stamp the spec builds
- * (`new Date().toISOString().replace(/[:.]/g, '-')`, e.g.
- * `2026-08-27T17-29-33-596Z`). A prefix match alone would take a store someone
- * named `e2e-synthetic-scratch` by hand, and this deletes on a live server.
- */
-const SYNTHETIC_STORE_NAME = /^e2e-synthetic-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
-/** Reported separately rather than swept: close enough to be worth a human look. */
-const NEAR_MISS_PREFIX = 'e2e-synthetic-';
+/** Everything the e2e specs name: `e2e-synthetic-<stamp>`, hand-made `e2e-scratch`, and so on. */
+const E2E_STORE_PREFIX = 'e2e-';
 
 function requireEnv(name, why) {
   const v = process.env[name];
@@ -50,15 +39,24 @@ function requireEnv(name, why) {
   return v;
 }
 
-const execute = process.argv.slice(2).includes('--execute');
+const argv = process.argv.slice(2);
+const execute = argv.includes('--execute');
+const force = argv.includes('--force');
 
 const apiUrl = requireEnv(
   'E2E_API_URL',
   'the server to sweep, e.g. https://testnet.random.cash',
 ).replace(/\/$/, '');
+// Archiving closes a store to new invoices, so pointing --execute at mainnet
+// with a real merchant's key could silence a live store whose name happens to
+// start with `e2e-`. Refuse anything that is not testnet or local unless forced.
+if (execute && !force && !/^https?:\/\/(testnet\.random\.cash|localhost|127\.0\.0\.1)(:\d+)?(\/|$)/.test(apiUrl)) {
+  console.error(`refusing to --execute against ${apiUrl}: not testnet or local. Pass --force if you mean it.`);
+  process.exit(1);
+}
 const token = requireEnv(
   'E2E_API_TOKEN',
-  'server_admin API key (ak_...) — hard-deleting a store is an admin action',
+  'API key (ak_...) for the account that owns the stores — archiving is owner-only',
 );
 // Same rule as fixtures/api.ts: the deployed client's nginx proxies /api/ to the
 // backend and strips the prefix, so a remote base URL needs it and a direct one
@@ -82,45 +80,32 @@ async function api(path, method = 'GET') {
 }
 
 console.log(`sweeping ${apiUrl}${prefix}`);
-console.log(execute ? 'MODE: execute\n' : 'MODE: dry run (pass --execute to delete)\n');
+console.log(execute ? 'MODE: execute\n' : 'MODE: dry run (pass --execute to archive)\n');
 
-const stores = await api('/stores?include_archived=true');
+const stores = await api('/stores');
 
-// Every matching store is residue, archived or not — an archive from a run
-// before this script hard-deleted is exactly the pile this backfill exists
-// to clear, not something to treat as already handled.
-const matched = stores.filter((s) => SYNTHETIC_STORE_NAME.test(s.name));
-const nearMisses = stores.filter(
-  (s) => !SYNTHETIC_STORE_NAME.test(s.name) && s.name.startsWith(NEAR_MISS_PREFIX),
-);
+const matched = stores.filter((s) => s.name.startsWith(E2E_STORE_PREFIX));
 
 for (const store of matched) {
-  console.log(`  ${execute ? 'delete' : 'would delete'}  ${store.id}  ${store.name}`);
+  console.log(`  ${execute ? 'archive' : 'would archive'}  ${store.id}  ${store.name}`);
 }
 
 let failed = 0;
 if (execute) {
   for (const store of matched) {
     try {
-      await api(`/admin/stores/${store.id}`, 'DELETE');
+      await api(`/stores/${store.id}`, 'DELETE');
     } catch (err) {
-      // Keep going and fail at the end: one 403/409 must not strand the rest.
+      // Keep going and fail at the end: one 403 must not strand the rest.
       console.error(`  FAILED  ${store.id}  ${store.name} — ${err.message}`);
       failed++;
     }
   }
 }
 
-console.log(`\n${stores.length} store(s) visible to this token, ${matched.length} matching ${SYNTHETIC_STORE_NAME}.`);
-if (nearMisses.length > 0) {
-  console.log(
-    `\n${nearMisses.length} store(s) start with "${NEAR_MISS_PREFIX}" but do not match the ` +
-      `timestamp shape and were left alone — check them by hand:`,
-  );
-  for (const s of nearMisses) console.log(`  skipped  ${s.id}  ${s.name}`);
-}
-if (!execute && matched.length > 0) console.log('\nRe-run with --execute to delete.');
+console.log(`\n${stores.length} live store(s) visible to this token, ${matched.length} named "${E2E_STORE_PREFIX}*".`);
+if (!execute && matched.length > 0) console.log('\nRe-run with --execute to archive.');
 if (failed > 0) {
-  console.error(`\n${failed} deletion(s) failed.`);
+  console.error(`\n${failed} archive(s) failed.`);
   process.exit(1);
 }

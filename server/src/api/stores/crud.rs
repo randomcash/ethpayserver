@@ -37,15 +37,15 @@ pub(crate) fn store_response(store: Store) -> StoreResponse {
 /// Query for `GET /stores`.
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 pub struct ListStoresQuery {
-    /// Include archived stores. Off by default: an archived store is retired,
-    /// not destroyed, and should not crowd the working list.
+    /// List only archived stores. Off by default: an archived store is
+    /// retired, not destroyed, and should not crowd the working list.
     #[serde(default)]
-    pub include_archived: bool,
+    pub archived: bool,
 }
 
 /// List stores for the authenticated user.
 ///
-/// Archived stores are left out unless `include_archived=true`.
+/// Archived stores are left out; `archived=true` returns only them.
 #[utoipa::path(
     get,
     path = "/stores",
@@ -74,7 +74,7 @@ where
     Ok(Json(
         stores
             .into_iter()
-            .filter(|s| query.include_archived || !s.archived)
+            .filter(|s| s.archived == query.archived)
             .map(store_response)
             .collect(),
     ))
