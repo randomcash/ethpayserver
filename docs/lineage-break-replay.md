@@ -73,7 +73,7 @@ reading the chain again can.
   token match, so it cannot attribute a transfer to another invoice; it then
   goes through the same credited-amount path as an active watch. Replay
   idempotence is expected to come from the payment upsert described below
-  (`reapplying_the_same_detection_credits_once` covers the in-memory store's dedup on `(chain, tx_hash, tx_index)`, which mirrors the Postgres upsert but does not prove it; the Postgres upsert itself is covered by the ignored
+  (no consumer-level test claims this: the in-memory data service dedups on its own, so a test against it would prove only the mock. The Postgres upsert is covered by the ignored
   integration test
   `integration_redelivered_payment_reuses_the_original_row_id_and_does_not_duplicate_the_obligation`,
   which asserts one row and one credit). Status effects
