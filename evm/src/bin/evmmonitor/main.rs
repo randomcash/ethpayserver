@@ -56,13 +56,13 @@ use clap::Parser;
 use data_service::RedisDataService;
 use evm::error::EvmResult;
 use evm::monitor::bridge::{EventBridge, RedisBridge};
-use evm::monitor::startup::{STARTUP_ATTEMPTS, STARTUP_INITIAL_DELAY, retry_startup};
+use evm::monitor::startup::{STARTUP_ATTEMPTS, STARTUP_INITIAL_DELAY, build_monitors};
 use evm::monitor::{
     CoordinatorConfig, EventHandler, LoggingHandler, MonitorCoordinator, MonitorEvent,
 };
 use secrecy::ExposeSecret;
 use tokio::signal;
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use chain::create_chain_monitor;
@@ -186,31 +186,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Add chain monitors
     let monitored_chain_ids: Vec<u64> = chain_configs.iter().map(|c| c.chain_id).collect();
-    for chain_config in &chain_configs {
-        // A monitor that failed to build is not a degraded mode: the process
-        // would stay up, report nothing, and detect no payments on that chain.
-        // Retry briefly for a transient RPC failure, then exit non-zero so the
-        // supervisor restarts us and the failure is visible.
-        let monitor = retry_startup(
-            "create chain monitor",
-            STARTUP_ATTEMPTS,
-            STARTUP_INITIAL_DELAY,
-            || create_chain_monitor(chain_config),
-        )
-        .await
-        .map_err(|e| {
-            error!(
-                chain_id = chain_config.chain_id,
-                error = %e,
-                "failed to create chain monitor"
-            );
-            anyhow::anyhow!(
-                "failed to create chain monitor for chain {}: {e}",
-                chain_config.chain_id
-            )
-        })?;
+    // A monitor that failed to build is not a degraded mode: the process would
+    // stay up, report nothing, and detect no payments on that chain. Retry
+    // briefly for a transient RPC failure, then exit non-zero so the
+    // supervisor restarts us and the failure is visible.
+    let monitors = build_monitors(
+        &monitored_chain_ids,
+        STARTUP_ATTEMPTS,
+        STARTUP_INITIAL_DELAY,
+        |chain_id| {
+            let chain_config = chain_configs
+                .iter()
+                .find(|c| c.chain_id == chain_id)
+                .expect("chain id comes from chain_configs");
+            create_chain_monitor(chain_config)
+        },
+    )
+    .await?;
+    for (chain_id, monitor) in monitors {
         coordinator.add_chain(monitor).await?;
-        info!(chain_id = chain_config.chain_id, "chain monitor started");
+        info!(chain_id, "chain monitor started");
     }
 
     // Restore watched addresses from Redis persistence
