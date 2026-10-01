@@ -289,7 +289,7 @@ E2E_TEST_MNEMONIC="..." E2E_API_TOKEN=ak_... E2E_SEPOLIA_RPC_URL=https://... \
 |----------------------------|----------|--------------------------------------------------------------------|
 | `E2E_SYNTHETIC_PAYMENT`    | yes      | `true` to run the spec at all                                      |
 | `E2E_TEST_MNEMONIC`        | yes      | BIP39 phrase — merchant xpub **and** the spending wallet           |
-| `E2E_API_TOKEN`            | yes      | `server_admin` API key (`ak_...`) — creates the store and hard-deletes it afterward |
+| `E2E_API_TOKEN`            | yes      | `server_admin` API key (`ak_...`) — creates the store and archives it afterward |
 | `E2E_SEPOLIA_RPC_URL`      | yes      | Sepolia RPC endpoint used to broadcast                             |
 | `E2E_WEBHOOK_PUBLIC_URL`   | no       | Skip the cloudflared quick tunnel and use this base URL instead    |
 | `E2E_WEBHOOK_PORT`         | no       | Bind the sink to a fixed port (pairs with the above)               |

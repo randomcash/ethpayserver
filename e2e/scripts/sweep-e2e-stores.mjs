@@ -84,7 +84,7 @@ async function api(path, method = 'GET') {
 console.log(`sweeping ${apiUrl}${prefix}`);
 console.log(execute ? 'MODE: execute\n' : 'MODE: dry run (pass --execute to delete)\n');
 
-const stores = await api('/stores');
+const stores = await api('/stores?include_archived=true');
 
 // Every matching store is residue, archived or not — an archive from a run
 // before this script hard-deleted is exactly the pile this backfill exists
