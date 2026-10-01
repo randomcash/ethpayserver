@@ -86,6 +86,29 @@ where
     Ok(monitors)
 }
 
+/// Build every chain's monitor, then hand each to `register` (in `main`, the
+/// coordinator's `add_chain`). This is the whole startup step `main` runs, so a
+/// failure anywhere in it comes back as an `Err` for `main` to propagate and
+/// nothing is registered unless every chain built.
+pub async fn start_monitors<M, F, Fut, R, RFut>(
+    chain_ids: &[u64],
+    attempts: u32,
+    initial_delay: Duration,
+    create: F,
+    mut register: R,
+) -> EvmResult<()>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = EvmResult<M>>,
+    R: FnMut(u64, M) -> RFut,
+    RFut: Future<Output = EvmResult<()>>,
+{
+    for (chain_id, monitor) in build_monitors(chain_ids, attempts, initial_delay, create).await? {
+        register(chain_id, monitor).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +186,51 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out, vec![(1, 1), (2, 2)]);
+    }
+
+    /// The decision `main` acts on: when any chain cannot be built, startup
+    /// returns `Err` and registers no monitor at all (a half-blind process
+    /// must not run). The old behaviour - log, skip the chain, return `Ok` -
+    /// fails both assertions.
+    #[tokio::test(start_paused = true)]
+    async fn start_monitors_errs_and_registers_nothing_when_a_chain_fails() {
+        let registered = std::sync::Mutex::new(Vec::new());
+        let out = start_monitors(
+            &[1, 11155111],
+            3,
+            Duration::from_secs(1),
+            |id| async move {
+                if id == 11155111 {
+                    Err(EvmError::Monitor("failed to get chain ID".into()))
+                } else {
+                    Ok(id)
+                }
+            },
+            |id, _m| {
+                registered.lock().unwrap().push(id);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert!(out.is_err());
+        assert!(registered.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn start_monitors_registers_every_chain_on_success() {
+        let registered = std::sync::Mutex::new(Vec::new());
+        start_monitors(
+            &[1, 2],
+            3,
+            Duration::from_secs(1),
+            |id| async move { Ok(id) },
+            |id, _m| {
+                registered.lock().unwrap().push(id);
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*registered.lock().unwrap(), vec![1, 2]);
     }
 }

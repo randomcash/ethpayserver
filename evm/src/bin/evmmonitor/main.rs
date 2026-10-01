@@ -56,7 +56,7 @@ use clap::Parser;
 use data_service::RedisDataService;
 use evm::error::EvmResult;
 use evm::monitor::bridge::{EventBridge, RedisBridge};
-use evm::monitor::startup::{STARTUP_ATTEMPTS, STARTUP_INITIAL_DELAY, build_monitors};
+use evm::monitor::startup::{STARTUP_ATTEMPTS, STARTUP_INITIAL_DELAY, start_monitors};
 use evm::monitor::{
     CoordinatorConfig, EventHandler, LoggingHandler, MonitorCoordinator, MonitorEvent,
 };
@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
     // stay up, report nothing, and detect no payments on that chain. Retry
     // briefly for a transient RPC failure, then exit non-zero so the
     // supervisor restarts us and the failure is visible.
-    let monitors = build_monitors(
+    start_monitors(
         &monitored_chain_ids,
         STARTUP_ATTEMPTS,
         STARTUP_INITIAL_DELAY,
@@ -201,12 +201,16 @@ async fn main() -> anyhow::Result<()> {
                 .expect("chain id comes from chain_configs");
             create_chain_monitor(chain_config)
         },
+        |chain_id, monitor| {
+            let coordinator = coordinator.clone();
+            async move {
+                coordinator.add_chain(monitor).await?;
+                info!(chain_id, "chain monitor started");
+                Ok(())
+            }
+        },
     )
     .await?;
-    for (chain_id, monitor) in monitors {
-        coordinator.add_chain(monitor).await?;
-        info!(chain_id, "chain monitor started");
-    }
 
     // Restore watched addresses from Redis persistence
     restore_watched_addresses(&coordinator, &persistence, &monitored_chain_ids).await;
