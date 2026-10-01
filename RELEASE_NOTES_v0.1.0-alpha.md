@@ -21,9 +21,9 @@ invoice created over the API
   → signed webhook delivered
 ```
 
-That runs nightly against `testnet.random.cash` with a healthchecks.io
-dead-man's switch behind it, and it is the reason this release exists. Before it,
-nothing proved the deployed system could take a payment.
+That runs nightly against `testnet.random.cash` with a dead-man's switch behind
+it (healthchecks.io at the time of this release; now a Sentry cron monitor), and
+it is the reason this release exists. Before it, nothing proved the deployed system could take a payment.
 
 ## Highlights
 

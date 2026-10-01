@@ -67,7 +67,7 @@ jobs:
       # 429s (see e2e/README.md).
       #
       # Running the full suite here would fail from the first scheduled run,
-      # ping healthchecks /fail every morning and file a testnet-is-failing
+      # fail the Sentry cron monitor every morning and file a testnet-is-failing
       # issue daily — desensitising the dead-man's switch before it ever
       # carries signal. Widen this list only as specs are made remote-capable.
       - name: Run E2E suite
