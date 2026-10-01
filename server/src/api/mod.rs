@@ -43,7 +43,8 @@ pub mod webhook_deliveries;
 pub mod ws;
 
 pub use extractors::{
-    AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser, StoreScopedUser,
+    AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser, MerchantReader,
+    StoreScopedUser,
 };
 pub use openapi::ApiDoc;
 
@@ -315,6 +316,7 @@ where
         .route("/users", get(admin::list_users::<A>))
         .route("/users/{id}", delete(admin::delete_user_account::<A>))
         .route("/users/{id}/stores", get(admin::list_user_stores::<A>))
+        .route("/stores", get(admin::list_stores::<A>))
         .route("/stores/{id}", delete(admin::hard_delete_store::<A>))
         .route(
             "/users/{id}/role",

@@ -52,6 +52,11 @@ fn is_store_scope_entry(entry: &str) -> bool {
 /// the owner anyway, since enforcement always intersects the two (see
 /// `key_grants_store_permission`), so there is nothing here to launder.
 ///
+/// The one server policy accepted is `ethpay.server.canviewusers`, which
+/// `MerchantReader` enforces: read-only access to the merchant listing, and
+/// only for a key whose owner is a `ServerAdmin` at request time. Held by a
+/// non-admin's key it grants nothing.
+///
 /// This takes no role, because none of its answers depend on one. Every
 /// accepted form resolves against whoever owns the key rather than naming a
 /// power directly: `[]` and `["unrestricted"]` both mean "the owner's role in
@@ -76,7 +81,13 @@ pub(super) fn validate_requested_permissions(requested: &[String]) -> Result<(),
     match requested {
         [] => Ok(()),
         [single] if single == Permission::Unrestricted.as_policy() => Ok(()),
-        entries if entries.iter().all(|e| is_store_scope_entry(e)) => Ok(()),
+        entries
+            if entries
+                .iter()
+                .all(|e| is_store_scope_entry(e) || e == Policies::SERVER_VIEW_USERS) =>
+        {
+            Ok(())
+        }
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }
@@ -107,6 +118,23 @@ mod permission_scope_tests {
         // of the codebase cannot deliver.
         let named = vec![Permission::ServerManageTokens.as_policy().to_string()];
         assert!(validate_requested_permissions(&named).is_err());
+    }
+
+    #[test]
+    fn the_merchant_read_policy_is_accepted_alone_or_beside_store_permissions() {
+        let view = Permission::ServerViewUsers.as_policy().to_string();
+        assert!(validate_requested_permissions(std::slice::from_ref(&view)).is_ok());
+        let with_invoice = vec![view, Permission::StoreCreateInvoice.as_policy().to_string()];
+        assert!(validate_requested_permissions(&with_invoice).is_ok());
+    }
+
+    #[test]
+    fn the_merchant_read_policy_does_not_unlock_its_write_sibling() {
+        let manage = vec![
+            Permission::ServerViewUsers.as_policy().to_string(),
+            Permission::ServerManageUsers.as_policy().to_string(),
+        ];
+        assert!(validate_requested_permissions(&manage).is_err());
     }
 
     #[test]

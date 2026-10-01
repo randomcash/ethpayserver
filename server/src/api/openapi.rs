@@ -81,6 +81,7 @@ use super::{admin, dashboard, health, invoices, plugins, rates, stores, users};
         users::wallets::set_primary_wallet_credential,
         // Admin
         admin::list_users,
+        admin::list_stores,
         admin::deletion::account::list_user_stores,
         admin::deletion::account::delete_user_account,
         admin::deletion::store::hard_delete_store,
@@ -154,6 +155,7 @@ use super::{admin, dashboard, health, invoices, plugins, rates, stores, users};
         users::WalletReauthChallengeResponse,
         users::PromoteWalletCredentialRequest,
         admin::UserListResponse,
+        admin::MerchantStoreEntry,
         admin::AdminUserInfo,
         admin::UpdateRoleRequest,
         admin::ServerSettingsResponse,
