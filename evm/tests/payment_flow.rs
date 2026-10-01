@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use evm::monitor::{
-    ChainMonitor, ChainMonitorConfig, MockBlockSource, MonitorEvent, WatchedAddress, make_block,
-    make_block_with_parent, make_erc20_transfer_log, make_native_transfer,
+    BACKFILL_MAX_BLOCKS, ChainMonitor, ChainMonitorConfig, MockBlockSource, MonitorEvent,
+    WatchedAddress, make_block, make_block_with_parent, make_erc20_transfer_log,
+    make_native_transfer,
 };
 use evm::{Address, B256, U256};
 
@@ -1066,5 +1067,303 @@ async fn a_block_that_could_not_be_read_is_reported_rather_than_treated_as_empty
         reported,
         "a block read that failed was silently treated as a block with no payments. \
          Nothing re-reads it, so the payment inside it is gone with no trace."
+    );
+}
+
+// ============================================================================
+// Blocks skipped by a stream that went down and resubscribed
+// ============================================================================
+
+/// Watch one address, process block 100, then deliver block 103 with a
+/// payment sitting in block 101 or 102. With `stalled` the stream never
+/// delivered 101/102 (a resubscribe starts from the new head); without it they
+/// arrive normally, which is the control: that the payment is found there
+/// proves the fixture pays into a watched address, so a pass under a stall
+/// means the gap was read and not that anything is reported regardless.
+///
+/// Returns the payments detected as `(block_number, tx_hash)`.
+async fn payments_detected_across_a_stall(stalled: bool, erc20: bool) -> Vec<(u64, B256)> {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let token_contract = Address::random();
+    let sender = Address::random();
+    let amount = U256::from(1_000_000u64);
+    let tx_hash = B256::random();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: Some(amount),
+            token_contract: erc20.then_some(token_contract),
+            created_at: Utc::now(),
+        })
+        .await;
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    test_source.push_block(make_block(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The payment lands in block 101, inside what the stream skipped.
+    if erc20 {
+        test_source
+            .add_log(
+                101,
+                make_erc20_transfer_log(
+                    token_contract,
+                    sender,
+                    payment_address,
+                    amount,
+                    101,
+                    tx_hash,
+                    0,
+                ),
+            )
+            .await;
+    } else {
+        test_source
+            .add_native_transfer(
+                101,
+                make_native_transfer(sender, payment_address, amount, tx_hash),
+            )
+            .await;
+    }
+
+    if stalled {
+        // The chain has them; the subscription never delivered them.
+        test_source.set_block_hash(101, B256::random());
+        test_source.set_block_hash(102, B256::random());
+    } else {
+        test_source.push_block(make_block(101));
+        test_source.push_block(make_block(102));
+    }
+    test_source.push_block(make_block(103));
+
+    let mut detected = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(MonitorEvent::PaymentDetected(p))) =
+            tokio::time::timeout(Duration::from_millis(200), event_rx.recv()).await
+        {
+            detected.push((p.block_number, p.tx_hash));
+        }
+    }
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+    detected
+}
+
+/// Nothing backfilled the blocks a resubscribe skipped: the cursor moved to
+/// the new head and a payment in the gap was never credited.
+#[tokio::test]
+async fn test_native_payment_in_a_stalled_gap_is_detected() {
+    let control = payments_detected_across_a_stall(false, false).await;
+    assert!(
+        control.len() == 1 && control[0].0 == 101,
+        "control (no gap) must detect the payment exactly once, got {control:?}"
+    );
+
+    let detected = payments_detected_across_a_stall(true, false).await;
+    assert_eq!(
+        detected.len(),
+        1,
+        "a native payment in blocks the stream skipped must still be detected, got {detected:?}"
+    );
+    assert_eq!(detected[0].0, 101, "credited against the block it was in");
+}
+
+#[tokio::test]
+async fn test_erc20_payment_in_a_stalled_gap_is_detected() {
+    let control = payments_detected_across_a_stall(false, true).await;
+    assert!(
+        control.len() == 1 && control[0].0 == 101,
+        "control (no gap) must detect the payment exactly once, got {control:?}"
+    );
+
+    let detected = payments_detected_across_a_stall(true, true).await;
+    assert_eq!(
+        detected.len(),
+        1,
+        "an ERC20 payment in blocks the stream skipped must still be detected, got {detected:?}"
+    );
+    assert_eq!(detected[0].0, 101, "credited against the block it was in");
+}
+
+/// A backfill that fails part-way is retried from the same height on the next
+/// block. Payments the failed attempt had already read must not be announced
+/// again by the retry: block 102 cannot be named, so the scan fails after
+/// reading 101, and it fails again on the next block before finally succeeding.
+#[tokio::test]
+async fn test_failed_backfill_retry_reports_a_payment_once() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let amount = U256::from(1_000_000u64);
+    let tx_hash = B256::random();
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: Some(amount),
+            token_contract: None,
+            created_at: Utc::now(),
+        })
+        .await;
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    test_source.push_block(make_block(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    test_source
+        .add_native_transfer(
+            101,
+            make_native_transfer(sender, payment_address, amount, tx_hash),
+        )
+        .await;
+    // 101 is readable; 102 is not, so every backfill attempt fails after 101.
+    test_source.set_block_hash(101, B256::random());
+    test_source.push_block(make_block(103));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    test_source.push_block(make_block(104));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    test_source.set_block_hash(102, B256::random());
+    test_source.push_block(make_block(105));
+
+    let mut detected = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(MonitorEvent::PaymentDetected(p))) =
+            tokio::time::timeout(Duration::from_millis(200), event_rx.recv()).await
+        {
+            detected.push((p.block_number, p.tx_hash));
+        }
+    }
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+
+    assert_eq!(
+        detected,
+        vec![(101, tx_hash)],
+        "a payment read by a backfill attempt that then failed must be reported once, \
+         when the range finally succeeds"
+    );
+}
+
+/// A stall longer than one backfill chunk: the payment sits beyond the first
+/// chunk, each arrival scans at most one chunk, and the payment is reported
+/// once when the catch-up reaches it.
+#[tokio::test]
+async fn test_backfill_of_a_long_stall_is_bounded_and_still_finds_the_payment() {
+    let source = MockBlockSource::new(TEST_CHAIN_ID);
+    let test_source = source.clone();
+
+    let payment_address = Address::random();
+    let sender = Address::random();
+    let amount = U256::from(1_000_000u64);
+    let tx_hash = B256::random();
+    let cap = BACKFILL_MAX_BLOCKS;
+    // Gap of three chunks; the payment is in the second.
+    let head = 100 + 3 * cap + 1;
+    let payment_block = 100 + cap + 5;
+
+    let monitor = Arc::new(ChainMonitor::new(
+        test_chain_config(),
+        source,
+        test_monitor_config(3),
+    ));
+    monitor
+        .watch(WatchedAddress {
+            address: payment_address,
+            invoice_id: uuid::Uuid::new_v4(),
+            expected_amount: Some(amount),
+            token_contract: None,
+            created_at: Utc::now(),
+        })
+        .await;
+
+    let mut event_rx = monitor.subscribe();
+    let monitor_clone = monitor.clone();
+    let monitor_handle = tokio::spawn(async move { monitor_clone.start().await });
+    let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await;
+
+    test_source.push_block(make_block(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    test_source
+        .add_native_transfer(
+            payment_block,
+            make_native_transfer(sender, payment_address, amount, tx_hash),
+        )
+        .await;
+    for n in 101..head {
+        test_source.set_block_hash(n, B256::random());
+    }
+    test_source.reset_call_counts();
+    test_source.push_block(make_block(head));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // One arrival read one chunk and nothing beyond it, and the payment in a
+    // later chunk is not reported yet.
+    let scanned = test_source.call_count("find_native_transfers_to");
+    assert!(
+        scanned <= cap,
+        "one block must scan at most {cap} blocks, scanned {scanned}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), event_rx.recv())
+            .await
+            .is_err(),
+        "the payment is beyond the first chunk and cannot be known yet"
+    );
+
+    // Following blocks continue from where the cursor stopped.
+    for n in head + 1..=head + 4 {
+        test_source.push_block(make_block(n));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let mut detected = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(MonitorEvent::PaymentDetected(p))) =
+            tokio::time::timeout(Duration::from_millis(200), event_rx.recv()).await
+        {
+            detected.push((p.block_number, p.tx_hash));
+        }
+    }
+
+    monitor.stop().await.unwrap();
+    let _ = monitor_handle.await;
+
+    assert_eq!(
+        detected,
+        vec![(payment_block, tx_hash)],
+        "the payment must be detected exactly once after the catch-up reaches it"
     );
 }
