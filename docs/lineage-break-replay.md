@@ -79,7 +79,9 @@ reading the chain again can.
   and `erc20_payment_to_an_expired_watch_is_credited` in
   `server/src/services/event_consumer/tests/payment_detected.rs` (landed as
   #310; both deactivate the watch first, and both go red with the fallback
-  removed, the ERC-20 one asserting `credited_amount`). The address and token
+  removed, the ERC-20 one asserting `credited_amount`; both store the option's
+  address checksum-cased and the token upper-cased, so an exact-match
+  comparison of either turns them red). The address and token
   comparison is case-insensitive, which is sound only because every chain the
   server enables today uses hex EVM addresses; a chain with case-sensitive
   addresses would need an exact comparison here. What the fallback is bounded by: it only looks at the payment options
@@ -97,7 +99,9 @@ reading the chain again can.
   invoice keeps its status, and a partial payment counts toward
   `amount_received` without changing status. Replaying rescanned transfers
   through the normal outbox therefore credits the expired-watch case, so the
-  replay design does not need a separate inactive-watch lookup.
+  apply path no longer needs a separate inactive-watch lookup. That says
+  nothing about the rescan itself, which still has to find transfers to
+  addresses whose watches have expired (items 1 and 2 above).
 - **A replay must emit the detection before the confirmation.**
   `handle_payment_confirmed` looks the payment up by
   `(invoice_id, tx_hash, tx_index)` and, when no row exists, logs at debug and
