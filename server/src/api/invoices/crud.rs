@@ -84,7 +84,8 @@ where
             ));
         }
         Ok(_) => {}
-        Err(_) => {
+        Err(e) => {
+            tracing::error!(error = %e, %store_id, "failed to load store for invoice creation");
             return Err(invoice_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",

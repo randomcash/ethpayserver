@@ -339,7 +339,10 @@ where
         .data_service
         .get_store(StoreId(store_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            tracing::error!(error = %e, %store_id, "failed to load store for unarchive");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     if store.owner_id != user.id {
@@ -348,11 +351,10 @@ where
 
     if store.archived {
         store.archived = false;
-        state
-            .data_service
-            .update_store(&store)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        state.data_service.update_store(&store).await.map_err(|e| {
+            tracing::error!(error = %e, %store_id, "failed to unarchive store");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     }
 
     Ok(StatusCode::NO_CONTENT)
