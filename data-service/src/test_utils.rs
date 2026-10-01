@@ -238,7 +238,7 @@ impl InvoiceReader for InMemoryDataService {
             .collect();
 
         let total = results.len() as i64;
-        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        results.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         let offset = params.offset as usize;
         let limit = params.limit as usize;
@@ -408,7 +408,7 @@ impl PaymentReader for InMemoryDataService {
             .cloned()
             .collect();
 
-        filtered.sort_by(|a, b| b.detected_at.cmp(&a.detected_at));
+        filtered.sort_by_key(|b| std::cmp::Reverse(b.detected_at));
         let total = filtered.len() as i64;
         let offset = params.offset as usize;
         let limit = params.limit as usize;

@@ -25,11 +25,10 @@ ignore = [
     # (`call_ref`) nor `wasm_exceptions` (`catch`), and wasmtime defaults them
     # off.
     #
-    # REVISIT IF THE HOST EVER ENABLES FUEL. The real fix is a wasmtime bump,
-    # which cannot happen here: the dependency comes from commons, and
-    # wasmtime >=48 needs Rust 1.95 while rust-toolchain.toml pins 1.94.1. So
-    # it is a commons change, a toolchain bump and a pin bump, tracked
-    # separately.
+    # REVISIT IF THE HOST EVER ENABLES FUEL. The real fix is a wasmtime bump
+    # (>=48.0.3) in commons' plugin host. The toolchain is already on 1.95;
+    # what remains is the commons `rev` bump here once the commons change has
+    # merged, after which both ignores come out.
     "RUSTSEC-2026-0315", # wasmtime fuel accounting — fuel metering is not enabled
     "RUSTSEC-2026-0316", # wasmtime fuel accounting — fuel metering is not enabled
 ]
