@@ -80,8 +80,9 @@ reading the chain again can.
   `server/src/services/event_consumer/tests/payment_detected.rs` (landed as
   #310; both deactivate the watch first, and both go red with the fallback
   removed, the ERC-20 one asserting `credited_amount`; both store the option's
-  address checksum-cased and the token upper-cased, so an exact-match
-  comparison of either turns them red). The address and token
+  address checksum-cased, so an exact address comparison turns both red; only
+  the ERC-20 one stores a token, upper-cased, so an exact token comparison
+  turns that one red and leaves the native-asset test green). The address and token
   comparison is case-insensitive, which is sound only because every chain the
   server enables today uses hex EVM addresses; a chain with case-sensitive
   addresses would need an exact comparison here. What the fallback is bounded by: it only looks at the payment options
