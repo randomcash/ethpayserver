@@ -534,7 +534,7 @@ async fn an_invoice_on_an_archived_store_is_still_watched_and_settles() {
         panic!("consumer halted applying chain {chain} seq {seq}")
     }))
     .with_resume_failure_hook(Arc::new(|reason| panic!("consumer cannot continue: {reason}")));
-    let consumer_handle = tokio::spawn(async move { consumer.run().await });
+    let mut consumer_handle = tokio::spawn(async move { consumer.run().await });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     deliver_full_payment(&bridge, eip155, &invoice, payment_address).await;
@@ -548,6 +548,11 @@ async fn an_invoice_on_an_archived_store_is_still_watched_and_settles() {
             .status;
         if status == InvoiceStatus::Paid {
             break;
+        }
+        // A hook panic ends the task; surface its message instead of timing out.
+        if consumer_handle.is_finished() {
+            let outcome = (&mut consumer_handle).await;
+            panic!("consumer stopped before the invoice settled: {outcome:?}");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
