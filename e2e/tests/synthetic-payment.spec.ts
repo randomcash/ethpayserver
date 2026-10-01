@@ -195,9 +195,15 @@ async function expectRunSurvivedArchive(
   token: string,
 ): Promise<void> {
   if (records.length !== PAYMENT_COUNT) {
-    throw new Error(`expected ${PAYMENT_COUNT} paid invoices to verify, recorded ${records.length}`);
+    throw new Error(
+      `the run recorded ${records.length} paid invoices, expected ${PAYMENT_COUNT}; ` +
+        `the survival check has nothing to verify (the archive itself is not at fault)`,
+    );
   }
-  const store = await api<{ archived: boolean }>(`/stores/${storeId}`, { token });
+  const store = await api<{ archived: boolean; name: string }>(`/stores/${storeId}`, { token });
+  if (!store.name.startsWith('e2e-synthetic-')) {
+    throw new Error(`archived store ${storeId} is named '${store.name}', not an e2e-synthetic stamp`);
+  }
   if (!store.archived) throw new Error(`store ${storeId} is not archived after the archive call`);
   const listed = await api<{ id: string }[]>('/stores', { token });
   if (listed.some((s) => s.id === storeId)) {
@@ -364,8 +370,9 @@ test.describe('Synthetic payment (live testnet)', () => {
       return;
     } catch (err) {
       const msg =
-        `Failed to archive synthetic-payment store ${storeId}, or its payments did not ` +
-        `survive the archive: ${err}. If the store is still listed, archive it with ` +
+        `Synthetic-payment archive or survival check failed for store ${storeId}: ${err}. ` +
+        `If its payments are missing, suspect a hard delete or a cascade regression, not the ` +
+        `archive call. If the store is still listed, archive it with ` +
         `\`DELETE /stores/${storeId}\`; \`node scripts/sweep-e2e-stores.mjs --execute\` ` +
         `removes synthetic stores for good.`;
       console.log(`::error title=Synthetic payment archive or survival check failed::${msg}`);
