@@ -71,6 +71,27 @@ where
         ));
     }
 
+    // An archived store is retired: it keeps its history but takes no new
+    // invoices. Checked after the permission gate so a caller without access
+    // learns nothing about the store's state.
+    match auth::StoreRepository::get_store(&*state.data_service, store_id).await {
+        Ok(Some(store)) if store.archived => {
+            return Err(invoice_error(
+                StatusCode::CONFLICT,
+                "store_archived",
+                "This store is archived and cannot receive new invoices",
+            ));
+        }
+        Ok(_) => {}
+        Err(_) => {
+            return Err(invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to load store",
+            ));
+        }
+    }
+
     // A plugin (host capability 2) may refuse invoice creation - e.g. to
     // enforce a lapsed subscription. The merchant keeps every other
     // capability; only this endpoint is ever filtered.
