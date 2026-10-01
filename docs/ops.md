@@ -133,13 +133,15 @@ that figure will drift. The `*/5` cron therefore does not hold a 5-minute
 cadence.
 
 **Where the 5-minute cadence actually comes from.** Not from this workflow.
-The deploy repository defines a one-minute systemd timer that polls
-`/api/health/deep`, requires the same fields to be healthy (plus a
-flat-block check across polls), and reports success to a dead-man's switch,
-so a down service, a broken watcher and a dead box all surface as a late
-check-in. That is the alerting path for prompt outage detection. The timer's
+The deploy repository (`central-infrastructure`, private) defines a
+one-minute systemd timer that polls `/api/health/deep` and, per the script's
+own header as read when this was written (re-read it before relying on this),
+reports success to a dead-man's switch and treats a chain whose block has not
+advanced within `STALE_BLOCK_SECS` (default 600) as down, so a down service,
+a broken watcher and a dead box all surface as a late check-in. That is the
+intended path for prompt outage detection. The timer's
 unit and script are `systemd/rcs-health-watch@.timer` (`OnUnitActiveSec=1min`)
-and `scripts/health-watch.sh` in the private deploy repository, deliberately:
+and `scripts/health-watch.sh` in that repository, deliberately:
 they depend on host paths and credentials that must not be published here.
 Whether `rcs-health-watch@testnet.timer` is installed and enabled is
 **unverified from this repository**: enabling it is the deploy-repository
@@ -152,9 +154,14 @@ constantly, and one widened to match delivery cannot tell "testnet is down"
 from "GitHub skipped runs". Size the monitors' expected interval to hours and
 treat them as a backstop for the workflow itself, not as outage detection.
 Resizing the monitors is a manual Sentry change owned by the operator.
-`STALL_THRESHOLD` counts checks, not minutes, so it stretches the same way;
-the host timer's minutes-based stale-block check is the one that bounds
-stall time. The scheduled end-to-end workflow is subject to the same
+`STALL_THRESHOLD` counts checks, not minutes, so it stretches the same way.
+It is deliberately left at 3 rather than lowered: a lower value would
+false-flag a slow chain on the 5-minute cadence the workflow is nominally on,
+and at the delivered cadence of hours it cannot be made prompt anyway. A
+flat chain is therefore flagged here only after several delivered runs; the
+host timer's seconds-based stale-block check (if enabled) is what bounds
+stall time. The check-in needs no code change at this cadence: it fires once
+per delivered run, so the only adjustment is the monitor window in Sentry. The scheduled end-to-end workflow is subject to the same
 best-effort dispatch and is a separate problem, not addressed here. The two
 Sentry Cron Monitor URLs above have to be created by hand in Sentry (Crons →
 new monitor → "check in via HTTP") and the resulting URLs stored as repo
