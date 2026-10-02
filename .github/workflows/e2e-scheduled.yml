@@ -67,7 +67,7 @@ jobs:
       # 429s (see e2e/README.md).
       #
       # Running the full suite here would fail from the first scheduled run,
-      # ping healthchecks /fail every morning and file a testnet-is-failing
+      # fail the check-in every morning and file a testnet-is-failing
       # issue daily — desensitising the dead-man's switch before it ever
       # carries signal. Widen this list only as specs are made remote-capable.
       - name: Run E2E suite
@@ -145,9 +145,8 @@ jobs:
       # Silence — a box that never ran the workflow at all — is what actually
       # alerts, since Sentry pages on a cron that missed its expected window.
       # No-op if the secret is unset, so a fork or a fresh clone does not fail
-      # here. Was healthchecks.io; moved onto the Sentry cron monitor so
-      # alerting for this and the deep-health watchdog (health-monitor.yml)
-      # lives with one vendor instead of two.
+      # here. Alerting for this and the deep-health watchdog
+      # (health-monitor.yml) lives in one place.
       - name: Check in to Sentry cron monitor
         env:
           SENTRY_CRON_URL: ${{ secrets.SENTRY_CRON_E2E_URL }}
