@@ -756,6 +756,14 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
 
         // Sign payload with HMAC-SHA256
         let signature = self.sign_payload(&payload_json, &job.webhook_secret);
+        // Signed per attempt, so a retry carries a fresh send time and a captured
+        // request goes stale. Sent alongside the body-only header for receivers
+        // that have not moved over yet.
+        let timestamped_signature = super::sign_webhook_payload_timestamped(
+            &payload_json,
+            &job.webhook_secret,
+            Utc::now().timestamp(),
+        );
 
         // Send request
         let response = self
@@ -763,6 +771,7 @@ impl<D: WebhookDataService + 'static> WebhookService<D> {
             .post(&job.webhook_url)
             .header("Content-Type", "application/json")
             .header("X-Webhook-Signature", &signature)
+            .header("X-Webhook-Signature-Timestamped", &timestamped_signature)
             .header("X-Webhook-Event", job.payload.event_type.to_string())
             .header("X-Webhook-Id", job.payload.event_id.to_string())
             .header(

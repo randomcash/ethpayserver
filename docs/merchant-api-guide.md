@@ -712,6 +712,7 @@ If you credited any of those transactions, reverse the credit. There is no
 |--------|-------------|
 | `Content-Type` | `application/json` |
 | `X-Webhook-Signature` | `sha256=<hex>` HMAC-SHA256 of the JSON body |
+| `X-Webhook-Signature-Timestamped` | `t=<unix>,v1=<hex>`: HMAC-SHA256 of `<unix>.<body>`; `t` is this attempt's send time |
 | `X-Webhook-Event` | Event type (e.g., `payment_confirmed`) |
 | `X-Webhook-Id` | Identifier for this delivery |
 | `X-Webhook-Idempotency-Key` | Stable key for the logical event (dedupe on this) |
@@ -728,8 +729,22 @@ absent means "does not apply to this event".
 
 ### Verifying Signatures
 
-Compute an HMAC-SHA256 of the raw request body using your webhook secret, then
-compare with the `X-Webhook-Signature` header.
+Prefer `X-Webhook-Signature-Timestamped`. Parse `t` and `v1`, compute an
+HMAC-SHA256 of `"<t>.<raw body>"` with your webhook secret, compare it to `v1`
+in constant time, and reject the request if `|now - t|` exceeds **5 minutes**.
+`t` is set again on every delivery attempt, so retries are fresh while a
+captured request stops verifying once it is older than your tolerance. Keep
+your clock synced (NTP).
+
+`X-Webhook-Signature` (HMAC of the body alone) is still sent during a
+transition and will be removed later. It proves nothing about when the request
+was sent, so a receiver that accepts only it cannot reject a replay.
+
+The examples below verify the legacy header; the timestamped form differs only
+in the signed string.
+
+Legacy: compute an HMAC-SHA256 of the raw request body using your webhook
+secret, then compare with the `X-Webhook-Signature` header.
 
 **Python:**
 
