@@ -84,6 +84,25 @@ export async function promoteToServerAdmin(userId: string): Promise<void> {
   }
 }
 
+/** The stored role and lock of an account, for asserting what the UI really changed. */
+export async function readUserAccess(
+  userId: string,
+): Promise<{ role: string; locked: boolean }> {
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rows } = await client.query(
+      `SELECT role, (locked_until IS NOT NULL AND locked_until > NOW()) AS locked
+         FROM users WHERE id::text = $1`,
+      [userId],
+    );
+    if (rows.length !== 1) throw new Error(`expected one account, found ${rows.length}`);
+    return { role: rows[0].role as string, locked: rows[0].locked as boolean };
+  } finally {
+    await client.end();
+  }
+}
+
 /**
  * A user with an API key, created directly in the database.
  *
@@ -99,7 +118,7 @@ export async function promoteToServerAdmin(userId: string): Promise<void> {
  */
 export async function createUserWithApiKey(
   role: 'user' | 'server_admin' = 'user',
-): Promise<{ userId: string; apiKey: string }> {
+): Promise<{ userId: string; apiKey: string; email: string }> {
   const crypto = await import('node:crypto');
   // `ak_` because that is the shape `validate_api_key` looks for, and a key
   // that does not start with it fails for a reason that reads as "wrong
@@ -137,7 +156,7 @@ export async function createUserWithApiKey(
       `INSERT INTO users (email, kdf_params, encrypted_symmetric_key,
                           recovery_verification_hash, role)
        VALUES ($1, $2, $3, 'e2e-placeholder', $4)
-       RETURNING id`,
+       RETURNING id, email`,
       [
         `e2e-${crypto.randomBytes(6).toString('hex')}@example.test`,
         JSON.stringify({
@@ -156,6 +175,7 @@ export async function createUserWithApiKey(
       ],
     );
     const userId = rows[0].id as string;
+    const email = rows[0].email as string;
 
     // `id` is supplied, unlike for `users` above. The two tables differ:
     // `users.id` is `UUID PRIMARY KEY DEFAULT uuid_generate_v4()`, while
@@ -169,7 +189,7 @@ export async function createUserWithApiKey(
        VALUES ($1, $2, 'e2e', $3, $4, true)`,
       [crypto.randomUUID(), userId, keyHash, apiKey.slice(0, 12)],
     );
-    return { userId, apiKey };
+    return { userId, apiKey, email };
   } finally {
     await client.end();
   }
