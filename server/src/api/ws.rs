@@ -11,13 +11,20 @@ use axum::{
     },
     response::IntoResponse,
 };
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use auth::SessionService;
 
 use crate::state::PgAppState;
+
+/// Decides whether a session's user may see updates about an invoice.
+///
+/// Evaluated per update rather than once at connect, so a membership removed
+/// while the socket is open stops receiving that store's frames.
+pub type InvoiceVisibility =
+    std::sync::Arc<dyn Fn(auth::UserInfo, String) -> BoxFuture<'static, bool> + Send + Sync>;
 
 /// Client-to-server messages.
 #[derive(Debug, Deserialize)]
@@ -96,8 +103,34 @@ where
     };
     let rx = ws_broadcast.subscribe();
     let auth_service = state.auth_service.clone();
+    let data_service = state.data_service.clone();
+    let visibility: InvoiceVisibility = std::sync::Arc::new(move |user, invoice_id| {
+        let data_service = data_service.clone();
+        Box::pin(async move {
+            let Ok(Some(invoice)) = ::types::InvoiceReader::get(
+                &*data_service,
+                &::types::InvoiceId::from_string(invoice_id),
+            )
+            .await
+            else {
+                return false;
+            };
+            if user.role == auth::Role::ServerAdmin {
+                return true;
+            }
+            matches!(
+                auth::repository::UserStoreRepository::get_user_store(
+                    &*data_service,
+                    user.id,
+                    invoice.store_id
+                )
+                .await,
+                Ok(Some(_))
+            )
+        })
+    });
 
-    ws.on_upgrade(move |socket| handle_socket(socket, rx, auth_service))
+    ws.on_upgrade(move |socket| handle_socket(socket, rx, auth_service, visibility))
         .into_response()
 }
 
@@ -112,6 +145,7 @@ async fn handle_socket<A: SessionService>(
     socket: WebSocket,
     rx: broadcast::Receiver<StatusUpdate>,
     auth_service: std::sync::Arc<A>,
+    visibility: InvoiceVisibility,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -145,21 +179,30 @@ async fn handle_socket<A: SessionService>(
         }
     };
 
-    if auth_service.validate_session(session_id).await.is_err() {
+    let Ok((user, _session)) = auth_service.validate_session(session_id).await else {
         let _ = sender.close().await;
         return;
-    }
+    };
 
-    // Auth succeeded — hand off to the forwarding loop
-    handle_socket_forwarding(sender, receiver, rx).await;
+    // Auth succeeded — hand off to the forwarding loop, scoped to this user
+    let visible = move |invoice_id: String| visibility(user.clone(), invoice_id);
+    handle_socket_forwarding(sender, receiver, rx, visible).await;
 }
 
 /// Forward broadcast updates to an authenticated WebSocket client.
-async fn handle_socket_forwarding(
+///
+/// The broadcast carries every tenant's events, so a frame naming an invoice is
+/// forwarded only when `visible` says this client's user may see that invoice.
+/// An invoice that cannot be resolved is dropped, never forwarded.
+async fn handle_socket_forwarding<V, F>(
     mut sender: futures::stream::SplitSink<WebSocket, Message>,
     receiver: futures::stream::SplitStream<WebSocket>,
     mut rx: broadcast::Receiver<StatusUpdate>,
-) {
+    visible: V,
+) where
+    V: Fn(String) -> F + Send + 'static,
+    F: std::future::Future<Output = bool> + Send,
+{
     // Send connected acknowledgement. Serialising a unit-variant is infallible.
     #[allow(
         clippy::unwrap_used,
@@ -173,6 +216,17 @@ async fn handle_socket_forwarding(
     // Spawn a task to forward broadcast messages to the client
     let mut send_task = tokio::spawn(async move {
         while let Ok(update) = rx.recv().await {
+            let invoice_id = match &update {
+                StatusUpdate::InvoiceStatus { invoice_id, .. }
+                | StatusUpdate::PaymentUpdate { invoice_id, .. } => Some(invoice_id.clone()),
+                StatusUpdate::Ping => None,
+                StatusUpdate::Connected => continue,
+            };
+            if let Some(invoice_id) = invoice_id
+                && !visible(invoice_id).await
+            {
+                continue;
+            }
             let msg = match serde_json::to_string(&update) {
                 Ok(json) => json,
                 Err(_) => continue,
@@ -345,7 +399,9 @@ mod tests {
         let rx = bc.subscribe();
         ws.on_upgrade(move |socket| {
             let (sender, receiver) = socket.split();
-            handle_socket_forwarding(sender, receiver, rx)
+            handle_socket_forwarding(sender, receiver, rx, |id: String| async move {
+                id != "inv_hidden"
+            })
         })
     }
 
@@ -416,6 +472,48 @@ mod tests {
         assert!(
             matches!(update, StatusUpdate::InvoiceStatus { ref invoice_id, ref status }
                 if invoice_id == "inv_42" && status == "paid")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forwarding_drops_updates_the_user_cannot_see() {
+        let timeout = std::time::Duration::from_secs(5);
+        let (addr, broadcast) = spawn_test_ws_server().await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .expect("client connect failed");
+        tokio::time::timeout(timeout, ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        broadcast.send(StatusUpdate::InvoiceStatus {
+            invoice_id: "inv_hidden".to_string(),
+            status: "paid".to_string(),
+        });
+        broadcast.send(StatusUpdate::PaymentUpdate {
+            payment_id: "pay_1".to_string(),
+            invoice_id: "inv_hidden".to_string(),
+            status: "confirmed".to_string(),
+            amount: Some("1".to_string()),
+        });
+        broadcast.send(StatusUpdate::InvoiceStatus {
+            invoice_id: "inv_mine".to_string(),
+            status: "paid".to_string(),
+        });
+
+        // The first frame to arrive must be the visible one; the hidden
+        // frames were sent first, so leaking either would arrive before it.
+        let msg = tokio::time::timeout(timeout, ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let update: StatusUpdate = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert!(
+            matches!(update, StatusUpdate::InvoiceStatus { ref invoice_id, .. }
+            if invoice_id == "inv_mine")
         );
     }
 

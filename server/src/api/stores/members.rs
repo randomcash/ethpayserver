@@ -92,7 +92,7 @@ where
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
-        (status = 404, description = "Store or role not found"),
+        (status = 404, description = "Store or user not found"),
     )
 )]
 pub async fn add_store_member<A>(
@@ -132,6 +132,12 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::BAD_REQUEST)?;
+
+    // A nonexistent user is a client error, not a failed insert.
+    auth::UserRepository::get_user(&*state.data_service, UserId(req.user_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let user_store = UserStore::new(UserId(req.user_id), StoreId(store_id), role.id);
 
