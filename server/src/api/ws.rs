@@ -354,7 +354,8 @@ fn sync_listeners(
     broadcast: &WsBroadcast,
     entitlement: &Entitlement,
     listeners: &mut std::collections::HashMap<Topic, AbortOnDrop>,
-    out: &tokio::sync::mpsc::Sender<StatusUpdate>,
+    out: &tokio::sync::mpsc::Sender<(Topic, StatusUpdate)>,
+    lagged: &tokio::sync::mpsc::Sender<()>,
 ) {
     listeners.retain(|topic, _| entitlement.topics.contains(topic));
     for topic in &entitlement.topics {
@@ -363,21 +364,28 @@ fn sync_listeners(
         }
         let mut rx = broadcast.subscribe_topic(*topic);
         let out = out.clone();
+        let lagged = lagged.clone();
+        let topic = *topic;
         let task = tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(update) => {
-                        if out.send(update).await.is_err() {
+                        if out.send((topic, update)).await.is_err() {
                             break;
                         }
                     }
-                    // A slow socket misses updates; it is not closed for it.
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    // Dropped updates may include a payment confirmation and
+                    // the client cannot know it missed one, so the socket is
+                    // closed and the client resyncs on reconnect.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = lagged.try_send(());
+                        break;
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
-        listeners.insert(*topic, AbortOnDrop(task));
+        listeners.insert(topic, AbortOnDrop(task));
     }
 }
 
@@ -393,11 +401,12 @@ async fn handle_socket_forwarding(
         let _ = sender.close().await;
         return;
     };
-    let (out, mut updates) = tokio::sync::mpsc::channel::<StatusUpdate>(256);
+    let (out, mut updates) = tokio::sync::mpsc::channel::<(Topic, StatusUpdate)>(256);
+    let (lagged, mut lagged_rx) = tokio::sync::mpsc::channel::<()>(1);
     let mut listeners = std::collections::HashMap::new();
     // Subscribe before acknowledging, so nothing published after the client
     // sees `connected` can be missed.
-    sync_listeners(&broadcast, &entitlement, &mut listeners, &out);
+    sync_listeners(&broadcast, &entitlement, &mut listeners, &out, &lagged);
 
     // Send connected acknowledgement. Serialising a unit-variant is infallible.
     #[allow(
@@ -415,14 +424,19 @@ async fn handle_socket_forwarding(
 
     loop {
         tokio::select! {
-            Some(update) = updates.recv() => {
+            Some((topic, update)) = updates.recv() => {
+                // Already queued when its store was revoked: drop it.
+                if !listeners.contains_key(&topic) {
+                    continue;
+                }
                 let Ok(msg) = serde_json::to_string(&update) else { continue };
                 if sender.send(Message::Text(msg.into())).await.is_err() {
                     break;
                 }
             }
+            Some(()) = lagged_rx.recv() => break,
             _ = ticker.tick() => match revalidate().await {
-                Some(entitlement) => sync_listeners(&broadcast, &entitlement, &mut listeners, &out),
+                Some(entitlement) => sync_listeners(&broadcast, &entitlement, &mut listeners, &out, &lagged),
                 None => break,
             },
             incoming = receiver.next() => match incoming {

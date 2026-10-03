@@ -125,9 +125,10 @@ async fn handle_checkout_socket(
         loop {
             let update = match rx.recv().await {
                 Ok(update) => update,
-                // A slow socket misses updates; it is not closed for it.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                // Dropped updates may include the payment confirmation and the
+                // page cannot know it missed one, so close and let it resync.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
             let msg = match serde_json::to_string(&update) {
                 Ok(json) => json,

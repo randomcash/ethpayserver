@@ -186,6 +186,18 @@ async fn next_update(ws: &mut Socket) -> Option<serde_json::Value> {
     serde_json::from_str(msg.to_text().ok()?).ok()
 }
 
+/// Asserts that the server closes the socket (Close frame, error or end of
+/// stream). A quiet, still-open socket is a failure, not a pass.
+async fn assert_closed(ws: &mut Socket, why: &str) {
+    loop {
+        match tokio::time::timeout(WAIT, ws.next()).await {
+            Err(_) => panic!("{why}: socket still open after {WAIT:?}"),
+            Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_)))) => return,
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+}
+
 /// Asserts that nothing is delivered within a quiet period.
 async fn assert_silent(ws: &mut Socket) {
     if let Ok(Some(Ok(msg))) = tokio::time::timeout(QUIET, ws.next()).await {
@@ -383,10 +395,7 @@ async fn when_the_decision_cannot_be_made_the_socket_is_closed() {
 
     // The entitlement can no longer be established, so the socket closes
     // instead of carrying on with the last answer it had.
-    assert!(
-        next_update(&mut ws_a).await.is_none(),
-        "the socket should have been closed"
-    );
+    assert_closed(&mut ws_a, "entitlement undecidable").await;
 }
 
 #[tokio::test]
@@ -410,10 +419,7 @@ async fn a_revoked_session_closes_the_socket_though_membership_remains() {
     // Logout: the user still belongs to the store.
     h.sessions.revoke(a.session);
 
-    assert!(
-        next_update(&mut ws_a).await.is_none(),
-        "the socket should have been closed within the revalidation interval"
-    );
+    assert_closed(&mut ws_a, "session revoked").await;
 }
 
 #[tokio::test]
@@ -507,4 +513,25 @@ async fn an_update_for_an_invoice_is_attributed_to_the_invoices_store() {
     ));
     assert!(observe_a.try_recv().is_err(), "nothing else was published");
     assert!(observe_b.try_recv().is_err(), "nothing else was published");
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_socket_that_missed_updates_is_closed_so_the_client_resyncs() {
+    let Some(pg) = support::service().await else {
+        return;
+    };
+    let pg = Arc::new(pg);
+    let a = Person::new(pg.pool()).await;
+    let (store_a, _) = tenant(&pg, &a, "a").await;
+    let h = serve_revalidating(pg.clone(), &[&a], Duration::from_secs(3600)).await;
+    let mut ws_a = connect(&h, &a).await;
+
+    // The test runtime is single-threaded and this loop never yields, so the
+    // socket's listener cannot drain the 64-slot channel while it fills.
+    for i in 0..200 {
+        h.broadcast.send(sid(&store_a), paid(&format!("burst-{i}")));
+    }
+
+    assert_closed(&mut ws_a, "updates were dropped").await;
 }
