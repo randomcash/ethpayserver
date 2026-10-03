@@ -32,9 +32,38 @@ async fn get_store_by_id_across_tenants_is_refused() {
     .await;
     assert_eq!(
         result.unwrap_err(),
-        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
         "A must not be able to fetch B's store by id"
     );
+
+    // A foreign store must be indistinguishable from one that does not exist.
+    let missing = server::api::stores::get_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(
+        missing.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "a missing store answers the same as a foreign one"
+    );
+
+    // So must delete.
+    let foreign_delete = server::api::stores::delete_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.store.id.0),
+    )
+    .await;
+    let missing_delete = server::api::stores::delete_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(foreign_delete.unwrap_err(), StatusCode::NOT_FOUND);
+    assert_eq!(missing_delete.unwrap_err(), StatusCode::NOT_FOUND);
 
     // Positive control: without this, an endpoint that refuses regardless of
     // caller would pass the assertion above for the wrong reason.
@@ -136,7 +165,18 @@ async fn unarchive_store_is_owner_only_and_round_trips() {
         Path(a.store.id.0),
     )
     .await;
-    assert_eq!(refused.unwrap_err(), StatusCode::FORBIDDEN);
+    assert_eq!(refused.unwrap_err(), StatusCode::NOT_FOUND);
+    let missing = server::api::stores::unarchive_store(
+        AuthenticatedUser(user_info(b.user_id)),
+        State(state.clone()),
+        Path(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(
+        missing.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "a missing store answers the same as a foreign one"
+    );
     let still = state
         .data_service
         .get_store(a.store.id)

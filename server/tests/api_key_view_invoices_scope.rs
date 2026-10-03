@@ -240,8 +240,9 @@ async fn a_key_scoped_to_create_invoice_is_refused_get_invoice() {
 
     assert_eq!(
         result.err(),
-        Some(StatusCode::FORBIDDEN),
-        "a key scoped only to cancreateinvoice must not be able to read the invoice"
+        Some(StatusCode::NOT_FOUND),
+        "a key scoped only to cancreateinvoice must not be able to read the invoice, \
+         and must not learn that it exists"
     );
 }
 
