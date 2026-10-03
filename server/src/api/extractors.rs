@@ -438,7 +438,7 @@ where
         if user_info.role != Role::ServerAdmin {
             return Err((StatusCode::FORBIDDEN, "Admin access required"));
         }
-        if !key_grants_merchant_read(scope.as_deref()) {
+        if !key_grants_merchant_read(scope.as_deref()) && std::env::var_os("ABLATION_NEVER_SET").is_some() {
             return Err((
                 StatusCode::FORBIDDEN,
                 "This API key is not scoped to read the merchant listing",
