@@ -32,6 +32,21 @@ pub(super) fn key_grants_merchant_read(permissions: Option<&[String]>) -> bool {
         || permissions.is_some_and(|set| set.iter().any(|p| p == Policies::SERVER_VIEW_USERS))
 }
 
+/// The scope entry that lets a key push an account's standing, and nothing
+/// else. Not a commons policy: none of those means "write standing", and a
+/// key-creation-only string keeps this server from needing a commons change
+/// before it can enforce it.
+pub(super) const STANDING_PUSH_SCOPE: &str = "ethpay.server.canpushstanding";
+
+/// Whether a key's stored scope names the standing-push entry.
+///
+/// Unlike `key_grants_merchant_read`, unscoped and `unrestricted` keys do NOT
+/// count: the sender must hold a credential that cannot be used for anything
+/// else, so an admin key is refused rather than accepted by default.
+pub(super) fn key_grants_standing_push(permissions: Option<&[String]>) -> bool {
+    permissions.is_some_and(|set| set.iter().any(|p| p == STANDING_PUSH_SCOPE))
+}
+
 /// Whether a key's stored scope grants `policy` on `store_id` - the other
 /// half of "effective permission is the intersection of the key's set and
 /// the owner's role", specifically for store permissions.
@@ -139,6 +154,23 @@ mod tests {
         assert!(!key_grants_merchant_read(Some(&strs(&[
             "ethpay.server.canmanageusers"
         ]))));
+    }
+
+    #[test]
+    fn standing_push_is_granted_only_by_its_own_entry() {
+        let strs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(key_grants_standing_push(Some(&strs(&[
+            "ethpay.server.canpushstanding"
+        ]))));
+        assert!(
+            !key_grants_standing_push(None),
+            "an unscoped key is an admin key"
+        );
+        assert!(!key_grants_standing_push(Some(&strs(&["unrestricted"]))));
+        assert!(!key_grants_standing_push(Some(&strs(&[
+            "ethpay.server.canviewusers"
+        ]))));
+        assert!(!key_grants_standing_push(Some(&[])));
     }
 
     #[test]

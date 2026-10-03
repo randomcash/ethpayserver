@@ -6,6 +6,7 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPool, Postgres};
 use uuid::Uuid;
 
+mod account_standing;
 mod auth;
 mod chain_cursor;
 mod conversions;
