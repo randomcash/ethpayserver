@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 use auth::{Permission, Policies};
 
+use super::api_key_scope::STANDING_PUSH_SCOPE;
+
 /// Is a single requested permission entry a store-scoped grant this server
 /// can actually enforce?
 ///
@@ -57,6 +59,10 @@ fn is_store_scope_entry(entry: &str) -> bool {
 /// only for a key whose owner is a `ServerAdmin` at request time. Held by a
 /// non-admin's key it grants nothing.
 ///
+/// The standing-push entry is accepted only on its own. A key that can write
+/// the standing that gates invoice creation must not be able to do anything
+/// else, so it cannot be combined with store permissions or the listing scope.
+///
 /// This takes no role, because none of its answers depend on one. Every
 /// accepted form resolves against whoever owns the key rather than naming a
 /// power directly: `[]` and `["unrestricted"]` both mean "the owner's role in
@@ -81,6 +87,7 @@ pub(super) fn validate_requested_permissions(requested: &[String]) -> Result<(),
     match requested {
         [] => Ok(()),
         [single] if single == Permission::Unrestricted.as_policy() => Ok(()),
+        [single] if single == STANDING_PUSH_SCOPE => Ok(()),
         entries
             if entries
                 .iter()
@@ -126,6 +133,20 @@ mod permission_scope_tests {
         assert!(validate_requested_permissions(std::slice::from_ref(&view)).is_ok());
         let with_invoice = vec![view, Permission::StoreCreateInvoice.as_policy().to_string()];
         assert!(validate_requested_permissions(&with_invoice).is_ok());
+    }
+
+    #[test]
+    fn the_standing_push_scope_is_accepted_only_alone() {
+        let push = STANDING_PUSH_SCOPE.to_string();
+        assert!(validate_requested_permissions(std::slice::from_ref(&push)).is_ok());
+        for other in [
+            Permission::StoreCreateInvoice.as_policy(),
+            Permission::ServerViewUsers.as_policy(),
+            Permission::Unrestricted.as_policy(),
+        ] {
+            let mixed = vec![push.clone(), other.to_string()];
+            assert!(validate_requested_permissions(&mixed).is_err(), "{other}");
+        }
     }
 
     #[test]
