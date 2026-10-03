@@ -62,6 +62,29 @@ export async function resetDatabase(): Promise<void> {
 }
 
 /**
+ * Make an existing account a `server_admin`, by the id registration showed.
+ *
+ * It throws when no row matches, because an UPDATE that touches nothing looks
+ * like success and the test that called it would then be asserting about an
+ * account that is still an ordinary user.
+ */
+export async function promoteToServerAdmin(userId: string): Promise<void> {
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rowCount } = await client.query(
+      `UPDATE users SET role = 'server_admin' WHERE id::text = $1`,
+      [userId],
+    );
+    if (rowCount !== 1) {
+      throw new Error(`expected to promote exactly one account, matched ${rowCount}`);
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+/**
  * A user with an API key, created directly in the database.
  *
  * Registration goes through WebAuthn in a browser, which is the right way to
