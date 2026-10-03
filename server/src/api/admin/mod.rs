@@ -19,11 +19,12 @@ use ::types::ChainId;
 use auth::{
     Role, ServerSettings, ServerSettingsRepository, SessionService, UserId, UserRepository,
 };
+use data_service::MerchantDirectoryReader;
 
 pub mod deletion;
 pub mod plugins;
 
-use super::extractors::AdminAuth;
+use super::extractors::{AdminAuth, MerchantReader};
 use crate::state::PgAppState;
 pub use api_types::{
     AdminUserInfo, ServerSettingsResponse, UpdateRoleRequest, UpdateServerSettingsRequest,
@@ -122,6 +123,67 @@ where
         offset,
         limit,
     }))
+}
+
+/// One store in the server-wide listing.
+///
+/// Only what `data_service::MerchantStore` carries: identifiers, name and
+/// archived flag, no settings or wallet data.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MerchantStoreEntry {
+    pub id: String,
+    pub name: String,
+    pub owner_id: String,
+    pub archived: bool,
+}
+
+/// List every store on the server (paginated), oldest first.
+///
+/// Read-only, so unlike the rest of `/admin` it also accepts an API key
+/// scoped to `ethpay.server.canviewusers` (owned by a server admin). That
+/// lets an integration that only needs to enumerate merchants hold a key
+/// that can do nothing else on the admin surface.
+#[utoipa::path(
+    get,
+    path = "/admin/stores",
+    tag = "admin",
+    security(("bearer_auth" = [])),
+    params(
+        ("limit" = Option<i64>, Query, description = "Max results (default 50, max 200)"),
+        ("offset" = Option<i64>, Query, description = "Offset for pagination"),
+    ),
+    responses(
+        (status = 200, description = "Stores on this server", body = Vec<MerchantStoreEntry>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access, or a key scoped to read the merchant listing, required"),
+    )
+)]
+pub async fn list_stores<A>(
+    MerchantReader(_reader): MerchantReader,
+    Query(params): Query<ListUsersParams>,
+    State(state): State<PgAppState<A>>,
+) -> Result<Json<Vec<MerchantStoreEntry>>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let stores = MerchantDirectoryReader::list_stores(&*state.data_service, offset, limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(
+        stores
+            .into_iter()
+            .map(|s| MerchantStoreEntry {
+                id: s.id.0.to_string(),
+                name: s.name,
+                owner_id: s.owner_id.0.to_string(),
+                archived: s.archived,
+            })
+            .collect(),
+    ))
 }
 
 /// Change a user's role.

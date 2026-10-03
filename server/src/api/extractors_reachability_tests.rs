@@ -527,3 +527,138 @@ async fn an_explicitly_unrestricted_key_still_authenticates() {
         "an explicit unrestricted scope grants everything, so it must not be refused"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The merchant-listing scope, driven as the scoped key itself.
+//
+// The real admin handlers are mounted, so a key that is let through to
+// `/admin/stores` is checked against the routes it must NOT reach, including
+// account deletion, in the same router.
+
+fn admin_app(state: PgAppState<NoSessionService>) -> Router {
+    Router::new()
+        .route(
+            "/admin/stores",
+            get(crate::api::admin::list_stores::<NoSessionService>),
+        )
+        .route(
+            "/admin/users",
+            get(crate::api::admin::list_users::<NoSessionService>),
+        )
+        .route(
+            "/admin/users/{id}",
+            axum::routing::delete(crate::api::admin::delete_user_account::<NoSessionService>),
+        )
+        .with_state(state)
+}
+
+async fn admin_status(
+    service: &PgDataService,
+    user_id: Uuid,
+    permissions: Option<&[String]>,
+    method: &str,
+    uri: &str,
+) -> StatusCode {
+    let raw_key = format!("ak_merchant_{}", Uuid::new_v4());
+    seed_api_key_opt(service.pool(), user_id, &raw_key, permissions).await;
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {raw_key}"))
+        .body(Body::empty())
+        .unwrap();
+    admin_app(test_state(service.clone()))
+        .oneshot(req)
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_key_scoped_to_invoice_create_and_merchant_read_lists_stores_and_nothing_else() {
+    let Some(service) = test_service().await else {
+        return;
+    };
+    let pool = service.pool().clone();
+    let admin = seed_user_with_role(&pool, "server_admin").await;
+    let victim = seed_user_with_role(&pool, "user").await;
+    let scope = [
+        Policies::STORE_CREATE_INVOICE.to_string(),
+        Policies::SERVER_VIEW_USERS.to_string(),
+    ];
+
+    assert_eq!(
+        admin_status(&service, admin, Some(&scope), "GET", "/admin/stores").await,
+        StatusCode::OK,
+        "the merchant-read scope must reach the listing"
+    );
+    assert_eq!(
+        admin_status(&service, admin, Some(&scope), "GET", "/admin/users").await,
+        StatusCode::FORBIDDEN,
+        "merchant read must not open the admin user listing"
+    );
+    assert_eq!(
+        admin_status(
+            &service,
+            admin,
+            Some(&scope),
+            "DELETE",
+            &format!("/admin/users/{victim}")
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "the scoped key must not be able to delete a user"
+    );
+    let still_there: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = $1")
+        .bind(victim)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(still_there, 1, "the refused delete must not have run");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_key_without_the_merchant_read_scope_cannot_list_stores() {
+    let Some(service) = test_service().await else {
+        return;
+    };
+    let admin = seed_user_with_role(service.pool(), "server_admin").await;
+    let scope = [Policies::STORE_CREATE_INVOICE.to_string()];
+
+    assert_eq!(
+        admin_status(&service, admin, Some(&scope), "GET", "/admin/stores").await,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn the_merchant_read_scope_on_a_non_admin_owners_key_grants_nothing() {
+    let Some(service) = test_service().await else {
+        return;
+    };
+    let user = seed_user_with_role(service.pool(), "user").await;
+    let scope = [Policies::SERVER_VIEW_USERS.to_string()];
+
+    assert_eq!(
+        admin_status(&service, user, Some(&scope), "GET", "/admin/stores").await,
+        StatusCode::FORBIDDEN,
+        "a key never exceeds its owner"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_unrestricted_admin_key_still_lists_stores() {
+    let Some(service) = test_service().await else {
+        return;
+    };
+    let admin = seed_user_with_role(service.pool(), "server_admin").await;
+
+    assert_eq!(
+        admin_status(&service, admin, None, "GET", "/admin/stores").await,
+        StatusCode::OK
+    );
+}
