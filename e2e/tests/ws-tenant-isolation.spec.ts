@@ -25,8 +25,25 @@
  * Positive controls come first and are required on both sockets: a dead
  * socket also "received nothing foreign".
  *
+ * How A and B become members depends on where this runs:
+ *
+ *   - Local server (CI `e2e` job): membership is inserted straight into the
+ *     database - `user_stores`, with the role id read from `store_roles`
+ *     (the global `Guest` default). Those are the tables the gate reads:
+ *     `may_see_store` -> `verify_store_access_for_query` -> `get_user_store`
+ *     is a plain `SELECT ... FROM user_stores WHERE user_id AND store_id`, and
+ *     the member route writes the same row through `add_user_to_store`. The
+ *     fixture skips the route's permission check, which is not under test, and
+ *     nothing the gate reads. The store owner is a server-admin user created
+ *     the same way, mirroring the admin-owned shape of the remote run.
+ *   - Remote (the nightly, `E2E_REMOTE=true`): there is no database access, so
+ *     the member route is the only way in, and it answers 403 for every seeded
+ *     role because none carries the store-users permissions. That is reported
+ *     as a blocked setup - isolation NOT VERIFIED - never as a result. Do not
+ *     switch the flag off to quiet it: a red run that says why is the signal.
+ *
  * Off unless `E2E_WS_ISOLATION=true`; once on, missing configuration is a hard
- * failure. Needs `E2E_API_TOKEN`, a server admin key.
+ * failure. The remote run needs `E2E_API_TOKEN`, a server admin key.
  */
 import { appendFileSync } from 'node:fs';
 
@@ -34,7 +51,8 @@ import { test, expect } from '@playwright/test';
 import { randomBytes } from 'node:crypto';
 import { HDKey, generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
-import { api } from '../fixtures/api';
+import { api, ApiError } from '../fixtures/api';
+import { addStoreMember, createUserWithApiKey } from '../fixtures/db';
 import {
   expectNothingForeign,
   expectReceived,
@@ -43,6 +61,7 @@ import {
 } from '../fixtures/ws-isolation';
 
 const ENABLED = process.env.E2E_WS_ISOLATION === 'true';
+const REMOTE = process.env.E2E_REMOTE === 'true';
 
 const CHAIN_ID = 'eip155:11155111';
 const MERCHANT_PATH = "m/44'/60'/0'";
@@ -50,7 +69,7 @@ const MERCHANT_PATH = "m/44'/60'/0'";
 const EXPIRY_WAIT_MS = 3 * 60_000;
 /** For the one pair no later event orders: how long a leak has to show up. */
 const SETTLE_MS = 8_000;
-/** Role name accepted by the member-add endpoint; the gate asks only for membership. */
+/** Global default role granted to A and B; the gate asks only for membership. */
 const MEMBER_ROLE = 'Guest';
 
 interface Account {
@@ -101,7 +120,7 @@ let storeIds: string[] = [];
 let accounts: Account[] = [];
 let sockets: RecordingSocket[] = [];
 
-test.describe('Status socket tenant isolation (live testnet)', () => {
+test.describe('Status socket tenant isolation', () => {
   test.describe.configure({ retries: 0 });
   test.skip(!ENABLED, 'Set E2E_WS_ISOLATION=true to run the live /ws isolation test');
 
@@ -143,7 +162,9 @@ test.describe('Status socket tenant isolation (live testnet)', () => {
 
   test('a socket receives its own stores\' events and no other store\'s', async () => {
     test.setTimeout(4 * EXPIRY_WAIT_MS);
-    const token = requireEnv('E2E_API_TOKEN', 'a server admin API key that owns the test stores');
+    const token = REMOTE
+      ? requireEnv('E2E_API_TOKEN', 'a server admin API key that owns the test stores')
+      : (await createUserWithApiKey('server_admin')).apiKey;
     adminToken = token;
 
     const stamp = Date.now().toString(36);
@@ -165,11 +186,27 @@ test.describe('Status socket tenant isolation (live testnet)', () => {
         token,
         body: { chain_id: CHAIN_ID, token_address: null, asset_symbol: 'ETH', decimals: 18, xpub: xpub() },
       });
-      await api(`/stores/${store.id}/members`, {
-        method: 'POST',
-        token,
-        body: { user_id: member.userId, role: MEMBER_ROLE },
-      });
+      if (!REMOTE) {
+        await addStoreMember(member.userId, store.id, MEMBER_ROLE);
+        return store.id;
+      }
+      try {
+        await api(`/stores/${store.id}/members`, {
+          method: 'POST',
+          token,
+          body: { user_id: member.userId, role: MEMBER_ROLE },
+        });
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 403) {
+          throw new Error(
+            'ws isolation NOT VERIFIED - this is a setup failure, not an isolation result: ' +
+              'the member route refused (403) because no store role carries the store-users ' +
+              'permissions, so a member cannot be added to a store. ' +
+              `(${e.message})`,
+          );
+        }
+        throw e;
+      }
       return store.id;
     }
     const s1 = await makeStore(0, a);

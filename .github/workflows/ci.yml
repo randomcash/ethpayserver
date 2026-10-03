@@ -781,6 +781,10 @@ jobs:
           E2E_API_URL: http://localhost:3000
           E2E_BASE_URL: http://localhost:8080
           E2E_DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
+          # Tenant isolation of the status socket, against this server. Here
+          # membership is seeded in the database, so the spec can actually run;
+          # the nightly cannot seed and reports why.
+          E2E_WS_ISOLATION: "true"
           PLAYWRIGHT_LIST_PRINT_STEPS: "1"
         run: npx playwright test
 
