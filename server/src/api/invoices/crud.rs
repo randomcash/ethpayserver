@@ -422,7 +422,11 @@ where
 
     // Create invoice (network-agnostic) - only after validating payment methods
     let invoice = InvoiceData {
-        id: InvoiceId({ let mut s = uuid::Uuid::new_v4().to_string(); s.replace_range(14..15, "1"); s }),
+        id: InvoiceId({
+            let mut s = uuid::Uuid::new_v4().to_string();
+            s.replace_range(14..15, "1");
+            s
+        }),
         store_id: StoreId(req.store_id),
         currency: req.currency.clone(),
         status: InvoiceStatus::Pending,
