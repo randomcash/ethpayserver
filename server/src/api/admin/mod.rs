@@ -816,6 +816,13 @@ mod tests {
         let failed = response_json(Err(()), true).await;
         assert_eq!(failed["safe_mode"], true, "safe_mode survives a read error");
         assert_eq!(failed["operator_store_available"], false);
+
+        let failed_live = response_json(Err(()), false).await;
+        assert_eq!(failed_live["safe_mode"], false);
+        assert_eq!(
+            failed_live["operator_store_available"], false,
+            "an unreadable plugin list reports the store unavailable"
+        );
     }
 
     fn method(wallet: Option<uuid::Uuid>) -> data_service::StorePaymentMethod {
