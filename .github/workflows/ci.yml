@@ -831,6 +831,15 @@ jobs:
         # the last place to accept a mutable reference: whoever can move the tag
         # can change what signs our images.
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        # The release is named, though it is the installer's default today: the
+        # deploy that verifies these signatures compares its own cosign release
+        # with this one, and a release that lives only inside the installer
+        # cannot be compared. cosign 3 writes signatures in a bundle format that
+        # cosign 2 does not look for, so a mismatch reads as "no signatures
+        # found" for an image that is correctly signed. Change this and the
+        # verifier's pin together.
+        with:
+          cosign-release: v3.0.6
 
       - name: Compute image tags
         id: tag
