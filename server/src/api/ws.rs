@@ -4,12 +4,17 @@
 //! first frame: `{"type":"auth","token":"SESSION_ID"}`. The server validates
 //! the session and then forwards JSON-encoded status updates.
 //!
-//! Every update is tied to the store it happened in, and a socket receives it
-//! only if its user is a server admin or a member of that store. The decision
-//! is made per event, against the database, at the moment the event is
-//! delivered - not once at connect time - so a member removed while connected
-//! stops receiving at once. Anything that prevents the decision (a database
-//! error, a user that no longer exists) withholds the event.
+//! Every update is tied to the store it happened in and is published only to
+//! that store's channel (and its invoice's, and the server admins'). A socket
+//! subscribes to the channels of the stores its user may see - all of them for
+//! a server admin - so another store's update never reaches it, rather than
+//! reaching it and being filtered.
+//!
+//! Every few seconds the socket re-validates its session and re-derives its
+//! stores, subscribing and unsubscribing to match. A logged-out or revoked
+//! session, or a user that no longer exists, closes the socket; a membership
+//! removal stops delivery. Anything that prevents the decision (a database
+//! error) closes the socket too: it fails closed.
 
 use axum::{
     extract::{
@@ -60,38 +65,117 @@ pub enum StatusUpdate {
     Ping,
 }
 
-/// A status update together with the store it happened in.
-///
-/// The store id is not part of the wire format: it is what the socket handlers
-/// decide delivery on, and is dropped before the update is serialised.
-#[derive(Debug, Clone)]
-pub struct WsEvent {
-    /// Store the invoice or payment belongs to.
-    pub store_id: StoreId,
-    /// What clients are told.
-    pub update: StatusUpdate,
+/// Which channel a socket is listening to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Topic {
+    /// Every store on the server. Server admins only.
+    Admin,
+    /// One store.
+    Store(StoreId),
 }
 
-/// Shared broadcast channel for status updates.
+/// What one authenticated socket is entitled to listen to right now.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Entitlement {
+    topics: std::collections::HashSet<Topic>,
+}
+
+/// Broadcast channels keyed by what they carry. A channel exists only while
+/// someone listens to it.
+struct Channels<K> {
+    capacity: usize,
+    map: std::sync::Mutex<std::collections::HashMap<K, broadcast::Sender<StatusUpdate>>>,
+}
+
+impl<K: std::hash::Hash + Eq + Clone> Channels<K> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            map: Default::default(),
+        }
+    }
+
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<K, broadcast::Sender<StatusUpdate>>>
+    {
+        self.map.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn subscribe(&self, key: &K) -> broadcast::Receiver<StatusUpdate> {
+        let mut map = self.lock();
+        // Drop channels nobody listens to any more, so keys that were
+        // subscribed once and never published to do not accumulate.
+        map.retain(|_, tx| tx.receiver_count() > 0);
+        map.entry(key.clone())
+            .or_insert_with(|| broadcast::channel(self.capacity).0)
+            .subscribe()
+    }
+
+    fn publish(&self, key: &K, update: &StatusUpdate) {
+        let mut map = self.lock();
+        if let Some(tx) = map.get(key)
+            && tx.send(update.clone()).is_err()
+        {
+            // `send` only fails when there are no receivers.
+            map.remove(key);
+        }
+    }
+}
+
+/// Status updates, routed so that a listener only ever holds a channel that
+/// carries what it may see.
+///
+/// There is one channel per store, one per invoice (for the public checkout
+/// socket, where the invoice id is the capability), and one for server admins.
+/// An update is published to the channels of its own store and invoice and to
+/// nothing else, so a socket that never subscribed to a store has no way to
+/// receive its events: the data does not reach it, rather than reaching it
+/// and being discarded.
 #[derive(Clone)]
 pub struct WsBroadcast {
-    tx: broadcast::Sender<WsEvent>,
+    stores: std::sync::Arc<Channels<StoreId>>,
+    invoices: std::sync::Arc<Channels<String>>,
+    admins: std::sync::Arc<Channels<()>>,
+    revalidate_interval: std::time::Duration,
 }
 
+/// How often an open `/ws` socket re-checks its session and memberships.
+pub const DEFAULT_REVALIDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl WsBroadcast {
-    /// Create a new broadcast channel with the given capacity.
+    /// Create broadcast channels with the given per-channel capacity.
     pub fn new(capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(capacity);
-        Self { tx }
+        Self {
+            stores: std::sync::Arc::new(Channels::new(capacity)),
+            invoices: std::sync::Arc::new(Channels::new(capacity)),
+            admins: std::sync::Arc::new(Channels::new(capacity)),
+            revalidate_interval: DEFAULT_REVALIDATE_INTERVAL,
+        }
+    }
+
+    /// Set how often an open socket re-validates its session and memberships.
+    /// This bounds how long a logout, or a membership removal, goes unnoticed.
+    pub fn with_revalidate_interval(mut self, interval: std::time::Duration) -> Self {
+        self.revalidate_interval = interval;
+        self
     }
 
     /// Publish a status update for `store_id`.
     ///
     /// The store is required, not optional: an update with no store would have
-    /// no one it could safely be shown to.
+    /// no channel it could safely go to.
     pub fn send(&self, store_id: StoreId, update: StatusUpdate) {
-        // Ignore send errors (no receivers).
-        let _ = self.tx.send(WsEvent { store_id, update });
+        let invoice_id = match &update {
+            StatusUpdate::InvoiceStatus { invoice_id, .. }
+            | StatusUpdate::PaymentUpdate { invoice_id, .. } => Some(invoice_id.clone()),
+            StatusUpdate::Connected | StatusUpdate::Ping => None,
+        };
+        self.stores.publish(&store_id, &update);
+        self.admins.publish(&(), &update);
+        if let Some(invoice_id) = invoice_id {
+            self.invoices.publish(&invoice_id, &update);
+        }
     }
 
     /// Publish a status update for an invoice whose store the caller does not
@@ -122,36 +206,51 @@ impl WsBroadcast {
         }
     }
 
-    /// Subscribe to status updates.
-    pub fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
-        self.tx.subscribe()
+    /// Subscribe to the updates of one store.
+    pub fn subscribe_store(&self, store_id: StoreId) -> broadcast::Receiver<StatusUpdate> {
+        self.stores.subscribe(&store_id)
+    }
+
+    /// Subscribe to the updates of one invoice.
+    pub fn subscribe_invoice(&self, invoice_id: &str) -> broadcast::Receiver<StatusUpdate> {
+        self.invoices.subscribe(&invoice_id.to_string())
+    }
+
+    fn subscribe_topic(&self, topic: Topic) -> broadcast::Receiver<StatusUpdate> {
+        match topic {
+            Topic::Admin => self.admins.subscribe(&()),
+            Topic::Store(id) => self.subscribe_store(id),
+        }
     }
 }
 
-/// Answers, per event, whether one authenticated socket may see a store.
-type StoreGate = std::sync::Arc<dyn Fn(StoreId) -> BoxFuture<'static, bool> + Send + Sync>;
+/// Re-derives, for one socket, whether its session is still valid and which
+/// topics its user may listen to. `None` means the socket must be closed.
+type Revalidate = std::sync::Arc<dyn Fn() -> BoxFuture<'static, Option<Entitlement>> + Send + Sync>;
 
-/// Whether `user_id` may see events of `store_id`: a server admin, or a member.
+/// The topics `user_id` may listen to: everything for a server admin, else
+/// the stores they are a member of.
 ///
-/// The user is read afresh, so a demotion takes effect on the next event, and
-/// the membership check is the one the REST list endpoints use. Fails closed:
-/// every error, and a user row that is gone, answers `false`.
-pub(crate) async fn may_see_store<D>(
+/// The user is read afresh, so a demotion takes effect at the next
+/// re-validation, and the scope is the one the REST list endpoints use. Fails
+/// closed: every error, and a user row that is gone, answers `None`.
+pub(crate) async fn entitlement_of<D>(
     data_service: &D,
     user_id: auth::UserId,
-    store_id: StoreId,
-) -> bool
+) -> Option<Entitlement>
 where
     D: UserRepository + UserStoreRepository + ?Sized,
 {
     let user = match data_service.get_user(user_id).await {
         Ok(Some(user)) => auth::UserInfo::from(&user),
-        Ok(None) | Err(_) => return false,
+        Ok(None) | Err(_) => return None,
     };
-    match verify_store_access_for_query(data_service, &user, Some(store_id.0)).await {
-        Ok(StoreScope::One(_)) => true,
-        Ok(_) | Err(_) => false,
-    }
+    let topics = match verify_store_access_for_query(data_service, &user, None).await {
+        Ok(StoreScope::All) => [Topic::Admin].into_iter().collect(),
+        Ok(StoreScope::Membership(stores)) => stores.into_iter().map(Topic::Store).collect(),
+        Ok(StoreScope::One(_)) | Err(_) => return None,
+    };
+    Some(Entitlement { topics })
 }
 
 /// WebSocket upgrade handler.
@@ -167,16 +266,16 @@ pub async fn ws_handler<A>(
 where
     A: SessionService + 'static,
 {
-    // Get broadcast receiver. In deployments without WS configured, return 503
-    // rather than panicking the handler task.
+    // In deployments without WS configured, return 503 rather than panicking
+    // the handler task.
     let Some(ws_broadcast) = state.ws_broadcast.as_ref() else {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let rx = ws_broadcast.subscribe();
+    let broadcast = ws_broadcast.as_ref().clone();
     let auth_service = state.auth_service.clone();
     let data_service = state.data_service.clone();
 
-    ws.on_upgrade(move |socket| handle_socket(socket, rx, auth_service, data_service))
+    ws.on_upgrade(move |socket| handle_socket(socket, broadcast, auth_service, data_service))
         .into_response()
 }
 
@@ -186,10 +285,10 @@ const AUTH_TIMEOUT_SECS: u64 = 10;
 /// Handle an individual WebSocket connection.
 ///
 /// Waits for the client to send an auth message, validates the session,
-/// then forwards broadcast updates.
-async fn handle_socket<A: SessionService>(
+/// then forwards the updates of the channels the user is entitled to.
+async fn handle_socket<A: SessionService + 'static>(
     socket: WebSocket,
-    rx: broadcast::Receiver<WsEvent>,
+    broadcast: WsBroadcast,
     auth_service: std::sync::Arc<A>,
     data_service: std::sync::Arc<data_service::PgDataService>,
 ) {
@@ -225,30 +324,81 @@ async fn handle_socket<A: SessionService>(
         }
     };
 
-    let user_id = match auth_service.validate_session(session_id).await {
-        Ok((user, _session)) => user.id,
-        Err(_) => {
-            let _ = sender.close().await;
-            return;
-        }
-    };
-
-    let gate: StoreGate = std::sync::Arc::new(move |store_id| {
+    // The session is checked again on every tick, not just here: a logged-out
+    // or revoked session must not keep an open socket.
+    let revalidate: Revalidate = std::sync::Arc::new(move || {
+        let auth_service = auth_service.clone();
         let data_service = data_service.clone();
-        Box::pin(async move { may_see_store(&*data_service, user_id, store_id).await })
+        Box::pin(async move {
+            let (user, _session) = auth_service.validate_session(session_id).await.ok()?;
+            entitlement_of(&*data_service, user.id).await
+        })
     });
 
-    // Auth succeeded — hand off to the forwarding loop
-    handle_socket_forwarding(sender, receiver, rx, gate).await;
+    handle_socket_forwarding(sender, receiver, broadcast, revalidate).await;
 }
 
-/// Forward broadcast updates to an authenticated WebSocket client.
+/// Aborts its task when dropped, so a socket's listeners die with it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Make `listeners` match `entitlement`: start a listener for each topic newly
+/// allowed, and drop (and so abort) the listener of each topic no longer
+/// allowed.
+fn sync_listeners(
+    broadcast: &WsBroadcast,
+    entitlement: &Entitlement,
+    listeners: &mut std::collections::HashMap<Topic, AbortOnDrop>,
+    out: &tokio::sync::mpsc::Sender<StatusUpdate>,
+) {
+    listeners.retain(|topic, _| entitlement.topics.contains(topic));
+    for topic in &entitlement.topics {
+        if listeners.contains_key(topic) {
+            continue;
+        }
+        let mut rx = broadcast.subscribe_topic(*topic);
+        let out = out.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(update) => {
+                        if out.send(update).await.is_err() {
+                            break;
+                        }
+                    }
+                    // A slow socket misses updates; it is not closed for it.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        listeners.insert(*topic, AbortOnDrop(task));
+    }
+}
+
+/// Forward updates to an authenticated WebSocket client, until it closes or
+/// its session or entitlement can no longer be established.
 async fn handle_socket_forwarding(
     mut sender: futures::stream::SplitSink<WebSocket, Message>,
-    receiver: futures::stream::SplitStream<WebSocket>,
-    mut rx: broadcast::Receiver<WsEvent>,
-    gate: StoreGate,
+    mut receiver: futures::stream::SplitStream<WebSocket>,
+    broadcast: WsBroadcast,
+    revalidate: Revalidate,
 ) {
+    let Some(entitlement) = revalidate().await else {
+        let _ = sender.close().await;
+        return;
+    };
+    let (out, mut updates) = tokio::sync::mpsc::channel::<StatusUpdate>(256);
+    let mut listeners = std::collections::HashMap::new();
+    // Subscribe before acknowledging, so nothing published after the client
+    // sees `connected` can be missed.
+    sync_listeners(&broadcast, &entitlement, &mut listeners, &out);
+
     // Send connected acknowledgement. Serialising a unit-variant is infallible.
     #[allow(
         clippy::unwrap_used,
@@ -259,37 +409,29 @@ async fn handle_socket_forwarding(
         return;
     }
 
-    // Spawn a task to forward broadcast messages to the client
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(event) = rx.recv().await {
-            if !gate(event.store_id).await {
-                continue;
-            }
-            let msg = match serde_json::to_string(&event.update) {
-                Ok(json) => json,
-                Err(_) => continue,
-            };
-            if sender.send(Message::Text(msg.into())).await.is_err() {
-                break;
-            }
-        }
-    });
+    let interval = broadcast.revalidate_interval;
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    // Spawn a task to handle incoming messages (ping/pong, close)
-    let mut recv_task = tokio::spawn(async move {
-        let mut receiver = receiver;
-        while let Some(Ok(msg)) = receiver.next().await {
-            if let Message::Close(_) = msg {
-                break;
+    loop {
+        tokio::select! {
+            Some(update) = updates.recv() => {
+                let Ok(msg) = serde_json::to_string(&update) else { continue };
+                if sender.send(Message::Text(msg.into())).await.is_err() {
+                    break;
+                }
             }
+            _ = ticker.tick() => match revalidate().await {
+                Some(entitlement) => sync_listeners(&broadcast, &entitlement, &mut listeners, &out),
+                None => break,
+            },
+            incoming = receiver.next() => match incoming {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => {}
+            },
         }
-    });
-
-    // Wait for either task to complete, then abort the other
-    tokio::select! {
-        _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
     }
+    let _ = sender.close().await;
 }
 
 #[cfg(test)]
@@ -376,51 +518,88 @@ mod tests {
         broadcast.send(store(), StatusUpdate::Ping);
     }
 
+    fn paid(invoice_id: &str) -> StatusUpdate {
+        StatusUpdate::InvoiceStatus {
+            invoice_id: invoice_id.to_string(),
+            status: "paid".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn test_ws_broadcast_send_receive() {
         let broadcast = WsBroadcast::new(16);
-        let mut rx = broadcast.subscribe();
+        let mut rx = broadcast.subscribe_store(store());
 
         broadcast.send(store(), StatusUpdate::Connected);
-        broadcast.send(
-            store(),
-            StatusUpdate::InvoiceStatus {
-                invoice_id: "inv_1".to_string(),
-                status: "paid".to_string(),
-            },
-        );
+        broadcast.send(store(), paid("inv_1"));
 
-        let msg1 = rx.recv().await.unwrap();
-        assert!(matches!(msg1.update, StatusUpdate::Connected));
-
-        let msg2 = rx.recv().await.unwrap();
+        assert!(matches!(rx.recv().await.unwrap(), StatusUpdate::Connected));
         assert!(
-            matches!(msg2.update, StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "inv_1")
+            matches!(rx.recv().await.unwrap(), StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "inv_1")
         );
     }
 
     #[tokio::test]
     async fn test_ws_broadcast_multiple_subscribers() {
         let broadcast = WsBroadcast::new(16);
-        let mut rx1 = broadcast.subscribe();
-        let mut rx2 = broadcast.subscribe();
+        let mut rx1 = broadcast.subscribe_store(store());
+        let mut rx2 = broadcast.subscribe_store(store());
 
         broadcast.send(store(), StatusUpdate::Ping);
 
-        assert!(matches!(
-            rx1.recv().await.unwrap().update,
-            StatusUpdate::Ping
-        ));
-        assert!(matches!(
-            rx2.recv().await.unwrap().update,
-            StatusUpdate::Ping
-        ));
+        assert!(matches!(rx1.recv().await.unwrap(), StatusUpdate::Ping));
+        assert!(matches!(rx2.recv().await.unwrap(), StatusUpdate::Ping));
+    }
+
+    #[tokio::test]
+    async fn a_store_channel_never_carries_another_stores_update() {
+        let broadcast = WsBroadcast::new(16);
+        let other = StoreId(uuid::Uuid::from_bytes([8; 16]));
+        let mut mine = broadcast.subscribe_store(store());
+        let mut theirs = broadcast.subscribe_store(other);
+
+        broadcast.send(other, paid("inv_other"));
+        broadcast.send(store(), paid("inv_mine"));
+
+        assert!(
+            matches!(mine.try_recv().unwrap(), StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "inv_mine")
+        );
+        assert!(mine.try_recv().is_err(), "nothing else was routed here");
+        assert!(
+            matches!(theirs.try_recv().unwrap(), StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "inv_other")
+        );
+        assert!(theirs.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn an_invoice_channel_carries_only_that_invoice() {
+        let broadcast = WsBroadcast::new(16);
+        let mut rx = broadcast.subscribe_invoice("inv_a");
+
+        // Same store, different invoice: still not for this channel.
+        broadcast.send(store(), paid("inv_b"));
+        broadcast.send(store(), paid("inv_a"));
+
+        assert!(
+            matches!(rx.try_recv().unwrap(), StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "inv_a")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn the_admin_channel_carries_every_store() {
+        let broadcast = WsBroadcast::new(16);
+        let mut rx = broadcast.subscribe_topic(Topic::Admin);
+        broadcast.send(store(), paid("inv_1"));
+        broadcast.send(StoreId(uuid::Uuid::from_bytes([8; 16])), paid("inv_2"));
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok());
     }
 
     #[tokio::test]
     async fn test_ws_broadcast_capacity_overflow_lags_receiver() {
         let broadcast = WsBroadcast::new(2);
-        let mut rx = broadcast.subscribe();
+        let mut rx = broadcast.subscribe_store(store());
 
         // Send more messages than the channel capacity
         broadcast.send(store(), StatusUpdate::Ping);
@@ -435,25 +614,28 @@ mod tests {
         );
 
         // After the lag error, the remaining buffered messages are still receivable
-        let msg1 = rx.recv().await.unwrap();
-        assert!(matches!(msg1.update, StatusUpdate::Connected));
-        let msg2 = rx.recv().await.unwrap();
-        assert!(matches!(msg2.update, StatusUpdate::Ping));
+        assert!(matches!(rx.recv().await.unwrap(), StatusUpdate::Connected));
+        assert!(matches!(rx.recv().await.unwrap(), StatusUpdate::Ping));
     }
 
     /// Helper handler for transport tests — upgrades to WebSocket and delegates
-    /// to `handle_socket_forwarding` with a gate that permits every store.
+    /// to `handle_socket_forwarding` with an entitlement to the one test store.
     /// Which stores a socket may see is covered through the real `/ws` handler
     /// in `server/tests/ws_store_scope.rs`.
     async fn test_upgrade(
         ws: WebSocketUpgrade,
         axum::extract::State(bc): axum::extract::State<WsBroadcast>,
     ) -> impl IntoResponse {
-        let rx = bc.subscribe();
         ws.on_upgrade(move |socket| {
             let (sender, receiver) = socket.split();
-            let allow_all: StoreGate = std::sync::Arc::new(|_| Box::pin(async { true }));
-            handle_socket_forwarding(sender, receiver, rx, allow_all)
+            let entitled: Revalidate = std::sync::Arc::new(|| {
+                Box::pin(async {
+                    Some(Entitlement {
+                        topics: [Topic::Store(store())].into_iter().collect(),
+                    })
+                })
+            });
+            handle_socket_forwarding(sender, receiver, bc, entitled)
         })
     }
 

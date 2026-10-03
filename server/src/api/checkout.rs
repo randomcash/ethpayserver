@@ -19,7 +19,7 @@ use auth::AuthenticationService;
 use data_service::{PaymentOptionReader, PaymentReader};
 use types::{InvoiceId, InvoiceReader, InvoiceStatus};
 
-use super::ws::{StatusUpdate, WsEvent};
+use super::ws::StatusUpdate;
 use crate::state::PgAppState;
 pub use api_types::{CheckoutPaymentInfo, CheckoutResponse};
 
@@ -77,7 +77,7 @@ pub struct CheckoutWsQuery {
 
 /// Public WebSocket handler for checkout status updates.
 ///
-/// No auth required. Only forwards events matching the specified invoice_id.
+/// No auth required. Subscribes to the specified invoice's own channel.
 pub async fn checkout_ws_handler<A>(
     ws: WebSocketUpgrade,
     Query(query): Query<CheckoutWsQuery>,
@@ -96,19 +96,20 @@ where
     let Some(ws_broadcast) = state.ws_broadcast.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let rx = ws_broadcast.subscribe();
+    // Subscribe to this invoice's own channel: no other invoice's update is
+    // ever routed to a public socket.
+    let rx = ws_broadcast.subscribe_invoice(&query.invoice_id);
 
-    ws.on_upgrade(move |socket| handle_checkout_socket(socket, rx, query.invoice_id))
+    ws.on_upgrade(move |socket| handle_checkout_socket(socket, rx))
         .into_response()
 }
 
 /// Handle a public checkout WebSocket connection.
 ///
-/// Only forwards StatusUpdate messages matching the given invoice_id.
+/// `rx` is the invoice's own channel, so everything on it is forwarded.
 async fn handle_checkout_socket(
     socket: WebSocket,
-    mut rx: tokio::sync::broadcast::Receiver<WsEvent>,
-    invoice_id: String,
+    mut rx: tokio::sync::broadcast::Receiver<StatusUpdate>,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -120,19 +121,14 @@ async fn handle_checkout_socket(
         return;
     }
 
-    let inv_id = invoice_id.clone();
     let mut send_task = tokio::spawn(async move {
-        while let Ok(WsEvent { update, .. }) = rx.recv().await {
-            // Filter: only forward events for this invoice
-            let matches = match &update {
-                StatusUpdate::InvoiceStatus { invoice_id, .. } => invoice_id == &inv_id,
-                StatusUpdate::PaymentUpdate { invoice_id, .. } => invoice_id == &inv_id,
-                StatusUpdate::Ping => true,
-                StatusUpdate::Connected => false,
+        loop {
+            let update = match rx.recv().await {
+                Ok(update) => update,
+                // A slow socket misses updates; it is not closed for it.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
-            if !matches {
-                continue;
-            }
             let msg = match serde_json::to_string(&update) {
                 Ok(json) => json,
                 Err(_) => continue,

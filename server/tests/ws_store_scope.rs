@@ -10,9 +10,13 @@
 //! is only ever asserted after a positive control: a channel that is simply
 //! not delivering would otherwise pass every "does not receive" check.
 //!
-//! The channel preserves order, so "the first frame is the tenant's own
-//! update" also proves that the other tenant's update, published before it,
-//! was withheld rather than merely late.
+//! Updates are routed to per-store channels, so a socket is never subscribed
+//! to a store its user cannot see. "The first frame is the tenant's own
+//! update" proves the other tenant's update, published before it, was not
+//! delivered rather than merely late.
+//!
+//! An open socket re-checks its session and memberships on a timer; the
+//! harness shortens it so the revocation tests do not wait seconds.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -46,12 +50,18 @@ const QUIET: Duration = Duration::from_millis(600);
 /// Maps a session token to the user it was issued to. The `/ws` handler only
 /// asks it who a token belongs to; everything else it decides from the
 /// database, which is what these tests are about.
-struct Sessions(HashMap<SessionId, UserInfo>);
+struct Sessions(std::sync::Mutex<HashMap<SessionId, UserInfo>>);
+
+impl Sessions {
+    fn revoke(&self, session: SessionId) {
+        self.0.lock().unwrap().remove(&session);
+    }
+}
 
 #[async_trait]
 impl SessionService for Sessions {
     async fn validate_session(&self, session_id: SessionId) -> AuthResult<(UserInfo, Session)> {
-        match self.0.get(&session_id) {
+        match self.0.lock().unwrap().get(&session_id).cloned() {
             Some(user) => Ok((user.clone(), Session::new(user.id, auth::DeviceId::new()))),
             None => Err(auth::AuthError::SessionInvalid),
         }
@@ -87,17 +97,31 @@ impl Person {
 struct Harness {
     addr: SocketAddr,
     broadcast: Arc<WsBroadcast>,
+    sessions: Arc<Sessions>,
 }
 
+/// How often the harness's sockets re-check their session and memberships.
+const FAST: Duration = Duration::from_millis(150);
+
 async fn serve(data_service: Arc<PgDataService>, people: &[&Person]) -> Harness {
-    let sessions = people
-        .iter()
-        .map(|p| (p.session, support::user_info(p.user_id)))
-        .collect();
-    let broadcast = Arc::new(WsBroadcast::new(64));
+    serve_revalidating(data_service, people, FAST).await
+}
+
+async fn serve_revalidating(
+    data_service: Arc<PgDataService>,
+    people: &[&Person],
+    revalidate: Duration,
+) -> Harness {
+    let sessions = Arc::new(Sessions(std::sync::Mutex::new(
+        people
+            .iter()
+            .map(|p| (p.session, support::user_info(p.user_id)))
+            .collect(),
+    )));
+    let broadcast = Arc::new(WsBroadcast::new(64).with_revalidate_interval(revalidate));
     let mut state = PgAppState::new(
         data_service,
-        Arc::new(Sessions(sessions)),
+        sessions.clone(),
         None::<Arc<RedisEVMMonitor>>,
         Arc::new(NoOpRateProvider),
         Arc::new(server::services::email::NoopEmailSender),
@@ -109,7 +133,39 @@ async fn serve(data_service: Arc<PgDataService>, people: &[&Person]) -> Harness 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Harness { addr, broadcast }
+    Harness {
+        addr,
+        broadcast,
+        sessions,
+    }
+}
+
+/// The public checkout socket needs a full auth service type, though it never
+/// authenticates anyone.
+async fn serve_checkout(data_service: Arc<PgDataService>) -> (SocketAddr, Arc<WsBroadcast>) {
+    let broadcast = Arc::new(WsBroadcast::new(64));
+    let mut state = PgAppState::new(
+        data_service.clone(),
+        Arc::new(auth::WebAuthnAuthService::new(data_service)),
+        None::<Arc<RedisEVMMonitor>>,
+        Arc::new(NoOpRateProvider),
+        Arc::new(server::services::email::NoopEmailSender),
+    );
+    state.ws_broadcast = Some(broadcast.clone());
+    let app = axum::Router::new()
+        .route(
+            "/checkout/ws",
+            axum::routing::get(
+                server::api::checkout::checkout_ws_handler::<
+                    auth::WebAuthnAuthService<PgDataService>,
+                >,
+            ),
+        )
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, broadcast)
 }
 
 async fn connect(h: &Harness, person: &Person) -> Socket {
@@ -284,7 +340,9 @@ async fn a_member_removed_mid_connection_stops_receiving() {
         .await
         .unwrap();
 
-    // The socket is still open; the very next event must not reach it.
+    // The socket is still open. Once it has re-checked its memberships, the
+    // next event must not reach it.
+    tokio::time::sleep(FAST * 4).await;
     h.broadcast.send(sid(&store), paid("after-removal"));
     assert_eq!(
         next_update(&mut ws_admin).await.unwrap()["invoice_id"],
@@ -296,7 +354,7 @@ async fn a_member_removed_mid_connection_stops_receiving() {
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
-async fn when_the_decision_cannot_be_made_nothing_is_delivered() {
+async fn when_the_decision_cannot_be_made_the_socket_is_closed() {
     let Some(pg) = support::service().await else {
         return;
     };
@@ -312,7 +370,6 @@ async fn when_the_decision_cannot_be_made_nothing_is_delivered() {
     let (store_a, _) = tenant(&pg, &a, "a").await;
     let h = serve(Arc::new(PgDataService::new(handler_pool.clone())), &[&a]).await;
     let mut ws_a = connect(&h, &a).await;
-    let mut observer = h.broadcast.subscribe();
 
     h.broadcast.send(sid(&store_a), paid("healthy"));
     assert_eq!(
@@ -324,21 +381,95 @@ async fn when_the_decision_cannot_be_made_nothing_is_delivered() {
 
     handler_pool.close().await;
 
-    h.broadcast.send(sid(&store_a), paid("db-down"));
-    // The update was published, and is the owner's own: only the failed
-    // check stands between it and the socket.
-    let seen_by_channel = loop {
-        let event = tokio::time::timeout(WAIT, observer.recv())
-            .await
-            .expect("channel delivers")
-            .unwrap();
-        if matches!(&event.update, StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "db-down")
-        {
-            break event;
-        }
+    // The entitlement can no longer be established, so the socket closes
+    // instead of carrying on with the last answer it had.
+    assert!(
+        next_update(&mut ws_a).await.is_none(),
+        "the socket should have been closed"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_revoked_session_closes_the_socket_though_membership_remains() {
+    let Some(pg) = support::service().await else {
+        return;
     };
-    assert_eq!(seen_by_channel.store_id, sid(&store_a));
+    let pg = Arc::new(pg);
+    let a = Person::new(pg.pool()).await;
+    let (store_a, _) = tenant(&pg, &a, "a").await;
+    let h = serve(pg.clone(), &[&a]).await;
+    let mut ws_a = connect(&h, &a).await;
+
+    h.broadcast.send(sid(&store_a), paid("while-logged-in"));
+    assert_eq!(
+        next_update(&mut ws_a).await.expect("delivered")["invoice_id"],
+        "while-logged-in"
+    );
+
+    // Logout: the user still belongs to the store.
+    h.sessions.revoke(a.session);
+
+    assert!(
+        next_update(&mut ws_a).await.is_none(),
+        "the socket should have been closed within the revalidation interval"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn routing_alone_keeps_another_tenants_update_away() {
+    let Some(pg) = support::service().await else {
+        return;
+    };
+    let pg = Arc::new(pg);
+    let (a, b) = (Person::new(pg.pool()).await, Person::new(pg.pool()).await);
+    let (store_a, _) = tenant(&pg, &a, "a").await;
+    let (store_b, _) = tenant(&pg, &b, "b").await;
+    // The socket never re-checks anything while the test runs, and there is
+    // no per-event check at all: only the channels it was subscribed to at
+    // connect can deliver.
+    let h = serve_revalidating(pg.clone(), &[&a], Duration::from_secs(3600)).await;
+    let mut ws_a = connect(&h, &a).await;
+
+    h.broadcast.send(sid(&store_b), paid("inv-of-b"));
+    h.broadcast.send(sid(&store_a), paid("inv-of-a"));
+
+    let got = next_update(&mut ws_a).await.expect("A's own update");
+    assert_eq!(got["invoice_id"], "inv-of-a", "first frame was {got}");
     assert_silent(&mut ws_a).await;
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_checkout_socket_receives_only_its_own_invoice() {
+    let Some(pg) = support::service().await else {
+        return;
+    };
+    let (a, b) = (
+        support::seed_tenant(&pg, "a").await,
+        support::seed_tenant(&pg, "b").await,
+    );
+    let (addr, broadcast) = serve_checkout(Arc::new(pg)).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{}/checkout/ws?invoice_id={}",
+        addr,
+        a.invoice.id.as_str()
+    ))
+    .await
+    .expect("connect");
+    assert_eq!(next_update(&mut ws).await.unwrap()["type"], "connected");
+
+    broadcast.send(types::StoreId(b.store.id.0), paid(b.invoice.id.as_str()));
+    broadcast.send(types::StoreId(a.store.id.0), paid(a.invoice.id.as_str()));
+
+    let got = next_update(&mut ws).await.expect("own invoice's update");
+    assert_eq!(
+        got["invoice_id"],
+        a.invoice.id.as_str(),
+        "first frame was {got}"
+    );
+    assert_silent(&mut ws).await;
 }
 
 #[tokio::test]
@@ -352,7 +483,8 @@ async fn an_update_for_an_invoice_is_attributed_to_the_invoices_store() {
         support::seed_tenant(&pg, "b").await,
     );
     let broadcast = WsBroadcast::new(16);
-    let mut observer = broadcast.subscribe();
+    let mut observe_a = broadcast.subscribe_store(types::StoreId(a.store.id.0));
+    let mut observe_b = broadcast.subscribe_store(types::StoreId(b.store.id.0));
 
     // An invoice that does not exist has no store, so nothing is published.
     broadcast
@@ -365,9 +497,14 @@ async fn an_update_for_an_invoice_is_attributed_to_the_invoices_store() {
         .send_for_invoice(&pg, &a.invoice.id, paid("a"))
         .await;
 
-    let first = observer.recv().await.unwrap();
-    assert_eq!(first.store_id, types::StoreId(b.store.id.0));
-    let second = observer.recv().await.unwrap();
-    assert_eq!(second.store_id, types::StoreId(a.store.id.0));
-    assert!(observer.try_recv().is_err(), "nothing else was published");
+    assert!(matches!(
+        observe_b.recv().await.unwrap(),
+        StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "b"
+    ));
+    assert!(matches!(
+        observe_a.recv().await.unwrap(),
+        StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "a"
+    ));
+    assert!(observe_a.try_recv().is_err(), "nothing else was published");
+    assert!(observe_b.try_recv().is_err(), "nothing else was published");
 }
