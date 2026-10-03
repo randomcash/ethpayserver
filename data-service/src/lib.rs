@@ -18,6 +18,7 @@
 //! ```
 
 pub mod account_deletion;
+pub mod account_standing;
 pub mod analytics;
 pub mod chain_cursor;
 pub mod email_change;
@@ -34,6 +35,9 @@ pub mod webhook_delivery;
 pub mod webhook_outbox;
 
 pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
+pub use account_standing::{
+    AccountStanding, AccountStandingStore, ApplyOutcome, HeldStanding, StandingDecision,
+};
 pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
 pub use chain_cursor::{ChainCursor, ChainCursorReader, ChainCursorWriter};
 pub use email_change::{EmailChangeRequest, EmailChangeWriter};
