@@ -10,6 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use data_service::{AccountStanding, AccountStandingStore, ApplyOutcome, HeldStanding};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use payserver_plugin_api::PluginId;
 use payserver_plugin_host::PluginEngine;
 use types::RepositoryResult;
@@ -17,6 +18,7 @@ use uuid::Uuid;
 
 use super::super::{DeferredCapabilities, PluginCalls};
 use super::DeferredStanding;
+use super::tests::Buf;
 use crate::services::plugins::pools::PluginPools;
 
 /// A plugin that forwards its argument to `import` and returns the answer.
@@ -106,18 +108,98 @@ fn a_plugin_importing_account_standing_loads_and_reads_the_stored_standing() {
     assert_eq!(answer["standing"]["checkout_url"], "https://x.example/c");
 }
 
+/// Loads `import` through the same host calls the positive test uses, so a
+/// refusal can only be about the import itself.
+fn load(import: &str) -> Result<(), String> {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
+    let calls = PluginCalls::new(PluginId::new("cash.random.standing").unwrap(), pools);
+    let engine = PluginEngine::new();
+    let module = engine.compile(&plugin_importing(import)).unwrap();
+    engine
+        .instantiate_with_calls(&module, Arc::new(calls))
+        .map(|_| ())
+        .map_err(|e| format!("{e:?}"))
+}
+
 #[test]
 fn no_import_exists_by_which_a_plugin_could_write_a_standing() {
-    let engine = PluginEngine::new();
+    // The harness loads the read import, so a refusal below is about the name.
+    load("account_standing").expect("the read import must load");
     for import in [
         "apply_account_standing",
         "set_account_standing",
         "account_standing_set",
     ] {
-        let module = engine.compile(&plugin_importing(import)).unwrap();
-        assert!(
-            engine.instantiate(&module).is_err(),
-            "{import} must not exist on the host"
-        );
+        let err = load(import).expect_err(&format!("{import} must not exist on the host"));
+        assert!(err.contains(import), "refused for another reason: {err}");
     }
+}
+
+#[test]
+fn a_plugin_reading_a_stale_standing_surfaces_the_fail_open() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let account = Uuid::new_v4();
+    let standing = DeferredStanding::new();
+    assert!(standing.publish(Arc::new(Store(HeldStanding {
+        standing: AccountStanding {
+            account_id: account,
+            version: 1,
+            in_good_standing: true,
+            paid_through: None,
+            plan_name: "p".into(),
+            checkout_url: None,
+        },
+        last_heard_at: Utc::now() - Duration::days(365),
+    }))));
+    let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
+    let calls = PluginCalls::new(PluginId::new("cash.random.standing").unwrap(), pools)
+        .with_capabilities(&DeferredCapabilities {
+            standing,
+            ..DeferredCapabilities::default()
+        });
+    let engine = PluginEngine::new();
+    let module = engine
+        .compile(&plugin_importing("account_standing"))
+        .unwrap();
+    let mut instance = engine
+        .instantiate_with_calls(&module, Arc::new(calls))
+        .unwrap();
+
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let buf = Buf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .with_ansi(false)
+        .with_writer(buf.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        metrics::with_local_recorder(&recorder, || {
+            instance
+                .call_raw(
+                    "call",
+                    format!(r#"{{"account_id":"{account}"}}"#).as_bytes(),
+                    10_000_000,
+                )
+                .unwrap()
+        })
+    });
+
+    let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged
+            .lines()
+            .any(|l| l.contains("ERROR") && l.contains("standing fail-open")),
+        "no error-level event: {logged:?}"
+    );
+    assert!(
+        handle.render().contains(&format!(
+            "{}{{reason=\"stale\"}} 1",
+            data_service::FAIL_OPEN_COUNTER
+        )),
+        "counter not incremented"
+    );
 }

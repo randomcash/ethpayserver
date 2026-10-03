@@ -65,7 +65,7 @@ fn calls(store: Option<Held>) -> PluginCalls {
 }
 
 #[derive(Clone, Default)]
-struct Buf(Arc<Mutex<Vec<u8>>>);
+pub(super) struct Buf(pub(super) Arc<Mutex<Vec<u8>>>);
 
 impl std::io::Write for Buf {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
