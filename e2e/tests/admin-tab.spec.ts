@@ -14,13 +14,17 @@ test.describe('Server Admin tab visibility', () => {
     withAuthenticator: page,
   }) => {
     await register(page);
+    // The tab is gated on the role fetch (/api/auth/me), which can resolve after
+    // the first tabs paint. Wait for that response itself, not for the network
+    // to go idle, so absence is measured after the role is known.
+    const roleLoaded = page.waitForResponse(
+      (r) => r.url().includes('/api/auth/me') && r.ok(),
+    );
     await page.goto('/evm/settings');
-    // Wait for a tab every account has, so absence of the admin one is not just
-    // "the page has not rendered yet".
+    await roleLoaded;
+    // Also wait for a tab every account has, so absence of the admin one is not
+    // just "the page has not rendered yet".
     await expect(page.locator('.settings-tab', { hasText: /account/i }).first()).toBeVisible();
-    // The tab is gated on the role fetch, which can resolve after the first
-    // tabs paint; let the network settle before asserting absence.
-    await page.waitForLoadState('networkidle');
     await expect(page.locator('.settings-tab-admin')).toHaveCount(0);
     await expect(page.locator('.settings-tab', { hasText: /server admin/i })).toHaveCount(0);
     await expect(page.locator('.admin-users-table')).toHaveCount(0);
