@@ -435,9 +435,6 @@ where
         let (user_info, _is_operator, scope) =
             validate_session_with_scope(parts, state, false).await?;
 
-        if user_info.role != Role::ServerAdmin {
-            return Err((StatusCode::FORBIDDEN, "Admin access required"));
-        }
         if !key_grants_merchant_read(scope.as_deref()) {
             return Err((
                 StatusCode::FORBIDDEN,
