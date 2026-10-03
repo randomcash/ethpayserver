@@ -22,7 +22,9 @@ use crate::state::PgAppState;
 /// Decides whether a session's user may see updates about an invoice.
 ///
 /// Evaluated per update rather than once at connect, so a membership removed
-/// while the socket is open stops receiving that store's frames.
+/// while the socket is open stops receiving that store's frames. The user's
+/// role is fixed at connect, so a demoted server admin keeps seeing every
+/// store's frames until the socket closes.
 pub type InvoiceVisibility =
     std::sync::Arc<dyn Fn(auth::UserInfo, String) -> BoxFuture<'static, bool> + Send + Sync>;
 
@@ -83,6 +85,37 @@ impl WsBroadcast {
     }
 }
 
+/// Whether `user` may see updates about `invoice_id`: server admins, and
+/// members of the invoice's store. An invoice that cannot be resolved, or a
+/// lookup that fails, is not visible - the feed fails closed.
+pub async fn invoice_visible_to<D>(data: &D, user: &auth::UserInfo, invoice_id: String) -> bool
+where
+    D: ::types::InvoiceReader + auth::repository::UserStoreRepository + ?Sized,
+{
+    let invoice =
+        match ::types::InvoiceReader::get(data, &::types::InvoiceId::from_string(invoice_id)).await
+        {
+            Ok(Some(invoice)) => invoice,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::warn!(error = ?e, "ws: invoice lookup failed; dropping frame");
+                return false;
+            }
+        };
+    if user.role == auth::Role::ServerAdmin {
+        return true;
+    }
+    match auth::repository::UserStoreRepository::get_user_store(data, user.id, invoice.store_id)
+        .await
+    {
+        Ok(membership) => membership.is_some(),
+        Err(e) => {
+            tracing::warn!(error = ?e, "ws: membership lookup failed; dropping frame");
+            false
+        }
+    }
+}
+
 /// WebSocket upgrade handler.
 ///
 /// Accepts the upgrade immediately. Authentication happens inside the
@@ -106,28 +139,7 @@ where
     let data_service = state.data_service.clone();
     let visibility: InvoiceVisibility = std::sync::Arc::new(move |user, invoice_id| {
         let data_service = data_service.clone();
-        Box::pin(async move {
-            let Ok(Some(invoice)) = ::types::InvoiceReader::get(
-                &*data_service,
-                &::types::InvoiceId::from_string(invoice_id),
-            )
-            .await
-            else {
-                return false;
-            };
-            if user.role == auth::Role::ServerAdmin {
-                return true;
-            }
-            matches!(
-                auth::repository::UserStoreRepository::get_user_store(
-                    &*data_service,
-                    user.id,
-                    invoice.store_id
-                )
-                .await,
-                Ok(Some(_))
-            )
-        })
+        Box::pin(async move { invoice_visible_to(&*data_service, &user, invoice_id).await })
     });
 
     ws.on_upgrade(move |socket| handle_socket(socket, rx, auth_service, visibility))
@@ -215,7 +227,17 @@ async fn handle_socket_forwarding<V, F>(
 
     // Spawn a task to forward broadcast messages to the client
     let mut send_task = tokio::spawn(async move {
-        while let Ok(update) = rx.recv().await {
+        loop {
+            let update = match rx.recv().await {
+                Ok(update) => update,
+                // Per-frame lookups can fall behind a burst; the skipped
+                // frames are gone but the feed must keep running.
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "ws: client lagged; frames skipped");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
             let invoice_id = match &update {
                 StatusUpdate::InvoiceStatus { invoice_id, .. }
                 | StatusUpdate::PaymentUpdate { invoice_id, .. } => Some(invoice_id.clone()),

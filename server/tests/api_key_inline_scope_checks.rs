@@ -70,12 +70,17 @@ async fn service() -> Option<PgDataService> {
     Some(PgDataService::new(pool))
 }
 
+/// The kdf and key columns must deserialize into real shapes: member-add
+/// resolves the target user through `get_user`, which reads them.
 async fn seed_user(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, kdf_params, encrypted_symmetric_key, \
          recovery_verification_hash, kdf_salt_identifier) \
-         VALUES ($1, '{}'::jsonb, '{}'::jsonb, 'h', 'passkey:' || $1::text)",
+         VALUES ($1, \
+         '{\"algorithm\":\"argon2id\",\"memory_kb\":65536,\"iterations\":3,\"parallelism\":4,\"salt\":\"AAAA\"}'::jsonb, \
+         '{\"ciphertext\":\"AAAA\",\"iv\":\"AAAA\",\"mac\":\"AAAA\"}'::jsonb, \
+         'h', 'passkey:' || $1::text)",
     )
     .bind(id)
     .execute(pool)
@@ -251,6 +256,44 @@ async fn a_key_scoped_to_modify_users_can_add_a_member() {
         "a key scoped to canmodifystoreusers must be able to add a member: {:?}",
         result.err()
     );
+}
+
+/// A permitted caller naming a user id that does not exist gets a client
+/// error, not a failed insert. The sibling test above is the positive
+/// control: the same call with a real user succeeds.
+#[tokio::test]
+#[ignore]
+async fn adding_a_nonexistent_user_as_a_member_is_404() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let owner = seed_user(pg.pool()).await;
+    let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
+    pg.create_store_owned_by(&store, UserId(owner))
+        .await
+        .expect("seed store owned by user");
+    seed_owner_with_permissions(
+        &pg,
+        owner,
+        store.id.0,
+        vec!["ethpay.store.canmodifystoreusers".to_string()],
+    )
+    .await;
+
+    let state = app_state(Arc::new(pg));
+
+    let result = add_store_member(
+        StoreScopedUser(user_info(owner), None),
+        State(state),
+        Path(store.id.0),
+        Json(api_types::AddMemberRequest {
+            user_id: Uuid::new_v4(),
+            role: "Guest".to_string(),
+        }),
+    )
+    .await;
+
+    assert_eq!(result.err(), Some(StatusCode::NOT_FOUND));
 }
 
 /// `policy:storeId` scoping on a two-path-param handler

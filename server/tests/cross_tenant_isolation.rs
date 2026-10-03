@@ -84,3 +84,5 @@ mod store_settings;
 mod stores;
 #[path = "cross_tenant_isolation/wallets.rs"]
 mod wallets;
+#[path = "cross_tenant_isolation/ws.rs"]
+mod ws;
