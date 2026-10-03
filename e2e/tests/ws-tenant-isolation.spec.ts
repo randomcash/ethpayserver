@@ -51,7 +51,7 @@ import { test, expect } from '@playwright/test';
 import { randomBytes } from 'node:crypto';
 import { HDKey, generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
-import { api, ApiError } from '../fixtures/api';
+import { api, ApiError, V4_UUID } from '../fixtures/api';
 import { addStoreMember, createUserWithApiKey } from '../fixtures/db';
 import {
   expectNothingForeign,
@@ -230,6 +230,7 @@ test.describe('Status socket tenant isolation', () => {
           metadata: { source: 'ws-tenant-isolation' },
         },
       });
+      expect(invoice.id, 'invoice id is not a v4 UUID').toMatch(V4_UUID);
       return invoice.id;
     }
 
