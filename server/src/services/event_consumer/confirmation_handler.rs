@@ -192,10 +192,13 @@ impl<
 
                     // Broadcast invoice paid via WebSocket
                     if let Some(ref ws) = self.ws_broadcast {
-                        ws.send(StatusUpdate::InvoiceStatus {
-                            invoice_id: event.invoice_id.to_string(),
-                            status: InvoiceStatus::Paid.to_string(),
-                        });
+                        ws.send(
+                            invoice.store_id,
+                            StatusUpdate::InvoiceStatus {
+                                invoice_id: event.invoice_id.to_string(),
+                                status: InvoiceStatus::Paid.to_string(),
+                            },
+                        );
                     }
 
                     // Queue webhook notification for payment confirmed
@@ -252,10 +255,13 @@ impl<
 
                     // Broadcast late payment via WebSocket
                     if let Some(ref ws) = self.ws_broadcast {
-                        ws.send(StatusUpdate::InvoiceStatus {
-                            invoice_id: event.invoice_id.to_string(),
-                            status: InvoiceStatus::LatePaid.to_string(),
-                        });
+                        ws.send(
+                            invoice.store_id,
+                            StatusUpdate::InvoiceStatus {
+                                invoice_id: event.invoice_id.to_string(),
+                                status: InvoiceStatus::LatePaid.to_string(),
+                            },
+                        );
                     }
 
                     // Queue webhook notification for late payment
