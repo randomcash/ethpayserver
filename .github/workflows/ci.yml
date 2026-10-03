@@ -444,6 +444,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install audit tools
         run: cargo install cargo-audit cargo-deny --locked
+      # The wasmtime ignores in .cargo/audit.toml hold only while wasmtime is
+      # built without its GC heap and component model, and only until a fixed
+      # release is locked. See the script.
+      - name: wasmtime ignore guard self-test
+        run: ./scripts/check-wasmtime-ignores.test.sh
+      - name: wasmtime ignores still valid
+        run: ./scripts/check-wasmtime-ignores.sh
       - name: cargo audit
         run: cargo audit
       - name: cargo deny

@@ -44,8 +44,10 @@ ignore = [
     #   0327  async-lifted component callback result count - needs the component
     #         model; the host instantiates core `Module`s only
     # The fix is >=48.0.4 (or >=49.0.2), which is a commons bump, so these come
-    # out with the other two when that lands. REVISIT IF THE HOST EVER ENABLES
-    # `gc`, `component-model` or `async` on wasmtime.
+    # out with the other two when that lands. scripts/check-wasmtime-ignores.sh
+    # runs in CI and fails if `gc`, `component-model` or `async` is ever enabled
+    # on wasmtime (this reasoning would then be false), and fails once the locked
+    # wasmtime is a fixed release while any of the five ignores remains.
     "RUSTSEC-2026-0325", # wasmtime mis-typed tag imports - gc feature not compiled
     "RUSTSEC-2026-0326", # wasmtime GC rooting across try_call - gc feature not compiled
     "RUSTSEC-2026-0327", # wasmtime component async callback - component model not compiled
