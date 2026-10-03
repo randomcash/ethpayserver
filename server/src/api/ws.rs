@@ -381,7 +381,12 @@ fn sync_listeners(
                         let _ = lagged.try_send(());
                         break;
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    // A channel that closed under a live listener would leave
+                    // the socket connected but deaf; fail closed instead.
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let _ = lagged.try_send(());
+                        break;
+                    }
                 }
             }
         });
