@@ -136,7 +136,10 @@ where
     // A nonexistent user is a client error, not a failed insert.
     auth::UserRepository::get_user(&*state.data_service, UserId(req.user_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            tracing::error!(error = %e, "member add: user lookup failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let user_store = UserStore::new(UserId(req.user_id), StoreId(store_id), role.id);
