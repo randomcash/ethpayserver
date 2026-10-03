@@ -187,7 +187,7 @@ async fn an_api_key_cannot_reach_another_tenants_stores() {
         server::api::stores::get_store(a_via_key, State(state.clone()), Path(b.store.id.0)).await;
     assert_eq!(
         result.unwrap_err(),
-        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
         "an API key must not fetch another tenant's store by id"
     );
 

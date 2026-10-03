@@ -203,26 +203,42 @@ pub(crate) async fn get_invoice_with_permission<A: SessionService>(
 ) -> Result<InvoiceData, StatusCode> {
     let invoice = InvoiceReader::get(&*state.data_service, invoice_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if user.role != auth::Role::ServerAdmin {
-        let is_member = state
+    let is_member = match &invoice {
+        Some(invoice) if user.role != auth::Role::ServerAdmin => state
             .data_service
             .get_user_store(user.id, invoice.store_id)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .is_some();
+            .is_some(),
+        _ => false,
+    };
 
-        if !is_member {
-            return Err(StatusCode::NOT_FOUND);
-        }
+    visible_invoice(
+        invoice,
+        user.role == auth::Role::ServerAdmin,
+        is_member,
+        key_scope,
+    )
+}
+
+/// The decision behind [`get_invoice_with_permission`], on facts already
+/// loaded. A missing invoice, a non-member and an out-of-scope key all answer
+/// the same `NOT_FOUND`, so the answer never says whether an id exists.
+pub(crate) fn visible_invoice(
+    invoice: Option<InvoiceData>,
+    is_admin: bool,
+    is_member: bool,
+    key_scope: Option<&[String]>,
+) -> Result<InvoiceData, StatusCode> {
+    let invoice = invoice.ok_or(StatusCode::NOT_FOUND)?;
+    if !is_admin && !is_member {
+        return Err(StatusCode::NOT_FOUND);
     }
-
     if !key_grants_store_permission(key_scope, VIEW_INVOICES, invoice.store_id) {
         return Err(StatusCode::NOT_FOUND);
     }
-
     Ok(invoice)
 }
 
