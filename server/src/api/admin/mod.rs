@@ -61,6 +61,22 @@ pub struct SafeModeResponse {
     /// boot. Plugins are disabled, not uninstalled - their files and data are
     /// untouched, and clearing the flag on the next boot restores them.
     pub safe_mode: bool,
+    /// True when something on this server can use the operator store: at
+    /// least one installed plugin is enabled and safe mode is off. The
+    /// operator store only decides where a plugin's invoices are issued and
+    /// which store's payments a plugin is told about, so on a server with no
+    /// running plugin the setting does nothing and a client should not offer
+    /// it.
+    pub operator_store_available: bool,
+}
+
+/// Whether an operator store has any consumer on this server.
+///
+/// Based on the installed rows rather than what loaded at boot, so a plugin
+/// that was installed or enabled after boot (and takes the store up on the
+/// next restart, like the store itself) still makes the setting reachable.
+fn operator_store_available(safe_mode: bool, enabled: impl IntoIterator<Item = bool>) -> bool {
+    !safe_mode && enabled.into_iter().any(|e| e)
 }
 
 // ============================================================================
@@ -584,13 +600,21 @@ fn billable(methods: &[data_service::StorePaymentMethod]) -> Result<(), &'static
 pub async fn get_safe_mode<A>(
     AdminAuth(_admin): AdminAuth,
     State(state): State<PgAppState<A>>,
-) -> Json<SafeModeResponse>
+) -> Result<Json<SafeModeResponse>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    Json(SafeModeResponse {
+    let installed =
+        data_service::InstalledPluginReader::list_installed_plugins(&*state.data_service)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(SafeModeResponse {
         safe_mode: state.safe_mode,
-    })
+        operator_store_available: operator_store_available(
+            state.safe_mode,
+            installed.iter().map(|p| p.enabled),
+        ),
+    }))
 }
 
 #[cfg(test)]
@@ -687,9 +711,28 @@ mod tests {
 
     #[test]
     fn test_safe_mode_response_serialization() {
-        let resp = SafeModeResponse { safe_mode: true };
+        let resp = SafeModeResponse {
+            safe_mode: true,
+            operator_store_available: false,
+        };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["safe_mode"], true);
+        assert_eq!(json["operator_store_available"], false);
+    }
+
+    /// The operator store is offered only when a plugin could use it.
+    #[test]
+    fn the_operator_store_is_available_only_with_an_enabled_plugin() {
+        assert!(!operator_store_available(false, []), "no plugins installed");
+        assert!(
+            !operator_store_available(false, [false]),
+            "the only plugin is disabled"
+        );
+        assert!(operator_store_available(false, [false, true]));
+        assert!(
+            !operator_store_available(true, [true]),
+            "safe mode loads nothing"
+        );
     }
 
     fn method(wallet: Option<uuid::Uuid>) -> data_service::StorePaymentMethod {
