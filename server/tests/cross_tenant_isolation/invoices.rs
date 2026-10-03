@@ -209,8 +209,21 @@ async fn get_invoice_by_id_across_tenants_is_refused() {
 
     assert_eq!(
         result.unwrap_err(),
-        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
         "A must not be able to fetch B's invoice by id"
+    );
+
+    // A foreign invoice must be indistinguishable from one that does not exist.
+    let missing = server::api::invoices::get_invoice(
+        store_scoped_user_info(a.user_id),
+        State(state.clone()),
+        Path(Uuid::new_v4().to_string()),
+    )
+    .await;
+    assert_eq!(
+        missing.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "a missing invoice answers the same as a foreign one"
     );
 
     // Positive control: the admin test below proves the admin bypass works,
