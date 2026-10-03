@@ -36,7 +36,8 @@ pub mod webhook_outbox;
 
 pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
 pub use account_standing::{
-    AccountStanding, AccountStandingStore, ApplyOutcome, HeldStanding, StandingDecision,
+    AccountStanding, AccountStandingStore, ApplyOutcome, DEFAULT_STANDING_MAX_AGE_DAYS,
+    FAIL_OPEN_COUNTER, HeldStanding, StandingDecision, decide_and_surface,
 };
 pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
 pub use chain_cursor::{ChainCursor, ChainCursorReader, ChainCursorWriter};

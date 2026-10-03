@@ -85,9 +85,11 @@ use super::pools::PluginPools;
 
 mod invoicing;
 mod sql;
+mod standing;
 mod volume;
 
 pub use invoicing::DeferredIssuer;
+pub use standing::DeferredStanding;
 pub use volume::{DeferredBulkVolume, DeferredVolume};
 
 /// The late-bound host capabilities a plugin's imports resolve through.
@@ -107,6 +109,8 @@ pub struct DeferredCapabilities {
     /// requires an instance that can answer for one account to answer for
     /// many, even though in practice one implies the other.
     pub bulk_volume: DeferredBulkVolume,
+    /// Capability 7: reading the standing the host stored for an account.
+    pub standing: DeferredStanding,
 }
 
 /// One plugin's host imports: its database, and whether it may invoice.
@@ -130,6 +134,10 @@ pub struct PluginCalls {
     /// reported as unavailable rather than answered with an empty list, which
     /// a plugin would read as "none of these merchants sold anything".
     bulk_volume: DeferredBulkVolume,
+    /// Who answers when this plugin asks for an account's stored standing.
+    /// Unpublished is reported as unavailable rather than as "no standing",
+    /// which a plugin gating on it would read as permission to allow.
+    standing: DeferredStanding,
     /// The runtime to drive the async database work on.
     ///
     /// [`PluginHostCalls`] is sync because the runtime calls plugins from
@@ -151,6 +159,7 @@ impl PluginCalls {
             issuer: DeferredIssuer::default(),
             volume: DeferredVolume::default(),
             bulk_volume: DeferredBulkVolume::default(),
+            standing: DeferredStanding::default(),
             handle: tokio::runtime::Handle::current(),
         }
     }
@@ -162,6 +171,7 @@ impl PluginCalls {
         self.issuer = capabilities.issuer.clone();
         self.volume = capabilities.volume.clone();
         self.bulk_volume = capabilities.bulk_volume.clone();
+        self.standing = capabilities.standing.clone();
         self
     }
 }
@@ -177,6 +187,10 @@ impl PluginHostCalls for PluginCalls {
 
     fn merchant_volumes(&self, request: &[u8]) -> Result<Vec<u8>, String> {
         self.merchant_volumes_impl(request)
+    }
+
+    fn account_standing(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        self.account_standing_impl(request)
     }
 
     fn storage_query(&self, request: &[u8]) -> Result<Vec<u8>, String> {
