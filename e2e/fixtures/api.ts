@@ -79,5 +79,9 @@ export function wsUrl(path: string): string {
  * For the unauthenticated checkout socket that unguessability is the only
  * thing standing between a stranger and an invoice's live status, so a change
  * to a sequential, time-ordered or otherwise predictable id must fail here.
+ *
+ * Rejecting uppercase is deliberate, not pedantry: the server renders ids
+ * lowercase, so an uppercase id means a different generator produced it.
+ * Making the pattern case-insensitive would discard that discrimination.
  */
 export const V4_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
