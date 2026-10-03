@@ -103,16 +103,14 @@ async fn list_stores_hides_archived_unless_asked() {
     let all = server::api::stores::list_stores(
         AuthenticatedUser(user_info(a.user_id)),
         State(state),
-        Query(ListStoresQuery {
-            include_archived: true,
-        }),
+        Query(ListStoresQuery { archived: true }),
     )
     .await
     .expect("list");
     let found = all
         .iter()
         .find(|s| s.id == a.store.id.0)
-        .expect("include_archived must list the archived store");
+        .expect("archived=true must list the archived store");
     assert!(found.archived);
 }
 

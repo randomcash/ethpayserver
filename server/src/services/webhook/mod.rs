@@ -64,4 +64,4 @@ pub use dispatch::{QueueOutcome, queue_for_store};
 pub use error::WebhookError;
 pub use job::WebhookJob;
 pub use service::{WebhookDataService, WebhookService, WebhookSink};
-pub use signing::sign_webhook_payload;
+pub use signing::{sign_webhook_payload, sign_webhook_payload_timestamped};
