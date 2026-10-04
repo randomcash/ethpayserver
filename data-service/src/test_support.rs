@@ -34,8 +34,10 @@ pub fn database_url() -> String {
 /// For a non-ignored test that can use a database when one is present. The
 /// announcement has a fixed form, `SKIPPED: <test> (DATABASE_URL not set)`, so
 /// `grep -c SKIPPED` counts skips. It is written to the process's stderr
-/// handle directly: `eprintln!` is captured per test and hidden for a test that
-/// passes, which is exactly how a skip went unnoticed.
+/// handle directly, which gets past libtest's per-test capture. nextest
+/// captures each test process's output and hides it for a test that passes, so
+/// `.config/nextest.toml` sets `success-output = "final"`: the line then shows
+/// in the run summary without `--nocapture`.
 pub fn database_url_or_skip(test: &str) -> Option<String> {
     use std::io::Write;
 
