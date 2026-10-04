@@ -17,9 +17,7 @@ use crate::support::{app_state, seed_tenant, service, user_info};
 #[tokio::test]
 #[ignore]
 async fn get_store_by_id_across_tenants_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -80,9 +78,7 @@ async fn get_store_by_id_across_tenants_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn list_stores_never_includes_another_tenants_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -110,9 +106,7 @@ async fn list_stores_hides_archived_unless_asked() {
     use auth::repository::StoreRepository;
     use server::api::stores::ListStoresQuery;
 
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     pg.archive_store(a.store.id).await.expect("archive");
     let state = app_state(Arc::new(pg));
@@ -151,9 +145,7 @@ async fn unarchive_store_is_owner_only_and_round_trips() {
     use auth::repository::StoreRepository;
     use server::api::stores::ListStoresQuery;
 
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     pg.archive_store(a.store.id).await.expect("archive");
@@ -222,9 +214,7 @@ async fn archived_store_refuses_new_invoices() {
     use server::api::AuthenticatedCaller;
     use server::api::invoices::{CreateInvoiceRequest, create_invoice};
 
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let state = app_state(Arc::new(pg));
     let request = || CreateInvoiceRequest {

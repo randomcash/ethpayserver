@@ -12,6 +12,7 @@
 //! what [`MerchantVolumeReader::merchant_volume`] returns for each alone -
 //! proving the batch neither drops nor bleeds volume across accounts.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -82,16 +83,6 @@ impl RateProvider for FixedRateProvider {
     fn name(&self) -> &'static str {
         "fixed"
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -188,7 +179,7 @@ fn state(data_service: Arc<PgDataService>) -> PgAppState<UnusedSessionService> {
 #[tokio::test]
 #[ignore]
 async fn bulk_volume_matches_the_single_account_reader_and_does_not_blend_accounts() {
-    let pg = service().await.expect("DATABASE_URL required");
+    let pg = pg_service().await;
     let account_a = seed_user(pg.pool()).await;
     let account_b = seed_user(pg.pool()).await;
 
@@ -249,7 +240,7 @@ async fn bulk_volume_matches_the_single_account_reader_and_does_not_blend_accoun
 #[tokio::test]
 #[ignore]
 async fn an_account_with_no_stores_gets_a_zero_entry_not_a_dropped_one() {
-    let pg = service().await.expect("DATABASE_URL required");
+    let pg = pg_service().await;
     let has_stores = seed_user(pg.pool()).await;
     let no_stores = seed_user(pg.pool()).await;
     seed_store_with_payment(&pg, has_stores, "ETH", "2000000000000000000").await;

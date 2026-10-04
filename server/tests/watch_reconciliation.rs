@@ -9,16 +9,18 @@
 //! rather than being vacuously green - the same standard this repo holds
 //! every check like it to.
 //!
-//! Needs a real Postgres and a real Redis; skips (not fails) when either
-//! `DATABASE_URL` or `TEST_REDIS_URL` is unset, the convention every other
-//! ignored integration test in this crate follows.
+//! Needs a real Postgres and a real Redis. A missing or unreachable
+//! `DATABASE_URL` fails, naming it; an unset `TEST_REDIS_URL` still returns
+//! early without running anything, so a run without Redis proves nothing
+//! about these tests.
 
 use auth::{Store, UserId};
 use data_service::invoice_creation::InvoiceCreationWriter;
 use data_service::store_creation::StoreCreationWriter;
+use data_service::test_support::pg_service;
 use data_service::{
-    ExpectedWatch, LiveWatchedAddressReader, LiveWatchedAddressWriter, PgDataService,
-    RedisDataService, WatchKey, reconcile,
+    ExpectedWatch, LiveWatchedAddressReader, LiveWatchedAddressWriter, RedisDataService, WatchKey,
+    reconcile,
 };
 use server::services::{RedisEVMMonitor, diff_watches, reconcile_watches};
 use sqlx::PgPool;
@@ -27,16 +29,6 @@ use types::{
     PaymentOptionData, PaymentOptionId, StoreId,
 };
 use uuid::Uuid;
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .unwrap_or_else(|e| panic!("DATABASE_URL is set but connecting failed: {e}"));
-    Some(PgDataService::new(pool))
-}
 
 async fn seed_user(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
@@ -161,9 +153,7 @@ async fn cleanup(pool: &PgPool, users: &[Uuid]) {
 #[tokio::test]
 #[ignore]
 async fn reconcile_watches_reports_a_stale_watch_and_a_missed_watch() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };
@@ -273,9 +263,7 @@ async fn reconcile_watches_reports_a_stale_watch_and_a_missed_watch() {
 #[ignore]
 #[allow(clippy::too_many_lines)] // integration test with multi-step setup + assertions
 async fn a_reused_address_resolves_to_the_new_invoice_not_the_stale_one() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };

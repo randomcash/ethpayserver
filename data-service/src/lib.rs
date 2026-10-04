@@ -82,6 +82,9 @@ pub mod test_utils;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_utils::InMemoryDataService;
 
+#[cfg(all(any(test, feature = "test-utils"), feature = "postgres"))]
+pub mod test_support;
+
 // Re-export repository traits and types from the types crate for convenience.
 pub use types::{
     // Watched Address (for PostgreSQL persistence)

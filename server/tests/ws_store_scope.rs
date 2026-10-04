@@ -171,9 +171,7 @@ async fn make_admin(pool: &PgPool, person: &Person) {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_tenant_receives_its_own_updates_and_not_another_tenants() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let (a, b) = (Person::new(pg.pool()).await, Person::new(pg.pool()).await);
     let (store_a, _) = tenant(&pg, &a, "a").await;
@@ -193,9 +191,7 @@ async fn a_tenant_receives_its_own_updates_and_not_another_tenants() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn payment_updates_are_scoped_the_same_way() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let (a, b) = (Person::new(pg.pool()).await, Person::new(pg.pool()).await);
     let (store_a, _) = tenant(&pg, &a, "a").await;
@@ -221,9 +217,7 @@ async fn payment_updates_are_scoped_the_same_way() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_server_admin_receives_every_stores_updates() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let (a, b) = (Person::new(pg.pool()).await, Person::new(pg.pool()).await);
     let admin = Person::new(pg.pool()).await;
@@ -249,9 +243,7 @@ async fn a_server_admin_receives_every_stores_updates() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_member_removed_mid_connection_stops_receiving() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let owner = Person::new(pg.pool()).await;
     let member = Person::new(pg.pool()).await;
@@ -297,10 +289,8 @@ async fn a_member_removed_mid_connection_stops_receiving() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn when_the_decision_cannot_be_made_nothing_is_delivered() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
-    let url = std::env::var("DATABASE_URL").unwrap();
+    let pg = support::service().await;
+    let url = data_service::test_support::database_url();
     // The handler gets its own pool so that closing it breaks only the
     // handler's reads, not the seeding done through the shared one.
     let handler_pool = sqlx::postgres::PgPoolOptions::new()
@@ -344,9 +334,7 @@ async fn when_the_decision_cannot_be_made_nothing_is_delivered() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn an_update_for_an_invoice_is_attributed_to_the_invoices_store() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let (a, b) = (
         support::seed_tenant(&pg, "a").await,
         support::seed_tenant(&pg, "b").await,

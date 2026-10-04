@@ -11,6 +11,7 @@
 //! (`api_key_view_invoices_scope.rs`); these tests do the same for the four
 //! call sites that didn't, both directions on each.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -54,16 +55,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by these handlers")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -166,9 +157,7 @@ async fn seed_store_invoice_payment(pg: &PgDataService) -> (Uuid, InvoiceData, P
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_get_payment() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let (owner, _invoice, payment) = seed_store_invoice_payment(&pg).await;
     let state = app_state(Arc::new(pg));
 
@@ -192,9 +181,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_get_payment() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_get_payment() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let (owner, _invoice, payment) = seed_store_invoice_payment(&pg).await;
     let state = app_state(Arc::new(pg));
 
@@ -222,9 +209,7 @@ async fn a_key_scoped_to_view_invoices_can_get_payment() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_get_invoice_payments() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let (owner, invoice, _payment) = seed_store_invoice_payment(&pg).await;
     let state = app_state(Arc::new(pg));
 
@@ -248,9 +233,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_get_invoice_payments() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_get_invoice_payments() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let (owner, invoice, _payment) = seed_store_invoice_payment(&pg).await;
     let state = app_state(Arc::new(pg));
 
@@ -278,9 +261,7 @@ async fn a_key_scoped_to_view_invoices_can_get_invoice_payments() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_get_invoice_status() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let (owner, invoice, _payment) = seed_store_invoice_payment(&pg).await;
     let state = app_state(Arc::new(pg));
 
@@ -304,9 +285,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_get_invoice_status() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_get_invoice_status() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let (owner, invoice, _payment) = seed_store_invoice_payment(&pg).await;
     let state = app_state(Arc::new(pg));
 
@@ -341,9 +320,7 @@ fn tx_hash_path(chain_id: &ChainId, tx_hash: &str) -> TxHashLookupPath {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_lookup_by_tx_hash() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let (owner, _invoice, payment) = seed_store_invoice_payment(&pg).await;
     let state = app_state(Arc::new(pg));
 
@@ -370,9 +347,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_lookup_by_tx_hash() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_lookup_by_tx_hash() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let (owner, _invoice, payment) = seed_store_invoice_payment(&pg).await;
     let state = app_state(Arc::new(pg));
 
@@ -396,9 +371,7 @@ async fn a_key_scoped_to_view_invoices_can_lookup_by_tx_hash() {
 #[tokio::test]
 #[ignore]
 async fn a_preexisting_unscoped_key_still_gets_payment() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let (owner, _invoice, payment) = seed_store_invoice_payment(&pg).await;
     let state = app_state(Arc::new(pg));
 

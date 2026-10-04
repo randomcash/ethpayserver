@@ -11,6 +11,7 @@
 //! - a failed payout releases its invoices, because nothing moved;
 //! - the answer never reaches past the store that asked.
 
+use crate::test_support::pg_service;
 use chrono::Utc;
 use sqlx::PgPool;
 use types::{ChainId, PayoutData, PayoutStatus, StoreId};
@@ -18,16 +19,6 @@ use uuid::Uuid;
 
 use crate::postgres::PgDataService;
 use crate::{PayoutClaimReader, PayoutWriter};
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 async fn seed_store(pool: &PgPool) -> StoreId {
     let user_id = Uuid::new_v4();
@@ -87,9 +78,7 @@ fn ids(values: &[&str]) -> Vec<String> {
 #[tokio::test]
 #[ignore]
 async fn a_live_payout_holds_the_invoices_it_names() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let store = seed_store(&service.pool).await;
     let claimed_id = format!("inv-claimed-{}", Uuid::new_v4());
     let free_id = format!("inv-free-{}", Uuid::new_v4());
@@ -118,9 +107,7 @@ async fn a_live_payout_holds_the_invoices_it_names() {
 #[tokio::test]
 #[ignore]
 async fn a_failed_payout_releases_its_invoices() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let store = seed_store(&service.pool).await;
     let invoice_id = format!("inv-{}", Uuid::new_v4());
 
@@ -140,9 +127,7 @@ async fn a_failed_payout_releases_its_invoices() {
 #[tokio::test]
 #[ignore]
 async fn confirmed_and_broadcasting_payouts_hold_theirs() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let store = seed_store(&service.pool).await;
     let confirmed_id = format!("inv-confirmed-{}", Uuid::new_v4());
     let broadcasting_id = format!("inv-broadcasting-{}", Uuid::new_v4());
@@ -170,9 +155,7 @@ async fn confirmed_and_broadcasting_payouts_hold_theirs() {
 #[tokio::test]
 #[ignore]
 async fn another_stores_claim_is_not_reported() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let mine = seed_store(&service.pool).await;
     let theirs = seed_store(&service.pool).await;
     let invoice_id = format!("inv-{}", Uuid::new_v4());
@@ -194,9 +177,7 @@ async fn another_stores_claim_is_not_reported() {
 #[tokio::test]
 #[ignore]
 async fn nothing_asked_is_nothing_claimed() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let store = seed_store(&service.pool).await;
 
     let claimed = service

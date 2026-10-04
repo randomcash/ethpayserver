@@ -13,9 +13,10 @@
 //!
 //! Needs a real Postgres and is `#[ignore]`d, matching the convention
 //! `data-service`'s own DB-backed tests use: set `DATABASE_URL` and run with
-//! `--ignored`. Skips (rather than failing) when it is unset, same as those
-//! tests, so the default `cargo test` run stays DB-free.
+//! `--ignored`. Fails, naming `DATABASE_URL`, when it is unset or the database
+//! is unreachable; `#[ignore]` keeps the default `cargo test` run DB-free.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -55,16 +56,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by get_store_wallet")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -144,9 +135,7 @@ async fn wallet_for_method(
 #[tokio::test]
 #[ignore]
 async fn a_pinned_methods_wallet_outlives_a_primary_change_through_the_endpoint() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -230,9 +219,7 @@ async fn a_pinned_methods_wallet_outlives_a_primary_change_through_the_endpoint(
 #[tokio::test]
 #[ignore]
 async fn a_payment_method_from_another_store_is_not_found() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store_a = Store::new(format!("store-a-{}", Uuid::new_v4()), UserId(owner));
     let store_b = Store::new(format!("store-b-{}", Uuid::new_v4()), UserId(owner));
@@ -273,9 +260,7 @@ async fn a_payment_method_from_another_store_is_not_found() {
 #[tokio::test]
 #[ignore]
 async fn an_unresolvable_method_is_not_found() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))

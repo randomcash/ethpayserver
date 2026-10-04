@@ -56,9 +56,7 @@ impl AccountClosedObserver for RecordingObserver {
 #[tokio::test]
 #[ignore]
 async fn deleting_a_server_admin_target_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_user(pg.pool(), "server_admin").await;
     let observer = Arc::new(RecordingObserver::default());
@@ -98,9 +96,7 @@ async fn deleting_a_server_admin_target_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn deleting_an_account_that_took_a_payment_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_user(pg.pool(), "user").await;
     let store = Store::new(format!("store-{target}"), UserId(target));
@@ -150,9 +146,7 @@ async fn deleting_an_account_that_took_a_payment_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn deleting_an_untraded_account_succeeds_and_takes_its_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_user(pg.pool(), "user").await;
     let store = Store::new(format!("store-{target}"), UserId(target));
@@ -195,9 +189,7 @@ async fn deleting_an_untraded_account_succeeds_and_takes_its_store() {
 #[tokio::test]
 #[ignore]
 async fn deleting_an_account_as_an_admin_notifies_every_registered_plugin() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_user(pg.pool(), "user").await;
 
@@ -228,9 +220,7 @@ async fn deleting_an_account_as_an_admin_notifies_every_registered_plugin() {
 #[tokio::test]
 #[ignore]
 async fn list_user_stores_is_scoped_to_the_requested_user() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_user(pg.pool(), "user").await;
     let other = seed_user(pg.pool(), "user").await;
@@ -275,9 +265,7 @@ async fn list_user_stores_is_scoped_to_the_requested_user() {
 #[tokio::test]
 #[ignore]
 async fn deleting_an_account_with_a_still_watched_address_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };

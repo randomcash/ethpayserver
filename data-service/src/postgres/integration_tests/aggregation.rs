@@ -28,7 +28,7 @@ use super::{
 #[ignore]
 #[allow(clippy::too_many_lines)] // integration test with multi-step setup + assertions
 async fn integration_multi_currency_payment_aggregation() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create a $100 USD invoice
     let mut invoice = seeded_test_invoice(&service).await;
@@ -161,7 +161,7 @@ async fn integration_multi_currency_payment_aggregation() {
 #[tokio::test]
 #[ignore]
 async fn integration_same_asset_payment_no_conversion() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create a 1.5 ETH invoice
     let mut invoice = seeded_test_invoice(&service).await;
@@ -218,7 +218,7 @@ async fn integration_same_asset_payment_no_conversion() {
 #[tokio::test]
 #[ignore]
 async fn integration_payment_without_credit_not_counted() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create a $100 USD invoice
     let mut invoice = seeded_test_invoice(&service).await;
@@ -270,7 +270,7 @@ async fn integration_payment_without_credit_not_counted() {
 #[tokio::test]
 #[ignore]
 async fn integration_reorged_payment_excluded_from_aggregation() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create a $100 USD invoice
     let mut invoice = seeded_test_invoice(&service).await;
@@ -362,7 +362,7 @@ async fn integration_reorged_payment_excluded_from_aggregation() {
 #[tokio::test]
 #[ignore]
 async fn integration_multi_chain_payment_aggregation() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create a $100 USD invoice
     let mut invoice = seeded_test_invoice(&service).await;
@@ -458,7 +458,7 @@ async fn integration_multi_chain_payment_aggregation() {
 #[tokio::test]
 #[ignore]
 async fn integration_fractional_amounts_aggregate() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create a $100 USD invoice
     let mut invoice = seeded_test_invoice(&service).await;

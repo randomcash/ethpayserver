@@ -6,21 +6,11 @@
 //! should not refuses a deletion that was safe. Both are only visible against
 //! the real foreign keys, which is why these are integration tests.
 
+use crate::test_support::pg_service;
 use sqlx::{Executor, PgPool};
 use uuid::Uuid;
 
 use crate::account_deletion::AccountDeletionReader;
-use crate::postgres::PgDataService;
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 async fn seed_user(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
@@ -83,9 +73,7 @@ async fn cleanup(pool: &PgPool, user: Uuid) {
 #[tokio::test]
 #[ignore]
 async fn an_account_that_never_traded_has_nothing_blocking_it() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user(&service.pool).await;
     let store = seed_store(&service.pool, user).await;
     // An invoice alone is not money: nobody paid it, so nothing is lost by
@@ -108,9 +96,7 @@ async fn an_account_that_never_traded_has_nothing_blocking_it() {
 #[tokio::test]
 #[ignore]
 async fn a_payment_blocks_deletion() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user(&service.pool).await;
     let store = seed_store(&service.pool, user).await;
     let invoice = seed_invoice(&service.pool, store).await;
@@ -133,9 +119,7 @@ async fn a_payment_blocks_deletion() {
 async fn another_merchants_payments_do_not_block_me() {
     // The count walks `stores.owner_id`, which is the column that cascades.
     // Counting anything wider would refuse a deletion that is perfectly safe.
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let me = seed_user(&service.pool).await;
     let them = seed_user(&service.pool).await;
     seed_store(&service.pool, me).await;
@@ -163,9 +147,7 @@ async fn another_merchants_payments_do_not_block_me() {
 #[ignore]
 async fn deleting_an_untraded_account_takes_its_stores_with_it() {
     // The cascade is the point: what deletion is for is leaving nothing behind.
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user(&service.pool).await;
     let store = seed_store(&service.pool, user).await;
 
@@ -197,9 +179,7 @@ async fn without_the_guard_a_delete_destroys_the_payment_history() {
     // error. Nothing in the schema stops it, which is why the refusal has to
     // live in the endpoint - and why anyone reaching for `delete_user` directly
     // needs to have read this.
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user(&service.pool).await;
     let store = seed_store(&service.pool, user).await;
     let invoice = seed_invoice(&service.pool, store).await;
