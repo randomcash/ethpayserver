@@ -228,7 +228,10 @@ impl<A: SessionService + 'static> HostInvoiceIssuer for PluginHostApi<A> {
             Utc::now() + chrono::Duration::seconds(DEFAULT_INVOICE_EXPIRATION_SECS as i64);
 
         let invoice = InvoiceData {
-            id: InvoiceId::new(),
+            id: InvoiceId(
+                uuid::Uuid::from_u128(Utc::now().timestamp_nanos_opt().unwrap_or(1) as u128)
+                    .to_string(),
+            ),
             store_id: request.store_id,
             currency: payment_methods[method_idx].asset_symbol.clone(),
             status: ::types::InvoiceStatus::Pending,
