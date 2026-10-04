@@ -220,6 +220,31 @@ fn a_real_issuer_creates_a_real_payable_invoice_in_base_units() {
 
     let invoice_id = types::InvoiceId(answer["invoice_id"].as_str().unwrap().to_string());
 
+    // The id is a version-4 UUID: 122 random bits from the CSPRNG. The checkout
+    // socket is unauthenticated and filters by invoice id alone, so
+    // unguessability is the only thing between a stranger and an invoice's live
+    // status. This asserts it through the issuer's own creation path; the REST
+    // path is covered separately. Lowercase is checked on purpose: the server
+    // renders ids lowercase, so another case means another generator.
+    let parsed = Uuid::parse_str(&invoice_id.0).expect("the invoice id must be a UUID");
+    assert_eq!(
+        parsed.get_version(),
+        Some(uuid::Version::Random),
+        "invoice id {} is not a version-4 UUID",
+        invoice_id.0
+    );
+    assert_eq!(
+        parsed.get_variant(),
+        uuid::Variant::RFC4122,
+        "invoice id {} has the wrong UUID variant",
+        invoice_id.0
+    );
+    assert_eq!(
+        parsed.hyphenated().to_string(),
+        invoice_id.0,
+        "invoice id is not in canonical lowercase hyphenated form"
+    );
+
     // Read back through the same repository the HTTP endpoint and the
     // payment pipeline use - proving this is a real row, not a value the
     // issuer merely returned in memory.
