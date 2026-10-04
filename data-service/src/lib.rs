@@ -30,6 +30,7 @@ pub mod payout_claims;
 pub mod reorg;
 pub mod settlement_tolerance;
 pub mod store_creation;
+pub mod store_invites;
 pub mod watch_reconciliation;
 pub mod webhook_delivery;
 pub mod webhook_outbox;
@@ -54,6 +55,7 @@ pub use settlement_tolerance::{
     DEFAULT_TOLERANCE_PERCENT, MAX_TOLERANCE_PERCENT, SettlementAllowance,
     SettlementToleranceReader, SettlementToleranceWriter,
 };
+pub use store_invites::{InviteAcceptance, StoreInviteWriter};
 pub use watch_reconciliation::{WatchKey, WatchReconciliation, reconcile};
 pub use webhook_delivery::{
     UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,

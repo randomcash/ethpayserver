@@ -8,7 +8,7 @@
 
 pub(crate) mod api_keys;
 mod deletion;
-mod email;
+pub(crate) mod email;
 mod key_material;
 pub(crate) mod wallets;
 
