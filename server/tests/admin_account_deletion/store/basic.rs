@@ -26,9 +26,7 @@ use crate::support::*;
 #[tokio::test]
 #[ignore]
 async fn hard_delete_store_refuses_a_name_that_is_not_the_synthetic_shape() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_e2e_owner(pg.pool()).await;
     let store = Store::new("A Real Merchant's Shop".to_string(), UserId(target));
@@ -70,9 +68,7 @@ async fn hard_delete_store_refuses_a_name_that_is_not_the_synthetic_shape() {
 #[tokio::test]
 #[ignore]
 async fn hard_delete_store_refuses_a_synthetic_name_owned_by_someone_else() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_user(pg.pool(), "user").await;
     let store = Store::new(
@@ -121,9 +117,7 @@ async fn hard_delete_store_refuses_a_synthetic_name_owned_by_someone_else() {
 #[tokio::test]
 #[ignore]
 async fn hard_delete_store_removes_a_synthetic_store_with_its_invoice_and_payment() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_e2e_owner(pg.pool()).await;
     let store = Store::new(
@@ -181,9 +175,7 @@ async fn hard_delete_store_removes_a_synthetic_store_with_its_invoice_and_paymen
 #[tokio::test]
 #[ignore]
 async fn hard_delete_store_refuses_when_a_payout_exists() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_e2e_owner(pg.pool()).await;
     let store = Store::new(
@@ -232,9 +224,7 @@ async fn hard_delete_store_refuses_when_a_payout_exists() {
 #[tokio::test]
 #[ignore]
 async fn hard_delete_store_refuses_when_a_refund_exists() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let caller = seed_user(pg.pool(), "server_admin").await;
     let target = seed_e2e_owner(pg.pool()).await;
     let store = Store::new(

@@ -2,6 +2,7 @@
 //! Require DATABASE_URL environment variable.
 //! Run with: DATABASE_URL="postgres://..." cargo test -p data-service -- --ignored
 
+use crate::test_support::pg_service;
 use chrono::{Duration, Utc};
 
 use auth::{
@@ -9,21 +10,10 @@ use auth::{
     User, UserId, UserRepository, WalletCredentialId, WalletRepository, error::AuthError,
 };
 
-use super::PgDataService;
 use super::tests::{
     test_device, test_encrypted_blob, test_kdf_params, test_session, test_user, test_wallet,
     test_wallet_challenge,
 };
-
-async fn create_test_service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 fn unique_email() -> String {
     format!("test_{}@example.com", uuid::Uuid::new_v4())
@@ -36,7 +26,7 @@ fn unique_wallet_address() -> String {
 #[tokio::test]
 #[ignore]
 async fn integration_user_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user
     let mut user = test_user();
@@ -118,7 +108,7 @@ async fn integration_user_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_user_wallet_address() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user with wallet address
     let wallet = unique_wallet_address();
@@ -153,7 +143,7 @@ async fn integration_user_wallet_address() {
 #[tokio::test]
 #[ignore]
 async fn integration_device_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user first
     let mut user = test_user();
@@ -199,7 +189,7 @@ async fn integration_device_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_session_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user and device first
     let mut user = test_user();
@@ -257,7 +247,7 @@ async fn integration_session_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_session_cascade_delete() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user and device
     let mut user = test_user();
@@ -288,7 +278,7 @@ async fn integration_session_cascade_delete() {
 #[tokio::test]
 #[ignore]
 async fn integration_wallet_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user first
     let mut user = test_user();
@@ -345,7 +335,7 @@ async fn integration_wallet_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_wallet_unique_constraint() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create two users
     let mut user1 = test_user();
@@ -383,7 +373,7 @@ async fn integration_wallet_unique_constraint() {
 #[tokio::test]
 #[ignore]
 async fn integration_set_primary_wallet_credential() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // A wallet-only account shaped the way `complete_new_user_wallet_registration`
     // actually creates one: pinned salt identifier, primary_wallet_address
@@ -460,7 +450,7 @@ async fn integration_set_primary_wallet_credential() {
 #[tokio::test]
 #[ignore]
 async fn integration_wallet_credentials_one_primary_is_db_enforced() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     let mut user = test_user();
     user.email = Some(unique_email());
@@ -492,7 +482,7 @@ async fn integration_wallet_credentials_one_primary_is_db_enforced() {
 #[tokio::test]
 #[ignore]
 async fn integration_wallet_challenge() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     let user_id = UserId::new();
     let challenge = test_wallet_challenge();
@@ -523,7 +513,7 @@ async fn integration_wallet_challenge() {
 #[tokio::test]
 #[ignore]
 async fn integration_wallet_reauth_challenge() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     let mut user = test_user();
     user.email = Some(unique_email());
@@ -582,7 +572,7 @@ async fn integration_wallet_reauth_challenge() {
 #[tokio::test]
 #[ignore]
 async fn integration_cascade_delete_user() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user with device, session, and wallet
     let mut user = test_user();
@@ -618,7 +608,7 @@ async fn integration_cascade_delete_user() {
 #[tokio::test]
 #[ignore]
 async fn integration_kdf_salt_identifier_is_immutable() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     let mut user = test_user();
     user.email = Some(unique_email());
@@ -654,7 +644,7 @@ async fn integration_kdf_salt_identifier_is_immutable() {
 #[tokio::test]
 #[ignore]
 async fn integration_null_kdf_salt_identifier_can_still_be_pinned() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     let mut user = test_user();
     user.email = Some(unique_email());

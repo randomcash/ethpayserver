@@ -19,9 +19,7 @@ use crate::support::{app_state, seed_tenant, service, store_scoped_user_info, us
 #[tokio::test]
 #[ignore]
 async fn wallets_are_scoped_to_the_owning_account() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -69,9 +67,7 @@ async fn wallets_are_scoped_to_the_owning_account() {
 #[tokio::test]
 #[ignore]
 async fn store_wallet_endpoints_refuse_a_non_members_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -136,9 +132,7 @@ async fn store_wallet_endpoints_refuse_a_non_members_store() {
 #[tokio::test]
 #[ignore]
 async fn store_wallet_override_refuses_a_wallet_from_another_account() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));

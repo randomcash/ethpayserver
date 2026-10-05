@@ -365,14 +365,8 @@ mod tests {
     async fn a_pool_connects_as_the_plugin_role_and_is_bounded_by_its_grants() {
         use crate::services::plugins::{PluginStorage, generate_role_password};
 
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            return;
-        };
-        let host_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("DATABASE_URL is set but connecting failed");
+        let url = data_service::test_support::database_url();
+        let host_pool = data_service::test_support::pool_for(&url, 2).await;
         let storage = PluginStorage::new(host_pool.clone());
         let plugin = id("cash.random.poolscope");
 
@@ -438,14 +432,8 @@ mod tests {
     async fn the_role_can_be_dropped_once_its_pool_is_closed() {
         use crate::services::plugins::{PluginStorage, generate_role_password};
 
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            return;
-        };
-        let host_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect");
+        let url = data_service::test_support::database_url();
+        let host_pool = data_service::test_support::pool_for(&url, 2).await;
         let storage = PluginStorage::new(host_pool);
         let plugin = id("cash.random.pooldrop");
 

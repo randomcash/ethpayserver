@@ -16,7 +16,7 @@ use super::{create_test_service, seeded_test_invoice, test_payment_option, uniqu
 #[tokio::test]
 #[ignore]
 async fn get_active_watched_addresses_for_stores_finds_a_still_pending_invoices_address() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
@@ -69,7 +69,7 @@ async fn get_active_watched_addresses_for_stores_finds_a_still_pending_invoices_
 #[tokio::test]
 #[ignore]
 async fn integration_watched_address_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create invoice first
     let invoice = seeded_test_invoice(&service).await;
@@ -117,7 +117,7 @@ async fn integration_watched_address_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_watched_address_get_active() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create invoice with future expiration
     let mut invoice = seeded_test_invoice(&service).await;
@@ -159,7 +159,7 @@ async fn integration_watched_address_get_active() {
 #[tokio::test]
 #[ignore]
 async fn integration_watched_address_different_chains() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create invoice
     let invoice = seeded_test_invoice(&service).await;
@@ -215,7 +215,7 @@ async fn integration_watched_address_different_chains() {
 #[tokio::test]
 #[ignore]
 async fn integration_watched_address_upsert_replaces() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create invoice
     let invoice = seeded_test_invoice(&service).await;

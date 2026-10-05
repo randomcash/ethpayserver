@@ -3,6 +3,7 @@ use super::*;
 use auth::{ServerSettings, Store, StoreId, UserId};
 use chrono::Utc;
 use data_service::StorePaymentMethod;
+use data_service::test_support::pg_service;
 use types::ChainId;
 use uuid::Uuid;
 
@@ -457,13 +458,6 @@ impl SessionService for NoAuthSessionService {
     }
 }
 
-async fn handler_test_service() -> Option<data_service::PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    data_service::PgDataService::connect(&database_url)
-        .await
-        .ok()
-}
-
 fn admin_user(user_id: Uuid) -> AuthenticatedUser {
     AuthenticatedUser(UserInfo {
         id: UserId(user_id),
@@ -551,9 +545,7 @@ const HANDLER_TEST_XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8
 #[tokio::test]
 #[ignore]
 async fn a_tron_payment_method_is_refused_by_the_handler() {
-    let Some(service) = handler_test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let user_id = seed_handler_test_user(&pool).await;
     let store_id = seed_handler_test_store(&pool, user_id).await;
@@ -589,9 +581,7 @@ async fn a_tron_payment_method_is_refused_by_the_handler() {
 #[tokio::test]
 #[ignore]
 async fn a_sepolia_payment_method_is_still_created_by_the_handler() {
-    let Some(service) = handler_test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let user_id = seed_handler_test_user(&pool).await;
     let store_id = seed_handler_test_store(&pool, user_id).await;
@@ -1630,9 +1620,7 @@ fn the_namespace_constants_agree_across_crates() {
 #[tokio::test]
 #[ignore]
 async fn the_create_wallet_endpoint_returns_addresses_to_verify_a_tron_key() {
-    let Some(service) = handler_test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let user_id = seed_handler_test_user(&pool).await;
     let state = handler_test_state(service);

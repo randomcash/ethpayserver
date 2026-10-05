@@ -73,9 +73,7 @@ async fn seed_store_for(service: &PgDataService, user_id: Uuid) -> Uuid {
 #[tokio::test]
 #[ignore]
 async fn two_methods_on_one_xpub_never_get_the_same_index() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
@@ -133,9 +131,7 @@ async fn two_methods_on_one_xpub_never_get_the_same_index() {
 #[tokio::test]
 #[ignore]
 async fn concurrent_allocation_on_one_wallet_issues_distinct_indices() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
     let wallet = WalletWriter::create_wallet(&service, user, EVM, &xpub_a, None)
@@ -185,9 +181,7 @@ async fn concurrent_allocation_on_one_wallet_issues_distinct_indices() {
 #[tokio::test]
 #[ignore]
 async fn adding_a_known_xpub_does_not_create_a_second_counter() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
 
@@ -229,9 +223,7 @@ async fn adding_a_known_xpub_does_not_create_a_second_counter() {
 #[tokio::test]
 #[ignore]
 async fn a_store_without_an_override_uses_the_account_primary() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -311,9 +303,7 @@ async fn a_store_without_an_override_uses_the_account_primary() {
 #[tokio::test]
 #[ignore]
 async fn a_store_cannot_be_pinned_to_another_accounts_wallet() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let mine = seed_user(&service).await;
     let theirs = seed_user(&service).await;
@@ -340,9 +330,7 @@ async fn a_store_cannot_be_pinned_to_another_accounts_wallet() {
 #[tokio::test]
 #[ignore]
 async fn promoting_a_wallet_demotes_the_previous_primary() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -382,9 +370,7 @@ async fn promoting_a_wallet_demotes_the_previous_primary() {
 #[tokio::test]
 #[ignore]
 async fn a_wallet_in_use_cannot_be_deleted() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
@@ -424,9 +410,7 @@ async fn a_wallet_in_use_cannot_be_deleted() {
 #[tokio::test]
 #[ignore]
 async fn rotation_repoints_without_resetting_the_counter() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -487,9 +471,7 @@ async fn rotation_repoints_without_resetting_the_counter() {
 #[tokio::test]
 #[ignore]
 async fn payment_options_record_the_wallet_and_index_they_used() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
@@ -577,9 +559,7 @@ async fn payment_options_record_the_wallet_and_index_they_used() {
 #[tokio::test]
 #[ignore]
 async fn an_xpub_another_account_holds_is_refused() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let theirs = seed_user(&service).await;
     let mine = seed_user(&service).await;
@@ -637,9 +617,7 @@ async fn an_xpub_another_account_holds_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn concurrent_first_wallet_creates_do_not_collide_on_primary() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -677,9 +655,7 @@ async fn concurrent_first_wallet_creates_do_not_collide_on_primary() {
 #[tokio::test]
 #[ignore]
 async fn setting_a_store_override_changes_where_derivation_happens() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -764,9 +740,7 @@ async fn setting_a_store_override_changes_where_derivation_happens() {
 #[tokio::test]
 #[ignore]
 async fn a_pin_outlives_a_primary_change_and_diverges_from_the_store() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -865,9 +839,7 @@ async fn a_pin_outlives_a_primary_change_and_diverges_from_the_store() {
 #[tokio::test]
 #[ignore]
 async fn a_method_with_no_resolvable_wallet_is_visible_but_cannot_allocate() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
@@ -925,9 +897,7 @@ async fn a_method_with_no_resolvable_wallet_is_visible_but_cannot_allocate() {
 #[tokio::test]
 #[ignore]
 async fn allocation_returns_the_key_of_the_wallet_whose_counter_moved() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -983,9 +953,7 @@ async fn allocation_returns_the_key_of_the_wallet_whose_counter_moved() {
 #[tokio::test]
 #[ignore]
 async fn rotation_moves_a_store_override_off_the_retired_key() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -1027,9 +995,7 @@ async fn rotation_moves_a_store_override_off_the_retired_key() {
 #[tokio::test]
 #[ignore]
 async fn a_wallet_is_deletable_once_only_history_refers_to_it() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
@@ -1117,9 +1083,7 @@ async fn a_wallet_is_deletable_once_only_history_refers_to_it() {
 #[tokio::test]
 #[ignore]
 async fn re_adding_a_native_asset_updates_rather_than_duplicating() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
@@ -1173,9 +1137,7 @@ async fn re_adding_a_native_asset_updates_rather_than_duplicating() {
 #[tokio::test]
 #[ignore]
 async fn rotating_a_store_records_no_rotation_from_a_key_to_itself() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -1248,9 +1210,7 @@ async fn rotating_a_store_records_no_rotation_from_a_key_to_itself() {
 #[tokio::test]
 #[ignore]
 async fn rotating_one_store_leaves_its_siblings_where_they_were() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub_a = unique_xpub("a");
     let xpub_b = unique_xpub("b");
     let user = seed_user(&service).await;
@@ -1318,9 +1278,7 @@ async fn rotating_one_store_leaves_its_siblings_where_they_were() {
 #[tokio::test]
 #[ignore]
 async fn a_refused_rotation_leaves_the_store_entirely_unmoved() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let mine = unique_xpub("mine");
     let theirs = unique_xpub("theirs");
 
@@ -1388,9 +1346,7 @@ async fn a_refused_rotation_leaves_the_store_entirely_unmoved() {
 #[tokio::test]
 #[ignore]
 async fn a_method_with_no_key_uses_the_account_primary() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let xpub = unique_xpub("primary");
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
@@ -1432,9 +1388,7 @@ async fn a_method_with_no_key_is_refused_when_nothing_resolves() {
     // The failure this moves earlier. Without the check the method is created,
     // looks correct in the list, and fails at the first invoice - with a
     // customer waiting.
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
 
@@ -1466,9 +1420,7 @@ async fn a_method_with_no_key_is_refused_when_nothing_resolves() {
 async fn an_unpinned_method_follows_the_store_wallet() {
     // Unpinned means it tracks resolution rather than freezing today's answer:
     // point the store at another key and the method moves with it.
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
 
@@ -1561,9 +1513,7 @@ async fn seed_unpinned_method(
 #[tokio::test]
 #[ignore]
 async fn a_tron_method_will_not_derive_from_an_ethereum_wallet() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
 
@@ -1612,9 +1562,7 @@ async fn a_tron_method_will_not_derive_from_an_ethereum_wallet() {
 #[tokio::test]
 #[ignore]
 async fn each_family_allocates_from_its_own_wallet() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
 
@@ -1668,9 +1616,7 @@ async fn each_family_allocates_from_its_own_wallet() {
 #[tokio::test]
 #[ignore]
 async fn one_xpub_registered_for_two_families_is_two_wallets() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let user = seed_user(&service).await;
     let shared = unique_xpub("shared");
 
@@ -1705,9 +1651,7 @@ async fn one_xpub_registered_for_two_families_is_two_wallets() {
 #[tokio::test]
 #[ignore]
 async fn pinning_a_store_for_one_family_leaves_the_others_alone() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let user = seed_user(&service).await;
     let store = seed_store_for(&service, user).await;
 
@@ -1772,9 +1716,7 @@ async fn pinning_a_store_for_one_family_leaves_the_others_alone() {
 #[tokio::test]
 #[ignore]
 async fn promoting_a_wallet_only_demotes_its_own_family() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
     let user = seed_user(&service).await;
 
     let evm = WalletWriter::create_wallet(&service, user, EVM, &unique_xpub("e"), None)

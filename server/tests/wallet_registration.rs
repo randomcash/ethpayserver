@@ -15,9 +15,9 @@
 //!
 //! Needs a real Postgres and is `#[ignore]`d, matching the convention
 //! `data-service`'s own DB-backed tests use: set `DATABASE_URL` and run with
-//! `--ignored`, so the default `cargo test` run stays DB-free. Unlike some
-//! of those tests, this one fails loud (`expect`, not a silent early return)
-//! when `DATABASE_URL` is unset - this is the test that proves the ticket's
+//! `--ignored`, so the default `cargo test` run stays DB-free. Like all
+//! of those tests, it fails loud (never a silent early return) when
+//! `DATABASE_URL` is unset - this is the test that proves the ticket's
 //! mandated "register the resulting key against a real instance" step, so an
 //! unset variable earning a bare pass with zero assertions run is exactly
 //! the failure mode it exists to catch. This is not a claim taken on faith:
@@ -32,6 +32,7 @@
 //! time the workflow file changed, and read as evidence of a stale claim
 //! rather than a typo.)
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -40,7 +41,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::Utc;
-use data_service::PgDataService;
 use evm::{ChainFamily, HdWallet, generate_mnemonic};
 use rates::NoOpRateProvider;
 use server::api::AuthenticatedUser;
@@ -77,20 +77,14 @@ impl SessionService for UnusedSessionService {
     }
 }
 
-async fn state() -> Option<PgAppState<UnusedSessionService>> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("DATABASE_URL is set but the database is unreachable");
-    Some(AppState::new(
-        Arc::new(PgDataService::new(pool)),
+async fn state() -> PgAppState<UnusedSessionService> {
+    AppState::new(
+        Arc::new(pg_service().await),
         Arc::new(UnusedSessionService),
         None,
         Arc::new(NoOpRateProvider),
         Arc::new(NoopEmailSender),
-    ))
+    )
 }
 
 async fn seed_user(pool: &PgPool, id: Uuid, email: &str) {
@@ -132,9 +126,7 @@ async fn cleanup(pool: &PgPool, user: Uuid) {
 #[tokio::test]
 #[ignore]
 async fn an_xpub_derive_xpub_prints_is_accepted_by_the_real_wallet_endpoint() {
-    let state = state().await.expect(
-        "DATABASE_URL must be set to run this ignored test - CI sets it before passing --ignored",
-    );
+    let state = state().await;
     let pool = state.data_service.pool().clone();
     // Unique per run, not a fixed literal: a prior failed run that skipped
     // `cleanup` (reached only on the happy path) would otherwise leave a row

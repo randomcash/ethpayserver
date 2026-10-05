@@ -14,6 +14,7 @@
 //! These drive the real handler and assert the three things agree: what was
 //! requested, what was persisted, and what the response claims.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -47,16 +48,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by this handler")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -102,9 +93,7 @@ fn app_state(data_service: Arc<PgDataService>) -> PgAppState<UnusedSessionServic
 #[tokio::test]
 #[ignore]
 async fn an_explicitly_scoped_key_is_persisted_with_exactly_that_scope() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let requested = vec![auth::Permission::StoreCreateInvoice.as_policy().to_string()];
 
@@ -152,9 +141,7 @@ async fn an_explicitly_scoped_key_is_persisted_with_exactly_that_scope() {
 #[tokio::test]
 #[ignore]
 async fn an_absent_scope_is_persisted_as_inherit_rather_than_as_an_empty_scope() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
 
     let pg = Arc::new(pg);
