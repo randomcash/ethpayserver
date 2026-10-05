@@ -781,6 +781,33 @@ where
         .with_filter(tracing_subscriber::filter::LevelFilter::INFO)
 }
 
+/// The whole subscriber both binaries install: the Sentry layer from
+/// [`sentry_layer`] plus a stdout `fmt` layer (JSON when `json`) filtered by
+/// `log_filter`.
+///
+/// Each layer carries its own filter so `SENTRY_LOG_LEVEL` and `LOG_LEVEL`
+/// stay independent. Returned rather than installed so a test can run the
+/// exact stack a binary runs; the binaries only call `.init()` on it.
+pub fn build_subscriber(
+    log_filter: tracing_subscriber::EnvFilter,
+    json: bool,
+    sentry_min_level: tracing::Level,
+) -> Box<dyn tracing::Subscriber + Send + Sync> {
+    use tracing_subscriber::{Layer, layer::SubscriberExt};
+    let registry = tracing_subscriber::registry().with(sentry_layer(sentry_min_level));
+    if json {
+        Box::new(
+            registry.with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_filter(log_filter),
+            ),
+        )
+    } else {
+        Box::new(registry.with(tracing_subscriber::fmt::layer().with_filter(log_filter)))
+    }
+}
+
 /// Log whether error reporting is on, at INFO, always — never the DSN itself
 /// — and refuse to continue when [`reporting_status`] says this environment
 /// must not run disabled.

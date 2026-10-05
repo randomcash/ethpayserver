@@ -1,4 +1,4 @@
-use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Whether `log_format` selects JSON output, and a warning to log for a value
 /// that is neither `json` nor `pretty` — an unrecognized value (a typo, wrong
@@ -37,17 +37,7 @@ pub fn init_tracing(log_level: &str, log_format: &str) {
     // shared `.with(filter)`) is what actually decouples them.
     let sentry_log_level = evm::telemetry::resolve_sentry_log_level();
 
-    if json {
-        tracing_subscriber::registry()
-            .with(evm::telemetry::sentry_layer(sentry_log_level))
-            .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
-            .init();
-    } else {
-        tracing_subscriber::registry()
-            .with(evm::telemetry::sentry_layer(sentry_log_level))
-            .with(tracing_subscriber::fmt::layer().with_filter(filter))
-            .init();
-    }
+    evm::telemetry::build_subscriber(filter, json, sentry_log_level).init();
 
     // Logged after `.init()` on purpose: there is no subscriber to write to
     // before that.
