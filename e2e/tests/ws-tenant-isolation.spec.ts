@@ -8,6 +8,12 @@
  * only an authenticated user, who becomes its owner, and owning a store is
  * all the socket's gate asks for.
  *
+ * This spec seeds two OWNERS rather than members. It still covers the member
+ * path because the gate resolves access solely through `user_stores` and
+ * ignores the role, and `create_store_owned_by` writes that row for an owner.
+ * If the gate is ever changed to special-case `stores.owner_id`, this spec
+ * stops covering membership and a member-specific spec becomes necessary.
+ *
  * Events are produced by expiring real invoices (a one-second expiry; the
  * invoice cleanup service broadcasts `expired`), so nothing is paid and no
  * wallet is touched. They are published one at a time, each only after its
@@ -60,6 +66,16 @@ const CHAIN_ID = 'eip155:11155111';
 const MERCHANT_PATH = "m/44'/60'/0'";
 /** The cleanup service sweeps on a 60s fallback tick and on block events. */
 const EXPIRY_WAIT_MS = 3 * 60_000;
+/**
+ * An expired invoice keeps its address watched for a grace period, after which
+ * the next sweep unwatches it, and deleting an account is refused with 409
+ * while any watch is active. On a local server started with a short grace and
+ * tick this normally clears within seconds; the generous bound is the fallback
+ * for a remote server whose cleanup settings are not ours (60s + 60s by
+ * default). Teardown waits for the real state rather than forcing it.
+ */
+const UNWATCH_WAIT_MS = 4 * 60_000;
+const UNWATCH_POLL_MS = 5_000;
 /** For the one pair no later event orders: how long a leak has to show up. */
 const SETTLE_MS = 8_000;
 
@@ -106,6 +122,25 @@ function storeName(offsetMs: number): string {
   return `e2e-synthetic-${new Date(Date.now() + offsetMs).toISOString().replace(/[:.]/g, '-')}`;
 }
 
+/** Retry only the 409 for a still-watched address; any other failure is final. */
+async function deleteAccountWhenUnwatched(userId: string, token: string): Promise<void> {
+  const started = Date.now();
+  const deadline = started + UNWATCH_WAIT_MS;
+  let refused = 0;
+  for (;;) {
+    try {
+      await api(`/admin/users/${userId}`, { method: 'DELETE', token });
+      if (refused > 0) console.log(`account ${userId}: delete refused ${refused}x with 409, then succeeded after ${Date.now() - started}ms`);
+      return;
+    } catch (e) {
+      if (!(e instanceof ApiError) || e.status !== 409 || Date.now() >= deadline) throw e;
+      refused++;
+      if (refused === 1) console.log(`account ${userId}: delete refused 409 (${e.body.slice(0, 120)}), waiting`);
+      await new Promise((r) => setTimeout(r, UNWATCH_POLL_MS));
+    }
+  }
+}
+
 let adminToken: string | null = null;
 let stores: { id: string; session: string }[] = [];
 let accounts: Account[] = [];
@@ -139,7 +174,7 @@ test.describe('Status socket tenant isolation', () => {
       );
     }
     for (const u of users) {
-      await api(`/admin/users/${u.userId}`, { method: 'DELETE', token }).catch((e) =>
+      await deleteAccountWhenUnwatched(u.userId, token).catch((e) =>
         failures.push(`delete account ${u.userId}: ${e}`),
       );
     }
