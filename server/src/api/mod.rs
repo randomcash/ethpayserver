@@ -290,6 +290,7 @@ where
         // and gated on the verification token alone.
         .route("/me/email", post(users::request_email_change::<A>))
         .route("/me/email", delete(users::remove_email::<A>))
+        .route("/me/email/status", get(users::get_email_status::<A>))
         .route(
             "/me/email/confirm",
             post(users::confirm_email_change::<A>),
