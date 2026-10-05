@@ -255,3 +255,54 @@ export async function seedPaymentForInvoice(
     await client.end();
   }
 }
+
+/**
+ * Refuse to touch the database from the remote lane.
+ *
+ * A remote run targets a deployed environment whose database this process must
+ * never write to. Throws rather than returning, so a test that needs a seed
+ * fails there instead of being skipped: a skipped control looks the same as a
+ * passing one.
+ */
+export function requireLocalDatabase(what: string): void {
+  if (process.env.E2E_REMOTE === 'true') {
+    throw new Error(`${what} writes to the database, which the remote lane must never do`);
+  }
+}
+
+/** Delete a payment seeded by `seedPaymentForInvoice`, to run the control case. */
+export async function removeSeededPayment(paymentId: string): Promise<void> {
+  requireLocalDatabase('removeSeededPayment');
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rowCount } = await client.query('DELETE FROM payments WHERE id = $1', [paymentId]);
+    if (rowCount !== 1) {
+      throw new Error(`expected to remove exactly one seeded payment, removed ${rowCount}`);
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * Whether the owner of the store named `storeName` still has a user row.
+ *
+ * Reads the database rather than trusting a status code: a refused delete and a
+ * successful one are told apart by whether the account is still there. Returns
+ * false once the owner is deleted, as the store cascades away with it.
+ */
+export async function storeOwnerExists(storeName: string): Promise<boolean> {
+  requireLocalDatabase('storeOwnerExists');
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rows } = await client.query(
+      `SELECT 1 FROM stores s JOIN users u ON u.id = s.owner_id WHERE s.name = $1`,
+      [storeName],
+    );
+    return rows.length > 0;
+  } finally {
+    await client.end();
+  }
+}
