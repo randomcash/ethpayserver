@@ -52,6 +52,22 @@ async fn creates_a_pending_invoice_with_a_converted_payment_option() {
     );
 }
 
+/// A quote that leaves a fractional wei is rounded up, so the customer can
+/// never pay less than the invoice is worth.
+#[tokio::test]
+async fn rounds_a_fractional_wei_quote_up() {
+    let h = TestHarness::new(StubRateProvider::new().with_rate(
+        "USD",
+        "ETH",
+        "0.000333333333333333333",
+    ));
+
+    let json = parse_ok(h.server.do_create_invoice(usd_args(h.store_id)).await);
+
+    // 100 * 0.000333333333333333333 ETH = 33333333333333333.3 wei
+    assert_eq!(json["payment_options"][0]["amount"], "33333333333333334");
+}
+
 #[tokio::test]
 async fn persists_the_invoice_and_its_payment_option() {
     let h = TestHarness::new(StubRateProvider::usd_eth());
