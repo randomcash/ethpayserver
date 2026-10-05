@@ -317,7 +317,7 @@ jobs:
         working-directory: e2e
         env:
           E2E_REMOTE: "true"
-        run: npx playwright test tests/route-coverage.spec.ts tests/visual-review-report.spec.ts tests/visual-review-main.spec.ts
+        run: npx playwright test tests/route-coverage.spec.ts tests/visual-review-report.spec.ts tests/visual-review-main.spec.ts tests/ws-isolation-helpers.spec.ts
 
   test:
     name: Test
@@ -625,7 +625,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22, as the scheduled run uses: the isolation spec opens sockets with
+          # the global WebSocket, which Node 20 does not have.
+          node-version: 22
 
       - name: Run migrations
         env:
@@ -781,6 +783,10 @@ jobs:
           E2E_API_URL: http://localhost:3000
           E2E_BASE_URL: http://localhost:8080
           E2E_DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
+          # Tenant isolation of the status socket, against this server. Here
+          # membership is seeded in the database, so the spec can actually run;
+          # the nightly cannot seed and reports why.
+          E2E_WS_ISOLATION: "true"
           PLAYWRIGHT_LIST_PRINT_STEPS: "1"
         run: npx playwright test
 
@@ -831,6 +837,15 @@ jobs:
         # the last place to accept a mutable reference: whoever can move the tag
         # can change what signs our images.
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        # The release is named, though it is the installer's default today: the
+        # deploy that verifies these signatures compares its own cosign release
+        # with this one, and a release that lives only inside the installer
+        # cannot be compared. cosign 3 writes signatures in a bundle format that
+        # cosign 2 does not look for, so a mismatch reads as "no signatures
+        # found" for an image that is correctly signed. Change this and the
+        # verifier's pin together.
+        with:
+          cosign-release: v3.0.6
 
       - name: Compute image tags
         id: tag
@@ -920,12 +935,19 @@ jobs:
           [ -n "$RCS_DISPATCH_PAT" ] || { echo "::error::RCS_DISPATCH_PAT is not set; images were pushed but nothing will deploy"; exit 1; }
           SHA_TAG="${{ needs.docker.outputs.sha_tag }}"
           [ -n "$SHA_TAG" ] || { echo "::error::docker job produced no sha tag"; exit 1; }
+          # The signing certificate records the full commit it was issued for. Sending
+          # the full sha lets the receiver require that the signature was made for THIS
+          # commit, not merely by this workflow on this branch. Refuse, rather than send
+          # a payload without it, so the receiver never has to guess what absence means.
+          FULL_SHA="$GITHUB_SHA"
+          [[ "$FULL_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::GITHUB_SHA is not a 40-character sha: '$FULL_SHA'"; exit 1; }
+          [ "$SHA_TAG" = "sha-${FULL_SHA::7}" ] || { echo "::error::sha tag $SHA_TAG does not belong to commit $FULL_SHA"; exit 1; }
           curl -sS --fail-with-body -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $RCS_DISPATCH_PAT" \
             https://api.github.com/repos/randomcash/central-infrastructure/dispatches \
-            -d "{\"event_type\":\"deploy-testnet\",\"client_payload\":{\"sha_tag\":\"$SHA_TAG\"}}"
-          echo "dispatched deploy-testnet $SHA_TAG" >> "$GITHUB_STEP_SUMMARY"
+            -d "{\"event_type\":\"deploy-testnet\",\"client_payload\":{\"sha_tag\":\"$SHA_TAG\",\"sha\":\"$FULL_SHA\"}}"
+          echo "dispatched deploy-testnet $SHA_TAG ($FULL_SHA)" >> "$GITHUB_STEP_SUMMARY"
 
   # Mainnet handles real merchant funds, so it takes release tags and nothing
   # else. `staging` was dropped with the rename: no staging host exists, and the

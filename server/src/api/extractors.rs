@@ -14,7 +14,8 @@ use chrono::{DateTime, Utc};
 use super::api_key_deprecation::DeprecationSlot;
 use super::api_key_hash::hash_api_key;
 pub(super) use super::api_key_scope::{
-    key_grants_merchant_read, key_grants_store_permission, key_retains_unrestricted_access,
+    key_grants_merchant_read, key_grants_standing_push, key_grants_store_permission,
+    key_retains_unrestricted_access,
 };
 use super::auth_freshness::{is_grace_expired, is_reauth_stale};
 use crate::state::PgAppState;
@@ -446,6 +447,43 @@ where
         }
 
         Ok(MerchantReader(user_info))
+    }
+}
+
+/// The caller of the account-standing push: an API key scoped to exactly that
+/// action, owned by a `ServerAdmin`.
+///
+/// Stricter than `MerchantReader` on purpose. A session, an unscoped key and an
+/// `unrestricted` key are all refused: the sender is meant to hold a credential
+/// that cannot be used for anything else, and accepting an admin key would let
+/// it be given one without anyone noticing. The owner's real role is read
+/// before the scoped-key downgrade, as there, so a key never exceeds its owner.
+pub struct StandingPusher(pub UserInfo);
+
+impl<A> FromRequestParts<PgAppState<A>> for StandingPusher
+where
+    A: SessionService + 'static,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &PgAppState<A>,
+    ) -> Result<Self, Self::Rejection> {
+        let (user_info, _is_operator, scope) =
+            validate_session_with_scope(parts, state, false).await?;
+
+        if !key_grants_standing_push(scope.as_deref()) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "This credential is not scoped to push account standing",
+            ));
+        }
+        if user_info.role != Role::ServerAdmin {
+            return Err((StatusCode::FORBIDDEN, "Admin access required"));
+        }
+
+        Ok(StandingPusher(user_info))
     }
 }
 

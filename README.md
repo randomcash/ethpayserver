@@ -245,7 +245,7 @@ is meant to serve every payserver — EVM, Tron, Solana, Monero — rather than 
 one. The image tag this server is **tested against** is pinned in
 `ops/client-image.pin`. That is not the tag serving production: the
 frontend deploys on its own cadence from payserver-client via
-central-infrastructure, so the two can drift.
+the private deploy repository, so the two can drift.
 
 ### Crates
 

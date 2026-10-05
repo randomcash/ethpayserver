@@ -44,7 +44,7 @@ Mainnet takes release tags and nothing else — there is no manual-approval
 button on a branch, and no `main`-branch deploy. Cut the tag with
 `scripts/release.sh`; that is the approval step.
 
-Both jobs POST a `repository_dispatch` to `central-infrastructure`, which
+Both jobs POST a `repository_dispatch` to the private deploy repository, which
 owns the deploy itself. A 202 from that API means the event was accepted,
 not that anything deployed — which is what the health gate below is for.
 
@@ -60,8 +60,8 @@ SPA fallback answers `/health/deep` with HTTP 200 and a page of HTML. A
 gate pointed at the bare host would pass against a server that never
 restarted.
 
-For **mainnet**, the deploy itself verifies: `central-infrastructure`'s
-`deploy.yml` asserts database and Redis connectivity, waits for every chain
+For **mainnet**, the deploy itself verifies: the private deploy repository's
+mainnet workflow asserts database and Redis connectivity, waits for every chain
 monitor to reach `connected` + `is_healthy`, and checks the WebAuthn relying
 party both on the container and as the running server resolved it — then
 records `.deployed-sha` only once all of that passes, so the rollback target

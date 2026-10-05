@@ -1,7 +1,15 @@
+import type { Page } from '@playwright/test';
 import { test, expect, register, login, logout } from '../fixtures/auth';
-import { resetDatabase } from '../fixtures/db';
+import {
+  removeSeededPayment,
+  requireLocalDatabase,
+  resetDatabase,
+  seedPaymentForInvoice,
+  storeOwnerExists,
+} from '../fixtures/db';
 import { createStoreReadyForInvoices } from '../fixtures/payment-methods';
 import { createInvoice } from '../fixtures/invoices';
+import { parseEther } from 'viem';
 
 /**
  * The whole life of a passkey account: register, use it, log back in, delete it,
@@ -22,16 +30,35 @@ const SKIP_AUTH = process.env.E2E_SKIP_AUTH
   ? process.env.E2E_SKIP_AUTH === 'true'
   : process.env.E2E_REMOTE === 'true';
 
-test.describe('Account lifecycle (passkey)', () => {
-  test.skip(() => SKIP_AUTH, 'Skipped: auth endpoints rate-limit at 5/min/IP');
+/**
+ * Walk the Danger Zone to the point of pressing "permanently delete" with the
+ * right handle typed, and press it. Returns the confirmation block so a caller
+ * can read the server's reason if the delete is refused.
+ */
+async function attemptDelete(page: Page, handle: string) {
+  await page.goto('/evm/settings');
+  await page.locator('.settings-tab', { hasText: /account/i }).first().click();
+  await page.locator('.ps-card-danger').locator('button', { hasText: /delete account/i }).click();
+  const confirm = page.locator('.form-group', { hasText: /to confirm/i });
+  await confirm.locator('input[type="text"]').fill(handle);
+  await confirm.locator('button', { hasText: /permanently delete/i }).click();
+  return confirm;
+}
 
+test.describe('Account lifecycle (passkey)', () => {
   test.beforeAll(async () => {
+    // Safe in the remote lane: `resetDatabase` returns without connecting when
+    // E2E_REMOTE is 'true', so the guard in the refusal test fails it before any write.
     await resetDatabase();
   });
 
   test('an account can be created, used, returned to, and destroyed', async ({
     withAuthenticator: page,
   }) => {
+    // Skipped per test, not per describe: a describe-level skip would also
+    // swallow the refusal test below before its remote-lane guard could fail it.
+    test.skip(SKIP_AUTH, 'Skipped: auth endpoints rate-limit at 5/min/IP');
+
     // ---- create -------------------------------------------------------
     const { accountId } = await register(page);
     expect(accountId, 'a passkey-only account must surface its id: it is the only handle it has').toBeTruthy();
@@ -100,26 +127,39 @@ test.describe('Account lifecycle (passkey)', () => {
     // asserts the refusal reaches the merchant as a readable reason rather than
     // a bare failure.
     //
-    // Skipped until the suite can seed a payment without spending on-chain -
-    // the synthetic-payment run does it with real ETH and is nightly. Left in
-    // place, and failing loudly if someone removes the skip without adding the
-    // seed, rather than filed away and forgotten.
-    test.skip(true, 'needs a way to seed a confirmed payment without on-chain spend');
+    // The payment is seeded straight into Postgres, as the synthetic-payment
+    // run cannot be used here (it spends real ETH). That only exists locally, so
+    // the remote lane fails this test rather than skipping it.
+    requireLocalDatabase('seeding a payment');
+
+    const { accountId } = await register(page);
+    expect(accountId, 'the confirmation step needs the account handle').toBeTruthy();
 
     const store = `traded-${Date.now()}`;
     await createStoreReadyForInvoices(page, store);
-    // ... seed a confirmed payment here ...
+    await createInvoice(page, '0.001');
+    const invoiceId = new URL(page.url()).pathname.split('/').pop()!;
+    const paymentId = await seedPaymentForInvoice(invoiceId, parseEther('0.001'));
+    const handle = accountId!;
 
-    await page.goto('/evm/settings');
-    const danger = page.locator('.ps-card-danger');
-    await danger.locator('button', { hasText: /delete account/i }).click();
-    const confirm = page.locator('.form-group', { hasText: /to confirm/i });
-    await confirm.locator('input[type="text"]').fill('whatever');
-    await confirm.locator('button', { hasText: /permanently delete/i }).click();
+    const confirm = await attemptDelete(page, handle);
 
     await expect(
       confirm.locator('[style*="color-error"]'),
       'the refusal must name what is holding the account, not just fail',
-    ).toContainText(/payment/i);
+    ).toContainText(/hold.*payment/i);
+
+    // The effect, not the status code: the account must still be there.
+    expect(
+      await storeOwnerExists(store),
+      'a refused delete must leave the account in place',
+    ).toBe(true);
+
+    // Control: with the payment gone the same delete goes through. Without it,
+    // the refusal above could be coming from anything.
+    await removeSeededPayment(paymentId);
+    await attemptDelete(page, handle);
+    await page.waitForURL(/\/login/, { timeout: 15_000 });
+    expect(await storeOwnerExists(store), 'with no payment the delete must succeed').toBe(false);
   });
 });

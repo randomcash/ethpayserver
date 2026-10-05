@@ -154,6 +154,30 @@ fn issue(issuer: DeferredIssuer, request: &[u8]) -> Result<serde_json::Value, St
     Ok(serde_json::from_slice(&answer).expect("issuer answered non-JSON"))
 }
 
+/// The id is a version-4 UUID: 122 random bits from the CSPRNG. The checkout
+/// socket is unauthenticated and filters by invoice id alone, so
+/// unguessability is the only thing between a stranger and an invoice's live
+/// status. Lowercase is checked on purpose: the server renders ids lowercase,
+/// so another case means another generator.
+fn assert_v4_invoice_id(id: &str) {
+    let parsed = Uuid::parse_str(id).expect("the invoice id must be a UUID");
+    assert_eq!(
+        parsed.get_version(),
+        Some(uuid::Version::Random),
+        "invoice id {id} is not a version-4 UUID"
+    );
+    assert_eq!(
+        parsed.get_variant(),
+        uuid::Variant::RFC4122,
+        "invoice id {id} has the wrong UUID variant"
+    );
+    assert_eq!(
+        parsed.hyphenated().to_string(),
+        id,
+        "invoice id is not in canonical lowercase hyphenated form"
+    );
+}
+
 /// `issue` above goes through `PluginHostCalls::invoice_create`, which - like
 /// every host call a wasm plugin reaches - runs on a blocking thread and
 /// drives its async work with `Handle::current().block_on(..)`
@@ -219,6 +243,8 @@ fn a_real_issuer_creates_a_real_payable_invoice_in_base_units() {
     assert_eq!(answer["status"], "pending");
 
     let invoice_id = types::InvoiceId(answer["invoice_id"].as_str().unwrap().to_string());
+
+    assert_v4_invoice_id(&invoice_id.0);
 
     // Read back through the same repository the HTTP endpoint and the
     // payment pipeline use - proving this is a real row, not a value the

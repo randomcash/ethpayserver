@@ -5,17 +5,17 @@ use axum::{
 };
 
 use ::types::{InvoiceId, InvoiceReader};
-use auth::{SessionService, repository::UserStoreRepository};
+use auth::SessionService;
 use data_service::PaymentOptionReader;
 
 use crate::api::ApiErr;
-use crate::api::extractors::{StoreScopedUser, key_grants_store_permission};
+use crate::api::extractors::StoreScopedUser;
 use crate::state::PgAppState;
 
 use super::{
     InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, VIEW_INVOICES,
-    build_invoice_filter_params, customer_email_of, narrow_scope_by_key, resolve_store_names,
-    verify_store_access_for_query,
+    build_invoice_filter_params, customer_email_of, get_invoice_with_permission,
+    narrow_scope_by_key, resolve_store_names, verify_store_access_for_query,
 };
 
 /// List invoices with optional filters.
@@ -138,28 +138,7 @@ where
 {
     let id = InvoiceId::from_string(invoice_id);
 
-    let invoice = InvoiceReader::get(&*state.data_service, &id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    // Check user has access to the invoice's store (unless admin)
-    if user.role != auth::Role::ServerAdmin {
-        let is_member = state
-            .data_service
-            .get_user_store(user.id, invoice.store_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .is_some();
-
-        if !is_member {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
-
-    if !key_grants_store_permission(key_scope.as_deref(), VIEW_INVOICES, invoice.store_id) {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    let invoice = get_invoice_with_permission(&state, &user, key_scope.as_deref(), &id).await?;
 
     let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
         .await
