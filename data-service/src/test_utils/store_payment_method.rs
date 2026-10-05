@@ -188,10 +188,12 @@ impl StorePaymentMethodWriter for InMemoryDataService {
     }
 
     async fn delete_payment_method(&self, id: Uuid) -> RepositoryResult<()> {
-        self.payment_methods
-            .write()
-            .unwrap()
-            .retain(|pm| pm.id != id);
+        let mut methods = self.payment_methods.write().unwrap();
+        let before = methods.len();
+        methods.retain(|pm| pm.id != id);
+        if methods.len() == before {
+            return Err(RepositoryError::NotFound("payment method not found".into()));
+        }
         Ok(())
     }
 

@@ -1,6 +1,7 @@
 //! End-to-end agent flow over the MCP tool surface.
 //!
-//! Drives the same path a real agent takes: authenticate an API key, then call
+//! Drives the same path a real agent takes: authenticate an API key, serve the
+//! session it resolves to, then call
 //! the `#[tool]` entry points (not the `do_*` helpers) and read back the JSON
 //! they hand the agent.
 
@@ -19,26 +20,50 @@ use crate::testkit::{
 };
 use crate::validate_api_key;
 
+/// The authenticated session's server and the store it may reach.
+struct Session {
+    server: crate::server::EthpayMcpServer,
+    store_id: types::StoreId,
+}
+
 fn json(raw: &str) -> serde_json::Value {
     serde_json::from_str(raw).expect("tool returned invalid JSON")
 }
 
 #[tokio::test]
-async fn agent_authenticates_then_creates_and_settles_an_invoice() {
+async fn agent_authenticates_then_creates_and_cancels_an_invoice() {
+    // The harness owns the data service and the store's payment method; the
+    // API key is made to resolve to that very store, so the scope `main`
+    // hands the server is the scope the tools enforce.
+    let harness = TestHarness::new(StubRateProvider::usd_eth());
+
     // --- Authenticate, exactly as `main` does at start-up -------------------
     let user_id = auth::UserId(uuid::Uuid::new_v4());
-    let store = test_store(user_id);
+    let mut store = test_store(user_id);
+    store.id = harness.store_id;
     let auth_repo = StubAuthRepo::with_key(test_api_key(user_id)).with_store(store);
-    let (_, store_ids) = validate_api_key(&auth_repo, RAW_KEY)
+    let (authed_user, store_ids) = validate_api_key(&auth_repo, RAW_KEY)
         .await
         .expect("API key should validate");
-    assert_eq!(store_ids.len(), 1, "the key's scope is one store");
+    assert_eq!(
+        store_ids,
+        vec![harness.store_id],
+        "the key's scope is one store"
+    );
 
-    // --- Serve tools with an EVM monitor attached ---------------------------
+    // --- Serve tools to that session with an EVM monitor attached -----------
     let bridge = Arc::new(MemoryBridge::new());
     // Subscribe before any command is published — the bridge is a broadcast.
     let mut commands = bridge.commands_sender().subscribe();
-    let h = TestHarness::with_monitor(StubRateProvider::usd_eth(), Arc::clone(&bridge));
+    let h = Session {
+        server: harness.server_for_session(
+            authed_user,
+            store_ids,
+            StubRateProvider::usd_eth(),
+            Arc::clone(&bridge),
+        ),
+        store_id: harness.store_id,
+    };
 
     // --- create_invoice -----------------------------------------------------
     let created = json(

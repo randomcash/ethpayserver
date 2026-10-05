@@ -42,12 +42,6 @@ impl TestHarness {
         Self::build(rates, vec![], None)
     }
 
-    /// As [`TestHarness::new`], but with an in-process monitor bridge attached
-    /// so `WatchAddress` commands can be observed.
-    pub fn with_monitor(rates: StubRateProvider, monitor: Arc<MemoryBridge>) -> Self {
-        Self::build(rates, vec![], Some(monitor))
-    }
-
     /// A server whose session scope is exactly `store_ids`, sharing this
     /// harness's data service. Used to test scopes the harness store isn't in.
     pub fn server_scoped_to(
@@ -61,6 +55,25 @@ impl TestHarness {
             store_ids,
             Arc::new(rates),
             None,
+        )
+    }
+
+    /// A server serving exactly the session `validate_api_key` resolved: its
+    /// user and store scope, with `monitor` attached. The harness's data
+    /// service is shared, so the scope must name stores that exist in it.
+    pub fn server_for_session(
+        &self,
+        user_id: UserId,
+        store_ids: Vec<StoreId>,
+        rates: StubRateProvider,
+        monitor: Arc<MemoryBridge>,
+    ) -> EthpayMcpServer {
+        EthpayMcpServer::new(
+            Arc::clone(&self.data) as Arc<dyn McpDataService>,
+            user_id,
+            store_ids,
+            Arc::new(rates),
+            Some(monitor as Arc<EvmMonitor>),
         )
     }
 
