@@ -47,6 +47,8 @@ async function attemptDelete(page: Page, handle: string) {
 
 test.describe('Account lifecycle (passkey)', () => {
   test.beforeAll(async () => {
+    // Safe in the remote lane: `resetDatabase` returns without connecting when
+    // E2E_REMOTE is 'true', so the guard in the refusal test fails it before any write.
     await resetDatabase();
   });
 
