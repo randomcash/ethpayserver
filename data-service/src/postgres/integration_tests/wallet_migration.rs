@@ -36,9 +36,9 @@ fn split_url(url: &str) -> (String, String) {
 /// Create a throwaway database and apply every migration *before* the one
 /// under test.
 ///
-/// Returns `None` when `DATABASE_URL` is unset, matching the other integration
-/// tests, so the suite stays runnable without a database.
-pub(super) async fn pre_migration_db(suffix: &str) -> Option<(PgPool, String, String)> {
+/// Panics when `DATABASE_URL` is unset or unreachable, like the other
+/// integration tests.
+pub(super) async fn pre_migration_db(suffix: &str) -> (PgPool, String, String) {
     pre_migration_db_for(MIGRATION, suffix).await
 }
 
@@ -48,12 +48,12 @@ pub(super) async fn pre_migration_db(suffix: &str) -> Option<(PgPool, String, St
 pub(super) async fn pre_migration_db_for(
     migration: &str,
     suffix: &str,
-) -> Option<(PgPool, String, String)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
+) -> (PgPool, String, String) {
+    let url = crate::test_support::database_url();
     let (server_url, base) = split_url(&url);
     let name = format!("{base}_wallets_{suffix}");
 
-    let admin = PgPool::connect(&server_url).await.ok()?;
+    let admin = crate::test_support::pool_for(&server_url, 5).await;
     admin
         .execute(format!(r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#).as_str())
         .await
@@ -88,7 +88,7 @@ pub(super) async fn pre_migration_db_for(
             .unwrap_or_else(|e| panic!("apply {stem}: {e}"));
     }
 
-    Some((pool, name, server_url))
+    (pool, name, server_url)
 }
 
 pub(super) async fn drop_db(pool: PgPool, name: &str, server_url: &str) {
@@ -221,9 +221,7 @@ async fn seed_invoice_with_option(
 #[tokio::test]
 #[ignore]
 async fn migration_never_re_derives_an_issued_address() {
-    let Some((pool, name, server)) = pre_migration_db("addresses").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("addresses").await;
 
     const SHARED: &str = "xpub-shared-key";
     let (user, store_a) = seed_store(&pool, "a").await;
@@ -316,9 +314,7 @@ async fn migration_never_re_derives_an_issued_address() {
 #[tokio::test]
 #[ignore]
 async fn migration_preserves_which_key_each_store_uses() {
-    let Some((pool, name, server)) = pre_migration_db("routing").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("routing").await;
 
     // One account, two stores, two different keys. The busy store's key wins
     // the primary election; the quiet one must not silently follow it.
@@ -368,9 +364,7 @@ async fn migration_preserves_which_key_each_store_uses() {
 #[tokio::test]
 #[ignore]
 async fn migration_leaves_exactly_one_primary_per_account() {
-    let Some((pool, name, server)) = pre_migration_db("primary").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("primary").await;
 
     let (user, store) = seed_store(&pool, "p").await;
     seed_method(&pool, store, 1, None, "ETH", "xpub-one", 0).await;
@@ -409,9 +403,7 @@ async fn migration_leaves_exactly_one_primary_per_account() {
 #[tokio::test]
 #[ignore]
 async fn down_migration_refuses_to_split_a_merged_counter() {
-    let Some((pool, name, server)) = pre_migration_db("down").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("down").await;
 
     let (_, store) = seed_store(&pool, "d").await;
     seed_method(&pool, store, 1, None, "ETH", "xpub-merged", 5).await;
@@ -440,9 +432,7 @@ async fn down_migration_refuses_to_split_a_merged_counter() {
 #[tokio::test]
 #[ignore]
 async fn down_migration_reverses_when_no_wallet_is_shared() {
-    let Some((pool, name, server)) = pre_migration_db("downok").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("downok").await;
 
     let (_, store) = seed_store(&pool, "d2").await;
     seed_method(&pool, store, 1, None, "ETH", "xpub-solo-a", 5).await;
@@ -496,9 +486,7 @@ async fn down_migration_reverses_when_no_wallet_is_shared() {
 #[tokio::test]
 #[ignore]
 async fn migration_does_not_create_new_collisions_across_accounts() {
-    let Some((pool, name, server)) = pre_migration_db("crossaccount").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("crossaccount").await;
 
     const SHARED: &str = "xpub-two-owners";
     let (_owner_a, store_a) = seed_store(&pool, "a").await;
@@ -549,9 +537,7 @@ async fn migration_does_not_create_new_collisions_across_accounts() {
 #[tokio::test]
 #[ignore]
 async fn down_migration_refuses_to_strand_a_counter() {
-    let Some((pool, name, server)) = pre_migration_db("downstranded").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("downstranded").await;
 
     let (_, store) = seed_store(&pool, "s").await;
     let method = seed_method(&pool, store, 1, None, "ETH", "xpub-stranded", 50).await;
@@ -591,9 +577,7 @@ async fn down_migration_refuses_to_strand_a_counter() {
 #[tokio::test]
 #[ignore]
 async fn migration_collapses_duplicate_native_methods_keeping_audit() {
-    let Some((pool, name, server)) = pre_migration_db("native").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("native").await;
 
     let (_, store) = seed_store(&pool, "n").await;
     // Two ETH-on-mainnet rows: impossible to prevent in the old shape, because
@@ -656,9 +640,7 @@ async fn migration_collapses_duplicate_native_methods_keeping_audit() {
 #[tokio::test]
 #[ignore]
 async fn migration_counts_a_rotated_away_key_towards_its_high_water_mark() {
-    let Some((pool, name, server)) = pre_migration_db("rotatedaway").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("rotatedaway").await;
 
     const KEY: &str = "xpub-came-back";
     let (_, store) = seed_store(&pool, "r").await;
@@ -711,9 +693,7 @@ async fn migration_counts_a_rotated_away_key_towards_its_high_water_mark() {
 #[tokio::test]
 #[ignore]
 async fn migration_elects_a_primary_that_survives_duplicate_collapse() {
-    let Some((pool, name, server)) = pre_migration_db("electorder").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("electorder").await;
 
     let (owner, store) = seed_store(&pool, "e").await;
 
@@ -780,9 +760,7 @@ async fn migration_elects_a_primary_that_survives_duplicate_collapse() {
 #[tokio::test]
 #[ignore]
 async fn migration_leaves_provenance_null_where_the_method_was_never_unique() {
-    let Some((pool, name, server)) = pre_migration_db("ambiguous").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("ambiguous").await;
 
     let (_, store) = seed_store(&pool, "p").await;
     seed_method(&pool, store, 1, None, "ETH", "xpub-amb-a", 4).await;
@@ -839,9 +817,7 @@ async fn migration_leaves_provenance_null_where_the_method_was_never_unique() {
 #[tokio::test]
 #[ignore]
 async fn down_migration_refuses_a_wallet_shared_by_inheriting_methods() {
-    let Some((pool, name, server)) = pre_migration_db("downinherit").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("downinherit").await;
 
     let (_, store) = seed_store(&pool, "di").await;
     seed_method(&pool, store, 1, None, "ETH", "xpub-inherit", 5).await;
@@ -880,9 +856,7 @@ async fn down_migration_refuses_a_wallet_shared_by_inheriting_methods() {
 #[tokio::test]
 #[ignore]
 async fn down_migration_reverses_a_wallet_reached_only_through_an_override() {
-    let Some((pool, name, server)) = pre_migration_db("downoverride").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db("downoverride").await;
 
     let (_, store) = seed_store(&pool, "do").await;
     seed_method(&pool, store, 1, None, "ETH", "xpub-only-override", 7).await;

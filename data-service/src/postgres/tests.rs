@@ -11,20 +11,7 @@ use super::PgDataService;
 // Test helpers - shared with integration tests
 // =========================================================================
 
-pub(super) async fn create_test_service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    // `DATABASE_URL` unset means "no local DB configured" - an intentional
-    // skip. `DATABASE_URL` set but unreachable is a different failure: the
-    // gating CI job always sets it against a real Postgres, so a connect
-    // failure there means the environment is broken, not that the test
-    // should quietly report itself as passed.
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("DATABASE_URL is set but the database is unreachable");
-    Some(PgDataService::new(pool))
-}
+pub(super) use crate::test_support::pg_service as create_test_service;
 
 /// Compare two decimal amount strings by value rather than by formatting.
 ///

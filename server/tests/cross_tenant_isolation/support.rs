@@ -52,21 +52,7 @@ impl SessionService for UnusedSessionService {
     }
 }
 
-/// `None` means "no `DATABASE_URL`, intentionally skipped" - the only case
-/// that may pass silently. A `DATABASE_URL` that fails to connect is not the
-/// same thing and must not collapse into the same silent `None`: that would
-/// turn a broken or misconfigured CI database into every test in this file
-/// reporting "passed" having run zero assertions, exactly the "test that
-/// cannot fail" shape this suite exists to avoid.
-pub(crate) async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .unwrap_or_else(|e| panic!("DATABASE_URL is set but the pool failed to connect: {e}"));
-    Some(PgDataService::new(pool))
-}
+pub(crate) use data_service::test_support::pg_service as service;
 
 pub(crate) async fn seed_user(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();

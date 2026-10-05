@@ -15,6 +15,7 @@ use super::*;
 use auth::Policies;
 use axum::{Router, body::Body, extract::State, http::Request, routing::get};
 use data_service::PgDataService;
+use data_service::test_support::pg_service;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -43,11 +44,6 @@ impl SessionService for NoSessionService {
     async fn cleanup_stale_sessions(&self) -> auth::Result<u64> {
         Err(auth::AuthError::InvalidCredentials)
     }
-}
-
-async fn test_service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    PgDataService::connect(&database_url).await.ok()
 }
 
 fn test_state(service: PgDataService) -> PgAppState<NoSessionService> {
@@ -132,9 +128,7 @@ fn echo_app(state: PgAppState<NoSessionService>) -> Router {
 #[tokio::test]
 #[ignore]
 async fn an_api_key_authenticates_through_store_scoped_user_with_its_stored_scope() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let user_id = seed_user(&pool).await;
     let raw_key = format!("ak_reach_{}", Uuid::new_v4());
@@ -175,9 +169,7 @@ async fn an_api_key_authenticates_through_store_scoped_user_with_its_stored_scop
 #[tokio::test]
 #[ignore]
 async fn an_invalid_api_key_is_still_rejected_by_store_scoped_user() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
 
     let req = Request::builder()
         .method("GET")
@@ -333,9 +325,7 @@ async fn probe_status(
 #[tokio::test]
 #[ignore]
 async fn a_narrowed_admin_key_does_not_keep_the_bare_role_bypass() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let admin = seed_user_with_role(&pool, "server_admin").await;
     let somebody_else = seed_user_with_role(&pool, "user").await;
@@ -366,9 +356,7 @@ async fn a_narrowed_admin_key_does_not_keep_the_bare_role_bypass() {
 #[tokio::test]
 #[ignore]
 async fn a_never_narrowed_admin_key_still_has_the_bare_role_bypass() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let admin = seed_user_with_role(&pool, "server_admin").await;
     let somebody_else = seed_user_with_role(&pool, "user").await;
@@ -390,9 +378,7 @@ async fn a_never_narrowed_admin_key_still_has_the_bare_role_bypass() {
 #[tokio::test]
 #[ignore]
 async fn an_explicitly_unrestricted_admin_key_still_has_the_bare_role_bypass() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let admin = seed_user_with_role(&pool, "server_admin").await;
     let somebody_else = seed_user_with_role(&pool, "user").await;
@@ -423,9 +409,7 @@ async fn an_explicitly_unrestricted_admin_key_still_has_the_bare_role_bypass() {
 #[tokio::test]
 #[ignore]
 async fn a_narrowed_key_is_refused_where_the_scope_cannot_be_enforced() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let user_id = seed_user(&pool).await;
     let raw_key = format!("ak_narrow_{}", Uuid::new_v4());
@@ -460,9 +444,7 @@ async fn a_narrowed_key_is_refused_where_the_scope_cannot_be_enforced() {
 #[tokio::test]
 #[ignore]
 async fn a_key_with_no_stored_scope_still_authenticates_unchanged() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let user_id = seed_user(&pool).await;
     let raw_key = format!("ak_unscoped_{}", Uuid::new_v4());
@@ -498,9 +480,7 @@ async fn a_key_with_no_stored_scope_still_authenticates_unchanged() {
 #[tokio::test]
 #[ignore]
 async fn an_explicitly_unrestricted_key_still_authenticates() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let user_id = seed_user(&pool).await;
     let raw_key = format!("ak_unrestricted_{}", Uuid::new_v4());
@@ -577,9 +557,7 @@ async fn admin_status(
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_invoice_create_and_merchant_read_lists_stores_and_nothing_else() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let pool = service.pool().clone();
     let admin = seed_user_with_role(&pool, "server_admin").await;
     let victim = seed_user_with_role(&pool, "user").await;
@@ -621,9 +599,7 @@ async fn a_key_scoped_to_invoice_create_and_merchant_read_lists_stores_and_nothi
 #[tokio::test]
 #[ignore]
 async fn a_key_without_the_merchant_read_scope_cannot_list_stores() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let admin = seed_user_with_role(service.pool(), "server_admin").await;
     let scope = [Policies::STORE_CREATE_INVOICE.to_string()];
 
@@ -636,9 +612,7 @@ async fn a_key_without_the_merchant_read_scope_cannot_list_stores() {
 #[tokio::test]
 #[ignore]
 async fn the_merchant_read_scope_on_a_non_admin_owners_key_grants_nothing() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user_with_role(service.pool(), "user").await;
     let scope = [Policies::SERVER_VIEW_USERS.to_string()];
 
@@ -652,9 +626,7 @@ async fn the_merchant_read_scope_on_a_non_admin_owners_key_grants_nothing() {
 #[tokio::test]
 #[ignore]
 async fn an_unrestricted_admin_key_still_lists_stores() {
-    let Some(service) = test_service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let admin = seed_user_with_role(service.pool(), "server_admin").await;
 
     assert_eq!(

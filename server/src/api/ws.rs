@@ -243,12 +243,20 @@ where
 {
     let user = match data_service.get_user(user_id).await {
         Ok(Some(user)) => auth::UserInfo::from(&user),
-        Ok(None) | Err(_) => return None,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "ws: could not read the user; closing the socket");
+            return None;
+        }
     };
     let topics = match verify_store_access_for_query(data_service, &user, None).await {
         Ok(StoreScope::All) => [Topic::Admin].into_iter().collect(),
         Ok(StoreScope::Membership(stores)) => stores.into_iter().map(Topic::Store).collect(),
-        Ok(StoreScope::One(_)) | Err(_) => return None,
+        Ok(StoreScope::One(_)) => return None,
+        Err(status) => {
+            tracing::warn!(%status, "ws: could not read memberships; closing the socket");
+            return None;
+        }
     };
     Some(Entitlement { topics })
 }
@@ -330,7 +338,15 @@ async fn handle_socket<A: SessionService + 'static>(
         let auth_service = auth_service.clone();
         let data_service = data_service.clone();
         Box::pin(async move {
-            let (user, _session) = auth_service.validate_session(session_id).await.ok()?;
+            // An error here may be the backend failing rather than a revoked
+            // session; either way the socket closes, but say which.
+            let (user, _session) = match auth_service.validate_session(session_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::info!(error = %e, "ws: session no longer valid or unreadable; closing the socket");
+                    return None;
+                }
+            };
             entitlement_of(&*data_service, user.id).await
         })
     });

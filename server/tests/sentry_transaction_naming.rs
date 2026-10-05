@@ -15,13 +15,14 @@
 //! a reordering or a dropped layer in `main` free to regress unnoticed;
 //! calling the shared function closes that gap.
 //!
-//! Needs `DATABASE_URL`; skips (does not fail) when it's unset, the same
-//! convention the other ignored integration tests in this directory use -
-//! and, like those, is not just a local convenience: `.github/workflows/ci.yml`
+//! Needs `DATABASE_URL` and fails, naming it, when it is unset or the
+//! database is unreachable, like the other ignored integration tests in this
+//! directory - and, like those, is not just a local convenience: `.github/workflows/ci.yml`
 //! runs `cargo nextest run -p data-service -p server --no-fail-fast
 //! --run-ignored only` with `DATABASE_URL` set, so this test is part of the
 //! CI gate, not merely available to run by hand.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -34,22 +35,6 @@ use data_service::PgDataService;
 use rates::NoOpRateProvider;
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
-
-/// `None` means "DATABASE_URL unset" - the legitimate skip this ignored test's
-/// caller treats as "not run here". A set-but-unreachable URL is a different,
-/// real failure and must not collapse into that same skip path, so it panics
-/// instead of returning `None` - otherwise a broken connection string would
-/// make this the only automated guard on route-pattern naming pass green
-/// having never touched the router it's meant to check.
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("DATABASE_URL is set but the database is unreachable");
-    Some(PgDataService::new(pool))
-}
 
 /// Same auth-service construction `server.rs::main` uses (`AuthService::with_config`
 /// over the real data service, default `AuthConfig`), so `router<A>`'s `A` here is
@@ -77,9 +62,7 @@ fn app_state(data_service: Arc<PgDataService>) -> PgAppState<AuthService<PgDataS
 #[ignore]
 fn transaction_name_is_the_route_pattern_not_the_request_uri() {
     let bootstrap_rt = tokio::runtime::Runtime::new().expect("build bootstrap runtime");
-    let Some(pg) = bootstrap_rt.block_on(service()) else {
-        return;
-    };
+    let pg = bootstrap_rt.block_on(pg_service());
     let state = app_state(Arc::new(pg));
 
     // The exact router-building call `server.rs` makes, passed through the

@@ -19,6 +19,7 @@
 //! `PluginHostApi`), then read back through the same repositories the rest
 //! of the server uses.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -78,36 +79,6 @@ impl SessionService for UnusedSessionService {
     }
 }
 
-/// `#[ignore]` plus a silent `None` when `DATABASE_URL` is unset looks, out
-/// of context, like a way for these tests to report green having asserted
-/// nothing. It is not new to this file: it is the same convention every
-/// DB-backed integration test in this crate already uses
-/// (`server/tests/plugin_invoice_creation_filter.rs`,
-/// `server/tests/email_change_smtp_gate.rs`), and it is not the gate that
-/// actually matters - `.github/workflows/ci.yml`'s "Integration tests" step
-/// (the `test` job, line 280 as of this commit) sets `DATABASE_URL` to a
-/// real, migrated Postgres and runs
-/// `cargo nextest run -p data-service -p server --no-fail-fast --run-ignored
-/// only`, which is gating and gates on `server` specifically, so these two
-/// tests always run for real there. The silent skip only fires for a
-/// developer running `cargo test` locally without a database, which is the
-/// point of `#[ignore]`, not a way to avoid failing.
-///
-/// The two outcomes are not the same, so only the first one skips: a missing
-/// `DATABASE_URL` means "no database configured, skip" (`None`), but once the
-/// var is set, a failed `connect` means "a database was configured and this
-/// run could not reach it" - a real failure that must not read the same as
-/// an intentionally-skipped local run, so it panics instead.
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("DATABASE_URL was set but the database was unreachable");
-    Some(PgDataService::new(pool))
-}
-
 async fn seed_user(pool: &PgPool) -> Uuid {
     seed_user_with_id(pool, Uuid::new_v4()).await
 }
@@ -154,6 +125,30 @@ fn issue(issuer: DeferredIssuer, request: &[u8]) -> Result<serde_json::Value, St
     Ok(serde_json::from_slice(&answer).expect("issuer answered non-JSON"))
 }
 
+/// The id is a version-4 UUID: 122 random bits from the CSPRNG. The checkout
+/// socket is unauthenticated and filters by invoice id alone, so
+/// unguessability is the only thing between a stranger and an invoice's live
+/// status. Lowercase is checked on purpose: the server renders ids lowercase,
+/// so another case means another generator.
+fn assert_v4_invoice_id(id: &str) {
+    let parsed = Uuid::parse_str(id).expect("the invoice id must be a UUID");
+    assert_eq!(
+        parsed.get_version(),
+        Some(uuid::Version::Random),
+        "invoice id {id} is not a version-4 UUID"
+    );
+    assert_eq!(
+        parsed.get_variant(),
+        uuid::Variant::RFC4122,
+        "invoice id {id} has the wrong UUID variant"
+    );
+    assert_eq!(
+        parsed.hyphenated().to_string(),
+        id,
+        "invoice id is not in canonical lowercase hyphenated form"
+    );
+}
+
 /// `issue` above goes through `PluginHostCalls::invoice_create`, which - like
 /// every host call a wasm plugin reaches - runs on a blocking thread and
 /// drives its async work with `Handle::current().block_on(..)`
@@ -174,9 +169,7 @@ fn a_real_issuer_creates_a_real_payable_invoice_in_base_units() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
 
-    let Some(pg) = rt.block_on(service()) else {
-        return;
-    };
+    let pg = rt.block_on(pg_service());
     let pool = pg.pool().clone();
     let owner = rt.block_on(seed_user_with_id(
         &pool,
@@ -219,6 +212,8 @@ fn a_real_issuer_creates_a_real_payable_invoice_in_base_units() {
     assert_eq!(answer["status"], "pending");
 
     let invoice_id = types::InvoiceId(answer["invoice_id"].as_str().unwrap().to_string());
+
+    assert_v4_invoice_id(&invoice_id.0);
 
     // Read back through the same repository the HTTP endpoint and the
     // payment pipeline use - proving this is a real row, not a value the
@@ -269,9 +264,7 @@ fn a_real_issuer_floors_precision_the_asset_cannot_represent() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
 
-    let Some(pg) = rt.block_on(service()) else {
-        return;
-    };
+    let pg = rt.block_on(pg_service());
     let pool = pg.pool().clone();
     let owner = rt.block_on(seed_user_with_id(
         &pool,
@@ -330,9 +323,7 @@ fn a_real_issuer_refuses_an_asset_the_store_has_not_configured() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
 
-    let Some(pg) = rt.block_on(service()) else {
-        return;
-    };
+    let pg = rt.block_on(pg_service());
     let owner = rt.block_on(seed_user(pg.pool()));
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     rt.block_on(pg.create_store_owned_by(&store, UserId(owner)))

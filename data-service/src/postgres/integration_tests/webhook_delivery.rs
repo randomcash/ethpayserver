@@ -9,6 +9,7 @@
 //!   the delivery row itself does not carry, so the store scope is SQL, not
 //!   Rust.
 
+use crate::test_support::pg_service;
 use sqlx::PgPool;
 use types::{StoreId, StoreWebhookWriter};
 use uuid::Uuid;
@@ -17,16 +18,6 @@ use crate::postgres::PgDataService;
 use crate::{
     UpsertDeliveryParams, WebhookDeliveryReader, WebhookDeliveryStatus, WebhookDeliveryWriter,
 };
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 async fn seed_store(pool: &PgPool) -> StoreId {
     let user_id = Uuid::new_v4();
@@ -85,9 +76,7 @@ fn params(
 #[tokio::test]
 #[ignore]
 async fn two_failures_then_a_success_leave_one_row_not_three() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let store = seed_store(&service.pool).await;
     let store_webhook_id = seed_store_webhook(&service, store).await;
     let job_id = Uuid::new_v4();
@@ -163,9 +152,7 @@ async fn two_failures_then_a_success_leave_one_row_not_three() {
 #[tokio::test]
 #[ignore]
 async fn another_stores_delivery_is_not_listed() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let mine = seed_store(&service.pool).await;
     let theirs = seed_store(&service.pool).await;
     let my_webhook = seed_store_webhook(&service, mine).await;
@@ -209,9 +196,7 @@ async fn another_stores_delivery_is_not_listed() {
 #[tokio::test]
 #[ignore]
 async fn get_delivery_reports_the_owning_store() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let store = seed_store(&service.pool).await;
     let store_webhook_id = seed_store_webhook(&service, store).await;
     let job_id = Uuid::new_v4();

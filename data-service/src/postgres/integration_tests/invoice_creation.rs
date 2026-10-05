@@ -5,25 +5,15 @@
 //! not be paid. These assert the whole set lands together or not at all - which
 //! only the real foreign keys and a real transaction can show.
 
+use crate::test_support::pg_service;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::invoice_creation::InvoiceCreationWriter;
-use crate::postgres::PgDataService;
 use types::{
     ChainId, InvoiceData, InvoiceId, InvoiceStatus, PaymentMethodId, PaymentOptionData,
     PaymentOptionId, StoreId,
 };
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 async fn seed_store(pool: &PgPool) -> (Uuid, Uuid) {
     let user_id = Uuid::new_v4();
@@ -108,9 +98,7 @@ async fn counts(pool: &PgPool, invoice_id: &str) -> (i64, i64, i64) {
 #[tokio::test]
 #[ignore]
 async fn the_whole_invoice_lands_in_one_go() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let (_user, store) = seed_store(&service.pool).await;
     let invoice = an_invoice(store);
     // One native and one ERC-20: they take different paths through the watched
@@ -143,9 +131,7 @@ async fn a_failure_partway_leaves_nothing_at_all() {
     // Before this was transactional, that state was reachable for real: a
     // derivation error on the third of three methods left an invoice with two
     // payment options, payable in some assets and not others.
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let (_user, store) = seed_store(&service.pool).await;
     let invoice = an_invoice(store);
     let first = an_option(&invoice, "ETH", None);
@@ -176,9 +162,7 @@ async fn watched_addresses_take_the_invoice_expiry() {
     // The per-option writer re-read the expiry from the database and fell back
     // to "24 hours from now" when it found nothing. Passing it in removes the
     // guess; this pins that the value stored is the invoice's own.
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let (_user, store) = seed_store(&service.pool).await;
     let invoice = an_invoice(store);
     let option = an_option(&invoice, "ETH", None);

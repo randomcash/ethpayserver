@@ -35,9 +35,7 @@ use super::create_test_service;
 #[tokio::test]
 #[ignore]
 async fn zksync_era_usdc_resolves_by_lowercased_address() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
 
     let token = TokenReader::get_by_address(
         &service,
@@ -57,9 +55,7 @@ async fn zksync_era_usdc_resolves_by_lowercased_address() {
 #[tokio::test]
 #[ignore]
 async fn optimism_sepolia_usdc_resolves() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
 
     let token = TokenReader::get_by_address(
         &service,
@@ -77,9 +73,7 @@ async fn optimism_sepolia_usdc_resolves() {
 #[tokio::test]
 #[ignore]
 async fn linea_usdc_resolves_by_lowercased_address() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
 
     let token = TokenReader::get_by_address(
         &service,
@@ -97,9 +91,7 @@ async fn linea_usdc_resolves_by_lowercased_address() {
 #[tokio::test]
 #[ignore]
 async fn scroll_weth_decimals_round_trip_to_the_right_display_amount() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
 
     let token = TokenReader::get_by_address(
         &service,
@@ -196,9 +188,7 @@ const REMAINING_SEEDED_ROWS: &[(u64, &str, &str, u8)] = &[
 #[tokio::test]
 #[ignore]
 async fn remaining_seeded_rows_resolve_with_the_right_symbol_and_decimals() {
-    let Some(service) = create_test_service().await else {
-        return;
-    };
+    let service = create_test_service().await;
 
     for (chain_id, address, symbol, decimals) in REMAINING_SEEDED_ROWS {
         let token = TokenReader::get_by_address(&service, &ChainId::evm(*chain_id), address)

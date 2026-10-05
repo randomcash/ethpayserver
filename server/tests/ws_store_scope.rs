@@ -239,9 +239,7 @@ async fn make_admin(pool: &PgPool, person: &Person) {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_tenant_receives_its_own_updates_and_not_another_tenants() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let (a, b) = (Person::new(pg.pool()).await, Person::new(pg.pool()).await);
     let (store_a, _) = tenant(&pg, &a, "a").await;
@@ -261,9 +259,7 @@ async fn a_tenant_receives_its_own_updates_and_not_another_tenants() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn payment_updates_are_scoped_the_same_way() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let (a, b) = (Person::new(pg.pool()).await, Person::new(pg.pool()).await);
     let (store_a, _) = tenant(&pg, &a, "a").await;
@@ -289,9 +285,7 @@ async fn payment_updates_are_scoped_the_same_way() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_server_admin_receives_every_stores_updates() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let (a, b) = (Person::new(pg.pool()).await, Person::new(pg.pool()).await);
     let admin = Person::new(pg.pool()).await;
@@ -317,9 +311,7 @@ async fn a_server_admin_receives_every_stores_updates() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_member_removed_mid_connection_stops_receiving() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let owner = Person::new(pg.pool()).await;
     let member = Person::new(pg.pool()).await;
@@ -367,10 +359,8 @@ async fn a_member_removed_mid_connection_stops_receiving() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn when_the_decision_cannot_be_made_the_socket_is_closed() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
-    let url = std::env::var("DATABASE_URL").unwrap();
+    let pg = support::service().await;
+    let url = data_service::test_support::database_url();
     // The handler gets its own pool so that closing it breaks only the
     // handler's reads, not the seeding done through the shared one.
     let handler_pool = sqlx::postgres::PgPoolOptions::new()
@@ -401,9 +391,7 @@ async fn when_the_decision_cannot_be_made_the_socket_is_closed() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_revoked_session_closes_the_socket_though_membership_remains() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let a = Person::new(pg.pool()).await;
     let (store_a, _) = tenant(&pg, &a, "a").await;
@@ -424,10 +412,43 @@ async fn a_revoked_session_closes_the_socket_though_membership_remains() {
 
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
+async fn a_store_created_mid_connection_is_heard_only_after_the_next_recheck() {
+    let pg = support::service().await;
+    let pg = Arc::new(pg);
+    let a = Person::new(pg.pool()).await;
+    let (store_a, _) = tenant(&pg, &a, "a").await;
+
+    // Until the socket re-checks, a store joined after connecting has no
+    // channel on it: an update published then is not delivered, and is not
+    // replayed later. This pins the late-grant window as it is.
+    let slow = serve_revalidating(pg.clone(), &[&a], Duration::from_secs(3600)).await;
+    let mut ws_slow = connect(&slow, &a).await;
+    let (late_store, _) = tenant(&pg, &a, "late").await;
+    slow.broadcast
+        .send(sid(&late_store), paid("before-recheck"));
+    slow.broadcast.send(sid(&store_a), paid("positive-control"));
+    let got = next_update(&mut ws_slow).await.expect("the old store");
+    assert_eq!(
+        got["invoice_id"], "positive-control",
+        "first frame was {got}"
+    );
+    assert_silent(&mut ws_slow).await;
+
+    // After a re-check the new store is heard.
+    let fast = serve(pg.clone(), &[&a]).await;
+    let mut ws_fast = connect(&fast, &a).await;
+    let (later_store, _) = tenant(&pg, &a, "later").await;
+    tokio::time::sleep(FAST * 4).await;
+    fast.broadcast
+        .send(sid(&later_store), paid("after-recheck"));
+    let got = next_update(&mut ws_fast).await.expect("the new store");
+    assert_eq!(got["invoice_id"], "after-recheck", "first frame was {got}");
+}
+
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
 async fn routing_alone_keeps_another_tenants_update_away() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let (a, b) = (Person::new(pg.pool()).await, Person::new(pg.pool()).await);
     let (store_a, _) = tenant(&pg, &a, "a").await;
@@ -449,9 +470,7 @@ async fn routing_alone_keeps_another_tenants_update_away() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_checkout_socket_receives_only_its_own_invoice() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let (a, b) = (
         support::seed_tenant(&pg, "a").await,
         support::seed_tenant(&pg, "b").await,
@@ -481,9 +500,7 @@ async fn a_checkout_socket_receives_only_its_own_invoice() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn an_update_for_an_invoice_is_attributed_to_the_invoices_store() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let (a, b) = (
         support::seed_tenant(&pg, "a").await,
         support::seed_tenant(&pg, "b").await,
@@ -518,9 +535,7 @@ async fn an_update_for_an_invoice_is_attributed_to_the_invoices_store() {
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn a_socket_that_missed_updates_is_closed_so_the_client_resyncs() {
-    let Some(pg) = support::service().await else {
-        return;
-    };
+    let pg = support::service().await;
     let pg = Arc::new(pg);
     let a = Person::new(pg.pool()).await;
     let (store_a, _) = tenant(&pg, &a, "a").await;

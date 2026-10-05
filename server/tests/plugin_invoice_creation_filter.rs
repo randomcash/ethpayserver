@@ -36,6 +36,7 @@
 //! `AuthenticatedCaller::from_request_parts`, and only then hand the result
 //! to `create_invoice`.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -93,16 +94,6 @@ impl InvoiceCreationFilter for AlwaysDeny {
             reason: "Your subscription lapsed; renew it to create new invoices.".to_string(),
         }
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -223,9 +214,7 @@ fn app_state(
 #[tokio::test]
 #[ignore]
 async fn a_denying_filter_blocks_the_real_endpoint_with_the_reason() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -261,9 +250,7 @@ async fn a_denying_filter_blocks_the_real_endpoint_with_the_reason() {
 #[tokio::test]
 #[ignore]
 async fn permission_denies_before_the_filter_is_ever_consulted() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let stranger = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
@@ -297,9 +284,7 @@ async fn permission_denies_before_the_filter_is_ever_consulted() {
 #[tokio::test]
 #[ignore]
 async fn no_filters_reaches_past_the_filter_stage() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -337,9 +322,7 @@ async fn no_filters_reaches_past_the_filter_stage() {
 #[tokio::test]
 #[ignore]
 async fn operator_credential_is_never_filtered() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -370,9 +353,7 @@ async fn operator_credential_is_never_filtered() {
 #[tokio::test]
 #[ignore]
 async fn admin_without_the_operator_property_is_still_filtered() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let admin = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(admin));
     pg.create_store_owned_by(&store, UserId(admin))
@@ -418,9 +399,7 @@ async fn the_filter_is_told_which_account_owns_the_store() {
         }
     }
 
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -458,9 +437,7 @@ async fn the_filter_is_told_which_account_owns_the_store() {
 #[tokio::test]
 #[ignore]
 async fn operator_flag_on_a_real_api_key_row_reaches_the_extractor_and_exempts_the_request() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -496,9 +473,7 @@ async fn operator_flag_on_a_real_api_key_row_reaches_the_extractor_and_exempts_t
 #[tokio::test]
 #[ignore]
 async fn non_operator_api_key_row_is_still_filtered_through_the_real_extractor() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))

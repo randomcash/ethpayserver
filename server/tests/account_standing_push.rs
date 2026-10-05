@@ -7,9 +7,11 @@
 //! refused too, because the sender must hold a credential good for nothing
 //! else.
 //!
-//! Needs `DATABASE_URL`; skips when unset, like the other ignored integration
-//! tests, and runs in CI's `--run-ignored` step.
+//! Needs `DATABASE_URL` and fails, naming it, when it is unset or the database
+//! is unreachable, like the other ignored integration tests; runs in CI's
+//! `--run-ignored` step.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use axum::Router;
@@ -28,14 +30,8 @@ use server::state::PgAppState;
 
 const PUSH_SCOPE: &str = "ethpay.server.canpushstanding";
 
-async fn service() -> Option<Arc<PgDataService>> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("DATABASE_URL is set but the database is unreachable");
-    Some(Arc::new(PgDataService::new(pool)))
+async fn service() -> Arc<PgDataService> {
+    Arc::new(pg_service().await)
 }
 
 fn app(pg: &Arc<PgDataService>) -> Router {
@@ -145,7 +141,7 @@ async fn held(pg: &PgDataService, account: Uuid) -> Option<(i64, bool, String)> 
 #[tokio::test]
 #[ignore]
 async fn version_six_then_version_five_leaves_version_six_held() {
-    let Some(pg) = service().await else { return };
+    let pg = service().await;
     let app = app(&pg);
     let key = seed_key(&pg, "server_admin", Some(&[PUSH_SCOPE])).await;
     let account = Uuid::new_v4();
@@ -171,7 +167,7 @@ async fn version_six_then_version_five_leaves_version_six_held() {
 #[tokio::test]
 #[ignore]
 async fn version_six_sent_twice_changes_nothing_and_succeeds() {
-    let Some(pg) = service().await else { return };
+    let pg = service().await;
     let app = app(&pg);
     let key = seed_key(&pg, "server_admin", Some(&[PUSH_SCOPE])).await;
     let account = Uuid::new_v4();
@@ -194,7 +190,7 @@ async fn version_six_sent_twice_changes_nothing_and_succeeds() {
 #[tokio::test]
 #[ignore]
 async fn an_unauthenticated_push_is_refused_and_changes_nothing() {
-    let Some(pg) = service().await else { return };
+    let pg = service().await;
     let app = app(&pg);
     let account = Uuid::new_v4();
 
@@ -214,7 +210,7 @@ async fn an_unauthenticated_push_is_refused_and_changes_nothing() {
 #[tokio::test]
 #[ignore]
 async fn a_key_without_the_push_scope_is_refused_whatever_else_it_may_do() {
-    let Some(pg) = service().await else { return };
+    let pg = service().await;
     let app = app(&pg);
     let account = Uuid::new_v4();
 
@@ -260,7 +256,7 @@ async fn a_key_without_the_push_scope_is_refused_whatever_else_it_may_do() {
 #[tokio::test]
 #[ignore]
 async fn the_push_key_is_good_for_nothing_but_the_push() {
-    let Some(pg) = service().await else { return };
+    let pg = service().await;
     let app = app(&pg);
     let key = seed_key(&pg, "server_admin", Some(&[PUSH_SCOPE])).await;
 
@@ -282,7 +278,7 @@ async fn the_push_key_is_good_for_nothing_but_the_push() {
 #[tokio::test]
 #[ignore]
 async fn malformed_and_oversized_pushes_are_refused_and_store_nothing() {
-    let Some(pg) = service().await else { return };
+    let pg = service().await;
     let app = app(&pg);
     let key = seed_key(&pg, "server_admin", Some(&[PUSH_SCOPE])).await;
     let account = Uuid::new_v4();
@@ -325,7 +321,7 @@ async fn malformed_and_oversized_pushes_are_refused_and_store_nothing() {
 #[tokio::test]
 #[ignore]
 async fn authentication_is_checked_before_the_body() {
-    let Some(pg) = service().await else { return };
+    let pg = service().await;
     let app = app(&pg);
 
     // An invalid body from a caller with no credential must not reveal that

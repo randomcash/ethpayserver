@@ -15,21 +15,12 @@
 //! A unit test could not have found it - there is no `caip2` domain outside a
 //! real database - which is exactly why these live here.
 
+use crate::test_support::pg_service;
 use types::StoreId;
 use uuid::Uuid;
 
 use crate::postgres::PgDataService;
 use auth::{ServerSettings, ServerSettingsRepository};
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 /// Put the settings table back to having no row.
 ///
@@ -66,9 +57,7 @@ fn settings_with(chains: Vec<types::ChainId>, store: Option<StoreId>) -> ServerS
 #[tokio::test]
 #[ignore]
 async fn a_written_settings_row_can_be_read_back() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     without_a_settings_row(&service).await;
 
     let chains = vec![types::ChainId::evm(1), types::ChainId::evm(11155111)];
@@ -101,9 +90,7 @@ async fn a_written_settings_row_can_be_read_back() {
 #[tokio::test]
 #[ignore]
 async fn the_operator_store_can_be_set_and_cleared() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     without_a_settings_row(&service).await;
 
     let store = StoreId(Uuid::new_v4());
@@ -144,9 +131,7 @@ async fn the_operator_store_can_be_set_and_cleared() {
 #[tokio::test]
 #[ignore]
 async fn no_enabled_chains_round_trips_as_an_empty_list() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     without_a_settings_row(&service).await;
 
     service

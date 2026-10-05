@@ -13,6 +13,7 @@
 //! refused, a key with it let through - the same "both directions, or the
 //! test proves nothing" bar the store-settings tests hold themselves to.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -55,16 +56,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by these handlers")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -144,9 +135,7 @@ fn payments_query(store_id: Uuid) -> ListPaymentsQuery {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_list_invoices() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -180,9 +169,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_list_invoices() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_list_invoices() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -213,9 +200,7 @@ async fn a_key_scoped_to_view_invoices_can_list_invoices() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_get_invoice() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -250,9 +235,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_get_invoice() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_get_invoice() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -287,9 +270,7 @@ async fn a_key_scoped_to_view_invoices_can_get_invoice() {
 #[tokio::test]
 #[ignore]
 async fn a_preexisting_unscoped_key_still_lists_invoices() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -326,9 +307,7 @@ async fn a_preexisting_unscoped_key_still_lists_invoices() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_list_payments() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -358,9 +337,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_list_payments() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_list_payments() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -390,9 +367,7 @@ async fn a_key_scoped_to_view_invoices_can_list_payments() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_export_invoices_csv() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -421,9 +396,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_export_invoices_csv() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_export_invoices_csv() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -453,9 +426,7 @@ async fn a_key_scoped_to_view_invoices_can_export_invoices_csv() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_export_payments_csv() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -484,9 +455,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_export_payments_csv() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_export_payments_csv() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -524,9 +493,7 @@ async fn seed_allowance(pg: &PgDataService, invoice: &InvoiceData) {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_invoices_can_read_the_settlement_allowance() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -565,9 +532,7 @@ async fn a_key_scoped_to_view_invoices_can_read_the_settlement_allowance() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_the_settlement_allowance() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))

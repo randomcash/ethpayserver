@@ -104,9 +104,57 @@ where
         .into_response()
 }
 
+/// What an unauthenticated checkout socket may be sent: an invoice's status and
+/// the fields the public checkout response already returns for a payment.
+///
+/// This is deliberately not `StatusUpdate`: knowing an invoice id buys that
+/// invoice's status, not whatever a shared type gains later. A new field has to
+/// be added here on purpose to reach a public socket. The wire format matches
+/// the corresponding `StatusUpdate` variants.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "type")]
+enum CheckoutFrame {
+    #[serde(rename = "invoice_status")]
+    InvoiceStatus { invoice_id: String, status: String },
+    #[serde(rename = "payment_update")]
+    PaymentUpdate {
+        payment_id: String,
+        invoice_id: String,
+        status: String,
+        amount: Option<String>,
+    },
+    #[serde(rename = "connected")]
+    Connected,
+}
+
+impl CheckoutFrame {
+    /// The public view of an update, or `None` for one that carries nothing
+    /// about an invoice.
+    fn from_update(update: StatusUpdate) -> Option<Self> {
+        match update {
+            StatusUpdate::InvoiceStatus { invoice_id, status } => {
+                Some(Self::InvoiceStatus { invoice_id, status })
+            }
+            StatusUpdate::PaymentUpdate {
+                payment_id,
+                invoice_id,
+                status,
+                amount,
+            } => Some(Self::PaymentUpdate {
+                payment_id,
+                invoice_id,
+                status,
+                amount,
+            }),
+            StatusUpdate::Connected | StatusUpdate::Ping => None,
+        }
+    }
+}
+
 /// Handle a public checkout WebSocket connection.
 ///
-/// `rx` is the invoice's own channel, so everything on it is forwarded.
+/// `rx` is the invoice's own channel, so everything on it is forwarded, but
+/// only as the minimal `CheckoutFrame`.
 async fn handle_checkout_socket(
     socket: WebSocket,
     mut rx: tokio::sync::broadcast::Receiver<StatusUpdate>,
@@ -114,7 +162,7 @@ async fn handle_checkout_socket(
     let (mut sender, mut receiver) = socket.split();
 
     // Send connected acknowledgement
-    let Ok(connected) = serde_json::to_string(&StatusUpdate::Connected) else {
+    let Ok(connected) = serde_json::to_string(&CheckoutFrame::Connected) else {
         return;
     };
     if sender.send(Message::Text(connected.into())).await.is_err() {
@@ -130,7 +178,10 @@ async fn handle_checkout_socket(
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
                 | Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
-            let msg = match serde_json::to_string(&update) {
+            let Some(frame) = CheckoutFrame::from_update(update) else {
+                continue;
+            };
+            let msg = match serde_json::to_string(&frame) {
                 Ok(json) => json,
                 Err(_) => continue,
             };
@@ -159,6 +210,32 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use types::ChainId;
+
+    #[test]
+    fn checkout_frames_keep_the_wire_format_of_the_shared_updates() {
+        let updates = [
+            StatusUpdate::InvoiceStatus {
+                invoice_id: "i".into(),
+                status: "paid".into(),
+            },
+            StatusUpdate::PaymentUpdate {
+                payment_id: "p".into(),
+                invoice_id: "i".into(),
+                status: "confirmed".into(),
+                amount: Some("5".into()),
+            },
+        ];
+        for update in updates {
+            let shared = serde_json::to_value(&update).unwrap();
+            let frame = CheckoutFrame::from_update(update).unwrap();
+            assert_eq!(serde_json::to_value(&frame).unwrap(), shared);
+        }
+        assert_eq!(
+            serde_json::to_value(CheckoutFrame::Connected).unwrap(),
+            serde_json::to_value(StatusUpdate::Connected).unwrap()
+        );
+        assert!(CheckoutFrame::from_update(StatusUpdate::Ping).is_none());
+    }
 
     #[test]
     fn test_checkout_response_serialization() {

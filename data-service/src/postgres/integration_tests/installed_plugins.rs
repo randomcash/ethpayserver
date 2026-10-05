@@ -6,23 +6,13 @@
 //! upsert really does re-enable on upgrade, the disable really does persist,
 //! and the audit trail really does outlive the plugin it describes.
 
+use crate::test_support::pg_service;
 use uuid::Uuid;
 
 use crate::installed_plugins::{
     InstalledPluginReader, InstalledPluginWriter, NewInstalledPlugin, NewPluginEvent,
     PluginEventKind,
 };
-use crate::postgres::PgDataService;
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 /// Unique per test run: these tables are server-wide, with no store or user
 /// to scope them by, so two tests using the same literal id would collide on
@@ -44,9 +34,7 @@ fn new_plugin(id: &str, version: &str) -> NewInstalledPlugin {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
 async fn an_install_reads_back_exactly_what_was_written() {
-    let Some(svc) = service().await else {
-        return;
-    };
+    let svc = pg_service().await;
     let id = unique_id("install");
 
     svc.upsert_installed_plugin(&new_plugin(&id, "0.1.0"))
@@ -77,9 +65,7 @@ async fn an_install_reads_back_exactly_what_was_written() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
 async fn a_disable_and_its_reason_persist() {
-    let Some(svc) = service().await else {
-        return;
-    };
+    let svc = pg_service().await;
     let id = unique_id("disable");
     svc.upsert_installed_plugin(&new_plugin(&id, "0.1.0"))
         .await
@@ -108,9 +94,7 @@ async fn a_disable_and_its_reason_persist() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
 async fn enabling_clears_the_reason_it_was_disabled_for() {
-    let Some(svc) = service().await else {
-        return;
-    };
+    let svc = pg_service().await;
     let id = unique_id("reenable");
     svc.upsert_installed_plugin(&new_plugin(&id, "0.1.0"))
         .await
@@ -143,9 +127,7 @@ async fn enabling_clears_the_reason_it_was_disabled_for() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
 async fn an_upgrade_re_enables_a_plugin_the_previous_version_crashed() {
-    let Some(svc) = service().await else {
-        return;
-    };
+    let svc = pg_service().await;
     let id = unique_id("upgrade");
     svc.upsert_installed_plugin(&new_plugin(&id, "0.1.0"))
         .await
@@ -176,9 +158,7 @@ async fn an_upgrade_re_enables_a_plugin_the_previous_version_crashed() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
 async fn events_survive_the_plugin_being_uninstalled() {
-    let Some(svc) = service().await else {
-        return;
-    };
+    let svc = pg_service().await;
     let id = unique_id("audit");
     let actor = Uuid::new_v4();
 
@@ -242,9 +222,7 @@ async fn events_survive_the_plugin_being_uninstalled() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
 async fn uninstalling_an_absent_plugin_reports_that_nothing_was_removed() {
-    let Some(svc) = service().await else {
-        return;
-    };
+    let svc = pg_service().await;
     assert!(
         !svc.remove_installed_plugin(&unique_id("absent"))
             .await
@@ -259,9 +237,7 @@ async fn uninstalling_an_absent_plugin_reports_that_nothing_was_removed() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
 async fn toggling_an_absent_plugin_reports_that_nothing_changed() {
-    let Some(svc) = service().await else {
-        return;
-    };
+    let svc = pg_service().await;
     let absent = unique_id("absent-toggle");
     assert!(
         !svc.set_plugin_enabled(&absent, false, Some("never installed"))
@@ -285,9 +261,7 @@ async fn toggling_an_absent_plugin_reports_that_nothing_changed() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
 async fn an_upgrade_without_a_credential_keeps_the_existing_one() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let id = unique_id("keeps-credential");
 
     let mut first = new_plugin(&id, "0.1.0");
@@ -319,9 +293,7 @@ async fn an_upgrade_without_a_credential_keeps_the_existing_one() {
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
 async fn an_upgrade_with_a_credential_replaces_it() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let id = unique_id("rotates-credential");
 
     let mut first = new_plugin(&id, "0.1.0");
