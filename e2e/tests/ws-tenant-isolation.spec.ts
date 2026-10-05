@@ -1,11 +1,18 @@
 /**
  * Live tenant isolation of the status socket (`/ws`).
  *
- * Two ordinary accounts, A and B, each hold one open socket. A is a member of
- * store S1 only and B of store S2 only. Both stores are owned by the E2E admin
- * account, which is what lets invoices be created at all: a fresh ordinary
- * account is refused invoice creation until it has a paid subscription, and
- * that refusal is judged against the store's owner.
+ * Two ordinary accounts, A and B, each hold one open socket. A creates and owns
+ * store S1 only and B creates and owns S2 only, using their own session ids as
+ * bearer tokens. Each adds its own payment method and creates its own invoices,
+ * so there is no member route and no database insert: creating a store needs
+ * only an authenticated user, who becomes its owner, and owning a store is
+ * all the socket's gate asks for.
+ *
+ * This spec seeds two OWNERS rather than members. It still covers the member
+ * path because the gate resolves access solely through `user_stores` and
+ * ignores the role, and `create_store_owned_by` writes that row for an owner.
+ * If the gate is ever changed to special-case `stores.owner_id`, this spec
+ * stops covering membership and a member-specific spec becomes necessary.
  *
  * Events are produced by expiring real invoices (a one-second expiry; the
  * invoice cleanup service broadcasts `expired`), so nothing is paid and no
@@ -25,22 +32,14 @@
  * Positive controls come first and are required on both sockets: a dead
  * socket also "received nothing foreign".
  *
- * How A and B become members depends on where this runs:
+ * Local and remote run the same path. They differ only in how the admin token
+ * is obtained: a server-admin user created straight in the database locally, the
+ * `E2E_API_TOKEN` key remotely. The admin owns nothing under test; it only
+ * deletes the two accounts afterwards.
  *
- *   - Local server (CI `e2e` job): membership is inserted straight into the
- *     database - `user_stores`, with the role id read from `store_roles`
- *     (the global `Guest` default). Those are the tables the gate reads:
- *     `may_see_store` -> `verify_store_access_for_query` -> `get_user_store`
- *     is a plain `SELECT ... FROM user_stores WHERE user_id AND store_id`, and
- *     the member route writes the same row through `add_user_to_store`. The
- *     fixture skips the route's permission check, which is not under test, and
- *     nothing the gate reads. The store owner is a server-admin user created
- *     the same way, mirroring the admin-owned shape of the remote run.
- *   - Remote (the nightly, `E2E_REMOTE=true`): there is no database access, so
- *     the member route is the only way in, and it answers 403 for every seeded
- *     role because none carries the store-users permissions. That is reported
- *     as a blocked setup - isolation NOT VERIFIED - never as a result. Do not
- *     switch the flag off to quiet it: a red run that says why is the signal.
+ * If an ordinary account is refused invoice creation on standing, setup has
+ * not worked and nothing has been tested: that is reported as NOT VERIFIED,
+ * naming the status and body, and never as an isolation result.
  *
  * Off unless `E2E_WS_ISOLATION=true`; once on, missing configuration is a hard
  * failure. The remote run needs `E2E_API_TOKEN`, a server admin key.
@@ -52,7 +51,7 @@ import { randomBytes } from 'node:crypto';
 import { HDKey, generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 import { api, ApiError, V4_UUID } from '../fixtures/api';
-import { addStoreMember, createUserWithApiKey } from '../fixtures/db';
+import { createUserWithApiKey } from '../fixtures/db';
 import {
   expectNothingForeign,
   expectReceived,
@@ -67,10 +66,18 @@ const CHAIN_ID = 'eip155:11155111';
 const MERCHANT_PATH = "m/44'/60'/0'";
 /** The cleanup service sweeps on a 60s fallback tick and on block events. */
 const EXPIRY_WAIT_MS = 3 * 60_000;
+/**
+ * An expired invoice keeps its address watched for a grace period, after which
+ * the next sweep unwatches it, and deleting an account is refused with 409
+ * while any watch is active. On a local server started with a short grace and
+ * tick this normally clears within seconds; the generous bound is the fallback
+ * for a remote server whose cleanup settings are not ours (60s + 60s by
+ * default). Teardown waits for the real state rather than forcing it.
+ */
+const UNWATCH_WAIT_MS = 4 * 60_000;
+const UNWATCH_POLL_MS = 5_000;
 /** For the one pair no later event orders: how long a leak has to show up. */
 const SETTLE_MS = 8_000;
-/** Global default role granted to A and B; the gate asks only for membership. */
-const MEMBER_ROLE = 'Guest';
 
 interface Account {
   userId: string;
@@ -115,8 +122,27 @@ function storeName(offsetMs: number): string {
   return `e2e-synthetic-${new Date(Date.now() + offsetMs).toISOString().replace(/[:.]/g, '-')}`;
 }
 
+/** Retry only the 409 for a still-watched address; any other failure is final. */
+async function deleteAccountWhenUnwatched(userId: string, token: string): Promise<void> {
+  const started = Date.now();
+  const deadline = started + UNWATCH_WAIT_MS;
+  let refused = 0;
+  for (;;) {
+    try {
+      await api(`/admin/users/${userId}`, { method: 'DELETE', token });
+      if (refused > 0) console.log(`account ${userId}: delete refused ${refused}x with 409, then succeeded after ${Date.now() - started}ms`);
+      return;
+    } catch (e) {
+      if (!(e instanceof ApiError) || e.status !== 409 || Date.now() >= deadline) throw e;
+      refused++;
+      if (refused === 1) console.log(`account ${userId}: delete refused 409 (${e.body.slice(0, 120)}), waiting`);
+      await new Promise((r) => setTimeout(r, UNWATCH_POLL_MS));
+    }
+  }
+}
+
 let adminToken: string | null = null;
-let storeIds: string[] = [];
+let stores: { id: string; session: string }[] = [];
 let accounts: Account[] = [];
 let sockets: RecordingSocket[] = [];
 
@@ -125,8 +151,8 @@ test.describe('Status socket tenant isolation', () => {
   test.skip(!ENABLED, 'Set E2E_WS_ISOLATION=true to run the live /ws isolation test');
 
   /**
-   * Close the sockets, archive both stores and delete both ordinary accounts.
-   * Archive rather than hard delete, as the synthetic payment spec does. A
+   * Close the sockets, have each owner archive its own store and the admin
+   * delete both ordinary accounts. Archive rather than hard delete, as the synthetic payment spec does. A
    * cleanup failure fails the run only when the test itself passed, so it
    * never buries the isolation result, and it is announced either way.
    */
@@ -135,35 +161,42 @@ test.describe('Status socket tenant isolation', () => {
     sockets = [];
 
     const token = adminToken;
-    const stores = storeIds;
+    const owned = stores;
     const users = accounts;
-    storeIds = [];
+    stores = [];
     accounts = [];
     if (!token) return;
 
     const failures: string[] = [];
-    for (const id of stores) {
-      await api(`/stores/${id}`, { method: 'DELETE', token }).catch((e) => failures.push(`archive store ${id}: ${e}`));
+    for (const { id, session } of owned) {
+      await api(`/stores/${id}`, { method: 'DELETE', token: session }).catch((e) =>
+        failures.push(`archive store ${id}: ${e}`),
+      );
     }
     for (const u of users) {
-      await api(`/admin/users/${u.userId}`, { method: 'DELETE', token }).catch((e) =>
+      await deleteAccountWhenUnwatched(u.userId, token).catch((e) =>
         failures.push(`delete account ${u.userId}: ${e}`),
       );
     }
     if (failures.length === 0) return;
 
-    const msg = `ws isolation cleanup left residue: ${failures.join('; ')}`;
+    const testPassed = testInfo.status === testInfo.expectedStatus;
+    const msg =
+      (testPassed
+        ? 'The isolation assertions PASSED; only the teardown failed (this is not an isolation result). '
+        : 'The test itself failed; teardown also left residue. ') +
+      `ws isolation cleanup left residue: ${failures.join('; ')}`;
     console.log(`::error title=ws isolation cleanup failed::${msg}`);
     if (process.env.GITHUB_STEP_SUMMARY) {
       appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ❌ ws isolation cleanup failed\n\n${msg}\n`);
     }
-    if (testInfo.status === testInfo.expectedStatus) throw new Error(msg);
+    if (testPassed) throw new Error(msg);
   });
 
   test('a socket receives its own stores\' events and no other store\'s', async () => {
     test.setTimeout(4 * EXPIRY_WAIT_MS);
     const token = REMOTE
-      ? requireEnv('E2E_API_TOKEN', 'a server admin API key that owns the test stores')
+      ? requireEnv('E2E_API_TOKEN', 'a server admin API key that deletes the test accounts')
       : (await createUserWithApiKey('server_admin')).apiKey;
     adminToken = token;
 
@@ -174,39 +207,18 @@ test.describe('Status socket tenant isolation', () => {
     accounts.push(b);
 
     const xpub = () => HDKey.fromMasterSeed(randomBytes(32)).derive(MERCHANT_PATH).publicExtendedKey;
-    async function makeStore(offsetMs: number, member: Account): Promise<string> {
+    async function makeStore(offsetMs: number, owner: Account): Promise<string> {
       const store = await api<{ id: string }>('/stores', {
         method: 'POST',
-        token,
+        token: owner.session,
         body: { name: storeName(offsetMs) },
       });
-      storeIds.push(store.id);
+      stores.push({ id: store.id, session: owner.session });
       await api(`/stores/${store.id}/payment-methods`, {
         method: 'POST',
-        token,
+        token: owner.session,
         body: { chain_id: CHAIN_ID, token_address: null, asset_symbol: 'ETH', decimals: 18, xpub: xpub() },
       });
-      if (!REMOTE) {
-        await addStoreMember(member.userId, store.id, MEMBER_ROLE);
-        return store.id;
-      }
-      try {
-        await api(`/stores/${store.id}/members`, {
-          method: 'POST',
-          token,
-          body: { user_id: member.userId, role: MEMBER_ROLE },
-        });
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 403) {
-          throw new Error(
-            'ws isolation NOT VERIFIED - this is a setup failure, not an isolation result: ' +
-              'the member route refused (403) because no store role carries the store-users ' +
-              'permissions, so a member cannot be added to a store. ' +
-              `(${e.message})`,
-          );
-        }
-        throw e;
-      }
       return store.id;
     }
     const s1 = await makeStore(0, a);
@@ -218,10 +230,10 @@ test.describe('Status socket tenant isolation', () => {
     const socketB = await openAuthenticatedSocket(b.session);
     sockets.push(socketB);
 
-    async function expireOne(storeId: string): Promise<string> {
+    async function expireOne(storeId: string, owner: Account): Promise<string> {
       const invoice = await api<{ id: string }>('/invoices', {
         method: 'POST',
-        token,
+        token: owner.session,
         body: {
           store_id: storeId,
           currency: 'ETH',
@@ -229,20 +241,28 @@ test.describe('Status socket tenant isolation', () => {
           expiration_seconds: 1,
           metadata: { source: 'ws-tenant-isolation' },
         },
+      }).catch((e) => {
+        if (e instanceof ApiError && (e.status === 402 || e.status === 403)) {
+          throw new Error(
+            `NOT VERIFIED - setup refused invoice creation: ${e.status} ${e.body.slice(0, 500)}. ` +
+              'This is a setup failure, not an isolation result.',
+          );
+        }
+        throw e;
       });
       expect(invoice.id, 'invoice id is not a v4 UUID').toMatch(V4_UUID);
       return invoice.id;
     }
 
-    const s2First = await expireOne(s2);
+    const s2First = await expireOne(s2, b);
     const gotB1 = await socketB.waitForInvoice(s2First, EXPIRY_WAIT_MS);
     expect(gotB1.status, 'B was told something other than expiry about its own invoice').toBe('expired');
 
-    const s1Only = await expireOne(s1);
+    const s1Only = await expireOne(s1, a);
     const gotA = await socketA.waitForInvoice(s1Only, EXPIRY_WAIT_MS);
     expect(gotA.status, 'A was told something other than expiry about its own invoice').toBe('expired');
 
-    const s2Second = await expireOne(s2);
+    const s2Second = await expireOne(s2, b);
     await socketB.waitForInvoice(s2Second, EXPIRY_WAIT_MS);
 
     // The one pair nothing orders: S2's second event against A.
@@ -256,7 +276,7 @@ test.describe('Status socket tenant isolation', () => {
     expectNothingForeign('B', socketB.frames, [s2First, s2Second]);
 
     console.log(
-      `A (S1 member) frames: ${socketA.frames.length}, B (S2 member) frames: ${socketB.frames.length}; ` +
+      `A (S1 owner) frames: ${socketA.frames.length}, B (S2 owner) frames: ${socketB.frames.length}; ` +
         `A saw ${s1Only} and nothing of ${s2First}/${s2Second}; B saw ${s2First} and ${s2Second}, nothing of ${s1Only}`,
     );
   });
