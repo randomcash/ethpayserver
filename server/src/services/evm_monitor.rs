@@ -5,20 +5,24 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use data_service::{LiveWatchedAddressReader, RedisDataService};
+use evm::Address;
 use evm::monitor::events::{MonitorCommand, UnwatchAddressCommand, WatchAddressCommand};
 use evm::monitor::{COMMANDS_CHANNEL, ChainHealth, EVENTS_CHANNEL, EventBridge, RedisBridge};
-use evm::{Address, network_to_chain_id};
-use types::Network;
+use types::{ChainId, InvoiceId};
 use uuid::Uuid;
 
 /// Error type for EVM monitor operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EVMMonitorError {
-    #[error("unsupported network: {0:?}")]
-    UnsupportedNetwork(Network),
+    #[error("not an EVM chain: {0}")]
+    NotAnEvmChain(ChainId),
 
     #[error("bridge error: {0}")]
     Bridge(#[from] evm::EvmError),
+
+    #[error("could not read the monitor's watch set: {0}")]
+    LiveWatchSet(#[from] data_service::RepositoryError),
 }
 
 /// Interface for EVM payment monitoring.
@@ -30,7 +34,7 @@ pub trait EVMMonitor: Send + Sync {
     /// Start watching an address for incoming payments.
     async fn watch_address(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         address: Address,
         invoice_id: Uuid,
         expected_amount: Option<evm::U256>,
@@ -50,7 +54,7 @@ pub trait EVMMonitor: Send + Sync {
     /// Stop watching an address.
     async fn unwatch_address(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         address: Address,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError>;
@@ -70,33 +74,66 @@ pub trait EVMMonitor: Send + Sync {
     ///
     /// Returns health info for all monitored chains.
     async fn get_chain_health(&self) -> Result<Vec<ChainHealth>, EVMMonitorError>;
+
+    /// Get the `SENTRY_RELEASE` evmmonitor was compiled with, observed live
+    /// from the running process rather than trusted from the build log.
+    ///
+    /// Defaults to `None`: evmmonitor is the only implementation that can
+    /// observe this at all, so every other implementation (test doubles)
+    /// stays unaffected by this method existing.
+    async fn get_sentry_release(&self) -> Result<Option<String>, EVMMonitorError> {
+        Ok(None)
+    }
+
+    /// The monitor's actual watch set, as durably persisted (the state it
+    /// would resume watching from on restart) - not the same thing as what
+    /// Postgres says should be watched. See `watch_reconciler` for the
+    /// comparison this exists to feed.
+    ///
+    /// Defaults to empty: only the Redis-backed implementation can observe
+    /// this, so every test double stays unaffected by this method existing -
+    /// the same pattern as `get_sentry_release`.
+    async fn get_watched_addresses(
+        &self,
+    ) -> Result<Vec<(String, InvoiceId, ChainId, Option<String>)>, EVMMonitorError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Redis-based implementation of EVMMonitor.
 ///
-/// Communicates with evmmonitor via Redis pub/sub channels.
+/// Communicates with evmmonitor via Redis pub/sub channels for commands, and
+/// reads its persisted watch set (`evmwatch:addr:*`, written by evmmonitor
+/// itself) directly for `get_watched_addresses` - the two live in the same
+/// Redis instance, but are otherwise unrelated mechanisms.
 pub struct RedisEVMMonitor {
     bridge: Arc<RedisBridge>,
+    live_watches: Arc<RedisDataService>,
 }
 
 impl Clone for RedisEVMMonitor {
     fn clone(&self) -> Self {
         Self {
             bridge: Arc::clone(&self.bridge),
+            live_watches: Arc::clone(&self.live_watches),
         }
     }
 }
 
 impl RedisEVMMonitor {
     /// Create a new Redis-based EVM monitor.
-    pub fn new(bridge: Arc<RedisBridge>) -> Self {
-        Self { bridge }
+    pub fn new(bridge: Arc<RedisBridge>, live_watches: Arc<RedisDataService>) -> Self {
+        Self {
+            bridge,
+            live_watches,
+        }
     }
 
     /// Connect to Redis and create a new monitor.
     pub async fn connect(redis_url: &str) -> Result<Self, EVMMonitorError> {
         let bridge = RedisBridge::new(redis_url, EVENTS_CHANNEL, COMMANDS_CHANNEL).await?;
-        Ok(Self::new(Arc::new(bridge)))
+        let live_watches = RedisDataService::new(redis_url).await?;
+        Ok(Self::new(Arc::new(bridge), Arc::new(live_watches)))
     }
 }
 
@@ -104,23 +141,20 @@ impl RedisEVMMonitor {
 impl EVMMonitor for RedisEVMMonitor {
     async fn watch_address(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         address: Address,
         invoice_id: Uuid,
         expected_amount: Option<evm::U256>,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
-        let chain_id =
-            network_to_chain_id(network).ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
+        // This monitor talks to EVM RPCs, which take an EIP-155 number. That
+        // is the only place the number is still the right representation.
+        let eip155 = chain_id
+            .evm_chain_id()
+            .ok_or_else(|| EVMMonitorError::NotAnEvmChain(chain_id.clone()))?;
 
-        self.watch_address_by_chain_id(
-            chain_id,
-            address,
-            invoice_id,
-            expected_amount,
-            token_contract,
-        )
-        .await
+        self.watch_address_by_chain_id(eip155, address, invoice_id, expected_amount, token_contract)
+            .await
     }
 
     async fn watch_address_by_chain_id(
@@ -152,14 +186,17 @@ impl EVMMonitor for RedisEVMMonitor {
 
     async fn unwatch_address(
         &self,
-        network: Network,
+        chain_id: &ChainId,
         address: Address,
         token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
-        let chain_id =
-            network_to_chain_id(network).ok_or(EVMMonitorError::UnsupportedNetwork(network))?;
+        // This monitor talks to EVM RPCs, which take an EIP-155 number. That
+        // is the only place the number is still the right representation.
+        let eip155 = chain_id
+            .evm_chain_id()
+            .ok_or_else(|| EVMMonitorError::NotAnEvmChain(chain_id.clone()))?;
 
-        self.unwatch_address_by_chain_id(chain_id, address, token_contract)
+        self.unwatch_address_by_chain_id(eip155, address, token_contract)
             .await
     }
 
@@ -205,5 +242,50 @@ impl EVMMonitor for RedisEVMMonitor {
             }),
             None => Ok(vec![]), // No health data yet
         }
+    }
+
+    async fn get_sentry_release(&self) -> Result<Option<String>, EVMMonitorError> {
+        const SENTRY_RELEASE_KEY: &str = "evmmonitor:sentry_release";
+
+        let release: Option<String> = self.bridge.get_key(SENTRY_RELEASE_KEY).await?;
+        Ok(observed_sentry_release(release))
+    }
+
+    async fn get_watched_addresses(
+        &self,
+    ) -> Result<Vec<(String, InvoiceId, ChainId, Option<String>)>, EVMMonitorError> {
+        Ok(self.live_watches.get_all_watched().await?)
+    }
+}
+
+/// An unset `SENTRY_RELEASE` is published as the empty string (see
+/// evmmonitor's health publisher), not omitted - treat it the same as "not
+/// observed" rather than as a release worth comparing against. Split out from
+/// [`RedisEVMMonitor::get_sentry_release`] so this is unit-testable without a
+/// live Redis.
+fn observed_sentry_release(published: Option<String>) -> Option<String> {
+    published.filter(|r| !r.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::observed_sentry_release;
+
+    #[test]
+    fn a_non_empty_published_release_is_observed() {
+        assert_eq!(
+            observed_sentry_release(Some("abc1234".to_string())),
+            Some("abc1234".to_string())
+        );
+    }
+
+    #[test]
+    fn an_empty_published_release_is_treated_as_not_observed() {
+        assert_eq!(observed_sentry_release(Some(String::new())), None);
+    }
+
+    #[test]
+    fn no_published_value_is_not_observed() {
+        assert_eq!(observed_sentry_release(None), None);
     }
 }

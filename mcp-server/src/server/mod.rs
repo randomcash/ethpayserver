@@ -13,6 +13,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 use auth::UserId;
+use data_service::InvoiceCreationWriter;
 use evm::monitor::bridge::{COMMANDS_CHANNEL, EVENTS_CHANNEL, EventBridge, RedisBridge};
 use rates::RateProvider;
 use types::{
@@ -53,6 +54,7 @@ pub trait McpDataService:
     + PaymentOptionReader
     + PaymentOptionWriter
     + WatchedAddressWriter
+    + InvoiceCreationWriter
     + StorePaymentMethodReader
     + StorePaymentMethodWriter
 {
@@ -67,6 +69,7 @@ impl<T> McpDataService for T where
         + PaymentOptionReader
         + PaymentOptionWriter
         + WatchedAddressWriter
+        + InvoiceCreationWriter
         + StorePaymentMethodReader
         + StorePaymentMethodWriter
 {

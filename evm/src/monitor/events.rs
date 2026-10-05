@@ -84,6 +84,43 @@ pub enum MonitorEvent {
     StatusReport(StatusReport),
 }
 
+impl MonitorEvent {
+    /// The chain this event is about. Every variant carries one, so the
+    /// outbox can tag an envelope without knowing the event's inner shape.
+    pub fn chain_id(&self) -> u64 {
+        match self {
+            MonitorEvent::PaymentDetected(e) => e.chain_id,
+            MonitorEvent::PaymentConfirmed(e) => e.chain_id,
+            MonitorEvent::ReorgDetected(e) => e.chain_id,
+            MonitorEvent::MonitorStarted { chain_id }
+            | MonitorEvent::MonitorStopped { chain_id } => *chain_id,
+            MonitorEvent::MonitorError { chain_id, .. } => *chain_id,
+            MonitorEvent::AddressWatched(e) => e.chain_id,
+            MonitorEvent::AddressUnwatched(e) => e.chain_id,
+            MonitorEvent::StatusReport(e) => e.chain_id,
+        }
+    }
+
+    /// Best-available chain height as of this event, for outbox diagnostics.
+    ///
+    /// Not part of resume decisions - only `seq`/`epoch` decide where to
+    /// resume from - so a variant with no natural height (a watch
+    /// confirmation, a status log) reporting `0` here is harmless.
+    pub fn block_height(&self) -> u64 {
+        match self {
+            MonitorEvent::PaymentDetected(e) => e.block_number,
+            MonitorEvent::PaymentConfirmed(e) => e.block_number,
+            MonitorEvent::ReorgDetected(e) => e.fork_block,
+            MonitorEvent::StatusReport(e) => e.current_block,
+            MonitorEvent::MonitorStarted { .. }
+            | MonitorEvent::MonitorStopped { .. }
+            | MonitorEvent::MonitorError { .. }
+            | MonitorEvent::AddressWatched(_)
+            | MonitorEvent::AddressUnwatched(_) => 0,
+        }
+    }
+}
+
 /// Event confirming an address is now being watched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddressWatched {
@@ -174,9 +211,41 @@ impl PaymentDetected {
     }
 }
 
+impl PaymentDetected {
+    /// Which transfer within the transaction this is: the EVM log index for an
+    /// ERC20 transfer, or -1 for a native one.
+    ///
+    /// Native transfers are found by scanning each transaction's top-level
+    /// `to`/`value`, one per hash, so a fixed sentinel can never collide with
+    /// another native transfer in the same transaction. It must not be 0,
+    /// which is a real and reachable ERC20 log index.
+    ///
+    /// Branches on `is_native` rather than on `log_index.is_none()`: an ERC20
+    /// log that arrived without an index is malformed, not native, and must
+    /// not be silently filed on the native sentinel where it would collide
+    /// with a genuine native transfer. `None` here is rejected by the
+    /// consumer the same way a missing `token_address` already is.
+    #[must_use]
+    pub fn tx_index(&self) -> Option<i32> {
+        if self.is_native {
+            Some(-1)
+        } else {
+            self.log_index.map(|i| i as i32)
+        }
+    }
+}
+
 /// Payment confirmed event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentConfirmed {
+    /// Which transfer within the transaction this confirms.
+    ///
+    /// The EVM log index for an ERC20 transfer, or -1 for a native one. A
+    /// transaction can carry two transfers to two different watched
+    /// addresses, so `tx_hash` alone does not identify a payment - the
+    /// consumer needs this to mark the right row confirmed.
+    pub tx_index: i32,
+
     /// Chain ID.
     pub chain_id: u64,
     /// Invoice ID.
@@ -209,7 +278,28 @@ pub struct ReorgDetected {
     /// Depth of the reorg (number of blocks replaced).
     pub depth: u64,
     /// Invoice IDs that may be affected.
+    ///
+    /// Best-effort, drawn from payments the monitor still has in memory: it
+    /// is empty right after a restart and never includes a payment that has
+    /// already confirmed. Not the source of truth for which payments the
+    /// reorg touches — a consumer needing that should query its own durable
+    /// store for this chain and fork block instead of trusting this list.
     pub affected_invoices: Vec<uuid::Uuid>,
+    /// Transaction hashes the monitor re-validated against the chain and
+    /// found still present between `fork_block` and the new head — merely
+    /// relocated to a different block, not dropped. A consumer must not
+    /// retract one of these: doing so would un-pay an invoice that is still
+    /// genuinely paid.
+    pub survived_tx_hashes: Vec<B256>,
+    /// Whether the survivor scan could actually verify anything.
+    ///
+    /// `false` when the monitor had no watched addresses to scan, which is the
+    /// ordinary state of a quiet server - every invoice settled and past its
+    /// grace period. An empty `survived_tx_hashes` then means "nothing was
+    /// checked", not "nothing survived", and the two must not be confused:
+    /// the consumer retracts what it cannot find, so treating the first as the
+    /// second un-pays every settled invoice above `fork_block`.
+    pub survivors_verifiable: bool,
     /// When detected.
     pub detected_at: DateTime<Utc>,
 }
@@ -256,12 +346,14 @@ mod tests {
     #[test]
     fn test_reorg_significance() {
         let reorg = ReorgDetected {
+            survivors_verifiable: true,
             chain_id: 1,
             fork_block: 100,
             old_hash: B256::ZERO,
             new_hash: B256::ZERO,
             depth: 2,
             affected_invoices: vec![],
+            survived_tx_hashes: vec![],
             detected_at: Utc::now(),
         };
 

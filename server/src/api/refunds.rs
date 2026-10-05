@@ -1,181 +1,88 @@
 //! Refund API endpoints.
 //!
-//! POST /invoices/{invoice_id}/refund — Initiate a refund for a paid invoice.
+//! POST /invoices/{invoice_id}/refund — refuses; refunds are the merchant's job.
 //! GET  /invoices/{invoice_id}/refunds — List refunds for an invoice.
+//!
+//! # Refunds are the merchant's job
+//!
+//! This deployment is non-custodial: it derives payment addresses from a
+//! merchant's xpub and never holds the matching private key (see
+//! `evm::wallet::validate_xpub` and `README.md`), so it cannot sign or
+//! broadcast a transaction that would send money anywhere, refund included.
+//!
+//! `create_refund` used to accept this request, check the amount against the
+//! payment, and write a `Pending` refund row — and stop there, because nothing
+//! downstream of it could ever sign the transaction. Nothing ever moved that
+//! row past `Pending`, so a merchant who called it got a refund that stayed
+//! "pending" forever, indistinguishable from one about to happen. That is
+//! worse than refusing outright: it presents a capability the server does not
+//! have. The endpoint now says so, and creates nothing.
+//!
+//! A merchant refunds a payer from their own wallet, the one that holds the
+//! spending key. This endpoint remains only as an explicit, documented refusal
+//! rather than a route that disappears with no explanation.
+//!
+//! ## Existing testnet rows
+//!
+//! Checked directly against the testnet database on 2026-09-14: the
+//! `refunds` table held zero rows of any status, `Pending`/`Broadcasting`
+//! included. Nothing there was ever real, so this change ships with no
+//! migration and no backfill — there is nothing to migrate away from. If
+//! that ever stops being true (a restored backup, a different environment),
+//! treat any `Pending`/`Broadcasting` row found there the same way: it is a
+//! record of a request this server was never able to carry out, not a
+//! refund in progress.
+//!
+//! Mainnet was not checked the same way because there is nothing to check:
+//! it deploys only from a release tag matching `vMAJOR.MINOR.PATCH` exactly,
+//! this repository's only tag is the prerelease `v0.1.0-alpha`, and mainnet
+//! has consequently never received a deploy dispatch (see `ci.yml`'s
+//! `notify-deploy` job). No deployment means no database with the old
+//! refund code ever running against it, so there is no row to have written.
+
+#[cfg(test)]
+mod tests;
 
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
 };
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use auth::{SessionService, UserStoreRepository};
-use data_service::{InvoiceReader, PaymentReader, RefundReader, RefundWriter};
-use types::{InvoiceId, InvoiceStatus, RefundData, RefundStatus};
+use data_service::{InvoiceReader, RefundReader};
+use types::InvoiceId;
 
 use super::extractors::AuthenticatedUser;
-use crate::metrics;
+use crate::api::ApiErr;
 use crate::state::PgAppState;
+pub use api_types::RefundResponse;
 
-/// Request body for creating a refund.
-#[derive(Debug, Deserialize)]
-pub struct CreateRefundRequest {
-    /// Optional partial refund amount (in smallest unit).
-    /// If omitted, refunds the full payment amount.
-    pub amount: Option<String>,
-    /// Reason for the refund.
-    pub reason: Option<String>,
+/// Why `POST /invoices/{id}/refund` always refuses. See the module docs.
+const REFUND_UNSUPPORTED_REASON: &str = "refunds are the merchant's responsibility: this server holds no spending key and cannot send funds. Refund the payer from your own wallet.";
+
+/// The fixed response every refund request gets, regardless of the invoice,
+/// its status, or the caller's amount. Nothing here can ever act on a refund,
+/// so nothing here is worth validating first.
+fn refund_unsupported() -> ApiErr {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        REFUND_UNSUPPORTED_REASON.to_string(),
+    )
+        .into()
 }
 
-/// Refund response.
-#[derive(Debug, Serialize)]
-pub struct RefundResponse {
-    pub id: Uuid,
-    pub invoice_id: String,
-    pub payment_id: Uuid,
-    pub to_address: String,
-    pub chain_id: u64,
-    pub asset_type: String,
-    pub asset_symbol: String,
-    pub amount: String,
-    pub tx_hash: Option<String>,
-    pub status: String,
-    pub fee_amount: Option<String>,
-    pub reason: Option<String>,
-    pub error_message: Option<String>,
-    pub created_at: chrono::DateTime<Utc>,
-    pub confirmed_at: Option<chrono::DateTime<Utc>>,
-}
-
-impl From<RefundData> for RefundResponse {
-    fn from(r: RefundData) -> Self {
-        Self {
-            id: r.id,
-            invoice_id: r.invoice_id.0,
-            payment_id: r.payment_id,
-            to_address: r.to_address,
-            chain_id: r.chain_id,
-            asset_type: r.asset_type,
-            asset_symbol: r.asset_symbol,
-            amount: r.amount,
-            tx_hash: r.tx_hash,
-            status: r.status.to_string(),
-            fee_amount: r.fee_amount,
-            reason: r.reason,
-            error_message: r.error_message,
-            created_at: r.created_at,
-            confirmed_at: r.confirmed_at,
-        }
-    }
-}
-
-/// Initiate a refund for a paid invoice.
-///
-/// Validates the invoice is in Paid or LatePaid status, finds the confirmed
-/// payment, and creates a refund record. The actual transaction signing and
-/// broadcasting is handled by a background service.
+/// Refuse to create a refund. See the module docs: refunds are the merchant's
+/// job, done from their own wallet, because this server holds no spending key.
 pub async fn create_refund<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
-    State(state): State<PgAppState<A>>,
-    Path(invoice_id): Path<String>,
-    Json(body): Json<CreateRefundRequest>,
-) -> Result<Json<RefundResponse>, StatusCode>
+    AuthenticatedUser(_user): AuthenticatedUser,
+    State(_state): State<PgAppState<A>>,
+    Path(_invoice_id): Path<String>,
+) -> ApiErr
 where
     A: SessionService + 'static,
 {
-    let id = InvoiceId::from_string(invoice_id);
-
-    // Get invoice and validate status
-    let invoice = InvoiceReader::get(&*state.data_service, &id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    // Verify user has access to this invoice's store
-    if !user.role.is_admin()
-        && state
-            .data_service
-            .get_user_store(user.id, invoice.store_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .is_none()
-    {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    if !matches!(
-        invoice.status,
-        InvoiceStatus::Paid | InvoiceStatus::LatePaid
-    ) {
-        tracing::warn!(invoice_id = %id.0, status = %invoice.status, "Cannot refund invoice in this status");
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let payments = PaymentReader::get_valid_for_invoice(&*state.data_service, &id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let payment = payments
-        .into_iter()
-        .find(|p| p.confirmed_at.is_some() && !p.reorged)
-        .ok_or_else(|| {
-            tracing::warn!(invoice_id = %id.0, "No confirmed payment found for refund");
-            StatusCode::BAD_REQUEST
-        })?;
-
-    // Validate from_address exists (needed as refund destination)
-    let to_address = payment.from_address.clone().ok_or_else(|| {
-        tracing::warn!(
-            invoice_id = %id.0,
-            payment_id = %payment.id,
-            "Payment has no from_address, cannot determine refund destination"
-        );
-        StatusCode::BAD_REQUEST
-    })?;
-
-    let refund_amount = body.amount.unwrap_or_else(|| payment.amount.clone());
-
-    // Create refund record
-    let refund = RefundData {
-        id: Uuid::new_v4(),
-        invoice_id: id.clone(),
-        payment_id: payment.id,
-        store_id: invoice.store_id,
-        to_address,
-        chain_id: payment.chain_id,
-        asset_type: payment.asset_type.to_string(),
-        asset_symbol: payment.asset_symbol.clone(),
-        token_address: payment.token_address.clone(),
-        amount: refund_amount,
-        tx_hash: None,
-        status: RefundStatus::Pending,
-        fee_amount: None,
-        reason: body.reason,
-        error_message: None,
-        created_at: Utc::now(),
-        confirmed_at: None,
-    };
-
-    RefundWriter::create_refund(&*state.data_service, &refund)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to create refund record");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    metrics::record_refund_initiated(payment.chain_id, &payment.asset_symbol);
-    tracing::info!(
-        refund_id = %refund.id,
-        invoice_id = %id.0,
-        amount = %refund.amount,
-        to_address = %refund.to_address,
-        "Refund created"
-    );
-
-    Ok(Json(refund.into()))
+    refund_unsupported()
 }
 
 /// List refunds for an invoice.

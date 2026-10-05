@@ -1,0 +1,6 @@
+# Handlers that reach an API-key scope helper today with no granting-and-
+# refusing test naming them (see check-scope-call-sites.sh). These are known
+# gaps, not exemptions, named by handler (not by the helper it reaches
+# through): the list may only shrink. Write the two tests, then
+# delete the line - the guard fails if a listed name is in fact covered.
+# A new handler must not be added here; give it its tests instead.

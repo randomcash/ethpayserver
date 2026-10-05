@@ -4,7 +4,12 @@
 
 use std::sync::Arc;
 
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -15,160 +20,78 @@ use crate::state::PgAppState;
 pub mod admin;
 pub mod api_key_deprecation;
 pub mod api_key_hash;
+pub mod api_key_permissions;
 pub mod api_key_rate_limit;
+pub mod api_key_scope;
+pub mod auth_freshness;
 pub mod checkout;
 pub mod dashboard;
+pub mod entitlements;
 pub mod extractors;
 pub mod health;
 pub mod http_metrics;
 pub mod idempotency;
 pub mod invoices;
+mod openapi;
 pub mod payouts;
+pub mod plugins;
 pub mod rate_limit;
 pub mod rates;
 pub mod refunds;
 pub mod stores;
 pub mod users;
+pub mod webhook_deliveries;
 pub mod ws;
 
-pub use extractors::{AdminAuth, AuthenticatedUser};
+pub use extractors::{
+    AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser, MerchantReader,
+    StandingPusher, StoreScopedUser,
+};
+pub use openapi::ApiDoc;
 
-/// OpenAPI documentation for the entire API.
-#[derive(OpenApi)]
-#[openapi(
-    info(
-        title = "ETHPayServer API",
-        version = "0.1.0",
-        description = "Self-hosted Ethereum payment processor API",
-        license(name = "MIT"),
-    ),
-    paths(
-        // Health
-        health::health_check,
-        health::liveness,
-        health::readiness,
-        health::deep_health,
-        health::chains_health,
-        health::prometheus_metrics,
-        // Stores
-        stores::list_stores,
-        stores::create_store,
-        stores::get_store,
-        stores::update_store,
-        stores::delete_store,
-        stores::list_store_members,
-        stores::add_store_member,
-        stores::update_store_member,
-        stores::remove_store_member,
-        stores::get_store_wallet,
-        stores::configure_store_wallet,
-        stores::delete_store_wallet,
-        stores::rotate_store_wallet,
-        stores::list_wallets,
-        stores::get_wallet_by_id,
-        stores::export_wallet_xpub,
-        stores::list_wallet_addresses,
-        stores::get_store_webhook,
-        stores::configure_store_webhook,
-        stores::delete_store_webhook,
-        // Payment Methods
-        stores::list_payment_methods,
-        stores::create_payment_method,
-        stores::get_payment_method,
-        stores::update_payment_method,
-        stores::delete_payment_method,
-        // Invoices
-        invoices::list_invoices,
-        invoices::create_invoice,
-        invoices::get_invoice,
-        invoices::get_invoice_payments,
-        invoices::get_invoice_status,
-        invoices::cancel_invoice,
-        // Payments
-        invoices::list_payments,
-        invoices::get_payment,
-        // Dashboard
-        dashboard::get_stats,
-        // Rates
-        rates::get_rate,
-        // Users
-        users::list_api_keys,
-        users::create_api_key,
-        users::revoke_api_key,
-        users::update_api_key,
-        users::rotate_api_key,
-        // Admin
-        admin::list_users,
-        admin::update_user_role,
-        admin::lock_user,
-        admin::unlock_user,
-        admin::get_settings,
-        admin::update_settings,
-    ),
-    components(schemas(
-        health::HealthResponse,
-        health::ReadinessResponse,
-        health::DeepHealthResponse,
-        health::DependencyHealth,
-        health::RpcHealth,
-        health::MonitorHealth,
-        health::ChainsHealthResponse,
-        health::ChainHealthInfo,
-        stores::CreateStoreRequest,
-        stores::UpdateStoreRequest,
-        stores::StoreResponse,
-        stores::AddMemberRequest,
-        stores::UpdateMemberRequest,
-        stores::MemberResponse,
-        stores::ConfigureWalletRequest,
-        stores::WalletResponse,
-        stores::WalletXpubResponse,
-        stores::DerivedAddressEntry,
-        stores::WalletAddressesResponse,
-        stores::ConfigureWebhookRequest,
-        stores::WebhookResponse,
-        stores::CreatePaymentMethodRequest,
-        stores::UpdatePaymentMethodRequest,
-        stores::PaymentMethodResponse,
-        stores::RotateWalletRequest,
-        stores::RotateWalletResponse,
-        stores::RotationEntry,
-        invoices::CreateInvoiceRequest,
-        invoices::InvoiceResponse,
-        invoices::InvoiceListResponse,
-        invoices::PaymentResponse,
-        invoices::PaymentListResponse,
-        invoices::PaymentOptionResponse,
-        invoices::InvoiceStatusResponse,
-        dashboard::DashboardStats,
-        rates::RateResponse,
-        users::ApiKeyListResponse,
-        users::ApiKeyInfoResponse,
-        users::CreateApiKeyPayload,
-        users::CreateApiKeyResponsePayload,
-        users::UpdateApiKeyPayload,
-        users::RotateApiKeyResponsePayload,
-        admin::UserListResponse,
-        admin::AdminUserInfo,
-        admin::UpdateRoleRequest,
-        admin::ServerSettingsResponse,
-        admin::UpdateServerSettingsRequest,
-    )),
-    tags(
-        (name = "health", description = "Health check endpoints"),
-        (name = "stores", description = "Store management"),
-        (name = "invoices", description = "Invoice management"),
-        (name = "payments", description = "Payment management"),
-        (name = "tokens", description = "Token management (from EVM API)"),
-        (name = "networks", description = "Network information (from EVM API)"),
-        (name = "auth", description = "Authentication (from Auth API)"),
-        (name = "dashboard", description = "Dashboard statistics"),
-        (name = "rates", description = "Exchange rates"),
-        (name = "users", description = "User management (API keys)"),
-        (name = "admin", description = "Server administration"),
-    )
-)]
-pub struct ApiDoc;
+/// A status, optionally with a reason the caller can read.
+///
+/// Handlers mostly return bare `StatusCode`, and that stays true:
+/// `From<StatusCode>` gives an empty reason, so `?` on existing permission and
+/// lookup helpers is unchanged and those responses keep exactly the shape they
+/// had. What this adds is somewhere for a refusal's own words to travel, for
+/// the cases where the status alone does not say enough - originally so a
+/// repository conflict could say what it refused (see `stores::repository_error`),
+/// now shared with the invoice/payment filter builders for the same reason:
+/// a bare 400 and a bare "store_id required" 400 are indistinguishable on the
+/// wire, which is exactly the ambiguity that burned the client once.
+#[derive(Debug)]
+pub struct ApiErr(StatusCode, String);
+
+impl IntoResponse for ApiErr {
+    fn into_response(self) -> Response {
+        // An empty reason stays a bare status, which is what every handler here
+        // returned before and what `From<StatusCode>` produces.
+        //
+        // Note what this does NOT fix: both branches send an empty body, so the
+        // client still Displays a reasonless error as "HTTP error 404: ",
+        // trailing colon and all. The difference is only that the bare branch
+        // sends no `content-type` for a body that does not exist. Filling the
+        // reason is what removes the colon, and that is the caller's job.
+        if self.1.is_empty() {
+            self.0.into_response()
+        } else {
+            (self.0, self.1).into_response()
+        }
+    }
+}
+
+impl From<StatusCode> for ApiErr {
+    fn from(status: StatusCode) -> Self {
+        Self(status, String::new())
+    }
+}
+
+impl From<(StatusCode, String)> for ApiErr {
+    fn from((status, reason): (StatusCode, String)) -> Self {
+        Self(status, reason)
+    }
+}
 
 /// Create the unified API router.
 ///
@@ -207,6 +130,7 @@ where
         .route("/{store_id}", get(stores::get_store::<A>))
         .route("/{store_id}", put(stores::update_store::<A>))
         .route("/{store_id}", delete(stores::delete_store::<A>))
+        .route("/{store_id}/unarchive", post(stores::unarchive_store::<A>))
         .route("/{store_id}/members", get(stores::list_store_members::<A>))
         .route("/{store_id}/members", post(stores::add_store_member::<A>))
         .route(
@@ -236,10 +160,35 @@ where
         .route("/{store_id}/token-policy", get(stores::get_token_policy::<A>))
         .route("/{store_id}/token-policy", put(stores::set_token_policy::<A>))
         .route("/{store_id}/token-policy", delete(stores::delete_token_policy::<A>))
+        // Settlement tolerance
+        .route("/{store_id}/settlement-tolerance", get(stores::get_settlement_tolerance::<A>))
+        .route("/{store_id}/settlement-tolerance", put(stores::set_settlement_tolerance::<A>))
+        .route("/{store_id}/settlement-tolerance", delete(stores::delete_settlement_tolerance::<A>))
         // Payouts
         .route("/{store_id}/payouts", get(payouts::list_payouts::<A>))
         .route("/{store_id}/payouts", post(payouts::create_payout::<A>))
         .route("/{store_id}/payouts/{payout_id}", get(payouts::get_payout::<A>))
+        // The merchant makes the payout from their own wallet, then records it
+        // here; this server has no spending key and never broadcasts.
+        .route(
+            "/{store_id}/payouts/{payout_id}/settle",
+            post(payouts::settle_payout::<A>),
+        )
+        // Releases the invoice claim a payout holds, so a payout recorded by
+        // mistake does not lock that money out of every later payout.
+        .route(
+            "/{store_id}/payouts/{payout_id}/abandon",
+            post(payouts::abandon_payout::<A>),
+        )
+        // Webhook deliveries
+        .route(
+            "/{store_id}/webhook-deliveries",
+            get(webhook_deliveries::list_deliveries_for_store::<A>),
+        )
+        .route(
+            "/{store_id}/webhook-deliveries/{delivery_id}/replay",
+            post(webhook_deliveries::replay_delivery::<A>),
+        )
         .with_state(state.clone());
 
     // Invoice endpoints (with idempotency middleware on POST)
@@ -260,9 +209,17 @@ where
             "/{invoice_id}/status",
             get(invoices::get_invoice_status::<A>),
         )
+        .route(
+            "/{invoice_id}/settlement-allowance",
+            get(invoices::get_invoice_settlement_allowance::<A>),
+        )
         .route("/{invoice_id}/cancel", post(invoices::cancel_invoice::<A>))
         .route("/{invoice_id}/refund", post(refunds::create_refund::<A>))
         .route("/{invoice_id}/refunds", get(refunds::list_refunds::<A>))
+        .route(
+            "/{invoice_id}/webhook-deliveries",
+            get(webhook_deliveries::list_deliveries_for_invoice::<A>),
+        )
         .with_state(state.clone());
 
     if let Some(idem) = idempotency {
@@ -275,7 +232,10 @@ where
     // Wallet endpoints (cross-store)
     let wallet_routes = Router::new()
         .route("/", get(stores::list_wallets::<A>))
+        .route("/", post(stores::create_wallet::<A>))
         .route("/{wallet_id}", get(stores::get_wallet_by_id::<A>))
+        .route("/{wallet_id}", patch(stores::update_wallet::<A>))
+        .route("/{wallet_id}", delete(stores::delete_wallet::<A>))
         .route("/{wallet_id}/xpub", get(stores::export_wallet_xpub::<A>))
         .route(
             "/{wallet_id}/addresses",
@@ -300,13 +260,41 @@ where
         .route("/", get(rates::get_rate::<A>))
         .with_state(state.clone());
 
+    // Plugin static pages. Same route for merchant and admin views - the
+    // handler resolves the viewer from the authenticated identity.
+    let plugin_routes = Router::new()
+        // What the client puts in its navigation. Declared in each plugin's
+        // manifest, so building a menu runs no plugin code.
+        .route("/", get(plugins::list_plugin_pages::<A>))
+        .route("/{id}/pages/{*path}", get(plugins::get_page::<A>))
+        // Core, not a plugin's: the standing gates invoice creation, so it is
+        // stored by the host and lands whether or not any plugin is loaded.
+        .route("/entitlements", entitlements::route::<A>())
+        .with_state(state.clone());
+
     // Dashboard endpoint
     let dashboard_routes = Router::new()
         .route("/stats", get(dashboard::get_stats::<A>))
+        .route("/analytics", get(dashboard::get_analytics::<A>))
         .with_state(state.clone());
 
     // User endpoints (API keys)
     let user_routes = Router::new()
+        // Refuses while the account's stores hold payments, payouts or refunds:
+        // `users` cascades through `stores` into `invoices` and `payments`, so
+        // deleting a merchant who traded would erase their financial history.
+        .route("/me", delete(users::delete_account::<A>))
+        // Email change (sensitive - see server/src/api/users/email.rs).
+        // Set/change and remove require a fresh passkey or wallet login
+        // (`FreshlyAuthenticatedUser`); confirm is unauthenticated by design
+        // and gated on the verification token alone.
+        .route("/me/email", post(users::request_email_change::<A>))
+        .route("/me/email", delete(users::remove_email::<A>))
+        .route("/me/email/status", get(users::get_email_status::<A>))
+        .route(
+            "/me/email/confirm",
+            post(users::confirm_email_change::<A>),
+        )
         .route("/api-keys", get(users::list_api_keys::<A>))
         .route("/api-keys", post(users::create_api_key::<A>))
         .route("/api-keys/{id}", delete(users::revoke_api_key::<A>))
@@ -318,10 +306,23 @@ where
             "/api-keys/{id}/rotate",
             axum::routing::post(users::rotate_api_key::<A>),
         )
+        .route("/wallets", get(users::list_wallet_credentials::<A>))
+        .route(
+            "/wallets/{id}/reauth-challenge",
+            axum::routing::post(users::create_wallet_reauth_challenge::<A>),
+        )
+        .route(
+            "/wallets/{id}/primary",
+            axum::routing::patch(users::set_primary_wallet_credential::<A>),
+        )
         .with_state(state.clone());
     // Admin endpoints (ServerAdmin only)
     let admin_routes = Router::new()
         .route("/users", get(admin::list_users::<A>))
+        .route("/users/{id}", delete(admin::delete_user_account::<A>))
+        .route("/users/{id}/stores", get(admin::list_user_stores::<A>))
+        .route("/stores", get(admin::list_stores::<A>))
+        .route("/stores/{id}", delete(admin::hard_delete_store::<A>))
         .route(
             "/users/{id}/role",
             axum::routing::patch(admin::update_user_role::<A>),
@@ -336,6 +337,31 @@ where
         )
         .route("/settings", get(admin::get_settings::<A>))
         .route("/settings", axum::routing::put(admin::update_settings::<A>))
+        .route("/safe-mode", get(admin::get_safe_mode::<A>))
+        .route(
+            "/plugins",
+            get(admin::plugins::list_plugins::<A>).post(admin::plugins::install_plugin::<A>),
+        )
+        .route(
+            "/plugins/{id}",
+            delete(admin::plugins::uninstall_plugin::<A>),
+        )
+        .route(
+            "/plugins/{id}/enable",
+            post(admin::plugins::enable_plugin::<A>),
+        )
+        .route(
+            "/plugins/{id}/disable",
+            post(admin::plugins::disable_plugin::<A>),
+        )
+        .route(
+            "/plugins/{id}/events",
+            get(admin::plugins::plugin_events::<A>),
+        )
+        .route(
+            "/plugins/{id}/accounts/{account_id}/cancel-subscription",
+            post(admin::plugins::cancel_plugin_subscription::<A>),
+        )
         .with_state(state.clone());
 
     // Auth API from auth crate (with optional CAPTCHA provider)
@@ -364,6 +390,7 @@ where
         .nest("/payments", payment_routes)
         .merge(ws_route)
         .nest("/rates", rates_routes)
+        .nest("/plugins", plugin_routes)
         .nest("/dashboard", dashboard_routes)
         .nest("/users", user_routes)
         .nest("/admin", admin_routes)
@@ -431,4 +458,40 @@ where
     app = app.layer(axum::middleware::from_fn(http_metrics::middleware));
 
     app
+}
+
+/// Add every outer HTTP layer `bin/server.rs::main` puts on top of
+/// [`router`]: request tracing, permissive CORS, then the Sentry
+/// performance-tracing pair (a transaction per request, named from the
+/// matched route pattern via `tower-axum-matched-path` rather than the raw
+/// request URI — without it, every distinct invoice/store/etc. id mints its
+/// own transaction name, unbounded cardinality and an unreadable performance
+/// page).
+///
+/// Pulled out of `main` so the integration test in
+/// `server/tests/sentry_transaction_naming.rs` calls this exact function, in
+/// the exact order it adds these layers, instead of hand-copying `.layer()`
+/// calls. An earlier version of this function added only the two Sentry
+/// layers and left `TraceLayer`/`CorsLayer` inline in `main`, ahead of it —
+/// so the test exercised a router `main` never actually serves, and a future
+/// layer inserted between the two call sites in `main` would have regressed
+/// route-pattern naming with nothing to catch it. There is now only one call
+/// site for the full stack, in `main` and in the test alike.
+pub fn with_sentry_performance_tracing(router: Router) -> Router {
+    let router = router
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        );
+    // Axum runs middleware in the reverse order it's `.layer()`-ed, so
+    // `NewSentryLayer` must be added last to end up outermost of
+    // `SentryHttpLayer`, per sentry-tower's documented ordering.
+    router
+        .layer(sentry::integrations::tower::SentryHttpLayer::new().enable_transaction())
+        .layer(sentry::integrations::tower::NewSentryLayer::<
+            axum::extract::Request,
+        >::new_from_top())
 }

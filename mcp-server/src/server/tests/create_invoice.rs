@@ -33,7 +33,10 @@ async fn creates_a_pending_invoice_with_a_converted_payment_option() {
     assert_eq!(options.len(), 1);
     let option = &options[0];
     assert_eq!(option["asset_symbol"], "ETH");
-    assert_eq!(option["chain_id"], crate::testkit::CHAIN_ID);
+    assert_eq!(
+        option["chain_id"],
+        crate::testkit::caip2_chain_id().to_string()
+    );
     assert_eq!(option["decimals"], 18);
     assert_eq!(option["rate"], crate::testkit::USD_TO_ETH);
     assert_eq!(option["is_active"], true);
@@ -211,43 +214,62 @@ async fn defaults_to_the_standard_expiration() {
     );
 }
 
+async fn stored_invoice(h: &TestHarness, json: &serde_json::Value) -> types::InvoiceData {
+    let invoice_id = types::InvoiceId::from_string(json["id"].as_str().unwrap().to_string());
+    types::InvoiceReader::get(&*h.data, &invoice_id)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
 #[tokio::test]
-async fn folds_the_customer_email_into_metadata() {
+async fn stores_the_customer_email_in_its_own_field_not_metadata() {
     let h = TestHarness::new(StubRateProvider::usd_eth());
     let mut args = usd_args(h.store_id);
     args.customer_email = Some("agent@example.com".to_string());
     args.metadata = Some(serde_json::json!({ "order_id": "A-1" }));
 
     let json = parse_ok(h.server.do_create_invoice(args).await);
-    let invoice_id = types::InvoiceId::from_string(json["id"].as_str().unwrap().to_string());
-    let stored = types::InvoiceReader::get(&*h.data, &invoice_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let stored = stored_invoice(&h, &json).await;
 
+    assert_eq!(stored.customer_email.as_deref(), Some("agent@example.com"));
     let metadata = stored.metadata.unwrap();
     assert_eq!(metadata["order_id"], "A-1");
-    assert_eq!(metadata["customer_email"], "agent@example.com");
+    assert!(metadata.get("customer_email").is_none());
 }
 
 #[tokio::test]
-async fn keeps_a_caller_supplied_customer_email_in_metadata() {
+async fn lifts_a_customer_email_out_of_metadata_when_no_argument_is_given() {
+    for key in ["customer_email", "buyer_email"] {
+        let h = TestHarness::new(StubRateProvider::usd_eth());
+        let mut args = usd_args(h.store_id);
+        args.metadata = Some(serde_json::json!({ "order_id": "A-1", key: "inner@example.com" }));
+
+        let json = parse_ok(h.server.do_create_invoice(args).await);
+        let stored = stored_invoice(&h, &json).await;
+
+        assert_eq!(
+            stored.customer_email.as_deref(),
+            Some("inner@example.com"),
+            "{key} in metadata should populate the field"
+        );
+        let metadata = stored.metadata.unwrap();
+        assert_eq!(metadata["order_id"], "A-1");
+        assert!(metadata.get(key).is_none(), "{key} should leave metadata");
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_customer_email_wins_over_one_in_metadata() {
     let h = TestHarness::new(StubRateProvider::usd_eth());
     let mut args = usd_args(h.store_id);
     args.customer_email = Some("outer@example.com".to_string());
     args.metadata = Some(serde_json::json!({ "customer_email": "inner@example.com" }));
 
     let json = parse_ok(h.server.do_create_invoice(args).await);
-    let invoice_id = types::InvoiceId::from_string(json["id"].as_str().unwrap().to_string());
-    let stored = types::InvoiceReader::get(&*h.data, &invoice_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let stored = stored_invoice(&h, &json).await;
 
-    assert_eq!(
-        stored.metadata.unwrap()["customer_email"],
-        "inner@example.com"
-    );
+    assert_eq!(stored.customer_email.as_deref(), Some("outer@example.com"));
 }
 
 #[tokio::test]
@@ -278,7 +300,7 @@ async fn registers_the_payment_address_for_watching() {
     let watched = types::WatchedAddressReader::get_invoice_id(
         &*h.data,
         address,
-        crate::testkit::CHAIN_ID,
+        &crate::testkit::caip2_chain_id(),
         None,
     )
     .await

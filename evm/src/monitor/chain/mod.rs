@@ -4,6 +4,7 @@ mod config;
 mod confirmations;
 mod lifecycle;
 mod processing;
+pub use processing::BACKFILL_MAX_BLOCKS;
 
 pub use config::{ChainMonitorConfig, WatchedAddress};
 
@@ -13,6 +14,7 @@ use crate::network::ChainConfig;
 use alloy::primitives::{Address, B256};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::debug;
 
@@ -39,8 +41,31 @@ pub struct ChainMonitor<S: BlockSource> {
     /// Addresses being watched, keyed by (address, token_contract).
     /// This allows the same address to be watched for different tokens.
     watched: RwLock<HashMap<WatchKey, WatchedAddress>>,
-    /// Payments pending confirmation.
-    pending: RwLock<HashMap<B256, PendingPayment>>,
+    /// Payments pending confirmation, keyed by `(tx_hash, tx_index)`.
+    ///
+    /// Keyed by transaction alone, two transfers batched into one transaction
+    /// overwrote each other here, so only the last-inserted one was ever
+    /// confirmed. The payments themselves stopped colliding when the database
+    /// key gained `tx_index`; this is the same collision one layer up, and it
+    /// left the other invoice fully funded and stuck in `Processing` forever,
+    /// because `Processing -> Paid` happens only when a confirmation arrives.
+    pending: RwLock<HashMap<(B256, i32), PendingPayment>>,
+    /// When the block stream last delivered a block.
+    ///
+    /// Liveness of the subscription, which is a different question from how
+    /// far behind the chain head the monitor is. A monitor catching up after a
+    /// restart is far behind while receiving blocks perfectly well; a
+    /// half-open WebSocket is exactly level and receiving nothing.
+    last_block_at: RwLock<Instant>,
+    /// When the `start` event loop last completed a `select!` iteration.
+    ///
+    /// Unlike `last_block_at`, this moves on *every* completed iteration -
+    /// the confirmation-check tick as well as a delivered block - so it is
+    /// the one signal that keeps advancing as long as the loop itself is
+    /// alive. A watchdog running outside this loop (in the coordinator) polls
+    /// it to notice the loop wedged on a single iteration, which nothing
+    /// inside that same loop can ever detect.
+    loop_alive_at: RwLock<Instant>,
     /// Last processed block.
     last_block: RwLock<Option<u64>>,
     /// Block hash at last processed block (for reorg detection).
@@ -64,6 +89,8 @@ impl<S: BlockSource + 'static> ChainMonitor<S> {
             source: Arc::new(source),
             watched: RwLock::new(HashMap::new()),
             pending: RwLock::new(HashMap::new()),
+            last_block_at: RwLock::new(Instant::now()),
+            loop_alive_at: RwLock::new(Instant::now()),
             last_block: RwLock::new(None),
             last_block_hash: RwLock::new(None),
             event_tx,

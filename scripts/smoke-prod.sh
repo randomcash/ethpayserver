@@ -10,9 +10,6 @@
 #   SMOKE_API_KEY    — API key with invoice create/read permissions
 #   SMOKE_STORE_ID   — store UUID the API key is scoped to
 #
-# Optional:
-#   CHEF_BOT_TOKEN / CHEF_ALLOWED_USERS — Telegram alerting
-#
 # Exit 0 = all green. Exit 1 = at least one check failed.
 
 set -u
@@ -21,8 +18,6 @@ set -o pipefail
 : "${SMOKE_BASE_URL:?SMOKE_BASE_URL required — set to the deployed instance URL}"
 : "${SMOKE_API_KEY:?SMOKE_API_KEY required — create a smoke-test API key}"
 : "${SMOKE_STORE_ID:?SMOKE_STORE_ID required — set to the smoke-test store UUID}"
-: "${CHEF_BOT_TOKEN:=}"
-: "${CHEF_ALLOWED_USERS:=}"
 
 FAILED=()
 PASSED=()
@@ -115,20 +110,6 @@ JSON
 }
 
 # ---------------------------------------------------------------------------
-# 5. Alerting
-# ---------------------------------------------------------------------------
-
-telegram_alert() {
-  [[ -z "$CHEF_BOT_TOKEN" || -z "$CHEF_ALLOWED_USERS" ]] && return
-  local chat_id="${CHEF_ALLOWED_USERS%%,*}"
-  local text="$1"
-  curl -sS --max-time 10 -X POST \
-    -d "chat_id=$chat_id" \
-    --data-urlencode "text=$text" \
-    "https://api.telegram.org/bot$CHEF_BOT_TOKEN/sendMessage" >/dev/null 2>&1 || true
-}
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -138,10 +119,6 @@ check_deep
 check_invoice_lifecycle
 
 if [[ ${#FAILED[@]} -gt 0 ]]; then
-  msg="Smoke test FAILED on $SMOKE_BASE_URL (${#FAILED[@]} of $(( ${#PASSED[@]} + ${#FAILED[@]} )))
-$(printf '  - %s\n' "${FAILED[@]}")
-passed: ${#PASSED[@]}"
-  telegram_alert "$msg"
   log "SUMMARY: ${#FAILED[@]} failed, ${#PASSED[@]} passed"
   exit 1
 fi

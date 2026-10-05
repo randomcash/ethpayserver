@@ -9,12 +9,13 @@ use crate::metrics as rpc_metrics;
 use alloy::consensus::Transaction as TransactionTrait;
 use alloy::network::TransactionResponse;
 use alloy::primitives::{Address, U256};
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
+use alloy::providers::{ConnectionConfig, Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::{Block, BlockNumberOrTag, BlockTransactionsKind, Filter, Log};
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
@@ -132,6 +133,27 @@ impl RpcSourceConfig {
         }
         rendered
     }
+
+    /// Translate `max_reconnect_attempts`/`reconnect_delay_ms` into alloy's
+    /// [`ConnectionConfig`], so a WS backend that misses a keepalive pong and
+    /// drops actually reconnects on the budget this config declares, instead
+    /// of on alloy's own hardcoded default (10 attempts, 3s apart).
+    ///
+    /// `max_reconnect_attempts: 0` is documented on this struct as "infinite",
+    /// but alloy's retry loop reads a literal 0 as "give up after the first
+    /// failed attempt" (`retry_count >= max_retries` is true as soon as one
+    /// attempt fails). Passed through unchanged, our "infinite" default would
+    /// silently become the least resilient setting alloy has. `u32::MAX`
+    /// attempts is what "infinite" actually has to mean to alloy's counter.
+    fn ws_connection_config(&self) -> ConnectionConfig {
+        let max_retries = match self.max_reconnect_attempts {
+            0 => u32::MAX,
+            n => n,
+        };
+        ConnectionConfig::new()
+            .with_max_retries(max_retries)
+            .with_retry_interval(Duration::from_millis(self.reconnect_delay_ms))
+    }
 }
 
 impl RpcBlockSource {
@@ -196,10 +218,11 @@ impl RpcBlockSource {
 
         self.status.store(STATUS_CONNECTING, Ordering::SeqCst);
 
-        // Connect via WebSocket
+        // Connect via WebSocket, with our own reconnect budget rather than
+        // alloy's hardcoded default - see `ws_connection_config`.
         let ws_provider = ProviderBuilder::new()
             .disable_recommended_fillers()
-            .connect(ws_url.expose_secret())
+            .connect_with_config(ws_url.expose_secret(), self.config.ws_connection_config())
             .await
             .map_err(|e| {
                 self.status.store(STATUS_DISCONNECTED, Ordering::SeqCst);
@@ -474,37 +497,30 @@ impl BlockSource for RpcBlockSource {
         })
         .await?;
 
+        // A block the monitor was just notified about must exist. Absent means
+        // this HTTP endpoint has not imported it yet - a different node from
+        // the one the subscription came from, or a load-balanced pool where
+        // the two are not the same machine.
+        //
+        // Returning `Ok(vec![])` for that is indistinguishable from "this
+        // block contained no payments", and since this is the only native
+        // detection path, the caller would advance `last_block` past a block
+        // it never actually read. Nothing revisits it: gaps are only used for
+        // reorg detection and nothing backfills. A payment in that block would
+        // be silently never credited.
+        //
+        // So it fails closed, the same way the reorg gap check and
+        // `find_survived_tx_hashes` do: leave `last_block` untouched and let
+        // the next block re-drive it, which costs one retry and cannot lose a
+        // payment.
         let Some(block) = block else {
-            return Ok(Vec::new());
+            return Err(EvmError::Rpc(format!(
+                "block {block_number} was announced but this endpoint has not imported \
+                 it yet; refusing to treat it as empty"
+            )));
         };
 
-        // Filter transactions that send ETH to watched addresses
-        let mut transfers = Vec::new();
-
-        for (tx_index, tx) in block.transactions.txns().enumerate() {
-            // Skip if no recipient (contract creation)
-            let Some(to) = tx.to() else {
-                continue;
-            };
-
-            // Skip if not sending to a watched address
-            if !watched.contains(&to) {
-                continue;
-            }
-
-            // Skip if no value transferred
-            if tx.value().is_zero() {
-                continue;
-            }
-
-            transfers.push(NativeTransfer {
-                tx_hash: tx.tx_hash(),
-                from: tx.from(),
-                to,
-                value: tx.value(),
-                tx_index: tx_index as u64,
-            });
-        }
+        let transfers = extract_native_transfers(&block, &watched)?;
 
         debug!(
             chain_id = self.config.chain_id,
@@ -528,9 +544,182 @@ impl std::fmt::Debug for RpcBlockSource {
     }
 }
 
+/// Pull the transfers to `watched` out of a block the node returned.
+///
+/// Split out of [`RpcBlockSource::find_native_transfers_to`] so the matching
+/// can be tested without a provider - this is the only thing standing between
+/// a native payment and never being credited, and it was previously reachable
+/// only over a live RPC connection.
+///
+/// Refuses a block whose transaction list is hashes rather than full objects.
+/// Alloy's `txns()` documents that it "will be empty if the block is an uncle
+/// or if the transaction list contains only hashes", so a node that ignored
+/// `fullTransactions: true` - or a proxy or cache that answered with the wrong
+/// shape - would produce zero transfers and look exactly like a block with no
+/// payments in it. The caller would then advance past a block it never read.
+/// We asked for full objects; anything else is an error, not an empty result.
+fn extract_native_transfers(
+    block: &Block,
+    watched: &HashSet<Address>,
+) -> EvmResult<Vec<NativeTransfer>> {
+    if !block.transactions.is_full() && !block.transactions.is_uncle() {
+        return Err(EvmError::Rpc(
+            "block came back with transaction hashes instead of full transactions; \
+             refusing to read it as having no payments"
+                .to_string(),
+        ));
+    }
+
+    let mut transfers = Vec::new();
+
+    for (tx_index, tx) in block.transactions.txns().enumerate() {
+        // Skip if no recipient (contract creation)
+        let Some(to) = tx.to() else {
+            continue;
+        };
+
+        // Skip if not sending to a watched address
+        if !watched.contains(&to) {
+            continue;
+        }
+
+        // Skip if no value transferred
+        if tx.value().is_zero() {
+            continue;
+        }
+
+        transfers.push(NativeTransfer {
+            tx_hash: tx.tx_hash(),
+            from: tx.from(),
+            to,
+            value: tx.value(),
+            tx_index: tx_index as u64,
+        });
+    }
+
+    Ok(transfers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use alloy::consensus::{Signed, TxEip1559, TxEnvelope};
+    use alloy::primitives::{B256, Signature, TxKind};
+    use alloy::rpc::types::{BlockTransactions, Transaction};
+
+    fn tx_to(to: Address, value: U256, from: Address) -> Transaction {
+        let inner = TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 1,
+            to: TxKind::Call(to),
+            value,
+            ..Default::default()
+        };
+        let signed = Signed::new_unchecked(inner, Signature::test_signature(), B256::ZERO);
+        Transaction {
+            inner: alloy::consensus::transaction::Recovered::new_unchecked(
+                TxEnvelope::Eip1559(signed),
+                from,
+            ),
+            block_hash: None,
+            block_number: None,
+            transaction_index: None,
+            effective_gas_price: None,
+        }
+    }
+
+    fn block_with(transactions: BlockTransactions<Transaction>) -> Block {
+        Block {
+            transactions,
+            ..Default::default()
+        }
+    }
+
+    /// A block whose transaction list is hashes rather than full objects is
+    /// refused, not read as a block with no payments in it.
+    ///
+    /// Alloy's `txns()` yields nothing for a hashes-only list, so without this
+    /// a node that ignored `fullTransactions: true` - or a proxy answering
+    /// with the wrong shape - would produce zero transfers, and the monitor
+    /// would advance past a block it never actually read. Every payment in it
+    /// would be lost with no error anywhere.
+    #[test]
+    fn a_block_of_hashes_is_refused_rather_than_read_as_empty() {
+        let watched: HashSet<Address> = [Address::repeat_byte(0xAA)].into_iter().collect();
+        let block = block_with(BlockTransactions::Hashes(vec![B256::repeat_byte(1)]));
+
+        let err = extract_native_transfers(&block, &watched)
+            .expect_err("a hashes-only block must not read as zero transfers");
+
+        assert!(
+            err.to_string().contains("hashes"),
+            "the error should say what was wrong with the block, got {err}"
+        );
+    }
+
+    /// The ordinary case: full transactions to a watched address are matched.
+    #[test]
+    fn transfers_to_watched_addresses_are_found_with_sender_and_amount() {
+        let watched_addr = Address::repeat_byte(0xAA);
+        let other = Address::repeat_byte(0xBB);
+        let sender = Address::repeat_byte(0xCC);
+        let watched: HashSet<Address> = [watched_addr].into_iter().collect();
+
+        let block = block_with(BlockTransactions::Full(vec![
+            tx_to(other, U256::from(5u64), sender),
+            tx_to(watched_addr, U256::from(7u64), sender),
+        ]));
+
+        let transfers = extract_native_transfers(&block, &watched).unwrap();
+
+        assert_eq!(transfers.len(), 1, "only the watched address should match");
+        assert_eq!(transfers[0].to, watched_addr);
+        assert_eq!(transfers[0].from, sender);
+        assert_eq!(transfers[0].value, U256::from(7u64));
+        assert_eq!(
+            transfers[0].tx_index, 1,
+            "tx_index must be the position in the block, since two transfers in one \
+             block are told apart by it"
+        );
+    }
+
+    /// A zero-value transaction to a watched address is not a payment.
+    /// Contract calls routinely carry no value, and crediting an invoice for
+    /// one would mark it paid for nothing.
+    #[test]
+    fn a_zero_value_transaction_is_not_a_payment() {
+        let watched_addr = Address::repeat_byte(0xAA);
+        let watched: HashSet<Address> = [watched_addr].into_iter().collect();
+        let block = block_with(BlockTransactions::Full(vec![tx_to(
+            watched_addr,
+            U256::ZERO,
+            Address::repeat_byte(0xCC),
+        )]));
+
+        assert!(
+            extract_native_transfers(&block, &watched)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// An empty block is genuinely empty, and must not be confused with the
+    /// hashes case above.
+    #[test]
+    fn a_genuinely_empty_block_yields_no_transfers_without_erroring() {
+        let watched: HashSet<Address> = [Address::repeat_byte(0xAA)].into_iter().collect();
+        let block = block_with(BlockTransactions::Full(vec![]));
+
+        assert!(
+            extract_native_transfers(&block, &watched)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn config_debug_does_not_leak_the_api_key() {
@@ -610,6 +799,46 @@ mod tests {
         let rendered = redact_err(format!("error sending request for url ({})", url), url);
         assert!(!rendered.contains("alch_supersecretkey"));
         assert!(rendered.contains("https://eth-sepolia.g.alchemy.com"));
+    }
+
+    /// The documented "0 = infinite" reconnect budget must not reach alloy as
+    /// a literal 0 - alloy's own retry loop treats `max_retries: 0` as "give
+    /// up after the first failed reconnect", the opposite of infinite.
+    #[test]
+    fn ws_connection_config_maps_infinite_to_a_budget_alloy_will_not_exhaust() {
+        let config = RpcSourceConfig::with_websocket(
+            "wss://eth.example/v2/key",
+            "https://eth.example/v2/key",
+            1,
+        );
+        assert_eq!(
+            config.max_reconnect_attempts, 0,
+            "precondition: default is 0/infinite"
+        );
+
+        let conn = config.ws_connection_config();
+        assert_eq!(
+            conn.max_retries,
+            Some(u32::MAX),
+            "a literal 0 would make alloy give up after one failed reconnect attempt"
+        );
+    }
+
+    /// A finite, explicitly configured retry budget and delay pass through
+    /// unchanged into the connection config alloy actually reconnects with.
+    #[test]
+    fn ws_connection_config_passes_through_a_finite_retry_budget() {
+        let mut config = RpcSourceConfig::with_websocket(
+            "wss://eth.example/v2/key",
+            "https://eth.example/v2/key",
+            1,
+        );
+        config.max_reconnect_attempts = 5;
+        config.reconnect_delay_ms = 1500;
+
+        let conn = config.ws_connection_config();
+        assert_eq!(conn.max_retries, Some(5));
+        assert_eq!(conn.retry_interval, Some(Duration::from_millis(1500)));
     }
 
     #[test]

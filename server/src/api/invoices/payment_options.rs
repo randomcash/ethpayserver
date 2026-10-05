@@ -3,8 +3,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ::types::{
-    PaymentMethodId, PaymentOptionData, PaymentOptionId, StorePaymentMethodWriter,
-    WatchedAddressWriter, traits::InvoiceData,
+    DerivationAllocation, PaymentMethodId, PaymentOptionData, PaymentOptionId,
+    StorePaymentMethodWriter, traits::InvoiceData,
 };
 use auth::SessionService;
 use evm::{Address, U256, XpubDeriver};
@@ -22,24 +22,32 @@ pub(crate) type ValidatedMethod = (
     Option<chrono::DateTime<chrono::Utc>>,
 );
 
-/// Build and persist a payment option for each validated payment method.
+/// Derive a payment option for each validated payment method, writing nothing.
 ///
-/// For every method this derives a fresh payment address from the method's xpub,
-/// persists the `PaymentOptionData` and its watched address, then best-effort notifies
-/// the EVM monitor. Returns the created options in input order.
+/// Every option is built in memory so the whole set can be written in one
+/// transaction by the caller. This used to persist each option and its watched
+/// address as it went, which meant a failure on the third method left an
+/// invoice committed with two - payable in some assets and not others, and
+/// quoting a customer an address nobody was watching.
 ///
-/// Extracted from `create_invoice` (RCS-176); behavior is unchanged.
-pub(crate) async fn build_payment_options<A: SessionService>(
+/// The one thing that *is* written here is the derivation counter, and that is
+/// deliberate: `allocate_derivation` advances it before an address exists, and
+/// the advance must stand even if everything after rolls back. Burning an index
+/// costs nothing. Returning one risks issuing the same address twice.
+///
+/// Returns the options in input order, each with what the monitor needs to be
+/// told once the invoice is committed.
+pub(crate) async fn derive_payment_options<A: SessionService>(
     state: &PgAppState<A>,
     invoice: &InvoiceData,
     payment_methods: &[data_service::StorePaymentMethod],
     validated_methods: Vec<ValidatedMethod>,
-) -> Result<Vec<PaymentOptionData>, (StatusCode, Json<serde_json::Value>)> {
-    let mut created_options: Vec<PaymentOptionData> = Vec::with_capacity(validated_methods.len());
+) -> Result<Vec<DerivedOption>, (StatusCode, Json<serde_json::Value>)> {
+    let mut derived: Vec<DerivedOption> = Vec::with_capacity(validated_methods.len());
 
     for (method_idx, crypto_amount, rate_str, rate_at) in validated_methods {
-        created_options.push(
-            build_one_payment_option(
+        derived.push(
+            derive_one_payment_option(
                 state,
                 invoice,
                 &payment_methods[method_idx],
@@ -51,39 +59,77 @@ pub(crate) async fn build_payment_options<A: SessionService>(
         );
     }
 
-    Ok(created_options)
+    Ok(derived)
 }
 
-/// Derive an address for one payment method, persist the option, register the
-/// watched address and notify the monitor.
+/// A payment option that exists in memory but not yet in the database, together
+/// with the parsed values the monitor notification needs.
 ///
-/// Split out of `build_payment_options` so the outer function is just the loop.
-/// The per-method work is six sequential fallible steps and ran to 100 lines
-/// inline, over the 80-line lint that this ticket exists to satisfy.
-async fn build_one_payment_option<A: SessionService>(
+/// The address is carried in its parsed form rather than re-parsed from the
+/// option later: it was already parsed to build the option, and a second parse
+/// is a second chance to disagree.
+pub(crate) struct DerivedOption {
+    pub option: PaymentOptionData,
+    pub address: Address,
+    pub expected_amount: Option<U256>,
+    pub token_contract: Option<Address>,
+}
+
+/// Tell the monitor about every address on a committed invoice.
+///
+/// Best-effort, and deliberately after the commit. Notifying earlier announced
+/// addresses for an invoice that might still fail to be written - the monitor
+/// would then be watching for money against a payment option that does not
+/// exist. The retry service covers a missed notification; it cannot unsend one.
+pub(crate) async fn notify_monitor_for<A: SessionService>(
+    state: &PgAppState<A>,
+    invoice: &InvoiceData,
+    derived: &[DerivedOption],
+) {
+    for d in derived {
+        notify_evm_watch(
+            state,
+            &invoice.id.0,
+            &d.option.payment_address,
+            &d.option.chain_id,
+            d.option.token_address.as_deref(),
+            d.address,
+            d.expected_amount,
+            d.token_contract,
+        )
+        .await;
+    }
+}
+
+/// Derive an address for one payment method and build its option in memory.
+///
+/// Persists nothing but the derivation counter - see `derive_payment_options`.
+async fn derive_one_payment_option<A: SessionService>(
     state: &PgAppState<A>,
     invoice: &InvoiceData,
     payment_method: &data_service::StorePaymentMethod,
     crypto_amount: String,
     rate_str: Option<String>,
     rate_at: Option<chrono::DateTime<Utc>>,
-) -> Result<PaymentOptionData, (StatusCode, Json<serde_json::Value>)> {
-    let address = derive_payment_address(state, payment_method).await?;
-    let payment_address = address.to_string();
+) -> Result<DerivedOption, (StatusCode, Json<serde_json::Value>)> {
+    let (address, allocation) = derive_payment_address(state, payment_method).await?;
 
-    // Create payment option with calculated amount and rate
-    let payment_option = PaymentOptionData {
+    let option = PaymentOptionData {
         id: PaymentOptionId(Uuid::new_v4()),
         invoice_id: invoice.id.clone(),
         payment_method_id: PaymentMethodId::new(
             &payment_method.asset_symbol,
-            payment_method.chain_id,
+            &payment_method.chain_id,
         ),
-        chain_id: payment_method.chain_id,
+        chain_id: payment_method.chain_id.clone(),
         asset_symbol: payment_method.asset_symbol.clone(),
         token_address: payment_method.token_address.clone(),
         decimals: payment_method.decimals,
-        payment_address: payment_address.clone(),
+        payment_address: address.to_string(),
+        // Record which key produced this address and at what index. The address
+        // alone no longer implies a wallet now that stores can share one.
+        wallet_id: Some(allocation.wallet_id),
+        derivation_index: Some(allocation.index),
         amount: crypto_amount,
         rate: rate_str,
         rate_at,
@@ -91,76 +137,80 @@ async fn build_one_payment_option<A: SessionService>(
         created_at: Utc::now(),
     };
 
-    data_service::PaymentOptionWriter::create(&*state.data_service, &payment_option)
-        .await
-        .map_err(|_| {
-            invoice_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "Failed to create payment option",
-            )
-        })?;
-
-    // Save watched address to database (required for payment detection & retry mechanism)
-    let token_address_str = payment_method.token_address.as_deref();
-    WatchedAddressWriter::upsert(
-        &*state.data_service,
-        &payment_address,
-        &payment_option.id,
-        payment_method.chain_id,
-        token_address_str,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(
-            address = %payment_address,
-            invoice_id = %invoice.id.0,
-            error = %e,
-            "Failed to save watched address - invoice creation aborted"
-        );
-        invoice_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "Failed to save watched address",
-        )
-    })?;
-
-    // Notify the EVM monitor (best-effort — retry service handles misses)
-    let expected_amount = payment_option.amount.parse::<U256>().ok();
+    let expected_amount = option.amount.parse::<U256>().ok();
     let token_contract: Option<Address> = payment_method
         .token_address
         .as_ref()
         .and_then(|addr| addr.parse().ok());
-    notify_evm_watch(
-        state,
-        &invoice.id.0,
-        &payment_address,
-        payment_method.chain_id,
-        token_address_str,
+
+    Ok(DerivedOption {
+        option,
         address,
         expected_amount,
         token_contract,
-    )
-    .await;
-
-    Ok(payment_option)
+    })
 }
 
 /// Allocate the next derivation index for a payment method and derive its
 /// address from the stored xpub.
 ///
-/// Kept separate from `build_one_payment_option` so index allocation and key
+/// Kept separate from `derive_one_payment_option` so index allocation and key
 /// derivation — the two steps that must not silently reuse an address — read
 /// as one unit.
+///
+/// Returns the address and the allocation it came from; both the wallet and
+/// the index are recorded on the payment option so the pairing can be audited
+/// later.
 async fn derive_payment_address<A: SessionService>(
     state: &PgAppState<A>,
     payment_method: &data_service::StorePaymentMethod,
-) -> Result<Address, (StatusCode, Json<serde_json::Value>)> {
-    // Get and increment derivation index for this payment method
-    let index =
-        StorePaymentMethodWriter::next_derivation_index(&*state.data_service, payment_method.id)
+) -> Result<(Address, DerivationAllocation), (StatusCode, Json<serde_json::Value>)> {
+    // One call takes the index and returns the key it was taken from. The
+    // xpub on `payment_method` is deliberately NOT used here: it was read
+    // earlier, and a rotation or an override change committing since would
+    // make it a different wallet's key than the one whose counter just moved -
+    // deriving from the pair would burn an index on one wallet while handing
+    // out an address the other will issue again later.
+    let allocation =
+        StorePaymentMethodWriter::allocate_derivation(&*state.data_service, payment_method.id)
             .await
-            .map_err(|_| {
+            .map_err(|e| {
+                // A method with no wallet to derive from is the merchant's to
+                // fix - they deleted the key, or the store lost its wallet -
+                // and it is reachable now that wallets can be deleted. It used
+                // to answer 500 "Failed to allocate payment address", which a
+                // merchant cannot tell from a server fault and cannot act on.
+                if matches!(e, ::types::RepositoryError::NotFound(_)) {
+                    tracing::warn!(
+                        payment_method_id = %payment_method.id,
+                        store_id = %payment_method.store_id,
+                        chain_id = %payment_method.chain_id,
+                        namespace = %payment_method.chain_id.namespace(),
+                        "payment method resolves to no wallet in its chain family; \
+                         cannot derive an address"
+                    );
+                    // The same refusal covers "no key at all" and "no key for
+                    // this chain's family". Both are the merchant's to fix, in
+                    // the same place, and the message names the chain so they
+                    // can tell which - a store paid in ETH and Tron that has
+                    // only an Ethereum key otherwise gets an error that looks
+                    // like a contradiction of a Wallets page listing a wallet.
+                    return invoice_error(
+                        StatusCode::CONFLICT,
+                        "no_receiving_key",
+                        &format!(
+                            "This store's payment method has no receiving key for \
+                             {} to derive an address from. Add one on the Wallets \
+                             page, or set a key on the payment method.",
+                            payment_method.chain_id
+                        ),
+                    );
+                }
+                tracing::error!(
+                    payment_method_id = %payment_method.id,
+                    error = %e,
+                    "failed to allocate a derivation index"
+                );
                 invoice_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
@@ -168,21 +218,43 @@ async fn derive_payment_address<A: SessionService>(
                 )
             })?;
 
-    // Derive payment address from the payment method's xpub
-    let deriver = XpubDeriver::from_xpub(&payment_method.xpub).map_err(|_| {
-        invoice_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "Failed to derive payment address",
-        )
-    })?;
-    let address = deriver.derive_address(index as u32).map_err(|_| {
-        invoice_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "Failed to derive payment address",
-        )
-    })?;
+    // The namespace comes from the same statement as the key, so the family
+    // this derives under is by construction the family the key was registered
+    // for - not the one the chain id happens to say.
+    let deriver =
+        XpubDeriver::from_xpub(&allocation.namespace, &allocation.xpub).map_err(|_| {
+            invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to derive payment address",
+            )
+        })?;
 
-    Ok(address)
+    // `derive_evm_address`, not the family-encoded string. Everything
+    // downstream of here - the watched-address table, the monitor, the reorg
+    // scanner - means an EVM address on an EVM chain, and this server has no
+    // adapter that can watch anything else. A non-EVM key reaching this point
+    // means an operator enabled a chain nothing monitors: quoting a customer
+    // an address no component will ever see paid is worse than refusing, since
+    // the invoice would sit unpaid with the money already spent.
+    let address = deriver
+        .derive_evm_address(allocation.index as u32)
+        .map_err(|e| {
+            tracing::error!(
+                payment_method_id = %payment_method.id,
+                wallet_id = %allocation.wallet_id,
+                namespace = %allocation.namespace,
+                error = %e,
+                "cannot derive a watchable address for this payment method's chain family"
+            );
+            invoice_error(
+                StatusCode::CONFLICT,
+                "unsupported_chain",
+                "This store's payment method is on a chain this server cannot yet \
+                 watch for payments. Disable it, or use a chain with a registered \
+                 adapter.",
+            )
+        })?;
+
+    Ok((address, allocation))
 }

@@ -56,13 +56,14 @@ use clap::Parser;
 use data_service::RedisDataService;
 use evm::error::EvmResult;
 use evm::monitor::bridge::{EventBridge, RedisBridge};
+use evm::monitor::startup::{STARTUP_ATTEMPTS, STARTUP_INITIAL_DELAY, start_monitors};
 use evm::monitor::{
     CoordinatorConfig, EventHandler, LoggingHandler, MonitorCoordinator, MonitorEvent,
 };
 use secrecy::ExposeSecret;
 use tokio::signal;
-use tracing::{error, info};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::info;
+use tracing_subscriber::{EnvFilter, util::SubscriberInitExt};
 
 use chain::create_chain_monitor;
 use commands::{handle_commands, restore_watched_addresses};
@@ -96,8 +97,12 @@ async fn main() -> anyhow::Result<()> {
     // Load .env file if present
     let _ = dotenvy::dotenv();
 
-    // Initialize Sentry (no-op when SENTRY_DSN is unset)
-    let _sentry_guard = init_sentry();
+    // Initialize Sentry (no-op when SENTRY_DSN is unset). SENTRY_RELEASE is
+    // set by the CI build step from GITHUB_SHA — option_env! reads it at
+    // compile time, so it must be a real env var at `cargo build`, not
+    // something exported at deploy/run time.
+    let (_sentry_guard, sentry_dsn_configured, sentry_environment) =
+        evm::telemetry::init_sentry(option_env!("SENTRY_RELEASE").map(Cow::from));
 
     // Parse CLI args
     let args = Args::parse();
@@ -106,6 +111,12 @@ async fn main() -> anyhow::Result<()> {
     init_logging(&args.log_format, &args.log_level)?;
 
     info!("starting evmmonitor");
+
+    // Report whether error reporting is actually on. Must come after
+    // `init_logging`: `info!`/`error!` before that has no subscriber to write
+    // to. This is the component that failed silently for 10.5 hours, so it
+    // must not also be silently unreported.
+    evm::telemetry::report_reporting_status(sentry_dsn_configured, &sentry_environment)?;
 
     // Load configuration
     let config = load_config(&args)?;
@@ -175,21 +186,31 @@ async fn main() -> anyhow::Result<()> {
 
     // Add chain monitors
     let monitored_chain_ids: Vec<u64> = chain_configs.iter().map(|c| c.chain_id).collect();
-    for chain_config in &chain_configs {
-        match create_chain_monitor(chain_config).await {
-            Ok(monitor) => {
+    // A monitor that failed to build is not a degraded mode: the process would
+    // stay up, report nothing, and detect no payments on that chain. Retry
+    // briefly for a transient RPC failure, then exit non-zero so the
+    // supervisor restarts us and the failure is visible.
+    start_monitors(
+        &monitored_chain_ids,
+        STARTUP_ATTEMPTS,
+        STARTUP_INITIAL_DELAY,
+        |chain_id| {
+            let chain_config = chain_configs
+                .iter()
+                .find(|c| c.chain_id == chain_id)
+                .expect("chain id comes from chain_configs");
+            create_chain_monitor(chain_config)
+        },
+        |chain_id, monitor| {
+            let coordinator = coordinator.clone();
+            async move {
                 coordinator.add_chain(monitor).await?;
-                info!(chain_id = chain_config.chain_id, "chain monitor started");
+                info!(chain_id, "chain monitor started");
+                Ok(())
             }
-            Err(e) => {
-                error!(
-                    chain_id = chain_config.chain_id,
-                    error = %e,
-                    "failed to create chain monitor"
-                );
-            }
-        }
-    }
+        },
+    )
+    .await?;
 
     // Restore watched addresses from Redis persistence
     restore_watched_addresses(&coordinator, &persistence, &monitored_chain_ids).await;
@@ -206,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
     let command_coordinator = coordinator.clone();
     let command_bridge = bridge.clone();
     let command_persistence = persistence.clone();
-    let command_handle = tokio::spawn(async move {
+    let mut command_handle = tokio::spawn(async move {
         handle_commands(
             commands_stream,
             command_coordinator,
@@ -220,16 +241,51 @@ async fn main() -> anyhow::Result<()> {
     let health_coordinator = coordinator.clone();
     let health_redis_url = redis_url.clone();
     let health_handle = tokio::spawn(async move {
-        publish_health_loop(&health_coordinator, &health_redis_url).await;
+        publish_health_loop(
+            &health_coordinator,
+            &health_redis_url,
+            option_env!("SENTRY_RELEASE").unwrap_or_default(),
+        )
+        .await;
     });
 
     // Wait for shutdown signal
     shutdown_signal().await;
     info!("shutdown signal received");
 
-    // Abort background tasks
-    command_handle.abort();
+    // Mark the bridge as shutting down before anything else, so a
+    // subscription that ends while we tear down (the compose network can
+    // drop out from under a still-running container) logs as expected
+    // rather than as a fault.
+    bridge.begin_shutdown();
+
+    // Give the command subscription a moment to notice its connection ending
+    // on its own and log itself as a shutdown before we forcibly cancel it.
+    // Aborting immediately would race the stream's own end-of-stream tail:
+    // `abort()` only takes effect on the task's next poll, so if the task
+    // isn't already mid-poll when we call it, the task is dropped before
+    // that tail (and its shutdown-vs-fault log line) ever runs.
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut command_handle).await {
+        Err(_) => {
+            tracing::debug!(
+                "command handler task did not exit within the shutdown grace period, aborting"
+            );
+            command_handle.abort();
+        }
+        Ok(Err(join_error)) => {
+            tracing::error!(error = %join_error, "command handler task ended unexpectedly during shutdown");
+        }
+        Ok(Ok(())) => {}
+    }
     health_handle.abort();
+
+    // No equivalent handle exists here for the *events* subscription
+    // (`redis.rs`'s `subscribe`, as opposed to `subscribe_commands` above):
+    // evmmonitor never consumes that stream, only publishes to it via
+    // `BridgeHandler`. Its one consumer is the server's `EventConsumer`,
+    // which gets this same begin_shutdown-then-bounded-wait-then-abort
+    // treatment for its own handle in `server/src/bin/server.rs` before that
+    // process exits.
 
     // Graceful shutdown
     coordinator.stop().await?;
@@ -238,42 +294,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_sentry() -> sentry::ClientInitGuard {
-    sentry::init(sentry::ClientOptions {
-        dsn: std::env::var("SENTRY_DSN")
-            .ok()
-            .and_then(|s| s.parse().ok()),
-        release: option_env!("CI_COMMIT_SHORT_SHA").map(Cow::from),
-        environment: std::env::var("SENTRY_ENVIRONMENT").ok().map(Cow::from),
-        // Never attach default PII (IP, cookies, request bodies). This is a
-        // payment processor — see `evm::telemetry::scrub_event`.
-        send_default_pii: false,
-        // Mandatory secret/PII scrubber: redacts wallet keys, mnemonics, JWTs,
-        // API keys, emails and on-chain addresses before events leave the host.
-        before_send: Some(Arc::new(evm::telemetry::scrub_event)),
-        ..Default::default()
-    })
-}
-
 fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
     let filter = EnvFilter::try_new(level)?;
 
-    match format {
-        "json" => {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(sentry_tracing::layer())
-                .with(tracing_subscriber::fmt::layer().json())
-                .init();
-        }
-        _ => {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(sentry_tracing::layer())
-                .with(tracing_subscriber::fmt::layer())
-                .init();
-        }
-    }
+    // Gates which levels become Sentry *structured logs* specifically, so
+    // testnet can ship INFO there while mainnet ships WARN and above. Applied
+    // as the Sentry layer's own per-layer filter (below) rather than folded
+    // into `filter`, because a bare `.with(filter)` layer sits in the same
+    // `Layered` stack as every other layer and `Layered::enabled` ANDs across
+    // all of them — an event `filter` (LOG_LEVEL) rejects never reaches the
+    // Sentry layer's `on_event` at all, so `SENTRY_LOG_LEVEL` could only ever
+    // be a *further* restriction on top of LOG_LEVEL, never independent of
+    // it. Per-layer filtering (`.with_filter` on each layer instead of a
+    // shared `.with(filter)`) is what actually decouples them.
+    let sentry_log_level = evm::telemetry::resolve_sentry_log_level();
+
+    evm::telemetry::build_subscriber(filter, format == "json", sentry_log_level).init();
 
     Ok(())
 }

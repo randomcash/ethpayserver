@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{PayoutReader, PayoutWriter, RepositoryResult, sqlx_to_repo_error};
+use crate::{PayoutClaimReader, PayoutReader, PayoutWriter, RepositoryResult, sqlx_to_repo_error};
 use types::{PayoutData, PayoutStatus, StoreId};
 
 use super::PgDataService;
+use super::conversions::chain_id_from_row;
 
 fn db_to_payout_status(s: &str) -> PayoutStatus {
     s.parse().unwrap_or(PayoutStatus::Failed)
@@ -25,9 +26,7 @@ fn try_row_to_payout(row: &sqlx::postgres::PgRow) -> RepositoryResult<PayoutData
         destination_address: row
             .try_get("destination_address")
             .map_err(sqlx_to_repo_error)?,
-        chain_id: row
-            .try_get::<i64, _>("chain_id")
-            .map_err(sqlx_to_repo_error)? as u64,
+        chain_id: chain_id_from_row(row, "chain_id"),
         asset_type: row.try_get("asset_type").map_err(sqlx_to_repo_error)?,
         asset_symbol: row.try_get("asset_symbol").map_err(sqlx_to_repo_error)?,
         token_address: row.try_get("token_address").map_err(sqlx_to_repo_error)?,
@@ -101,6 +100,36 @@ impl PayoutReader for PgDataService {
 }
 
 #[async_trait]
+impl PayoutClaimReader for PgDataService {
+    async fn invoice_ids_already_claimed(
+        &self,
+        store_id: StoreId,
+        invoice_ids: &[String],
+    ) -> RepositoryResult<Vec<String>> {
+        if invoice_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // `invoice_ids` is a JSONB array, so the claimed ids are unnested and
+        // matched against the requested ones in the database. Doing it here
+        // rather than in Rust keeps the answer complete: a paged read of the
+        // store's payouts would miss a claim that fell outside the page.
+        let claimed: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT claimed.invoice_id \
+             FROM payouts p, jsonb_array_elements_text(p.invoice_ids) AS claimed(invoice_id) \
+             WHERE p.store_id = $1 AND p.status <> 'failed' AND claimed.invoice_id = ANY($2)",
+        )
+        .bind(store_id.0)
+        .bind(invoice_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(claimed)
+    }
+}
+
+#[async_trait]
 impl PayoutWriter for PgDataService {
     async fn create_payout(&self, payout: &PayoutData) -> RepositoryResult<()> {
         let invoice_ids_json = serde_json::to_value(&payout.invoice_ids).unwrap_or_default();
@@ -113,7 +142,7 @@ impl PayoutWriter for PgDataService {
         .bind(payout.store_id.0)
         .bind(&invoice_ids_json)
         .bind(&payout.destination_address)
-        .bind(payout.chain_id as i64)
+        .bind(payout.chain_id.as_str())
         .bind(&payout.asset_type)
         .bind(&payout.asset_symbol)
         .bind(&payout.token_address)

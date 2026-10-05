@@ -21,6 +21,11 @@ pub const TEST_XPUB: &str = "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQ
 /// Sepolia.
 pub const CHAIN_ID: u64 = 11_155_111;
 
+/// [`CHAIN_ID`] as the CAIP-2 identifier the payment method records.
+pub fn caip2_chain_id() -> types::ChainId {
+    types::ChainId::new("eip155", &CHAIN_ID.to_string()).expect("valid chain id")
+}
+
 /// A server wired to in-memory backends, plus handles for asserting on state.
 pub struct TestHarness {
     pub server: EthpayMcpServer,
@@ -110,6 +115,7 @@ impl TestHarness {
             created_at: Utc::now(),
             expires_at: Utc::now() + Duration::seconds(900),
             metadata: None,
+            customer_email: None,
             extra: None,
         };
         InvoiceWriter::upsert(&*self.data, &invoice).await.unwrap();

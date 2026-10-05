@@ -3,14 +3,18 @@ name: Scheduled audit
 # The in-CI `audit` job only runs when something is pushed. Advisories are
 # published against code that is already merged, so a quiet repo goes stale
 # silently: seven weeks without a push left four RUSTSEC advisories blocking
-# the audit gate, and the first symptom was CI refusing to build (RCS-186 era,
-# 2026-08-19). This runs on a clock instead of on activity, and files an issue
+# the audit gate, and the first symptom was CI refusing to build
+# (2026-08-19). This runs on a clock instead of on activity, and files an issue
 # so the next session sees it without anyone reading a workflow log.
 
 on:
   schedule:
-    # Mondays 07:00 UTC — before the weekly retro, so findings are on the desk.
-    - cron: "0 7 * * 1"
+    # Daily 07:00 UTC, not weekly. RUSTSEC-2026-0285 was published into the
+    # advisory database on 2026-09-15, a Tuesday; this job had passed on the
+    # Monday and would not have run again until the following Monday, so the
+    # first thing to notice would have been - and was - a deploy that stopped
+    # happening. A day of exposure instead of a week, for one extra run.
+    - cron: "0 7 * * *"
   workflow_dispatch:
 
 permissions:
@@ -30,12 +34,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: testnet
-
-      - name: Clone payserver-commons (sibling)
-        run: |
-          cd ..
-          git clone --depth 1 -b testnet https://github.com/randomcash/payserver-commons.git 2>/dev/null \
-            || git clone --depth 1 https://github.com/randomcash/payserver-commons.git
 
       - uses: dtolnay/rust-toolchain@stable
 

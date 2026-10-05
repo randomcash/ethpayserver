@@ -109,20 +109,27 @@ impl UserRepository for PgDataService {
             -- kdf_salt_identifier is deliberately absent: it is pinned at
             -- registration and the stored recovery_verification_hash was
             -- derived from it. Updating it would make the account
-            -- unrecoverable, so this statement cannot (RCS-201).
+            -- unrecoverable, so this statement cannot.
             UPDATE users SET
                 -- COALESCE, not assignment: pins the value on first write for
                 -- rows the old binary inserted during a rolling deploy (which
                 -- the one-shot backfill cannot reach), while remaining
                 -- immutable for every row that already has one. Without this
                 -- those rows keep recompute-on-read semantics forever and the
-                -- promised follow-up SET NOT NULL would find NULLs (RCS-201).
+                -- promised follow-up SET NOT NULL would find NULLs.
                 kdf_salt_identifier = COALESCE(users.kdf_salt_identifier, $11),
                 email = $2, primary_wallet_address = $3, kdf_params = $4,
                 encrypted_symmetric_key = $5, recovery_verification_hash = $6,
                 last_login_at = $7, failed_login_attempts = $8, locked_until = $9,
                 role = $10
             WHERE id = $1
+              -- Reject a changed identifier instead of silently discarding it.
+              -- COALESCE above pins a NULL row, which is why NULL still
+              -- matches; anything else must equal what is stored, or no row is
+              -- updated and the caller is told. Without this the
+              -- write looked successful and the change simply evaporated.
+              AND (users.kdf_salt_identifier IS NULL
+                   OR users.kdf_salt_identifier = $11)
             "#,
         )
         .bind(user.id.0)
@@ -141,7 +148,19 @@ impl UserRepository for PgDataService {
         .map_err(sqlx_to_auth_error)?;
 
         if result.rows_affected() == 0 {
-            return Err(AuthError::UserNotFound(user.id.to_string()));
+            // Zero rows now has two causes, and reporting the wrong one sends
+            // the reader hunting for a user that is sitting right there. Ask.
+            let existing: Option<Option<String>> =
+                sqlx::query_scalar("SELECT kdf_salt_identifier FROM users WHERE id = $1")
+                    .bind(user.id.0)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(sqlx_to_auth_error)?;
+
+            return match existing {
+                Some(_) => Err(AuthError::ImmutableField("kdf_salt_identifier".to_string())),
+                None => Err(AuthError::UserNotFound(user.id.to_string())),
+            };
         }
         Ok(())
     }
@@ -258,7 +277,7 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
         id: UserId(id),
         email: email.clone(),
         primary_wallet_address: primary_wallet_address.clone(),
-        // NULL means the row predates RCS-201's backfill (or was written by the
+        // NULL means the row predates the backfill (or was written by the
         // old binary during a rolling deploy). Fall back to the computed value,
         // which is what such a row was salted with anyway.
         kdf_salt_identifier: row
@@ -281,4 +300,42 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
         locked_until: row.get("locked_until"),
         role: role_str.parse().unwrap_or_default(),
     })
+}
+
+#[async_trait::async_trait]
+impl crate::account_deletion::AccountDeletionReader for crate::postgres::PgDataService {
+    async fn account_deletion_blockers(
+        &self,
+        user_id: auth::UserId,
+    ) -> types::RepositoryResult<crate::account_deletion::AccountDeletionBlockers> {
+        // One round trip, three scalar subqueries. Each walks from the owned
+        // stores down the path that `ON DELETE CASCADE` would take, so what is
+        // counted here is exactly what a delete would remove or trip over.
+        let row = sqlx::query(
+            r#"
+            SELECT
+              (SELECT COUNT(*) FROM payments p
+                 JOIN invoices i ON i.id = p.invoice_id
+                 JOIN stores s   ON s.id = i.store_id
+                WHERE s.owner_id = $1)                       AS payments,
+              (SELECT COUNT(*) FROM payouts po
+                 JOIN stores s ON s.id = po.store_id
+                WHERE s.owner_id = $1)                       AS payouts,
+              (SELECT COUNT(*) FROM refunds r
+                 JOIN stores s ON s.id = r.store_id
+                WHERE s.owner_id = $1)                       AS refunds
+            "#,
+        )
+        .bind(user_id.0)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| types::RepositoryError::Database(e.to_string()))?;
+
+        use sqlx::Row;
+        Ok(crate::account_deletion::AccountDeletionBlockers {
+            payments: row.get("payments"),
+            payouts: row.get("payouts"),
+            refunds: row.get("refunds"),
+        })
+    }
 }

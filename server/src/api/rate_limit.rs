@@ -5,10 +5,10 @@
 //!
 //! # Environment Variables
 //!
-//! - `RATE_LIMIT_AUTH`  - Auth endpoint limit, req/min (default: 5)
-//! - `RATE_LIMIT_WRITE` - Write endpoint limit, req/min (default: 10)
-//! - `RATE_LIMIT_READ`  - Read endpoint limit, req/min (default: 60)
-//! - `RATE_LIMIT_WS`    - WebSocket upgrade limit, req/min (default: 5)
+//! - `RATE_LIMIT_AUTH`  - Auth endpoint limit, req/min (default: 30)
+//! - `RATE_LIMIT_WRITE` - Write endpoint limit, req/min (default: 120)
+//! - `RATE_LIMIT_READ`  - Read endpoint limit, req/min (default: 300)
+//! - `RATE_LIMIT_WS`    - WebSocket upgrade limit, req/min (default: 60)
 
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
@@ -45,12 +45,37 @@ pub struct RateLimitConfig {
 }
 
 impl Default for RateLimitConfig {
+    /// Numbers a payment processor can actually run on.
+    ///
+    /// Every limiter here is keyed by **client IP**, which is what made the
+    /// previous set wrong rather than merely strict. A carrier NAT, an
+    /// office, a hotel - all of it arrives as one address, so a limit written
+    /// as though it were per-user is spent by whoever else is behind the same
+    /// router.
+    ///
+    /// These are still limits. They bound a flood; they no longer bound a
+    /// business.
     fn default() -> Self {
         Self {
-            auth_rpm: 5,
-            write_rpm: 10,
-            read_rpm: 60,
-            ws_rpm: 5,
+            // Deliberately the tightest, and still tripled. This is the
+            // credential surface, so being generous has a real cost - but ten
+            // a minute also locks out an office where three people sign in at
+            // once, and the ceremony is WebAuthn rather than a password, so
+            // there is no secret here to grind against.
+            auth_rpm: 30,
+            // A store creating an invoice per customer does a write per sale.
+            // Twenty a minute caps how fast a merchant may trade, which is
+            // not a security property.
+            write_rpm: 120,
+            // One dashboard load fans out across several endpoints, so sixty
+            // was a handful of page loads a minute shared by everyone on that
+            // address - and the checkout page now polls, deliberately, at six
+            // a minute.
+            read_rpm: 300,
+            // One long-lived socket per checkout, plus reconnects. The number
+            // has to cover a page that is *meant* to reconnect, not merely a
+            // page that is opened once.
+            ws_rpm: 60,
         }
     }
 }
@@ -59,10 +84,10 @@ impl RateLimitConfig {
     /// Load from environment variables with defaults.
     pub fn from_env() -> Self {
         Self {
-            auth_rpm: parse_env_u32("RATE_LIMIT_AUTH", 5),
-            write_rpm: parse_env_u32("RATE_LIMIT_WRITE", 10),
-            read_rpm: parse_env_u32("RATE_LIMIT_READ", 60),
-            ws_rpm: parse_env_u32("RATE_LIMIT_WS", 5),
+            auth_rpm: parse_env_u32("RATE_LIMIT_AUTH", 30),
+            write_rpm: parse_env_u32("RATE_LIMIT_WRITE", 120),
+            read_rpm: parse_env_u32("RATE_LIMIT_READ", 300),
+            ws_rpm: parse_env_u32("RATE_LIMIT_WS", 60),
         }
     }
 }
@@ -70,9 +95,13 @@ impl RateLimitConfig {
 /// Per-tier rate limiters.
 pub struct RateLimitState {
     auth: KeyedLimiter,
+    auth_rpm: u32,
     write: KeyedLimiter,
+    write_rpm: u32,
     read: KeyedLimiter,
+    read_rpm: u32,
     ws: KeyedLimiter,
+    ws_rpm: u32,
 }
 
 impl RateLimitState {
@@ -80,9 +109,13 @@ impl RateLimitState {
     pub fn from_config(config: &RateLimitConfig) -> Self {
         Self {
             auth: make_limiter(config.auth_rpm),
+            auth_rpm: config.auth_rpm,
             write: make_limiter(config.write_rpm),
+            write_rpm: config.write_rpm,
             read: make_limiter(config.read_rpm),
+            read_rpm: config.read_rpm,
             ws: make_limiter(config.ws_rpm),
+            ws_rpm: config.ws_rpm,
         }
     }
 }
@@ -119,7 +152,17 @@ fn classify(path: &str, method: &Method) -> Tier {
         Tier::Health
     } else if path.starts_with("/auth") {
         Tier::Auth
-    } else if path == "/ws" {
+    } else if path == "/ws" || path.ends_with("/ws") {
+        // `ends_with`, not equality. The socket tier covered exactly one
+        // route - the authenticated dashboard's `/ws`. The public checkout
+        // socket is mounted at `/api/checkout/ws` and was classified as an
+        // ordinary read, so the one upgrade endpoint reachable without a
+        // session, on the page where customers pay, was bounded by the read
+        // budget rather than the socket one.
+        //
+        // That is backwards. A read is cheap and finishes; an upgrade holds a
+        // connection open, and the unauthenticated one is the one worth
+        // bounding.
         Tier::WebSocket
     } else if *method == Method::GET || *method == Method::HEAD || *method == Method::OPTIONS {
         Tier::Read
@@ -157,12 +200,12 @@ pub async fn middleware(
 ) -> Response {
     let tier = classify(req.uri().path(), req.method());
 
-    let limiter = match tier {
+    let (limiter, rpm) = match tier {
         Tier::Health => return next.run(req).await,
-        Tier::Auth => &limiters.auth,
-        Tier::Write => &limiters.write,
-        Tier::Read => &limiters.read,
-        Tier::WebSocket => &limiters.ws,
+        Tier::Auth => (&limiters.auth, limiters.auth_rpm),
+        Tier::Write => (&limiters.write, limiters.write_rpm),
+        Tier::Read => (&limiters.read, limiters.read_rpm),
+        Tier::WebSocket => (&limiters.ws, limiters.ws_rpm),
     };
 
     let fallback_addr = req
@@ -175,6 +218,12 @@ pub async fn middleware(
     match limiter.check_key(&ip) {
         Ok(_) => next.run(req).await,
         Err(not_until) => {
+            tracing::warn!(
+                tier = tier.label(),
+                ip = %ip,
+                limit_rpm = rpm,
+                "rate limit exceeded"
+            );
             metrics::record_rate_limited(tier.label());
             let wait = not_until.wait_time_from(DefaultClock::default().now());
             let retry_after = (wait.as_secs() + 1).to_string();
@@ -254,10 +303,50 @@ mod tests {
     #[test]
     fn config_defaults() {
         let config = RateLimitConfig::default();
-        assert_eq!(config.auth_rpm, 5);
-        assert_eq!(config.write_rpm, 10);
-        assert_eq!(config.read_rpm, 60);
-        assert_eq!(config.ws_rpm, 5);
+        assert_eq!(config.auth_rpm, 30);
+        assert_eq!(config.write_rpm, 120);
+        assert_eq!(config.read_rpm, 300);
+        assert_eq!(config.ws_rpm, 60);
+    }
+
+    /// The public checkout socket must be bounded as a socket.
+    ///
+    /// It is mounted at `/api/checkout/ws`, and the classifier matched `/ws`
+    /// exactly - so the only upgrade endpoint reachable without a session was
+    /// counted against the read budget. A read is cheap and finishes; an
+    /// upgrade holds a connection open.
+    #[test]
+    fn every_socket_upgrade_is_classified_as_one() {
+        for path in ["/ws", "/api/ws", "/checkout/ws", "/api/checkout/ws"] {
+            assert!(
+                matches!(classify(path, &Method::GET), Tier::WebSocket),
+                "{path} is a socket upgrade and must be bounded as one"
+            );
+        }
+        // An ordinary read is still a read, including one that merely
+        // contains the letters.
+        assert!(matches!(
+            classify("/api/invoices", &Method::GET),
+            Tier::Read
+        ));
+        assert!(matches!(classify("/api/wsx", &Method::GET), Tier::Read));
+    }
+
+    /// A socket budget has to cover a page that is meant to reconnect: five
+    /// clients behind one address, each running a backoff sequence once.
+    #[test]
+    fn the_socket_budget_survives_reconnects_from_several_clients() {
+        let ws = RateLimitConfig::default().ws_rpm;
+        assert!(
+            ws >= 30,
+            "ws_rpm {ws} leaves no room for several clients behind one NAT to reconnect"
+        );
+    }
+
+    /// A write limit below a sale a second is a cap on trading, not security.
+    #[test]
+    fn the_write_budget_is_not_a_cap_on_selling() {
+        assert!(RateLimitConfig::default().write_rpm >= 60);
     }
 
     #[test]
@@ -294,5 +383,79 @@ mod tests {
         assert_eq!(Tier::Write.label(), "write");
         assert_eq!(Tier::Read.label(), "read");
         assert_eq!(Tier::WebSocket.label(), "ws");
+    }
+
+    /// Captures `tracing` output into a shared buffer so a test can assert on
+    /// log lines without a full logging setup.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLogs {
+        fn as_string(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    /// A rate limit rejection is silent to anyone watching from outside the
+    /// process. This asserts it is not silent to the logs.
+    #[tokio::test]
+    async fn rate_limit_exceeded_logs_a_warning() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let state = Arc::new(RateLimitState::from_config(&RateLimitConfig {
+            auth_rpm: 1,
+            write_rpm: 1,
+            read_rpm: 1,
+            ws_rpm: 1,
+        }));
+        let app: Router = Router::new()
+            .route("/auth/login", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state, middleware));
+
+        let build_request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/auth/login")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(build_request()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app.oneshot(build_request()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let output = logs.as_string();
+        assert!(
+            output.contains("rate limit exceeded"),
+            "expected a warning about the rejected request, got: {output}"
+        );
+        assert!(
+            output.contains("auth"),
+            "expected the tier that fired to be logged, got: {output}"
+        );
     }
 }

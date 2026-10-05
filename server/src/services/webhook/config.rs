@@ -13,6 +13,32 @@ pub struct WebhookConfig {
 
     /// How often to poll the queue when idle.
     pub poll_interval: Duration,
+
+    /// How long a single Redis connection attempt may take before giving up.
+    ///
+    /// Without a bound, a Redis that is unreachable rather than merely slow
+    /// is indistinguishable from a wedged process: both read as "no output"
+    /// until whatever timeout the OS or network happens to apply, which can
+    /// be minutes. This turns that into a fast, named failure.
+    ///
+    /// 3s, not the rounder 5s: the shared connection is retried once
+    /// (`set_number_of_retries(1)`), and that retry only gets a chance to run
+    /// if a bad attempt fails fast enough that it doesn't itself stall the
+    /// `run()` loop. A closed port took over 470s to time out with no bound
+    /// at all, so the margin here is deliberate, not decorative.
+    pub connect_timeout: Duration,
+
+    /// How long a claimed job stays invisible to other workers before it is
+    /// treated as abandoned and returned to the ready queue.
+    ///
+    /// A job is moved to a processing set (not deleted) the moment it's
+    /// claimed, so a worker killed mid-delivery — by `abort()` at shutdown or
+    /// otherwise — leaves the job recoverable instead of gone. This bounds
+    /// how long that recovery takes. It must comfortably exceed
+    /// `request_timeout` plus the delivery bookkeeping that follows it, or a
+    /// slow-but-healthy delivery would be reclaimed and redelivered while
+    /// still in flight.
+    pub visibility_timeout: Duration,
 }
 
 impl Default for WebhookConfig {
@@ -21,6 +47,8 @@ impl Default for WebhookConfig {
             queue_key: "ethpayserver:webhooks".to_string(),
             request_timeout: Duration::from_secs(30),
             poll_interval: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(3),
+            visibility_timeout: Duration::from_secs(300),
         }
     }
 }
@@ -31,6 +59,8 @@ impl WebhookConfig {
     /// - `WEBHOOK_QUEUE_KEY` - Redis queue key (default: "ethpayserver:webhooks")
     /// - `WEBHOOK_REQUEST_TIMEOUT_SECS` - HTTP request timeout (default: 30)
     /// - `WEBHOOK_POLL_INTERVAL_SECS` - Queue poll interval (default: 5)
+    /// - `WEBHOOK_REDIS_CONNECT_TIMEOUT_SECS` - Redis connect timeout (default: 3)
+    /// - `WEBHOOK_VISIBILITY_TIMEOUT_SECS` - Claimed-job visibility timeout (default: 300)
     pub fn from_env() -> Self {
         Self {
             queue_key: std::env::var("WEBHOOK_QUEUE_KEY")
@@ -47,6 +77,18 @@ impl WebhookConfig {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(5),
             ),
+            connect_timeout: Duration::from_secs(
+                std::env::var("WEBHOOK_REDIS_CONNECT_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(3),
+            ),
+            visibility_timeout: Duration::from_secs(
+                std::env::var("WEBHOOK_VISIBILITY_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(300),
+            ),
         }
     }
 }
@@ -62,5 +104,7 @@ mod tests {
         assert_eq!(config.queue_key, "ethpayserver:webhooks");
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.poll_interval, Duration::from_secs(5));
+        assert_eq!(config.connect_timeout, Duration::from_secs(3));
+        assert_eq!(config.visibility_timeout, Duration::from_secs(300));
     }
 }

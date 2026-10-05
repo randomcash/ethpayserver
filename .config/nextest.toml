@@ -1,0 +1,5 @@
+# Show the output of passing tests in the run summary. A test that skips
+# announces itself with a `SKIPPED:` line and still passes; without this
+# nextest hides that line and the skip is invisible in a CI log.
+[profile.default]
+success-output = "final"

@@ -6,23 +6,36 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::{PgPool, Postgres};
 use uuid::Uuid;
 
+mod account_standing;
 mod auth;
+mod chain_cursor;
 mod conversions;
+mod email_change;
+mod expected_watch;
+mod installed_plugins;
 mod invoice;
+mod invoice_creation;
+mod merchant_directory;
 mod payment;
 mod payment_option;
 mod payout;
 mod refund;
+mod settlement_tolerance;
+pub(crate) mod store_creation;
 mod store_payment_method;
 mod store_settings;
 mod store_token_policy;
-mod store_wallet;
 mod store_webhook;
 mod token;
+pub(crate) mod wallet;
 mod wallet_rotation;
 mod watched_address;
+mod watched_address_deletion;
+mod webhook_delivery;
+mod webhook_outbox;
 
-pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository};
+pub use auth::{ApiKeyRateLimitInfo, PostgresApiKeyRepository, WalletReauthChallenge};
+pub use expected_watch::ExpectedWatch;
 pub use wallet_rotation::WalletRotation;
 pub use watched_address::PendingWatch;
 
@@ -30,6 +43,47 @@ pub use watched_address::PendingWatch;
 mod integration_tests;
 #[cfg(test)]
 mod tests;
+
+// =============================================================================
+// List search
+// =============================================================================
+
+/// Escape the characters `LIKE` treats as wildcards, and lower-case the term.
+///
+/// Without this a merchant typing `%` matches every row, and `_` matches any
+/// character - a search box is not a pattern language. Backslash is `LIKE`'s
+/// default escape character, so escaping it first keeps a literal backslash
+/// literal without needing an `ESCAPE` clause.
+///
+/// Lower-casing here rather than reaching for `ILIKE` is what keeps the
+/// predicate index-able: `ILIKE` can use no btree index at all, while
+/// `LOWER(col) LIKE 'x%'` can be served by an expression index - the shape the
+/// existing `idx_watched_lower_addr_chain` and `idx_tokens_symbol` already use.
+/// Terms are ASCII hex, currency codes and asset symbols, where Rust's
+/// `to_lowercase` and Postgres' `LOWER` agree.
+fn escape_like(term: &str) -> String {
+    let mut out = String::with_capacity(term.len() + 2);
+    for ch in term.to_lowercase().chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// `term%` - an anchored prefix, for columns holding an identifier the user
+/// pastes whole (tx hashes, invoice ids) and where an index can serve the scan.
+pub(super) fn search_prefix_pattern(term: &str) -> String {
+    format!("{}%", escape_like(term))
+}
+
+/// `%term%` - a substring, for short columns where a partial match is what the
+/// user means (asset symbols, currencies, amounts) and where anchoring the
+/// pattern would buy no index anyway.
+pub(super) fn search_contains_pattern(term: &str) -> String {
+    format!("%{}%", escape_like(term))
+}
 
 /// PostgreSQL data service implementation.
 #[derive(Clone)]
@@ -118,6 +172,18 @@ impl PgDataService {
             .list_user_api_keys_with_rate_limit(user_id)
             .await
     }
+
+    /// Create a new API key with an initial permission scope. See
+    /// `PostgresApiKeyRepository::create_api_key_with_permissions`.
+    pub async fn create_api_key_with_permissions(
+        &self,
+        key: &::auth::ApiKey,
+        permissions: Option<&[String]>,
+    ) -> ::auth::error::Result<()> {
+        PostgresApiKeyRepository::new(self.pool.clone())
+            .create_api_key_with_permissions(key, permissions)
+            .await
+    }
 }
 
 // === API Key Rotation / Deprecation ===
@@ -130,6 +196,15 @@ pub struct ApiKeyAuthInfo {
     pub is_active: bool,
     pub deprecated_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Per-key rate limit in requests per minute. Null = server default.
+    pub rate_limit_rpm: Option<i32>,
+    /// Explicitly granted, never inherited from role or owner. See the
+    /// `is_operator` column comment on `api_keys`.
+    pub is_operator: bool,
+    /// Permission policy strings this key is scoped to. `None` means
+    /// "inherit the owner's role in full" - see the migration that added
+    /// this column.
+    pub permissions: Option<Vec<String>>,
 }
 
 /// Full API key info for listing.
@@ -145,6 +220,9 @@ pub struct ApiKeyFullInfo {
     pub deprecated_at: Option<DateTime<Utc>>,
     /// Per-key rate limit in requests per minute. Null = server default.
     pub rate_limit_rpm: Option<i32>,
+    /// Permission policy strings this key is scoped to. `None` means
+    /// "inherit the owner's role in full".
+    pub permissions: Option<Vec<String>>,
 }
 
 impl PgDataService {
@@ -154,7 +232,9 @@ impl PgDataService {
         key_hash: &str,
     ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyAuthInfo>(
-            "SELECT id, user_id, is_active, deprecated_at, expires_at FROM api_keys WHERE key_hash = $1",
+            "SELECT id, user_id, is_active, deprecated_at, expires_at, rate_limit_rpm, \
+                    is_operator, permissions \
+             FROM api_keys WHERE key_hash = $1",
         )
         .bind(key_hash)
         .fetch_optional(&self.pool)
@@ -168,7 +248,7 @@ impl PgDataService {
     ) -> Result<Vec<ApiKeyFullInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyFullInfo>(
             "SELECT id, name, key_prefix, is_active, created_at, last_used_at, \
-                    expires_at, deprecated_at, rate_limit_rpm \
+                    expires_at, deprecated_at, rate_limit_rpm, permissions \
              FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC",
         )
         .bind(user_id)
@@ -195,11 +275,16 @@ impl PgDataService {
     /// cannot end up with two active keys (new created, old still active)
     /// if the second statement fails.
     ///
+    /// `permissions` carries over the old key's permission scope (or lack
+    /// of one) to the replacement - rotation is meant to swap the secret,
+    /// not quietly widen what it can do.
+    ///
     /// Returns `Ok(())` on success. On failure the transaction rolls back
     /// and the database is left unchanged.
     pub async fn rotate_api_key_atomic(
         &self,
         new_key: &::auth::ApiKey,
+        permissions: Option<&[String]>,
         old_id: Uuid,
         deprecated_at: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
@@ -209,8 +294,8 @@ impl PgDataService {
         sqlx::query(
             "INSERT INTO api_keys \
                (id, user_id, name, key_hash, key_prefix, is_active, \
-                created_at, last_used_at, expires_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                created_at, last_used_at, expires_at, permissions) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(new_key.id.0)
         .bind(new_key.user_id.0)
@@ -221,6 +306,7 @@ impl PgDataService {
         .bind(new_key.created_at)
         .bind(new_key.last_used_at)
         .bind(new_key.expires_at)
+        .bind(permissions)
         .execute(&mut *tx)
         .await?;
 
@@ -255,7 +341,9 @@ impl PgDataService {
         id: Uuid,
     ) -> Result<Option<ApiKeyAuthInfo>, sqlx::Error> {
         sqlx::query_as::<_, ApiKeyAuthInfo>(
-            "SELECT id, user_id, is_active, deprecated_at, expires_at FROM api_keys WHERE id = $1",
+            "SELECT id, user_id, is_active, deprecated_at, expires_at, rate_limit_rpm, \
+                    is_operator, permissions \
+             FROM api_keys WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)

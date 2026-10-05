@@ -1,7 +1,19 @@
 /target
 /result
-/memos
+# /memos was ignored here, next to build output. It now holds the shared
+# session memory - spec, feature list and session log - which has to be
+# tracked or the harness has no memory at all. The first attempt to commit
+# those files silently added nothing but a hint in git's output.
 .env
 .env.*
 !.env.*.example
 .claude/
+
+# Local payserver-commons override written by scripts/commons.sh link.
+# Committing it would silently point everyone's build at one person's disk and
+# undo the revision pin in Cargo.toml.
+.cargo/config.toml
+
+# Installed plugins' wasm artifacts. `ETHPAY_PLUGIN_DIR` defaults to
+# ./plugins, so a local server that installs one drops binaries here.
+/plugins/

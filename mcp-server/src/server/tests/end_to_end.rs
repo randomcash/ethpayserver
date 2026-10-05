@@ -11,13 +11,13 @@ use rmcp::handler::server::wrapper::Parameters;
 use evm::monitor::bridge::MemoryBridge;
 use evm::monitor::events::MonitorCommand;
 
-use crate::api_key::validate_api_key;
 use crate::server::{
     CancelInvoiceArgs, CreateInvoiceArgs, GetInvoiceArgs, GetPaymentStatusArgs, ListInvoicesArgs,
 };
 use crate::testkit::{
     RAW_KEY, StubAuthRepo, StubRateProvider, TestHarness, test_api_key, test_store,
 };
+use crate::validate_api_key;
 
 fn json(raw: &str) -> serde_json::Value {
     serde_json::from_str(raw).expect("tool returned invalid JSON")
@@ -103,7 +103,7 @@ async fn agent_authenticates_then_creates_and_settles_an_invoice() {
     );
     assert_eq!(fetched["store_id"], h.store_id.0.to_string());
     assert_eq!(fetched["metadata"]["agent"], "test-agent");
-    assert_eq!(fetched["metadata"]["customer_email"], "agent@example.com");
+    assert!(fetched["metadata"].get("customer_email").is_none());
     assert_eq!(
         fetched["payment_options"].as_array().unwrap()[0]["payment_address"],
         payment_address

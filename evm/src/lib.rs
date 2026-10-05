@@ -32,6 +32,7 @@
 pub mod api;
 
 pub mod error;
+pub mod family;
 pub mod metrics;
 pub mod monitor;
 pub mod network;
@@ -40,21 +41,32 @@ pub mod provider;
 pub mod telemetry;
 pub mod testnet;
 pub mod tokens;
+// Reserved for a future hot-wallet mode: the server is non-custodial by
+// design and holds no spending key today, so nothing turns this feature on.
+// A caller that wants to move funds from a derived address has to opt into
+// that as a deliberate, visible product decision rather than finding the
+// capability already compiled in.
+#[cfg(feature = "hot-wallet")]
 pub mod transaction;
 pub mod wallet;
 
 // Re-export commonly used items
 pub use alloy::providers::RootProvider;
 pub use error::{EvmError, EvmResult};
+pub use family::{
+    ChainFamily, ETH_COIN_TYPE, NAMESPACE_EIP155, NAMESPACE_TRON, TRON_COIN_TYPE,
+    family_for_namespace,
+};
 pub use network::{
     ALL_CHAINS, ChainConfig, EvmNetwork, get_any_chain_config, get_chain_config,
     get_chain_config_by_id,
 };
-#[cfg(feature = "types")]
-pub use network::{chain_id_to_network, network_to_chain_id};
 pub use provider::EvmProvider;
 pub use tokens::{EvmTokenStandard, Token, discover_token, get_token_balance, get_token_info};
-pub use wallet::{HdWallet, XpubDeriver, generate_mnemonic, validate_mnemonic, validate_xpub};
+pub use wallet::{
+    HdWallet, VERIFICATION_ADDRESS_COUNT, XpubDeriver, generate_mnemonic, looks_like_a_private_key,
+    validate_mnemonic, validate_xpub,
+};
 
 // Re-export alloy primitives that users will commonly need
 pub use alloy::primitives::{Address, B256, U256};

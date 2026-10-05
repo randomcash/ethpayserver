@@ -12,7 +12,13 @@ use super::WebhookPayload;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookJob {
     /// Unique job ID.
+    ///
+    /// Also the primary key of its `webhook_deliveries` row: every attempt of
+    /// this job writes to the same row rather than inserting a new one.
     pub id: Uuid,
+
+    /// The store webhook this job is delivering to.
+    pub store_webhook_id: Uuid,
 
     /// Webhook URL to deliver to.
     pub webhook_url: String,
@@ -37,15 +43,25 @@ pub struct WebhookJob {
 }
 
 impl WebhookJob {
-    /// Stripe-like retry delays: 1m, 5m, 30m, 2h, 12h, 24h.
-    /// Index by (attempts - 1), clamped to last entry.
+    /// Retry delays: 1m, 5m, 30m, 2h, 12h, 24h.
+    ///
+    /// Escalating rather than fixed, and reaching a day rather than stopping
+    /// at minutes: the failures worth retrying at all are a subscriber's
+    /// deploy, a certificate rollover or an outage, and none of those is over
+    /// in five minutes. Index by `attempts - 1`, clamped to the last entry.
     const RETRY_DELAYS_SECS: [u64; 6] = [60, 300, 1800, 7200, 43200, 86400];
 
     /// Create a new webhook job.
-    pub fn new(webhook_url: String, webhook_secret: String, payload: WebhookPayload) -> Self {
+    pub fn new(
+        store_webhook_id: Uuid,
+        webhook_url: String,
+        webhook_secret: String,
+        payload: WebhookPayload,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            store_webhook_id,
             webhook_url,
             webhook_secret,
             payload,
@@ -56,7 +72,7 @@ impl WebhookJob {
         }
     }
 
-    /// Calculate delay for next retry using a Stripe-like backoff schedule.
+    /// Calculate the delay before the next retry.
     ///
     /// Attempt 1: 1 minute
     /// Attempt 2: 5 minutes
@@ -81,27 +97,35 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::services::webhook::WebhookEventType;
+    use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
 
-    fn test_payload() -> WebhookPayload {
-        WebhookPayload {
-            event_id: Uuid::new_v4(),
-            event_type: WebhookEventType::PaymentDetected,
-            timestamp: Utc::now(),
-            invoice_id: "test-invoice".to_string(),
-            store_id: Uuid::new_v4(),
-            status: "processing".to_string(),
+    fn test_invoice(id: &str, status: InvoiceStatus) -> InvoiceData {
+        InvoiceData {
+            id: InvoiceId::from_string(id.to_string()),
+            store_id: StoreId::new(),
+            currency: "ETH".to_string(),
+            status,
             amount: "1000".to_string(),
             amount_received: "1000".to_string(),
-            asset_symbol: "ETH".to_string(),
-            chain_id: 1,
-            network: Some("ethereum".to_string()),
-            payment: None,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            metadata: None,
+            customer_email: None,
+            extra: None,
         }
+    }
+
+    fn test_payload() -> WebhookPayload {
+        WebhookPayload::invoice_event(
+            WebhookEventType::InvoiceExpired,
+            &test_invoice("test-invoice", InvoiceStatus::Expired),
+        )
     }
 
     #[test]
     fn test_webhook_job_new() {
         let job = WebhookJob::new(
+            Uuid::new_v4(),
             "https://example.com/webhook".to_string(),
             "secret123".to_string(),
             test_payload(),
@@ -116,6 +140,7 @@ mod tests {
     #[test]
     fn test_webhook_job_retry_delay() {
         let mut job = WebhookJob::new(
+            Uuid::new_v4(),
             "https://example.com/webhook".to_string(),
             "secret123".to_string(),
             test_payload(),
@@ -149,6 +174,7 @@ mod tests {
     #[test]
     fn test_webhook_job_is_exhausted() {
         let mut job = WebhookJob::new(
+            Uuid::new_v4(),
             "https://example.com/webhook".to_string(),
             "secret123".to_string(),
             test_payload(),
@@ -174,22 +200,13 @@ mod tests {
 
     #[test]
     fn test_webhook_job_serialization() {
-        let payload = WebhookPayload {
-            event_id: Uuid::new_v4(),
-            event_type: WebhookEventType::InvoiceExpired,
-            timestamp: Utc::now(),
-            invoice_id: "inv_456".to_string(),
-            store_id: Uuid::new_v4(),
-            status: "expired".to_string(),
-            amount: "500".to_string(),
-            amount_received: "0".to_string(),
-            asset_symbol: "USDC".to_string(),
-            chain_id: 137,
-            network: Some("polygon".to_string()),
-            payment: None,
-        };
+        let payload = WebhookPayload::invoice_event(
+            WebhookEventType::InvoiceExpired,
+            &test_invoice("inv_456", InvoiceStatus::Expired),
+        );
 
         let job = WebhookJob::new(
+            Uuid::new_v4(),
             "https://example.com/hook".to_string(),
             "secret".to_string(),
             payload,

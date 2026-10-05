@@ -8,6 +8,7 @@ use crate::{PaymentOptionReader, PaymentOptionWriter, RepositoryResult, sqlx_to_
 use types::{InvoiceId, PaymentMethodId, PaymentOptionData, PaymentOptionId};
 
 use super::PgDataService;
+use super::conversions::chain_id_from_row;
 
 #[async_trait]
 impl PaymentOptionReader for PgDataService {
@@ -16,8 +17,9 @@ impl PaymentOptionReader for PgDataService {
             r#"
             SELECT
                 id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                token_address, decimals, payment_address, amount::text,
-                rate::text, rate_at, is_active, created_at
+                token_address, decimals, payment_address, wallet_id,
+                derivation_index, amount::text, rate::text, rate_at, is_active,
+                created_at
             FROM payment_options
             WHERE id = $1
             "#,
@@ -41,8 +43,9 @@ impl PaymentOptionReader for PgDataService {
             r#"
             SELECT
                 id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                token_address, decimals, payment_address, amount::text,
-                rate::text, rate_at, is_active, created_at
+                token_address, decimals, payment_address, wallet_id,
+                derivation_index, amount::text, rate::text, rate_at, is_active,
+                created_at
             FROM payment_options
             WHERE invoice_id = $1
             ORDER BY created_at ASC
@@ -65,8 +68,9 @@ impl PaymentOptionReader for PgDataService {
             r#"
             SELECT
                 id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                token_address, decimals, payment_address, amount::text,
-                rate::text, rate_at, is_active, created_at
+                token_address, decimals, payment_address, wallet_id,
+                derivation_index, amount::text, rate::text, rate_at, is_active,
+                created_at
             FROM payment_options
             WHERE invoice_id = $1 AND payment_method_id = $2
             "#,
@@ -91,8 +95,9 @@ impl PaymentOptionReader for PgDataService {
             r#"
             SELECT
                 id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                token_address, decimals, payment_address, amount::text,
-                rate::text, rate_at, is_active, created_at
+                token_address, decimals, payment_address, wallet_id,
+                derivation_index, amount::text, rate::text, rate_at, is_active,
+                created_at
             FROM payment_options
             WHERE invoice_id = $1 AND is_active = TRUE
             ORDER BY created_at ASC
@@ -109,7 +114,7 @@ impl PaymentOptionReader for PgDataService {
     async fn get_by_address(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<PaymentOptionData>> {
         let row = match token_address {
@@ -117,14 +122,15 @@ impl PaymentOptionReader for PgDataService {
                 r#"
                     SELECT
                         id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                        token_address, decimals, payment_address, amount::text,
-                        rate::text, rate_at, is_active, created_at
+                        token_address, decimals, payment_address, wallet_id,
+                        derivation_index, amount::text, rate::text, rate_at,
+                        is_active, created_at
                     FROM payment_options
                     WHERE payment_address = $1 AND chain_id = $2 AND token_address = $3
                     "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(token)
             .fetch_optional(&self.pool)
             .await
@@ -133,14 +139,15 @@ impl PaymentOptionReader for PgDataService {
                 r#"
                     SELECT
                         id, invoice_id, payment_method_id, chain_id, asset_symbol,
-                        token_address, decimals, payment_address, amount::text,
-                        rate::text, rate_at, is_active, created_at
+                        token_address, decimals, payment_address, wallet_id,
+                        derivation_index, amount::text, rate::text, rate_at,
+                        is_active, created_at
                     FROM payment_options
                     WHERE payment_address = $1 AND chain_id = $2 AND token_address IS NULL
                     "#,
             )
             .bind(address)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .fetch_optional(&self.pool)
             .await
             .map_err(sqlx_to_repo_error)?,
@@ -156,44 +163,11 @@ impl PaymentOptionReader for PgDataService {
 #[async_trait]
 impl PaymentOptionWriter for PgDataService {
     async fn create(&self, option: &PaymentOptionData) -> RepositoryResult<()> {
-        // Derive asset_type from token_address: NULL = native, NOT NULL = erc20
-        let asset_type = if option.token_address.is_some() {
-            "erc20"
-        } else {
-            "native"
-        };
-
-        sqlx::query(
-            r#"
-            INSERT INTO payment_options (
-                id, invoice_id, payment_method_id, chain_id, asset_type,
-                asset_symbol, token_address, decimals, payment_address, amount,
-                rate, rate_at, is_active, created_at
-            ) VALUES (
-                $1, $2, $3, $4, $5::asset_type, $6, $7, $8, $9, $10::numeric,
-                $11::numeric, $12, $13, $14
-            )
-            "#,
-        )
-        .bind(option.id.0)
-        .bind(option.invoice_id.as_str())
-        .bind(&option.payment_method_id.0)
-        .bind(option.chain_id as i64)
-        .bind(asset_type)
-        .bind(&option.asset_symbol)
-        .bind(&option.token_address)
-        .bind(option.decimals as i16)
-        .bind(&option.payment_address)
-        .bind(&option.amount)
-        .bind(&option.rate)
-        .bind(option.rate_at)
-        .bind(option.is_active)
-        .bind(option.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
-        Ok(())
+        // One copy of the statement, shared with the transactional path in
+        // `invoice_creation`. Two copies drift, and the drift only shows up as
+        // an invoice created through one route behaving unlike another.
+        let mut conn = self.pool.acquire().await.map_err(sqlx_to_repo_error)?;
+        super::invoice_creation::insert_payment_option(&mut conn, option).await
     }
 
     async fn update(&self, option: &PaymentOptionData) -> RepositoryResult<()> {
@@ -255,18 +229,20 @@ impl PaymentOptionWriter for PgDataService {
 /// Convert a database row to PaymentOptionData.
 fn row_to_payment_option(row: &sqlx::postgres::PgRow) -> PaymentOptionData {
     let id: Uuid = row.get("id");
-    let chain_id: i64 = row.get("chain_id");
+    let chain_id = chain_id_from_row(row, "chain_id");
     let decimals: i16 = row.get("decimals");
 
     PaymentOptionData {
         id: PaymentOptionId(id),
         invoice_id: InvoiceId::from_string(row.get("invoice_id")),
         payment_method_id: PaymentMethodId(row.get("payment_method_id")),
-        chain_id: chain_id as u64,
+        chain_id,
         asset_symbol: row.get("asset_symbol"),
         token_address: row.get("token_address"),
         decimals: decimals as u8,
         payment_address: row.get("payment_address"),
+        wallet_id: row.get("wallet_id"),
+        derivation_index: row.get("derivation_index"),
         amount: row.get("amount"),
         rate: row.get("rate"),
         rate_at: row.get("rate_at"),

@@ -402,7 +402,7 @@ impl From<StoreRow> for Store {
 }
 
 #[derive(sqlx::FromRow)]
-struct StoreRoleRow {
+pub(crate) struct StoreRoleRow {
     id: uuid::Uuid,
     store_id: Option<uuid::Uuid>,
     role: String,

@@ -29,6 +29,15 @@ const NATIVE_TOKEN: &str = "native";
 impl RedisDataService {
     /// Build the Redis key for a watched address.
     /// token_address is None for native assets, Some(addr) for ERC20 tokens.
+    ///
+    /// Keyed on the bare EIP-155 number, not the CAIP-2 identifier. This is the
+    /// EVM monitor's own key space (`evmwatch:`) and is EVM-only by
+    /// construction, so the number is unambiguous here - and a CAIP-2
+    /// identifier contains a colon, which is this key's separator: an
+    /// `eip155:1` chain would produce a six-part key that
+    /// `parse_watched_address_key` rejects, silently restoring zero watched
+    /// addresses on monitor restart. Keeping the number also means the keys
+    /// already in Redis stay readable across this deploy.
     fn watched_address_key(chain_id: u64, address: &str, token_address: Option<&str>) -> String {
         let token = token_address.unwrap_or(NATIVE_TOKEN);
         format!(
@@ -65,10 +74,15 @@ impl LiveWatchedAddressReader for RedisDataService {
     async fn get_watched_invoice(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<InvoiceId>> {
-        let key = Self::watched_address_key(chain_id, address, token_address);
+        let Some(eip155) = chain_id.evm_chain_id() else {
+            return Err(RepositoryError::InvalidData(format!(
+                "{chain_id} is not an EVM chain; the EVM monitor cannot watch it"
+            )));
+        };
+        let key = Self::watched_address_key(eip155, address, token_address);
         let mut conn = self.conn.clone();
 
         let result: Option<String> = conn
@@ -81,7 +95,7 @@ impl LiveWatchedAddressReader for RedisDataService {
 
     async fn get_all_watched(
         &self,
-    ) -> RepositoryResult<Vec<(String, InvoiceId, u64, Option<String>)>> {
+    ) -> RepositoryResult<Vec<(String, InvoiceId, types::ChainId, Option<String>)>> {
         let mut conn = self.conn.clone();
         let pattern = format!("{}:*", KEY_PREFIX);
         let mut result = Vec::new();
@@ -112,7 +126,9 @@ impl LiveWatchedAddressReader for RedisDataService {
                         result.push((
                             address,
                             InvoiceId::from_string(invoice_id_str),
-                            chain_id,
+                            // Back to CAIP-2 on the way out: the key stores the
+                            // EIP-155 number, the trait speaks identifiers.
+                            types::ChainId::evm(chain_id),
                             token,
                         ));
                     } else {
@@ -137,10 +153,15 @@ impl LiveWatchedAddressWriter for RedisDataService {
         &self,
         address: &str,
         invoice_id: &InvoiceId,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<()> {
-        let key = Self::watched_address_key(chain_id, address, token_address);
+        let Some(eip155) = chain_id.evm_chain_id() else {
+            return Err(RepositoryError::InvalidData(format!(
+                "{chain_id} is not an EVM chain; the EVM monitor cannot watch it"
+            )));
+        };
+        let key = Self::watched_address_key(eip155, address, token_address);
         let mut conn = self.conn.clone();
 
         conn.set::<_, _, ()>(&key, invoice_id.as_str())
@@ -153,10 +174,15 @@ impl LiveWatchedAddressWriter for RedisDataService {
     async fn unwatch_address(
         &self,
         address: &str,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<bool> {
-        let key = Self::watched_address_key(chain_id, address, token_address);
+        let Some(eip155) = chain_id.evm_chain_id() else {
+            return Err(RepositoryError::InvalidData(format!(
+                "{chain_id} is not an EVM chain; the EVM monitor cannot watch it"
+            )));
+        };
+        let key = Self::watched_address_key(eip155, address, token_address);
         let mut conn = self.conn.clone();
 
         let deleted: i64 = conn

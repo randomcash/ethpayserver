@@ -225,4 +225,42 @@ impl PostgresApiKeyRepository {
             })
             .collect())
     }
+
+    /// Insert a new API key with an initial permission scope.
+    ///
+    /// A variant of the `ApiKeyRepository::create_api_key` trait method,
+    /// which cannot carry `permissions` - that column has no home on the
+    /// pinned `auth::ApiKey` struct in payserver-commons, so it is not part
+    /// of that shared trait surface (same reasoning as `update_rate_limit`
+    /// below). Setting the scope in the same INSERT as the row itself,
+    /// rather than create-then-patch, matters here: a key that existed even
+    /// briefly with `permissions` unset would authenticate as fully
+    /// inheriting its owner's role, which for a ServerAdmin owner is exactly
+    /// the unscoped window this feature exists to close.
+    pub async fn create_api_key_with_permissions(
+        &self,
+        key: &ApiKey,
+        permissions: Option<&[String]>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, is_active, created_at, expires_at, permissions)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(key.id.0)
+        .bind(key.user_id.0)
+        .bind(&key.name)
+        .bind(&key.key_hash)
+        .bind(&key.key_prefix)
+        .bind(key.is_active)
+        .bind(key.created_at)
+        .bind(key.expires_at)
+        .bind(permissions)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AuthError::Repository(e.to_string()))?;
+
+        Ok(())
+    }
 }

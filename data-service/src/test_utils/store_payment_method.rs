@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use types::{
-    RepositoryError, RepositoryResult, StorePaymentMethod, StorePaymentMethodReader,
-    StorePaymentMethodWriter,
+    ChainId, DerivationAllocation, RepositoryError, RepositoryResult, StorePaymentMethod,
+    StorePaymentMethodReader, StorePaymentMethodWriter,
 };
 use uuid::Uuid;
 
@@ -16,7 +16,9 @@ impl InMemoryDataService {
     /// Register an enabled payment method for a store (for testing).
     ///
     /// Returns the generated payment method ID. Methods are returned by the
-    /// reader in insertion order.
+    /// reader in insertion order. `chain_id` is the EIP-155 number; the method
+    /// is pinned to a fresh wallet of its own, so unlike Postgres no two
+    /// methods share a derivation counter.
     pub fn add_payment_method(
         &self,
         store_id: Uuid,
@@ -26,6 +28,7 @@ impl InMemoryDataService {
         xpub: &str,
     ) -> Uuid {
         let id = Uuid::new_v4();
+        let chain_id = ChainId::new("eip155", &chain_id.to_string()).expect("valid chain id");
         self.payment_methods
             .write()
             .unwrap()
@@ -36,8 +39,9 @@ impl InMemoryDataService {
                 token_address: None,
                 asset_symbol: asset_symbol.to_string(),
                 decimals,
-                xpub: xpub.to_string(),
-                derivation_index: 0,
+                wallet_id: Some(Uuid::new_v4()),
+                xpub: Some(xpub.to_string()),
+                derivation_index: Some(0),
                 enabled: true,
                 created_at: Utc::now(),
             });
@@ -51,7 +55,7 @@ impl InMemoryDataService {
             .unwrap()
             .iter()
             .find(|pm| pm.id == id)
-            .map(|pm| pm.derivation_index)
+            .and_then(|pm| pm.derivation_index)
     }
 }
 
@@ -98,7 +102,7 @@ impl StorePaymentMethodReader for InMemoryDataService {
     async fn get_payment_method_by_chain(
         &self,
         store_id: Uuid,
-        chain_id: u64,
+        chain_id: &ChainId,
         token_address: Option<&str>,
     ) -> RepositoryResult<Option<StorePaymentMethod>> {
         Ok(self
@@ -108,7 +112,7 @@ impl StorePaymentMethodReader for InMemoryDataService {
             .iter()
             .find(|pm| {
                 pm.store_id == store_id
-                    && pm.chain_id == chain_id
+                    && pm.chain_id == *chain_id
                     && pm.token_address.as_deref() == token_address
             })
             .cloned())
@@ -135,21 +139,27 @@ impl StorePaymentMethodWriter for InMemoryDataService {
     async fn create_payment_method(
         &self,
         store_id: Uuid,
-        chain_id: u64,
+        chain_id: &ChainId,
         token_address: Option<&str>,
         asset_symbol: &str,
         decimals: u8,
-        xpub: &str,
+        xpub: Option<&str>,
     ) -> RepositoryResult<StorePaymentMethod> {
+        // No wallet resolution here: Postgres falls back to the store's or
+        // account's wallet for `None`; this double has none to fall back to.
+        let xpub = xpub.ok_or_else(|| {
+            RepositoryError::Conflict("no wallet to resolve an unpinned method to".into())
+        })?;
         let method = StorePaymentMethod {
             id: Uuid::new_v4(),
             store_id,
-            chain_id,
+            chain_id: chain_id.clone(),
             token_address: token_address.map(str::to_string),
             asset_symbol: asset_symbol.to_string(),
             decimals,
-            xpub: xpub.to_string(),
-            derivation_index: 0,
+            wallet_id: Some(Uuid::new_v4()),
+            xpub: Some(xpub.to_string()),
+            derivation_index: Some(0),
             enabled: true,
             created_at: Utc::now(),
         };
@@ -172,7 +182,7 @@ impl StorePaymentMethodWriter for InMemoryDataService {
             method.enabled = enabled;
         }
         if let Some(xpub) = xpub {
-            method.xpub = xpub.to_string();
+            method.xpub = Some(xpub.to_string());
         }
         Ok(method.clone())
     }
@@ -185,14 +195,27 @@ impl StorePaymentMethodWriter for InMemoryDataService {
         Ok(())
     }
 
-    async fn next_derivation_index(&self, id: Uuid) -> RepositoryResult<i32> {
+    async fn allocate_derivation(&self, id: Uuid) -> RepositoryResult<DerivationAllocation> {
         let mut methods = self.payment_methods.write().unwrap();
         let method = methods
             .iter_mut()
             .find(|pm| pm.id == id)
             .ok_or_else(|| RepositoryError::NotFound(format!("payment method {id}")))?;
-        let current = method.derivation_index;
-        method.derivation_index += 1;
-        Ok(current)
+        let (Some(wallet_id), Some(xpub), Some(index)) = (
+            method.wallet_id,
+            method.xpub.clone(),
+            method.derivation_index,
+        ) else {
+            return Err(RepositoryError::Conflict(format!(
+                "payment method {id} has no wallet"
+            )));
+        };
+        method.derivation_index = Some(index + 1);
+        Ok(DerivationAllocation {
+            wallet_id,
+            namespace: method.chain_id.namespace().to_string(),
+            xpub,
+            index,
+        })
     }
 }

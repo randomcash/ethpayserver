@@ -4,14 +4,19 @@ use axum::{
     http::StatusCode,
 };
 
-use ::types::{InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, StoreId};
-use auth::{SessionService, repository::UserStoreRepository};
+use ::types::{InvoiceId, InvoiceReader};
+use auth::SessionService;
 use data_service::PaymentOptionReader;
 
-use crate::api::extractors::AuthenticatedUser;
+use crate::api::ApiErr;
+use crate::api::extractors::StoreScopedUser;
 use crate::state::PgAppState;
 
-use super::{InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, extract_customer_email};
+use super::{
+    InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, VIEW_INVOICES,
+    build_invoice_filter_params, customer_email_of, get_invoice_with_permission,
+    narrow_scope_by_key, resolve_store_names, verify_store_access_for_query,
+};
 
 /// List invoices with optional filters.
 ///
@@ -25,56 +30,39 @@ use super::{InvoiceListResponse, InvoiceResponse, ListInvoicesQuery, extract_cus
     params(ListInvoicesQuery),
     responses(
         (status = 200, description = "List of invoices", body = InvoiceListResponse),
-        (status = 400, description = "store_id required"),
+        (status = 400, description = "invalid status filter"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Not a member of the store"),
     )
 )]
 pub async fn list_invoices<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListInvoicesQuery>,
-) -> Result<Json<InvoiceListResponse>, StatusCode>
+) -> Result<Json<InvoiceListResponse>, ApiErr>
 where
     A: SessionService + 'static,
 {
-    // For non-admins, store_id is required
-    let store_id = match query.store_id {
-        Some(id) => id,
-        None => {
-            // Admins can list all invoices, non-admins need store_id
-            if user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            // For admins without store_id, we'll query all
-            uuid::Uuid::nil()
-        }
-    };
+    // Resolve the store scope once: one store (membership-checked), the
+    // caller's own stores, or the whole server for an admin. The distinction is
+    // load-bearing - a nil-UUID sentinel here was once an authorization hole.
+    let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    // Then narrow it by what the key (if any) is scoped to - the owner's
+    // membership already answered "can this user see this store", this
+    // answers "did they authenticate with a key that's allowed to".
+    let scope = narrow_scope_by_key(scope, key_scope.as_deref(), VIEW_INVOICES)?;
 
-    // Check user has access to the store (unless admin or no store filter)
-    if store_id != uuid::Uuid::nil() {
-        let is_member = state
-            .data_service
-            .get_user_store(user.id, StoreId(store_id))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .is_some();
-
-        if !is_member && user.role != auth::Role::ServerAdmin {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
-
-    let mut params = InvoiceQueryParams::new();
-
-    if let Some(status) = query.status {
-        let status: InvoiceStatus = status.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-        params = params.with_status(status);
-    }
-
-    if let Some(currency) = query.currency {
-        params = params.with_currency(currency);
-    }
+    // The same builder the CSV export uses, so the two cannot answer different
+    // questions - an export that ignores a filter the list applied downloads
+    // something other than what is on screen. It applies the store
+    // scope first and ANDs every filter onto it; only StoreScope::All leaves
+    // the query unfiltered, and only an admin gets it.
+    let mut params = build_invoice_filter_params(
+        &scope,
+        query.status.as_deref(),
+        query.currency.as_deref(),
+        query.search.as_deref(),
+    )?;
 
     if let Some(limit) = query.limit {
         params = params.with_limit(limit);
@@ -84,14 +72,13 @@ where
         params = params.with_offset(offset);
     }
 
-    // Add store_id filter if provided (nil means admin querying all)
-    if store_id != uuid::Uuid::nil() {
-        params = params.with_store_id(StoreId(store_id));
-    }
-
     let (total, invoices) = InvoiceReader::query(&*state.data_service, &params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Name every row's store: with no store filter this page can span stores,
+    // and the client has no other way to label them.
+    let store_names = resolve_store_names(&state, invoices.iter().map(|i| i.store_id)).await;
 
     // Get payment options for each invoice
     let mut responses = Vec::with_capacity(invoices.len());
@@ -100,11 +87,13 @@ where
             .await
             .unwrap_or_default();
 
-        let customer_email = extract_customer_email(&invoice.metadata);
+        let customer_email = customer_email_of(&invoice);
         responses.push(InvoiceResponse {
             id: invoice.id.0,
+            store_id: invoice.store_id.0.to_string(),
+            store_name: store_names.get(&invoice.store_id.0).cloned(),
             currency: invoice.currency,
-            status: invoice.status.to_string(),
+            status: invoice.status,
             amount: invoice.amount,
             amount_received: invoice.amount_received,
             created_at: invoice.created_at,
@@ -140,7 +129,7 @@ where
     )
 )]
 pub async fn get_invoice<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(invoice_id): Path<String>,
 ) -> Result<Json<InvoiceResponse>, StatusCode>
@@ -149,34 +138,19 @@ where
 {
     let id = InvoiceId::from_string(invoice_id);
 
-    let invoice = InvoiceReader::get(&*state.data_service, &id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    // Check user has access to the invoice's store (unless admin)
-    if user.role != auth::Role::ServerAdmin {
-        let is_member = state
-            .data_service
-            .get_user_store(user.id, invoice.store_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .is_some();
-
-        if !is_member {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
+    let invoice = get_invoice_with_permission(&state, &user, key_scope.as_deref(), &id).await?;
 
     let options = PaymentOptionReader::get_for_invoice(&*state.data_service, &id)
         .await
         .unwrap_or_default();
 
-    let customer_email = extract_customer_email(&invoice.metadata);
+    let customer_email = customer_email_of(&invoice);
     let response = InvoiceResponse {
         id: invoice.id.0,
+        store_id: invoice.store_id.0.to_string(),
+        store_name: None,
         currency: invoice.currency,
-        status: invoice.status.to_string(),
+        status: invoice.status,
         amount: invoice.amount,
         amount_received: invoice.amount_received,
         created_at: invoice.created_at,

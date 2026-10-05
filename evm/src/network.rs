@@ -188,6 +188,27 @@ impl ChainConfig {
         self.explorer_url
             .replace("/tx/{tx}", &format!("/address/{}", address))
     }
+
+    /// Minimum time a confirmed payment's address should stay watched before
+    /// `InvoiceCleanupService` is allowed to unwatch it.
+    ///
+    /// A reorg re-validates candidates by re-scanning currently watched
+    /// addresses, so unwatching too soon after confirmation makes a
+    /// relocated-but-still-paid transaction indistinguishable from a
+    /// genuinely gone one. `confirmations_required * block_time_secs` is
+    /// this chain's own estimate of how long it takes to reach the depth we
+    /// already treat as final; a reorg reaching that deep *again* after
+    /// confirmation is the tail event this floor exists to catch, so it
+    /// here doubles it rather than pulling a chain-agnostic number out of
+    /// thin air. This is a floor, not the actual grace period — callers
+    /// combine it with their own configured value (typically much larger)
+    /// via `max`, so it only bites for a chain whose confirmations/block
+    /// time make the operator's flat default too thin.
+    pub fn min_paid_unwatch_grace_period_secs(&self) -> u64 {
+        (self.confirmations_required as u64)
+            .saturating_mul(self.block_time_secs)
+            .saturating_mul(2)
+    }
 }
 
 /// Ethereum Mainnet configuration.
@@ -375,52 +396,6 @@ pub fn get_any_chain_config(chain_id: u64) -> Option<&'static ChainConfig> {
     crate::testnet::get_testnet_config(chain_id)
 }
 
-/// Convert `types::Network` to EVM chain ID.
-///
-/// Returns `None` for non-EVM networks (e.g., Bitcoin).
-#[cfg(feature = "types")]
-pub fn network_to_chain_id(network: types::Network) -> Option<u64> {
-    use types::Network;
-    match network {
-        Network::Ethereum => Some(1),
-        Network::Polygon => Some(137),
-        Network::Arbitrum => Some(42161),
-        Network::Optimism => Some(10),
-        Network::Base => Some(8453),
-        Network::BinanceSmartChain => Some(56),
-        Network::Avalanche => Some(43114),
-        Network::ZkSync => Some(324),
-        Network::Linea => Some(59144),
-        Network::Scroll => Some(534352),
-        Network::Fantom => Some(250),
-        Network::Gnosis => Some(100),
-        _ => None,
-    }
-}
-
-/// Convert EVM chain ID to `types::Network`.
-///
-/// Returns `None` for unknown chain IDs.
-#[cfg(feature = "types")]
-pub fn chain_id_to_network(chain_id: u64) -> Option<types::Network> {
-    use types::Network;
-    match chain_id {
-        1 => Some(Network::Ethereum),
-        137 => Some(Network::Polygon),
-        42161 => Some(Network::Arbitrum),
-        10 => Some(Network::Optimism),
-        8453 => Some(Network::Base),
-        56 => Some(Network::BinanceSmartChain),
-        43114 => Some(Network::Avalanche),
-        324 => Some(Network::ZkSync),
-        59144 => Some(Network::Linea),
-        534352 => Some(Network::Scroll),
-        250 => Some(Network::Fantom),
-        100 => Some(Network::Gnosis),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +442,32 @@ mod tests {
                 assert_eq!(network.chain_id(), config.chain_id);
             }
         }
+    }
+
+    /// Every mainnet that has tokens seeded in the `tokens` table must be a
+    /// real member of `ALL_CHAINS` - the same check `evm::testnet` runs for
+    /// the newly-seeded testnets, mirrored here so both directions are
+    /// covered instead of just the one the original PR happened to add.
+    /// Named by id, not iterated from `ALL_CHAINS`, so this fails the moment
+    /// either list drifts from the other instead of trivially agreeing with
+    /// itself.
+    #[test]
+    fn test_seeded_mainnets_are_all_offered() {
+        for (chain_id, name) in [(324, "zkSync Era"), (59144, "Linea"), (534352, "Scroll")] {
+            let config = get_chain_config_by_id(chain_id)
+                .unwrap_or_else(|| panic!("{name} ({chain_id}) is not in ALL_CHAINS"));
+            assert_eq!(config.name, name);
+        }
+    }
+
+    #[test]
+    fn test_min_paid_unwatch_grace_period_is_double_the_confirmation_time() {
+        // Polygon: 128 confirmations * 2s/block * 2 = 512s.
+        assert_eq!(POLYGON.min_paid_unwatch_grace_period_secs(), 512);
+        // zkSync: 1 confirmation * 1s/block * 2 = 2s — a much smaller floor,
+        // since its single confirmation is backed by a ZK validity proof
+        // rather than probabilistic depth; the flat operator default (not
+        // computed here) is what actually protects it.
+        assert_eq!(ZKSYNC.min_paid_unwatch_grace_period_secs(), 2);
     }
 }

@@ -4,12 +4,11 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use auth::{ApiKey, ApiKeyId, ApiKeyRepository, AuthError, StoreRepository, UserId};
 use types::{Store, StoreId};
-
-use crate::api_key::hash_api_key;
 
 /// The raw key whose SHA-256 hash [`test_api_key`] stores.
 pub const RAW_KEY: &str = "ak_live_abc123";
@@ -131,7 +130,7 @@ pub fn test_api_key(user_id: UserId) -> ApiKey {
         id: ApiKeyId(Uuid::new_v4()),
         user_id,
         name: "MCP agent key".to_string(),
-        key_hash: hash_api_key(RAW_KEY),
+        key_hash: hex::encode(Sha256::digest(RAW_KEY.as_bytes())),
         key_prefix: "ak_live_****c123".to_string(),
         is_active: true,
         created_at: Utc::now(),

@@ -5,8 +5,6 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::repository::StoreRepository;
@@ -15,46 +13,21 @@ use data_service::{
     StoreTokenPolicyReader, StoreTokenPolicyWriter, TokenPolicyEntryInput, TokenPolicyMode,
 };
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::StoreScopedUser;
 use super::require_store_settings_permission;
 use crate::state::PgAppState;
-
-/// Token policy entry for API requests/responses.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct TokenPolicyEntryPayload {
-    pub chain_id: i64,
-    pub token_address: Option<String>,
-    pub asset_symbol: String,
-}
-
-/// Token policy response.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct TokenPolicyResponse {
-    pub id: String,
-    pub store_id: Uuid,
-    pub mode: String,
-    pub entries: Vec<TokenPolicyEntryPayload>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-/// Request to set a token policy.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct SetTokenPolicyRequest {
-    pub mode: String,
-    pub entries: Vec<TokenPolicyEntryPayload>,
-}
+pub use api_types::{SetTokenPolicyRequest, TokenPolicyEntryPayload, TokenPolicyResponse};
 
 /// Get store token policy.
 pub async fn get_token_policy<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<Option<TokenPolicyResponse>>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let _ = state
         .data_service
@@ -76,7 +49,7 @@ where
                 .entries
                 .into_iter()
                 .map(|e| TokenPolicyEntryPayload {
-                    chain_id: e.chain_id,
+                    chain_id: e.chain_id.clone(),
                     token_address: e.token_address,
                     asset_symbol: e.asset_symbol,
                 })
@@ -89,7 +62,7 @@ where
 
 /// Set (upsert) store token policy.
 pub async fn set_token_policy<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<SetTokenPolicyRequest>,
@@ -97,7 +70,7 @@ pub async fn set_token_policy<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let _ = state
         .data_service
@@ -121,6 +94,9 @@ where
         }
     }
 
+    // Collected through `Result` so one malformed identifier fails the whole
+    // request rather than being silently dropped from the policy - a policy
+    // missing an entry is a policy that permits something it should not.
     let inputs: Vec<TokenPolicyEntryInput> = req
         .entries
         .into_iter()
@@ -144,7 +120,7 @@ where
             .entries
             .into_iter()
             .map(|e| TokenPolicyEntryPayload {
-                chain_id: e.chain_id,
+                chain_id: e.chain_id.clone(),
                 token_address: e.token_address,
                 asset_symbol: e.asset_symbol,
             })
@@ -156,14 +132,14 @@ where
 
 /// Delete store token policy (revert to accept-all).
 pub async fn delete_token_policy<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let _ = state
         .data_service

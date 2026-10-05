@@ -9,14 +9,17 @@ use futures::StreamExt;
 use std::sync::Arc;
 
 use ::types::{
-    InvoiceQueryParams, InvoiceReader, InvoiceStatus, PaymentQueryParams, PaymentReader, StoreId,
+    InvoiceQueryParams, InvoiceReader, InvoiceStatus, PaymentQueryParams, PaymentReader,
 };
-use auth::{SessionService, repository::UserStoreRepository};
+use auth::SessionService;
 
-use super::{ListInvoicesQuery, ListPaymentsQuery};
-use crate::api::extractors::AuthenticatedUser;
+use super::{
+    ListInvoicesQuery, ListPaymentsQuery, StoreScope, VIEW_INVOICES, narrow_scope_by_key,
+    verify_store_access_for_query,
+};
+use crate::api::ApiErr;
+use crate::api::extractors::StoreScopedUser;
 use crate::state::PgAppState;
-use uuid::Uuid;
 
 /// Maximum number of rows allowed in a CSV export.
 const MAX_EXPORT_ROWS: i64 = 50_000;
@@ -55,70 +58,59 @@ pub(crate) fn csv_row(fields: &[&str]) -> String {
     row
 }
 
-/// Verify store access for list/export operations.
-/// Returns `Some(StoreId)` for store-scoped queries, `None` for admin-wide.
-async fn verify_store_access_for_query<A: SessionService>(
-    state: &PgAppState<A>,
-    user: &auth::UserInfo,
-    store_id: Option<Uuid>,
-) -> Result<Option<StoreId>, StatusCode> {
-    match store_id {
-        Some(id) => {
-            let is_member = state
-                .data_service
-                .get_user_store(user.id, StoreId(id))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .is_some();
-            if !is_member && user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::FORBIDDEN);
-            }
-            Ok(Some(StoreId(id)))
-        }
-        None => {
-            if user.role != auth::Role::ServerAdmin {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            Ok(None)
-        }
-    }
-}
-
-/// Build invoice query params from filter fields (shared by list and export).
-fn build_invoice_filter_params(
-    store_id: Option<StoreId>,
+/// Build invoice query params from filter fields.
+///
+/// Shared by `list_invoices` and the export so the button downloads what is on
+/// screen. The store scope goes on first and every filter is ANDed onto it -
+/// no filter here may ever replace it.
+pub(crate) fn build_invoice_filter_params(
+    scope: &StoreScope,
     status: Option<&str>,
     currency: Option<&str>,
-) -> Result<InvoiceQueryParams, StatusCode> {
-    let mut params = InvoiceQueryParams::new();
-    if let Some(sid) = store_id {
-        params = params.with_store_id(sid);
-    }
+    search: Option<&str>,
+) -> Result<InvoiceQueryParams, ApiErr> {
+    let mut params = scope.apply_invoice(InvoiceQueryParams::new());
     if let Some(s) = status {
-        let parsed: InvoiceStatus = s.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+        // The reason has to distinguish this from every other 400 the caller
+        // might see for `/invoices` or `/payments` - the client used to treat
+        // any 400 as "no store selected" (see `verify_store_access_for_query`'s
+        // history), and a bare status here would put an invalid filter right
+        // back into that same bucket.
+        let parsed: InvoiceStatus = s
+            .parse()
+            .map_err(|_| (StatusCode::BAD_REQUEST, "invalid status filter".to_string()))?;
         params = params.with_status(parsed);
     }
     if let Some(c) = currency {
         params = params.with_currency(c.to_string());
     }
+    if let Some(q) = search {
+        params = params.with_search(q);
+    }
     Ok(params)
 }
 
-/// Build payment query params from filter fields (shared by list and export).
-fn build_payment_filter_params(
-    store_id: Option<StoreId>,
+/// Build payment query params from filter fields.
+///
+/// Shared by `list_payments` and the export, for the same reason as its invoice
+/// twin above.
+pub(crate) fn build_payment_filter_params(
+    scope: &StoreScope,
     status: Option<&str>,
-) -> Result<PaymentQueryParams, StatusCode> {
-    let mut params = PaymentQueryParams::new();
-    if let Some(sid) = store_id {
-        params = params.with_store_id(sid);
-    }
+    search: Option<&str>,
+) -> Result<PaymentQueryParams, ApiErr> {
+    let mut params = scope.apply_payment(PaymentQueryParams::new());
     if let Some(s) = status {
         match s {
             "confirmed" => params = params.with_confirmed(true),
             "pending" => params = params.with_confirmed(false),
-            _ => return Err(StatusCode::BAD_REQUEST),
+            _ => {
+                return Err((StatusCode::BAD_REQUEST, "invalid status filter".to_string()).into());
+            }
         }
+    }
+    if let Some(q) = search {
+        params = params.with_search(q);
     }
     Ok(params)
 }
@@ -129,16 +121,21 @@ fn build_payment_filter_params(
 /// in pages of 1000 rows to avoid full-result buffering.
 #[allow(clippy::too_many_lines)] // CSV export: filter assembly + paged stream + row serialization
 pub async fn export_invoices_csv<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListInvoicesQuery>,
-) -> Result<Response, StatusCode>
+) -> Result<Response, ApiErr>
 where
     A: SessionService + 'static,
 {
-    let store_id = verify_store_access_for_query(&state, &user, query.store_id).await?;
-    let base_params =
-        build_invoice_filter_params(store_id, query.status.as_deref(), query.currency.as_deref())?;
+    let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    let scope = narrow_scope_by_key(scope, key_scope.as_deref(), VIEW_INVOICES)?;
+    let base_params = build_invoice_filter_params(
+        &scope,
+        query.status.as_deref(),
+        query.currency.as_deref(),
+        query.search.as_deref(),
+    )?;
 
     // Count total matching rows.
     let count_params = base_params.clone().with_limit(1).with_offset(0);
@@ -156,12 +153,15 @@ where
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .header("Content-Type", "application/json")
             .body(Body::from(body.to_string()))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into());
     }
 
-    let store_label = store_id
-        .map(|s| s.0.to_string())
-        .unwrap_or_else(|| "all".to_string());
+    // "all" covers both the admin's whole-server export and a merchant's
+    // across-my-stores one; neither names a single store.
+    let store_label = match &scope {
+        StoreScope::One(s) => s.0.to_string(),
+        _ => "all".to_string(),
+    };
     let date = Utc::now().format("%Y%m%d");
     let filename = format!("invoices_{}_{}.csv", store_label, date);
 
@@ -248,7 +248,7 @@ where
             format!("attachment; filename=\"{}\"", filename),
         )
         .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into())
 }
 
 /// Export payments as a streaming CSV file.
@@ -257,15 +257,17 @@ where
 /// in pages of 1000 rows to avoid full-result buffering.
 #[allow(clippy::too_many_lines)] // CSV export: filter assembly + paged stream + row serialization
 pub async fn export_payments_csv<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Query(query): Query<ListPaymentsQuery>,
-) -> Result<Response, StatusCode>
+) -> Result<Response, ApiErr>
 where
     A: SessionService + 'static,
 {
-    let store_id = verify_store_access_for_query(&state, &user, query.store_id).await?;
-    let base_params = build_payment_filter_params(store_id, query.status.as_deref())?;
+    let scope = verify_store_access_for_query(&*state.data_service, &user, query.store_id).await?;
+    let scope = narrow_scope_by_key(scope, key_scope.as_deref(), VIEW_INVOICES)?;
+    let base_params =
+        build_payment_filter_params(&scope, query.status.as_deref(), query.search.as_deref())?;
 
     let count_params = base_params.clone().with_limit(1).with_offset(0);
     let (total, _) = PaymentReader::query(&*state.data_service, &count_params)
@@ -282,12 +284,15 @@ where
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .header("Content-Type", "application/json")
             .body(Body::from(body.to_string()))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into());
     }
 
-    let store_label = store_id
-        .map(|s| s.0.to_string())
-        .unwrap_or_else(|| "all".to_string());
+    // "all" covers both the admin's whole-server export and a merchant's
+    // across-my-stores one; neither names a single store.
+    let store_label = match &scope {
+        StoreScope::One(s) => s.0.to_string(),
+        _ => "all".to_string(),
+    };
     let date = Utc::now().format("%Y%m%d");
     let filename = format!("payments_{}_{}.csv", store_label, date);
 
@@ -368,5 +373,5 @@ where
             format!("attachment; filename=\"{}\"", filename),
         )
         .body(body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into())
 }
