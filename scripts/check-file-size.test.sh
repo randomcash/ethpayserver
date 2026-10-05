@@ -368,6 +368,31 @@ else
   echo "FAIL: absence of a ratchet file must not exempt anything"; printf '%s\n' "$out"; fail=1
 fi
 
+# A revert of a split restores larger files. Modified path (shrunk by the split)
+# and deleted-then-restored path are both covered; genuine growth stays red.
+REVERT_T="$(mktemp -d)"
+(
+  cd "$REVERT_T" && git init -q . && git config user.email t@t && git config user.name t
+  lines 8 > mod.rs && lines 9 > users.rs && git add -A && git commit -qm "before split"
+  lines 3 > mod.rs && git rm -q users.rs && git commit -qam "split"
+  git branch base
+  git revert --no-edit HEAD >/dev/null
+)
+out="$(cd "$REVERT_T" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "ok: a pure revert of a split is not read as growth"
+else
+  echo "FAIL: reverting a split must pass"; printf '%s\n' "$out"; fail=1
+fi
+( cd "$REVERT_T" && lines 10 > mod.rs && git commit -qam "grow past the old size" )
+out="$(cd "$REVERT_T" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"; rc=$?
+rm -rf "$REVERT_T"
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'mod.rs grew'; then
+  echo "ok: growth beyond any earlier version is still refused after a revert"
+else
+  echo "FAIL: growth past every historical version must fail"; printf '%s\n' "$out"; fail=1
+fi
+
 # THE DEFAULT, which is what actually runs in CI: growth is reported and warned
 # about, and the build passes. Asserted on all three of exit code, the warning,
 # and the NOT ENFORCED line - because "exits 0" alone would also be satisfied by
