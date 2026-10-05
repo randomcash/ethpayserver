@@ -46,8 +46,6 @@ async function attemptDelete(page: Page, handle: string) {
 }
 
 test.describe('Account lifecycle (passkey)', () => {
-  test.skip(() => SKIP_AUTH, 'Skipped: auth endpoints rate-limit at 5/min/IP');
-
   test.beforeAll(async () => {
     await resetDatabase();
   });
@@ -55,6 +53,10 @@ test.describe('Account lifecycle (passkey)', () => {
   test('an account can be created, used, returned to, and destroyed', async ({
     withAuthenticator: page,
   }) => {
+    // Skipped per test, not per describe: a describe-level skip would also
+    // swallow the refusal test below before its remote-lane guard could fail it.
+    test.skip(SKIP_AUTH, 'Skipped: auth endpoints rate-limit at 5/min/IP');
+
     // ---- create -------------------------------------------------------
     const { accountId } = await register(page);
     expect(accountId, 'a passkey-only account must surface its id: it is the only handle it has').toBeTruthy();
