@@ -383,3 +383,146 @@ async fn an_invite_cannot_demote_an_existing_member_or_grant_ownership() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// Invites `email` at `role` and redeems the mailed code as `account`.
+async fn join_as(
+    app: &Router,
+    outbox: &Outbox,
+    owner: &Account,
+    store: &Store,
+    account: &Account,
+    email: &str,
+    role: &str,
+) {
+    let (status, _) = call(
+        app,
+        &owner.key,
+        Method::POST,
+        &format!("/stores/{}/invites", store.id.0),
+        Some(serde_json::json!({ "email": email, "role": role })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let code = outbox.code_for(email).expect("the invite was mailed");
+    let (status, body) = accept(app, &account.key, code).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_reinvite_revokes_the_earlier_code() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let pg = Arc::new(pg);
+    let outbox = Arc::new(Outbox::default());
+    let app = app(&pg, &outbox);
+
+    let email = format!("reinvite-{}@example.com", Uuid::new_v4());
+    let owner = seed_account(&pg, None).await;
+    let colleague = seed_account(&pg, Some(&email)).await;
+    let store = seed_store(&pg, &owner).await;
+
+    assert_eq!(
+        invite(&app, &owner.key, &store, &email).await.0,
+        StatusCode::ACCEPTED
+    );
+    let first = outbox.code_for(&email).unwrap();
+    assert_eq!(
+        invite(&app, &owner.key, &store, &email).await.0,
+        StatusCode::ACCEPTED
+    );
+    let second = outbox.code_for(&email).unwrap();
+    assert_ne!(first, second, "a re-invite must mint a new code");
+
+    let (status, _) = accept(&app, &colleague.key, first).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a replaced code must stop working"
+    );
+    assert!(
+        !is_member(&pg, colleague.id, &store).await,
+        "a replaced code must not create a membership"
+    );
+
+    let (status, body) = accept(&app, &colleague.key, second).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(is_member(&pg, colleague.id, &store).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_expired_invite_is_refused() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let pg = Arc::new(pg);
+    let outbox = Arc::new(Outbox::default());
+    let app = app(&pg, &outbox);
+
+    let email = format!("expired-{}@example.com", Uuid::new_v4());
+    let owner = seed_account(&pg, None).await;
+    let colleague = seed_account(&pg, Some(&email)).await;
+    let store = seed_store(&pg, &owner).await;
+
+    assert_eq!(
+        invite(&app, &owner.key, &store, &email).await.0,
+        StatusCode::ACCEPTED
+    );
+    let code = outbox.code_for(&email).unwrap();
+    let moved = sqlx::query(
+        "UPDATE store_invites SET expires_at = NOW() - INTERVAL '1 minute' WHERE token = $1",
+    )
+    .bind(code)
+    .execute(pg.pool())
+    .await
+    .unwrap();
+    assert_eq!(moved.rows_affected(), 1, "the invite row must exist");
+
+    let (status, _) = accept(&app, &colleague.key, code).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        !is_member(&pg, colleague.id, &store).await,
+        "an expired code must not create a membership"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_manager_and_an_employee_cannot_invite() {
+    let Some(pg) = service().await else {
+        return;
+    };
+    let pg = Arc::new(pg);
+    let outbox = Arc::new(Outbox::default());
+    let app = app(&pg, &outbox);
+
+    let owner = seed_account(&pg, None).await;
+    let store = seed_store(&pg, &owner).await;
+
+    for role in ["Manager", "Employee"] {
+        let email = format!("{role}-{}@example.com", Uuid::new_v4());
+        let member = seed_account(&pg, Some(&email)).await;
+        join_as(&app, &outbox, &owner, &store, &member, &email, role).await;
+
+        // Control: the owner's identical request succeeds.
+        let target = format!("target-{}@example.com", Uuid::new_v4());
+        assert_eq!(
+            invite(&app, &owner.key, &store, &target).await.0,
+            StatusCode::ACCEPTED
+        );
+        assert!(outbox.code_for(&target).is_some());
+
+        let refused = format!("refused-{}@example.com", Uuid::new_v4());
+        assert_eq!(
+            invite(&app, &member.key, &store, &refused).await.0,
+            StatusCode::FORBIDDEN,
+            "{role} must not invite"
+        );
+        assert!(
+            outbox.code_for(&refused).is_none(),
+            "a refused invite from {role} must send nothing"
+        );
+    }
+}

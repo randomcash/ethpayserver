@@ -11,6 +11,11 @@
 //! The membership is created when the holder of the mailed token redeems it
 //! at `POST /users/me/invites/accept`. Until then nothing exists.
 //!
+//! Limitation: the code is a bearer token. Any signed-in account that holds it
+//! can redeem it, and `store_invites` records who sent an invite and when it
+//! was accepted but not who accepted it. A membership therefore proves
+//! possession of a token, not the identity of the addressee.
+//!
 //! Gated on `caninviteusers`, held by Owner only. It is not
 //! `canmodifystoreusers`, which also gates changing roles and removing
 //! members and so is a different decision.
