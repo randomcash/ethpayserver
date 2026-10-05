@@ -180,12 +180,17 @@ test.describe('Status socket tenant isolation', () => {
     }
     if (failures.length === 0) return;
 
-    const msg = `ws isolation cleanup left residue: ${failures.join('; ')}`;
+    const testPassed = testInfo.status === testInfo.expectedStatus;
+    const msg =
+      (testPassed
+        ? 'The isolation assertions PASSED; only the teardown failed (this is not an isolation result). '
+        : 'The test itself failed; teardown also left residue. ') +
+      `ws isolation cleanup left residue: ${failures.join('; ')}`;
     console.log(`::error title=ws isolation cleanup failed::${msg}`);
     if (process.env.GITHUB_STEP_SUMMARY) {
       appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ❌ ws isolation cleanup failed\n\n${msg}\n`);
     }
-    if (testInfo.status === testInfo.expectedStatus) throw new Error(msg);
+    if (testPassed) throw new Error(msg);
   });
 
   test('a socket receives its own stores\' events and no other store\'s', async () => {
