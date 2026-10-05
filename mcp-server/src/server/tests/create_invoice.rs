@@ -68,6 +68,33 @@ async fn rounds_a_fractional_wei_quote_up() {
     assert_eq!(json["payment_options"][0]["amount"], "33333333333333334");
 }
 
+/// Base units scale with the method's decimals, not a fixed 18: a 6-decimal
+/// asset is quoted in millionths, and its fractional remainder rounds up.
+#[tokio::test]
+async fn scales_and_rounds_a_six_decimal_asset_in_its_own_base_units() {
+    let h = TestHarness::new(StubRateProvider::usd_eth().with_rate("USD", "USDC", "0.333333335"));
+    h.data.add_payment_method(
+        h.store_id.0,
+        crate::testkit::CHAIN_ID,
+        "USDC",
+        6,
+        crate::testkit::TEST_XPUB,
+    );
+
+    let json = parse_ok(h.server.do_create_invoice(usd_args(h.store_id)).await);
+
+    let options = json["payment_options"].as_array().unwrap();
+    let usdc = options
+        .iter()
+        .find(|o| o["asset_symbol"] == "USDC")
+        .expect("a USDC option");
+    assert_eq!(usdc["decimals"], 6);
+    // 100 * 0.333333335 USDC = 33.3333335 USDC = 33333333.5 base units
+    assert_eq!(usdc["amount"], "33333334");
+    let eth = options.iter().find(|o| o["asset_symbol"] == "ETH").unwrap();
+    assert_eq!(eth["amount"], "50000000000000000");
+}
+
 #[tokio::test]
 async fn persists_the_invoice_and_its_payment_option() {
     let h = TestHarness::new(StubRateProvider::usd_eth());
