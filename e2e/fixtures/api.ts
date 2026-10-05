@@ -73,3 +73,15 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
 export function wsUrl(path: string): string {
   return `${API_URL.replace(/^http/, 'ws')}${path}`;
 }
+
+/**
+ * The invoice id is a version-4 UUID: 122 random bits from the server's CSPRNG.
+ * For the unauthenticated checkout socket that unguessability is the only
+ * thing standing between a stranger and an invoice's live status, so a change
+ * to a sequential, time-ordered or otherwise predictable id must fail here.
+ *
+ * Rejecting uppercase is deliberate, not pedantry: the server renders ids
+ * lowercase, so an uppercase id means a different generator produced it.
+ * Making the pattern case-insensitive would discard that discrimination.
+ */
+export const V4_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

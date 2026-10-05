@@ -1,10 +1,26 @@
 # Recovering from an event-outbox lineage break
 
-Status: **design only, not implemented.** Today a lineage break (stored cursor
+Status: **design only, not implemented.** The apply-path prerequisite (crediting
+a payment to an expired watch, #310) has landed; the monitor rescan (items 1-3
+below) has not, and is the remaining work. Today a lineage break (stored cursor
 epoch differs from the outbox's, or the cursor is below retention) halts the
 consumer with `process::exit(1)`. An operator audits the gap and may set
 `EVENT_ACCEPT_LINEAGE_BREAK=true`. This note records what automatic recovery
 needs, so the work can be scoped and reviewed on its own.
+
+## What ships today, and what does not
+
+Ships: halt-and-exit on a lineage break; the operator-set
+`EVENT_ACCEPT_LINEAGE_BREAK` override, which resets the chain's active watches
+and drops the stale cursor; and the expired-watch fallback in the apply path,
+which credits a payment whose watch has expired. The fallback matches the
+invoice's own payment options by address, chain and token, case-insensitively,
+so it is correct for hex EVM addresses only.
+
+Not built: reading `block_height` back, any rescan of the gap, replay under a
+new epoch, and a different default for the flag. A transfer that confirmed
+during the gap on an already-expired watch is therefore still lost after an
+accepted break; halting is the default for that reason.
 
 ## What already exists
 
@@ -53,17 +69,40 @@ reading the chain again can.
 ## Questions the review raised, checked against the source
 
 - **Does the apply path accept a credit for a watch that has since
-  expired?** No, verified in source. `handle_payment_detected` resolves the
-  payment option through `WatchedAddressReader::get_payment_option_id`, whose
-  queries filter `is_active = TRUE`. For an expired watch it returns `None`,
-  the handler logs "no payment option found", and the payment is recorded with
-  no `credited_amount`, so it never counts toward `amount_received`. Publishing
-  rescanned transfers through the normal outbox therefore does **not** recover
-  the expired-watch case: it would apply cleanly and still under-credit, with
-  only a warning. Replay needs either a payment-option lookup that also
-  resolves inactive watches within the replay window, or the rescan to carry
-  the payment option id itself. This is the first thing to design and test, and
-  "What replay needs" items 1-2 are not sufficient without it.
+  expired?** Yes. `handle_payment_detected` first resolves the payment option
+  through `WatchedAddressReader::get_payment_option_id`, whose queries filter
+  `is_active = TRUE`, so an expired watch yields `None`. The handler then falls
+  back to the invoice's own payment options, matching address, chain and token
+  case-insensitively, and credits the payment with no grace window; the
+  existing late-payment transition to `late_paid` flags it at confirmation. The
+  fallback is covered by `payment_to_an_expired_watch_is_credited_and_settles_late`
+  and `erc20_payment_to_an_expired_watch_is_credited` in
+  `server/src/services/event_consumer/tests/payment_detected.rs` (landed as
+  #310; both deactivate the watch first, and both go red with the fallback
+  removed, the ERC-20 one asserting `credited_amount`; both store the option's
+  address checksum-cased, so an exact address comparison turns both red; only
+  the ERC-20 one stores a token, upper-cased, so an exact token comparison
+  turns that one red and leaves the native-asset test green). The address and token
+  comparison is case-insensitive, which is sound only because every chain the
+  server enables today uses hex EVM addresses; a chain with case-sensitive
+  addresses would need an exact comparison here. What the fallback is bounded by: it only looks at the payment options
+  of the invoice the event names, and only credits on an address, chain and
+  token match, so it cannot attribute a transfer to another invoice; it then
+  goes through the same credited-amount path as an active watch. Replay
+  idempotence is expected to come from the payment upsert described below
+  (no consumer-level test claims this: the in-memory data service dedups on its own, so a test against it would prove only the mock. The Postgres upsert is covered by the ignored
+  integration test
+  `integration_redelivered_payment_reuses_the_original_row_id_and_does_not_duplicate_the_obligation`,
+  which CI runs in its `--run-ignored only` step and which asserts one row and
+  one credit). Status effects
+  are those of `handle_payment_confirmed`: an expired invoice the payment
+  fully covers becomes `late_paid`, a cancelled, refunded or already-paid
+  invoice keeps its status, and a partial payment counts toward
+  `amount_received` without changing status. Replaying rescanned transfers
+  through the normal outbox therefore credits the expired-watch case, so the
+  apply path no longer needs a separate inactive-watch lookup. That says
+  nothing about the rescan itself, which still has to find transfers to
+  addresses whose watches have expired (items 1 and 2 above).
 - **A replay must emit the detection before the confirmation.**
   `handle_payment_confirmed` looks the payment up by
   `(invoice_id, tx_hash, tx_index)` and, when no row exists, logs at debug and
@@ -92,13 +131,18 @@ reading the chain again can.
   inactive watches are pinned by the ignored integration test
   `inactive_watch_is_neither_rearmed_nor_resolved_to_a_payment_option`
   (data-service; the re-arm half reads `monitor_notified` off the row, so dropping the `is_active` filter from the reset turns it red, and dropping it from the lookup turns the second half red).
-  That test asserts today's behaviour: whoever makes replay credit expired
-  watches will change it deliberately. That a replay must publish detection
-  before confirmation, and that re-applying is idempotent, are still asserted
-  here without a test.
-- Policy, to settle before building the apply-path change: whether a late
-  payment on an expired or closed invoice is credited, or only flagged for the
-  merchant.
+  That test covers the data-service layer only (watch re-arm and option
+  lookup skip inactive watches); the apply-path fallback that credits an
+  expired watch's payment is covered separately in the event consumer tests.
+  That a replay must publish detection
+  before confirmation is still asserted here without a test.
+- Policy, settled in #310: a late payment is credited and then flagged
+  (`late_paid`) for the merchant, with no grace window. A replay over a wide
+  gap applies this to every rescanned transfer to an expired invoice. Whether
+  a merchant is notified of a replay-driven `late_paid` is not decided here;
+  `late_paid` is the only signal, and reconciling cancelled or refunded
+  invoices that gain `amount_received` is left to the merchant until the
+  rescan is built and reviewed.
 
 ## Why this is not done in one step
 

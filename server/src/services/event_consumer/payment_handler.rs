@@ -304,12 +304,17 @@ impl<
 
         // Broadcast payment detected via WebSocket
         if let Some(ref ws) = self.ws_broadcast {
-            ws.send(StatusUpdate::PaymentUpdate {
-                payment_id: payment.id.to_string(),
-                invoice_id: event.invoice_id.to_string(),
-                status: "detected".to_string(),
-                amount: payment.credited_amount.clone(),
-            });
+            ws.send_for_invoice(
+                &*self.data_service,
+                &payment.invoice_id,
+                StatusUpdate::PaymentUpdate {
+                    payment_id: payment.id.to_string(),
+                    invoice_id: event.invoice_id.to_string(),
+                    status: "detected".to_string(),
+                    amount: payment.credited_amount.clone(),
+                },
+            )
+            .await;
         }
 
         Ok(())

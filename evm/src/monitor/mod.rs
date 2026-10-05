@@ -66,6 +66,7 @@ mod coordinator;
 pub mod events;
 mod handlers;
 mod source;
+pub mod startup;
 
 pub use source::rpc::{RpcBlockSource, RpcSourceConfig};
 pub use source::{BlockNotification, BlockSource, ChainHealth, LogFilter, SourceStatus};
@@ -79,7 +80,7 @@ pub use bridge::{
     EventCursor, EventEnvelope, MemoryBridge,
 };
 
-pub use chain::{ChainMonitor, ChainMonitorConfig, WatchedAddress};
+pub use chain::{BACKFILL_MAX_BLOCKS, ChainMonitor, ChainMonitorConfig, WatchedAddress};
 pub use coordinator::{CoordinatorConfig, MonitorCoordinator};
 pub use events::{
     AddressUnwatched, AddressWatched, GetStatusCommand, MonitorCommand, MonitorEvent,

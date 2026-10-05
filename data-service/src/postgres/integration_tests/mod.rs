@@ -13,6 +13,7 @@
 //! - `wallet_migration`: the account-wallets migration run over old-shape data
 //! - `backfill_truncated_payment_symbols`: the truncated-address backfill,
 //!   resolving known tokens and falling back for the rest
+//! - `account_standing`: the version compare-and-set and the fail-open read
 //! - `account_deletion`: what blocks deleting an account, against the real FKs
 //! - `store_creation`: a store and the membership that owns it, as one unit
 //! - `payout_claims`: which invoices a store's payouts already hold
@@ -28,6 +29,7 @@
 //!   watch once its invoice resolves, not just once it is deactivated
 
 mod account_deletion;
+mod account_standing;
 mod aggregation;
 mod analytics;
 mod backfill_truncated_payment_symbols;

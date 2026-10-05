@@ -13,9 +13,15 @@ name: Scheduled E2E (testnet)
 
 on:
   schedule:
-    # 06:00 UTC daily — an hour before the Monday audit, so a red testnet is
+    # 05:37 UTC daily — before the Monday audit, so a red testnet is
     # already on the desk when the weekly retro starts.
-    - cron: "0 6 * * *"
+    # An odd minute on purpose: the top of the hour, 06:00 especially, is the
+    # most contended scheduled slot, and at 0 6 this was dispatched 4-7 hours
+    # late every day, which made the Sentry cron monitor miss its window daily.
+    # The monitor's schedule lives in Sentry, not here: it must read
+    # `37 5 * * *` UTC with a check-in margin of about an hour. Keep the margin
+    # tight - a run that never happens is the only thing it exists to catch.
+    - cron: "37 5 * * *"
   workflow_dispatch:
 
 permissions:
@@ -61,7 +67,7 @@ jobs:
       # 429s (see e2e/README.md).
       #
       # Running the full suite here would fail from the first scheduled run,
-      # ping healthchecks /fail every morning and file a testnet-is-failing
+      # fail the check-in every morning and file a testnet-is-failing
       # issue daily — desensitising the dead-man's switch before it ever
       # carries signal. Widen this list only as specs are made remote-capable.
       - name: Run E2E suite
@@ -73,6 +79,18 @@ jobs:
         # paint the dead-man's switch red every morning for a known cause.
         # Re-add it when remote registration works.
         run: npx playwright test tests/perf.spec.ts
+
+      # Two ordinary accounts, one /ws socket each, one store each (owned by
+      # the E2E admin, so invoice creation is allowed): each socket must hear
+      # its own store's event and never the other's. `always()` so a red perf
+      # run does not hide a tenancy regression, and the reverse.
+      - name: Status socket tenant isolation
+        if: always()
+        working-directory: e2e
+        env:
+          E2E_WS_ISOLATION: "true"
+          E2E_API_TOKEN: ${{ secrets.E2E_API_TOKEN }}
+        run: npx playwright test tests/ws-tenant-isolation.spec.ts
 
       - name: Upload report
         if: always()
@@ -139,9 +157,8 @@ jobs:
       # Silence — a box that never ran the workflow at all — is what actually
       # alerts, since Sentry pages on a cron that missed its expected window.
       # No-op if the secret is unset, so a fork or a fresh clone does not fail
-      # here. Was healthchecks.io; moved onto the Sentry cron monitor so
-      # alerting for this and the deep-health watchdog (health-monitor.yml)
-      # lives with one vendor instead of two.
+      # here. Alerting for this and the deep-health watchdog
+      # (health-monitor.yml) lives in one place.
       - name: Check in to Sentry cron monitor
         env:
           SENTRY_CRON_URL: ${{ secrets.SENTRY_CRON_E2E_URL }}

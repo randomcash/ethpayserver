@@ -25,11 +25,30 @@ ignore = [
     # (`call_ref`) nor `wasm_exceptions` (`catch`), and wasmtime defaults them
     # off.
     #
-    # REVISIT IF THE HOST EVER ENABLES FUEL. The real fix is a wasmtime bump,
-    # which cannot happen here: the dependency comes from commons, and
-    # wasmtime >=48 needs Rust 1.95 while rust-toolchain.toml pins 1.94.1. So
-    # it is a commons change, a toolchain bump and a pin bump, tracked
-    # separately.
+    # REVISIT IF THE HOST EVER ENABLES FUEL. The real fix is a wasmtime bump
+    # (>=48.0.3) in commons' plugin host. The toolchain is already on 1.95;
+    # what remains is the commons `rev` bump here once the commons change has
+    # merged, after which both ignores come out.
     "RUSTSEC-2026-0315", # wasmtime fuel accounting — fuel metering is not enabled
     "RUSTSEC-2026-0316", # wasmtime fuel accounting — fuel metering is not enabled
+    # Three more against the same wasmtime 47, all in features this build does
+    # not compile. The plugin host depends on wasmtime with
+    # `default-features = false, features = ["runtime", "cranelift"]`;
+    # `cargo tree -e features -i wasmtime` shows neither `gc`, `component-model`
+    # nor `async` enabled anywhere in the workspace, so the vulnerable code is
+    # absent from the binary rather than merely switched off.
+    #   0326  GC values live across `try_call` are not rooted - needs the GC heap
+    #   0325  mis-typed WebAssembly tag imports corrupt the GC heap - needs the
+    #         GC heap, and the host's linker defines functions only, so a guest
+    #         has no tag import to mistype
+    #   0327  async-lifted component callback result count - needs the component
+    #         model; the host instantiates core `Module`s only
+    # The fix is >=48.0.4 (or >=49.0.2), which is a commons bump, so these come
+    # out with the other two when that lands. scripts/check-wasmtime-ignores.sh
+    # runs in CI and fails if `gc`, `component-model` or `async` is ever enabled
+    # on wasmtime (this reasoning would then be false), and fails once the locked
+    # wasmtime is a fixed release while any of the five ignores remains.
+    "RUSTSEC-2026-0325", # wasmtime mis-typed tag imports - gc feature not compiled
+    "RUSTSEC-2026-0326", # wasmtime GC rooting across try_call - gc feature not compiled
+    "RUSTSEC-2026-0327", # wasmtime component async callback - component model not compiled
 ]

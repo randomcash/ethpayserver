@@ -127,10 +127,15 @@ impl<
 
             // Broadcast reorg-induced status change via WebSocket
             if let Some(ref ws) = self.ws_broadcast {
-                ws.send(StatusUpdate::InvoiceStatus {
-                    invoice_id: invoice_id.as_str().to_string(),
-                    status: new_status.to_string(),
-                });
+                ws.send_for_invoice(
+                    &*self.data_service,
+                    &invoice_id,
+                    StatusUpdate::InvoiceStatus {
+                        invoice_id: invoice_id.as_str().to_string(),
+                        status: new_status.to_string(),
+                    },
+                )
+                .await;
             }
 
             tracing::info!(
