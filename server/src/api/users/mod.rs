@@ -15,8 +15,8 @@ pub(crate) mod wallets;
 pub use api_keys::{create_api_key, list_api_keys, revoke_api_key, rotate_api_key, update_api_key};
 pub use deletion::{DeleteAccountQuery, delete_account};
 pub use email::{
-    ConfirmEmailChangePayload, RequestEmailChangePayload, confirm_email_change, remove_email,
-    request_email_change,
+    ConfirmEmailChangePayload, EmailStatusResponse, RequestEmailChangePayload,
+    confirm_email_change, get_email_status, remove_email, request_email_change,
 };
 pub use wallets::{
     PromoteWalletCredentialRequest, WalletCredentialResponse, WalletReauthChallengeResponse,

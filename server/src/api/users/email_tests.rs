@@ -45,3 +45,27 @@ fn removing_an_email_that_is_not_there_is_refused_too() {
         Some((StatusCode::BAD_REQUEST, _))
     ));
 }
+
+#[test]
+fn status_reports_an_unconfigured_server_as_not_configured() {
+    let status = email_status(&crate::services::email::NoopEmailSender);
+    assert!(!status.configured);
+}
+
+#[test]
+fn status_reports_a_server_with_smtp_as_configured() {
+    let config = crate::services::email::SmtpConfig {
+        host: "smtp.example.com".to_string(),
+        port: 587,
+        username: "user".to_string(),
+        password: "pass".to_string(),
+        from: "noreply@example.com".to_string(),
+    };
+    // Building the transport only assembles config; it never connects.
+    #[allow(
+        clippy::expect_used,
+        reason = "transport construction cannot fail without a real network call"
+    )]
+    let service = crate::services::email::EmailService::new(&config).expect("build transport");
+    assert!(email_status(&service).configured);
+}
