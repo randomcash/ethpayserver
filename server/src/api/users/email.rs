@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use auth::SessionService;
 
-use crate::api::extractors::FreshlyAuthenticatedUser;
+use crate::api::extractors::{AuthenticatedUser, FreshlyAuthenticatedUser};
 use crate::services::EmailChangeVerificationData;
 use crate::state::PgAppState;
 
@@ -53,6 +53,46 @@ pub struct RequestEmailChangePayload {
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct ConfirmEmailChangePayload {
     pub token: Uuid,
+}
+
+/// Response for `GET /users/me/email/status`. A boolean only: the SMTP
+/// settings themselves (host, account, sender) never leave the server.
+///
+/// Local rather than in `api-types` for the same reason as
+/// `RequestEmailChangePayload`.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct EmailStatusResponse {
+    /// Whether this server can send outgoing email at all. When false, every
+    /// email channel (receipts, address verification) is inert.
+    pub configured: bool,
+}
+
+fn email_status(sender: &dyn crate::services::EmailSender) -> EmailStatusResponse {
+    EmailStatusResponse {
+        configured: sender.is_configured(),
+    }
+}
+
+/// Report whether this server can send email, so the client does not offer
+/// email channels that would never deliver.
+#[utoipa::path(
+    get,
+    path = "/users/me/email/status",
+    tag = "users",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Whether outgoing email is configured", body = EmailStatusResponse),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
+pub async fn get_email_status<A>(
+    AuthenticatedUser(_user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+) -> Json<EmailStatusResponse>
+where
+    A: SessionService + 'static,
+{
+    Json(email_status(&*state.email_sender))
 }
 
 /// Very small email-shape check.
