@@ -28,8 +28,8 @@ forget:
   both of which already carry it. `scripts/check-no-ticket-refs.sh` enforces
   this in CI; `CLAUDE.md`, `AGENTS.md` and `docs/` are exempt.
 
-`central-infrastructure` and `payserver-billing` are private. Deploy config and
-billing logic live there and must not migrate here.
+Deploy config and billing logic live in private repositories and must not
+migrate here.
 
 ## Three repositories, one product
 
@@ -170,7 +170,7 @@ human-reviewed without exception.
 
 ## Deploys
 
-`testnet` deploys on every push, via a dispatch to `central-infrastructure`.
+`testnet` deploys on every push, via a dispatch to the private deploy repository.
 `mainnet` takes release tags only — `vMAJOR.MINOR.PATCH` exactly, no prerelease
 suffix — and holds real merchant funds. There is no staging.
 - **A bound that logs its measurement every time it checks produces a time
