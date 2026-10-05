@@ -37,7 +37,7 @@ import { HDKey, mnemonicToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import { mnemonicToSeedSync } from '@scure/bip39';
 
-import { api, wsUrl } from '../fixtures/api';
+import { api, V4_UUID, wsUrl } from '../fixtures/api';
 import {
   expectRunSurvivedArchive,
   randomInvoiceAmountWei,
@@ -533,6 +533,8 @@ test.describe('Synthetic payment (live testnet)', () => {
             metadata: { source: 'synthetic-payment', sequence: i + 1 },
           },
         });
+
+        expect(invoice.id, 'invoice id is not a v4 UUID').toMatch(V4_UUID);
 
         const option = invoice.payment_options.find(
           (o) => o.chain_id === CHAIN_ID && o.token_address === null,

@@ -1667,3 +1667,42 @@ async fn the_create_wallet_endpoint_returns_addresses_to_verify_a_tron_key() {
         "a merchant has nothing else to check the key with"
     );
 }
+
+// =========================================================================
+// store_for_caller: foreign and nonexistent stores answer alike
+// =========================================================================
+
+fn a_store(owner: UserId) -> Store {
+    Store {
+        id: StoreId(Uuid::from_bytes([7; 16])),
+        name: "s".to_string(),
+        website: None,
+        owner_id: owner,
+        archived: false,
+        created_at: Utc::now(),
+    }
+}
+
+#[test]
+fn a_foreign_store_answers_the_same_as_a_nonexistent_one() {
+    let me = UserId(Uuid::from_bytes([1; 16]));
+    let someone_else = UserId(Uuid::from_bytes([2; 16]));
+    for owner_only in [false, true] {
+        let foreign = store_for_caller(Some(a_store(someone_else)), me, false, owner_only);
+        let missing = store_for_caller(None, me, false, owner_only);
+        assert_eq!(foreign.unwrap_err(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[test]
+fn a_member_who_is_not_owner_may_read_but_not_manage() {
+    let me = UserId(Uuid::from_bytes([1; 16]));
+    let owner = UserId(Uuid::from_bytes([2; 16]));
+    assert!(store_for_caller(Some(a_store(owner)), me, true, false).is_ok());
+    assert_eq!(
+        store_for_caller(Some(a_store(owner)), me, true, true).unwrap_err(),
+        StatusCode::FORBIDDEN
+    );
+    assert!(store_for_caller(Some(a_store(me)), me, false, true).is_ok());
+}
