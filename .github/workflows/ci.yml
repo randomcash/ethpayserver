@@ -894,7 +894,7 @@ jobs:
           cosign sign --yes "$DIGEST"
           echo "signed $DIGEST" >> "$GITHUB_STEP_SUMMARY"
 
-  # staging (main) + production (tags) deploy via SSH push — see the private deploy repository
+  # staging (main) + production (tags) deploy via SSH push — see central-infrastructure/deploy.yml
   # testnet deploys by dispatch like every other environment. It used
   # to run here, on a self-hosted runner attached to this PUBLIC repository -
   # which GitHub warns against, because a fork PR can execute on it. The only
@@ -912,8 +912,8 @@ jobs:
   # job; until then, treat this as half done.
   #
   # Separate from notify-deploy below because the payload differs: this targets
-  # the private deploy repository's testnet workflow, which takes `sha_tag` and runs
-  # docker compose locally on the box. The other targets its general deploy workflow, which takes
+  # central-infrastructure's deploy-testnet.yml, which takes `sha_tag` and runs
+  # docker compose locally on the box. The other targets deploy.yml, which takes
   # {service, environment, tag} and goes over SSH.
   notify-deploy-testnet:
     name: Notify Deploy (testnet)

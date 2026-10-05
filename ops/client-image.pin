@@ -1,7 +1,7 @@
 # The payserver-client image this payserver TESTS AGAINST.
 #
 # Not the one it deploys: the frontend deploys on its own cadence,
-# from payserver-client via the private deploy repository. This pin exists so E2E runs
+# from payserver-client via central-infrastructure. This pin exists so E2E runs
 # against a known frontend rather than a moving target.
 #
 # The frontend lives in its own repository (randomcash/payserver-client) and
