@@ -688,6 +688,18 @@ jobs:
           # from the moment it merged and the job stayed green-looking for two
           # steps afterwards.
           SENTRY_ENVIRONMENT: dev
+          # The ws isolation spec expires real invoices and waits for the
+          # cleanup service's expiry sweeps, then deletes its accounts, which
+          # is refused while any expired invoice's address is still watched.
+          # The defaults (60s grace, 60s sweep tick) make that minutes per
+          # run; these keep it to seconds without changing what is tested.
+          #
+          # Trade-off: this lane no longer exercises the production cleanup
+          # timing. A defect that only appears inside the 60s grace window
+          # would not show up here; the isolation spec is not testing the
+          # grace period, so that is accepted.
+          CLEANUP_UNWATCH_GRACE_PERIOD_SECS: "1"
+          CLEANUP_FALLBACK_INTERVAL_SECS: "5"
         # Fails here if the server does not come up, rather than letting a dead
         # server surface two steps later as "frontend proxy is not reaching the
         # API" - which reads as a client or nginx problem and is why this took

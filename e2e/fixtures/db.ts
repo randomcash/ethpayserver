@@ -153,37 +153,6 @@ export async function createUserWithApiKey(
 }
 
 /**
- * Put a user into a store under a global default role, by writing the same
- * `user_stores` row `add_user_to_store` writes and the same `store_roles` row
- * the member-add route resolves the role name against.
- *
- * Exists because the member route is unusable as a precondition: it needs the
- * store-users permissions and no seeded role carries them. Nothing here is
- * cached or derived - `get_user_store`, which every store-scoped access check
- * reads, is a plain `SELECT ... FROM user_stores WHERE user_id AND store_id`.
- */
-export async function addStoreMember(
-  userId: string,
-  storeId: string,
-  roleName: string,
-): Promise<void> {
-  const client = new Client({ connectionString: DATABASE_URL });
-  await client.connect();
-  try {
-    const { rowCount } = await client.query(
-      `INSERT INTO user_stores (user_id, store_id, store_role_id)
-       SELECT $1, $2, id FROM store_roles WHERE role = $3 AND store_id IS NULL`,
-      [userId, storeId, roleName],
-    );
-    if (rowCount !== 1) {
-      throw new Error(`no global store role named ${roleName} to grant`);
-    }
-  } finally {
-    await client.end();
-  }
-}
-
-/**
  * A payment row inserted directly, tied to an existing invoice.
  *
  * A real payment only exists once evmmonitor observes an on-chain transfer,
