@@ -161,8 +161,18 @@ fi
 # size comparison, so ordinary runs pay nothing. The path's history includes
 # commits that deleted it, so a restored-from-deletion file is covered too;
 # enrolment cannot do this, as it only applies to added paths.
+#
+# Deliberately wider than "reverts one commit": any version the base ever held
+# counts, so pasting back an old oversized file is waived too. Narrowing it to
+# the immediately preceding version would break reverting a refactor that has
+# since been edited, which is the common case. It cannot admit new content.
+# Needs the base's full history (CI checks out with fetch-depth: 0); in a
+# shallow clone it sees too little and fails toward reporting growth.
 restores_known_state() { # path
   local blob c
+  if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+    echo "note: shallow clone - revert detection for $1 sees truncated history" >&2
+  fi
   blob="$(git rev-parse --verify --quiet "HEAD:$1")" || return 1
   while IFS= read -r c; do
     [ -z "$c" ] && continue

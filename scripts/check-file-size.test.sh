@@ -379,7 +379,9 @@ REVERT_T="$(mktemp -d)"
   git revert --no-edit HEAD >/dev/null
 )
 out="$(cd "$REVERT_T" && LINE_LIMIT=5 BASE_REF=base "$GUARD" 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ]; then
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'mod.rs is byte-identical' \
+  && printf '%s\n' "$out" | grep -q 'users.rs is byte-identical' \
+  && ! printf '%s\n' "$out" | grep -q ' grew from'; then
   echo "ok: a pure revert of a split is not read as growth"
 else
   echo "FAIL: reverting a split must pass"; printf '%s\n' "$out"; fail=1
