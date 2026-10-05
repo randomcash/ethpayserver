@@ -19,7 +19,7 @@ use auth::AuthenticationService;
 use data_service::{PaymentOptionReader, PaymentReader};
 use types::{InvoiceId, InvoiceReader, InvoiceStatus};
 
-use super::ws::StatusUpdate;
+use super::ws::{StatusUpdate, WsEvent};
 use crate::state::PgAppState;
 pub use api_types::{CheckoutPaymentInfo, CheckoutResponse};
 
@@ -107,7 +107,7 @@ where
 /// Only forwards StatusUpdate messages matching the given invoice_id.
 async fn handle_checkout_socket(
     socket: WebSocket,
-    mut rx: tokio::sync::broadcast::Receiver<StatusUpdate>,
+    mut rx: tokio::sync::broadcast::Receiver<WsEvent>,
     invoice_id: String,
 ) {
     let (mut sender, mut receiver) = socket.split();
@@ -122,7 +122,7 @@ async fn handle_checkout_socket(
 
     let inv_id = invoice_id.clone();
     let mut send_task = tokio::spawn(async move {
-        while let Ok(update) = rx.recv().await {
+        while let Ok(WsEvent { update, .. }) = rx.recv().await {
             // Filter: only forward events for this invoice
             let matches = match &update {
                 StatusUpdate::InvoiceStatus { invoice_id, .. } => invoice_id == &inv_id,

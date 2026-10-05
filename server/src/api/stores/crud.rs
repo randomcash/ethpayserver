@@ -34,6 +34,44 @@ pub(crate) fn store_response(store: Store) -> StoreResponse {
     }
 }
 
+/// Answer a by-id store request on facts already loaded.
+///
+/// A store that does not exist and a store the caller has no standing in must
+/// be indistinguishable, so both are `NOT_FOUND`: a different status for the
+/// foreign case would confirm which store ids exist. `FORBIDDEN` is reserved
+/// for a caller who can already see the store (a member) but lacks the
+/// authority the route needs, since refusing them reveals nothing.
+pub(crate) fn store_for_caller(
+    store: Option<Store>,
+    caller: auth::UserId,
+    is_member: bool,
+    owner_only: bool,
+) -> Result<Store, StatusCode> {
+    let store = store.ok_or(StatusCode::NOT_FOUND)?;
+    let is_owner = store.owner_id == caller;
+    if !is_owner && !is_member {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if owner_only && !is_owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(store)
+}
+
+/// Whether `caller` is a member of `store_id`.
+async fn is_store_member<A: SessionService>(
+    state: &PgAppState<A>,
+    caller: auth::UserId,
+    store_id: StoreId,
+) -> Result<bool, StatusCode> {
+    Ok(state
+        .data_service
+        .get_user_store(caller, store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_some())
+}
+
 /// Query for `GET /stores`.
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 pub struct ListStoresQuery {
@@ -177,21 +215,9 @@ where
         .data_service
         .get_store(StoreId(store_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    // Check user has access (is owner or member)
-    let is_owner = store.owner_id == user.id;
-    let is_member = state
-        .data_service
-        .get_user_store(user.id, StoreId(store_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .is_some();
-
-    if !is_owner && !is_member {
-        return Err(StatusCode::FORBIDDEN);
-    }
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let is_member = is_store_member(&state, user.id, StoreId(store_id)).await?;
+    let store = store_for_caller(store, user.id, is_member, false)?;
 
     Ok(Json(store_response(store)))
 }
@@ -292,12 +318,9 @@ where
         .data_service
         .get_store(StoreId(store_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    if store.owner_id != user.id {
-        return Err(StatusCode::FORBIDDEN);
-    }
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let is_member = is_store_member(&state, user.id, StoreId(store_id)).await?;
+    store_for_caller(store, user.id, is_member, true)?;
 
     state
         .data_service
@@ -334,16 +357,13 @@ pub async fn unarchive_store<A>(
 where
     A: SessionService + 'static,
 {
-    let mut store = state
+    let store = state
         .data_service
         .get_store(StoreId(store_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    if store.owner_id != user.id {
-        return Err(StatusCode::FORBIDDEN);
-    }
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let is_member = is_store_member(&state, user.id, StoreId(store_id)).await?;
+    let mut store = store_for_caller(store, user.id, is_member, true)?;
 
     store.archived = false;
     state

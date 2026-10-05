@@ -26,6 +26,7 @@ pub mod api_key_scope;
 pub mod auth_freshness;
 pub mod checkout;
 pub mod dashboard;
+pub mod entitlements;
 pub mod extractors;
 pub mod health;
 pub mod http_metrics;
@@ -44,7 +45,7 @@ pub mod ws;
 
 pub use extractors::{
     AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser, MerchantReader,
-    StoreScopedUser,
+    StandingPusher, StoreScopedUser,
 };
 pub use openapi::ApiDoc;
 
@@ -266,6 +267,9 @@ where
         // manifest, so building a menu runs no plugin code.
         .route("/", get(plugins::list_plugin_pages::<A>))
         .route("/{id}/pages/{*path}", get(plugins::get_page::<A>))
+        // Core, not a plugin's: the standing gates invoice creation, so it is
+        // stored by the host and lands whether or not any plugin is loaded.
+        .route("/entitlements", entitlements::route::<A>())
         .with_state(state.clone());
 
     // Dashboard endpoint

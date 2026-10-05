@@ -38,7 +38,7 @@ async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
     .await;
     assert_eq!(
         result.unwrap_err(),
-        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
         "an API key must not reach another tenant's invoice any more than a session can"
     );
 
