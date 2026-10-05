@@ -343,3 +343,43 @@ fn resolve_environment_does_not_default_an_absent_var_to_a_permitted_value() {
         }
     }
 }
+
+/// Drives the constructor both binaries install, not a layer assembled in the
+/// test: if a binary went back to a bare `sentry_tracing::layer()`, nothing
+/// about the filter would be exercised. An INFO record must be dropped at
+/// `ERROR`, and an INFO record with a structured field must arrive as a log
+/// carrying that field once the threshold allows it.
+#[test]
+fn sentry_layer_applies_the_threshold_and_carries_structured_fields() {
+    use tracing_subscriber::prelude::*;
+
+    let _dispatcher = tracing_subscriber::registry()
+        .with(sentry_layer(tracing::Level::ERROR))
+        .set_default();
+    let envelopes = sentry::test::with_captured_envelopes_options(
+        || tracing::info!(order = "o-1", "below the threshold"),
+        client_options(None, None, "test".to_string(), 0.0),
+    );
+    assert!(
+        captured_logs(&envelopes).is_empty(),
+        "sentry_layer(ERROR) let an INFO record through as a structured log"
+    );
+    drop(_dispatcher);
+
+    let _dispatcher = tracing_subscriber::registry()
+        .with(sentry_layer(tracing::Level::INFO))
+        .set_default();
+    let envelopes = sentry::test::with_captured_envelopes_options(
+        || tracing::info!(order = "o-1", "at the threshold"),
+        client_options(None, None, "test".to_string(), 0.0),
+    );
+    let logs = captured_logs(&envelopes);
+    assert!(
+        !logs.is_empty(),
+        "sentry_layer(INFO) dropped an INFO record"
+    );
+    assert!(
+        logs.iter().all(|l| l.attributes.contains_key("order")),
+        "structured field did not arrive as an attribute: {logs:?}"
+    );
+}

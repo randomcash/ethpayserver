@@ -759,6 +759,28 @@ pub fn sentry_event_filter(
     }
 }
 
+/// The Sentry layer both binaries install: [`sentry_event_filter`] at
+/// `min_level`, per-layer-filtered to INFO and above.
+///
+/// Per-layer filtering (rather than a shared `.with(filter)`) keeps
+/// `SENTRY_LOG_LEVEL` independent of `LOG_LEVEL`: a bare filter layer ANDs
+/// across the whole stack, so an event `LOG_LEVEL` rejects would never reach
+/// this layer at all. The INFO floor is fixed because `sentry_tracing` never
+/// does anything below INFO regardless of `min_level`.
+///
+/// One constructor, so `server`, `evmmonitor` and the tests build the same
+/// layer: a test that assembles its own can prove the layer works, never that
+/// a binary installs it.
+pub fn sentry_layer<S>(min_level: tracing::Level) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use tracing_subscriber::Layer;
+    sentry_tracing::layer()
+        .event_filter(sentry_event_filter(min_level))
+        .with_filter(tracing_subscriber::filter::LevelFilter::INFO)
+}
+
 /// Log whether error reporting is on, at INFO, always — never the DSN itself
 /// — and refuse to continue when [`reporting_status`] says this environment
 /// must not run disabled.

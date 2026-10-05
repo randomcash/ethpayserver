@@ -308,31 +308,17 @@ fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
     // it. Per-layer filtering (`.with_filter` on each layer instead of a
     // shared `.with(filter)`) is what actually decouples them.
     let sentry_log_level = evm::telemetry::resolve_sentry_log_level();
-    // Floor for the Sentry layer's own callsite interest, independent of
-    // LOG_LEVEL. Fixed at INFO because `sentry_tracing`'s event/span
-    // classification never does anything below INFO regardless of
-    // `sentry_log_level` (DEBUG/TRACE are always `EventFilter::Ignore`), so
-    // this can't suppress anything `sentry_event_filter` would keep.
-    let sentry_filter = tracing_subscriber::filter::LevelFilter::INFO;
 
     match format {
         "json" => {
             tracing_subscriber::registry()
-                .with(
-                    sentry_tracing::layer()
-                        .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
-                        .with_filter(sentry_filter),
-                )
+                .with(evm::telemetry::sentry_layer(sentry_log_level))
                 .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
                 .init();
         }
         _ => {
             tracing_subscriber::registry()
-                .with(
-                    sentry_tracing::layer()
-                        .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
-                        .with_filter(sentry_filter),
-                )
+                .with(evm::telemetry::sentry_layer(sentry_log_level))
                 .with(tracing_subscriber::fmt::layer().with_filter(filter))
                 .init();
         }
