@@ -61,6 +61,48 @@ pub struct SafeModeResponse {
     /// boot. Plugins are disabled, not uninstalled - their files and data are
     /// untouched, and clearing the flag on the next boot restores them.
     pub safe_mode: bool,
+    /// True when something on this server can use the operator store: at
+    /// least one installed plugin is enabled and safe mode is off. The
+    /// operator store only decides where a plugin's invoices are issued and
+    /// which store's payments a plugin is told about, so on a server with no
+    /// running plugin the setting does nothing and a client should not offer
+    /// it.
+    pub operator_store_available: bool,
+}
+
+/// The safe-mode response for a server, read from its installed plugins.
+///
+/// A failed read reports the store as unavailable rather than failing the
+/// request: `safe_mode` is known without the database, and a client showing
+/// its safe-mode warning must still get it when the plugin list cannot be
+/// read.
+async fn safe_mode_response<R>(reader: &R, safe_mode: bool) -> SafeModeResponse
+where
+    R: data_service::InstalledPluginReader + ?Sized,
+{
+    let enabled = match reader.list_installed_plugins().await {
+        Ok(installed) => installed.iter().map(|p| p.enabled).collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list plugins for the safe-mode response");
+            Vec::new()
+        }
+    };
+    SafeModeResponse {
+        safe_mode,
+        operator_store_available: operator_store_available(safe_mode, enabled),
+    }
+}
+
+/// Whether an operator store has any consumer on this server.
+///
+/// Any enabled plugin counts, not only a billing one: the host hands the
+/// operator store to every loaded plugin (invoice issuing and payment
+/// reports are host-wide), and the server cannot tell what a plugin is for.
+/// Based on the installed rows rather than what loaded at boot, so a plugin
+/// that was installed or enabled after boot (and takes the store up on the
+/// next restart, like the store itself) still makes the setting reachable.
+fn operator_store_available(safe_mode: bool, enabled: impl IntoIterator<Item = bool>) -> bool {
+    !safe_mode && enabled.into_iter().any(|e| e)
 }
 
 // ============================================================================
@@ -588,9 +630,7 @@ pub async fn get_safe_mode<A>(
 where
     A: SessionService + 'static,
 {
-    Json(SafeModeResponse {
-        safe_mode: state.safe_mode,
-    })
+    Json(safe_mode_response(&*state.data_service, state.safe_mode).await)
 }
 
 #[cfg(test)]
@@ -687,9 +727,102 @@ mod tests {
 
     #[test]
     fn test_safe_mode_response_serialization() {
-        let resp = SafeModeResponse { safe_mode: true };
+        let resp = SafeModeResponse {
+            safe_mode: true,
+            operator_store_available: false,
+        };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["safe_mode"], true);
+        assert_eq!(json["operator_store_available"], false);
+    }
+
+    /// The operator store is offered only when a plugin could use it.
+    #[test]
+    fn the_operator_store_is_available_only_with_an_enabled_plugin() {
+        assert!(!operator_store_available(false, []), "no plugins installed");
+        assert!(
+            !operator_store_available(false, [false]),
+            "the only plugin is disabled"
+        );
+        assert!(operator_store_available(false, [false, true]));
+        assert!(
+            !operator_store_available(true, [true]),
+            "safe mode loads nothing"
+        );
+    }
+
+    struct Plugins(Result<Vec<bool>, ()>);
+
+    #[async_trait::async_trait]
+    impl data_service::InstalledPluginReader for Plugins {
+        async fn list_installed_plugins(
+            &self,
+        ) -> data_service::RepositoryResult<Vec<data_service::InstalledPlugin>> {
+            let Ok(flags) = &self.0 else {
+                return Err(data_service::RepositoryError::InvalidData("down".into()));
+            };
+            Ok(flags
+                .iter()
+                .map(|&enabled| data_service::InstalledPlugin {
+                    id: "p".to_string(),
+                    version: "1.0.0".to_string(),
+                    manifest_toml: String::new(),
+                    artifact_sha256: String::new(),
+                    enabled,
+                    disabled_reason: None,
+                    db_role_password: None,
+                    installed_at: Utc::now(),
+                    updated_at: Utc::now(),
+                })
+                .collect())
+        }
+        async fn get_installed_plugin(
+            &self,
+            _id: &str,
+        ) -> data_service::RepositoryResult<Option<data_service::InstalledPlugin>> {
+            Ok(None)
+        }
+        async fn plugin_events(
+            &self,
+            _id: &str,
+            _limit: i64,
+        ) -> data_service::RepositoryResult<Vec<data_service::PluginEvent>> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn response_json(plugins: Result<Vec<bool>, ()>, safe_mode: bool) -> serde_json::Value {
+        serde_json::to_value(safe_mode_response(&Plugins(plugins), safe_mode).await).unwrap()
+    }
+
+    /// The handler's body, end to end over the wire shape: it must read the
+    /// installed rows, and a failed read must not take `safe_mode` with it.
+    #[tokio::test]
+    async fn the_safe_mode_response_reflects_the_installed_plugins() {
+        let none = response_json(Ok(vec![]), false).await;
+        assert_eq!(none["operator_store_available"], false);
+        assert_eq!(none["safe_mode"], false);
+
+        let off = response_json(Ok(vec![false]), false).await;
+        assert_eq!(off["operator_store_available"], false);
+
+        let on = response_json(Ok(vec![false, true]), false).await;
+        assert_eq!(on["operator_store_available"], true);
+
+        let safe = response_json(Ok(vec![true]), true).await;
+        assert_eq!(safe["safe_mode"], true);
+        assert_eq!(safe["operator_store_available"], false);
+
+        let failed = response_json(Err(()), true).await;
+        assert_eq!(failed["safe_mode"], true, "safe_mode survives a read error");
+        assert_eq!(failed["operator_store_available"], false);
+
+        let failed_live = response_json(Err(()), false).await;
+        assert_eq!(failed_live["safe_mode"], false);
+        assert_eq!(
+            failed_live["operator_store_available"], false,
+            "an unreadable plugin list reports the store unavailable"
+        );
     }
 
     fn method(wallet: Option<uuid::Uuid>) -> data_service::StorePaymentMethod {
