@@ -18,7 +18,11 @@
 //! DATABASE_URL="postgres://..." ETHPAY_API_KEY="ak_live_..." ethpay-mcp
 //! ```
 
+#[cfg(test)]
+mod auth_tests;
 mod server;
+#[cfg(test)]
+mod testkit;
 
 use std::sync::Arc;
 
@@ -56,7 +60,7 @@ async fn main() -> Result<()> {
     // Required: API key
     let api_key_raw =
         std::env::var("ETHPAY_API_KEY").context("ETHPAY_API_KEY environment variable required")?;
-    let (user_id, store_ids) = validate_api_key(&data_service, &api_key_raw).await?;
+    let (user_id, store_ids) = validate_api_key(&*data_service, &api_key_raw).await?;
     tracing::info!(
         user_id = %user_id.0,
         stores = store_ids.len(),
@@ -72,7 +76,7 @@ async fn main() -> Result<()> {
         Ok(redis_url) => match server::create_evm_monitor(&redis_url).await {
             Ok(monitor) => {
                 tracing::info!("EVM monitor connected via Redis");
-                Some(Arc::new(monitor))
+                Some(monitor)
             }
             Err(e) => {
                 tracing::warn!(
@@ -100,8 +104,11 @@ async fn main() -> Result<()> {
 }
 
 /// Validate an API key and return the owning user ID and their accessible store IDs.
+///
+/// Generic over the repositories (rather than naming `PgDataService`) so the
+/// auth tests can drive it with a stub instead of a database.
 async fn validate_api_key(
-    data_service: &PgDataService,
+    data_service: &(impl ApiKeyRepository + StoreRepository),
     raw_key: &str,
 ) -> Result<(UserId, Vec<StoreId>)> {
     // Hash the key (same as auth crate: SHA-256 hex)
