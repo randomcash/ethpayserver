@@ -122,15 +122,50 @@ environment (an ordinary GitHub Actions run has no other persistence between
 schedule ticks), passes it to `check-health-deep.sh` as `HEALTH_STATE_FILE`,
 and saves it back afterwards regardless of pass/fail. The script tracks how
 many consecutive checks a chain's `last_block` has repeated and fails once
-that exceeds `STALL_THRESHOLD` (default 3 — i.e. ~15-20 minutes flat at the
-5-minute cadence).
+that exceeds `STALL_THRESHOLD` (default 3 checks — about 15-20 minutes flat
+only if every 5-minute run is dispatched, which GitHub does not do; at the
+delivered cadence it is many hours. See the next paragraph).
 
-Five minutes is GitHub Actions' practical floor, not the 30-60s this ticket
-asked for — schedule intervals shorter than that are not reliable, and GitHub
-can delay a scheduled run further under load. The two Sentry Cron Monitor
-URLs above have to be created by hand in Sentry (Crons → new monitor → "check
-in via HTTP") and the resulting URLs stored as repo secrets; that account
-setup is outside what a commit here can do.
+Five minutes is GitHub Actions' practical floor, and it is a floor, not a
+delivery guarantee. Scheduled workflows are best-effort: this one has been
+observed dispatching only a small fraction of its runs, with gaps of hours, and
+that figure will drift. The `*/5` cron therefore does not hold a 5-minute
+cadence.
+
+**Where the 5-minute cadence actually comes from.** Not from this workflow.
+The deploy repository (`central-infrastructure`, private) defines a
+one-minute systemd timer that polls `/api/health/deep` and, per the script's
+own header as read when this was written (re-read it before relying on this),
+reports success to a dead-man's switch and treats a chain whose block has not
+advanced within `STALE_BLOCK_SECS` (default 600) as down, so a down service,
+a broken watcher and a dead box all surface as a late check-in. That is the
+intended path for prompt outage detection. The timer's
+unit and script are `systemd/rcs-health-watch@.timer` (`OnUnitActiveSec=1min`)
+and `scripts/health-watch.sh` in that repository, deliberately:
+they depend on host paths and credentials that must not be published here.
+Whether `rcs-health-watch@testnet.timer` is installed and enabled is
+**unverified from this repository**: enabling it is the deploy-repository
+owner's job, and it can be checked with `systemctl list-timers` on the host.
+Until that is confirmed, treat prompt outage detection as not yet in place.
+
+Consequences for this workflow's Sentry Cron Monitors: their check-ins come
+only from the GitHub schedule, so a window sized for 5 minutes alarms
+constantly, and one widened to match delivery cannot tell "testnet is down"
+from "GitHub skipped runs". Size the monitors' expected interval to hours and
+treat them as a backstop for the workflow itself, not as outage detection.
+Resizing the monitors is a manual Sentry change owned by the operator.
+`STALL_THRESHOLD` counts checks, not minutes, so it stretches the same way.
+It is deliberately left at 3 rather than lowered: a lower value would
+false-flag a slow chain on the 5-minute cadence the workflow is nominally on,
+and at the delivered cadence of hours it cannot be made prompt anyway. A
+flat chain is therefore flagged here only after several delivered runs; the
+host timer's seconds-based stale-block check (if enabled) is what bounds
+stall time. The check-in needs no code change at this cadence: it fires once
+per delivered run, so the only adjustment is the monitor window in Sentry. The scheduled end-to-end workflow is subject to the same
+best-effort dispatch and is a separate problem, not addressed here. The two
+Sentry Cron Monitor URLs above have to be created by hand in Sentry (Crons →
+new monitor → "check in via HTTP") and the resulting URLs stored as repo
+secrets; that account setup is outside what a commit here can do.
 
 For the faster cadence, also add a Sentry **Uptime Check** (not a Cron
 Monitor) against `/api/health/deep`, run from Sentry's own checkers at 30-60s.
