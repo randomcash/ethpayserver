@@ -13,6 +13,7 @@
 //! way `plugin_invoice_creation_filter.rs` calls `create_invoice`: the
 //! extractors it takes are plain data, so nothing here depends on routing.
 
+use data_service::test_support::pg_service;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -57,16 +58,6 @@ impl AccountClosedObserver for RecordingObserver {
     async fn account_closed(&self, account_id: UserId) {
         self.seen.lock().unwrap().push(account_id);
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 /// A bare passkey-only account: no email, no store, nothing an
@@ -116,9 +107,7 @@ fn app_state(
 #[tokio::test]
 #[ignore]
 async fn a_deleted_account_notifies_every_registered_plugin() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let id = seed_user(pg.pool()).await;
 
     let observer = Arc::new(RecordingObserver::default());
@@ -147,9 +136,7 @@ async fn a_deleted_account_notifies_every_registered_plugin() {
 #[tokio::test]
 #[ignore]
 async fn a_refused_deletion_notifies_nobody() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let id = seed_user(pg.pool()).await;
 
     let observer = Arc::new(RecordingObserver::default());

@@ -10,7 +10,7 @@ use super::{assert_amount_eq, create_test_service, seeded_test_invoice, test_pay
 #[tokio::test]
 #[ignore]
 async fn integration_payment_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create invoice first (payments have FK to invoices)
     let invoice = seeded_test_invoice(&service).await;
@@ -45,7 +45,7 @@ async fn integration_payment_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_payment_get_for_invoice() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create invoice
     let invoice = seeded_test_invoice(&service).await;
@@ -68,7 +68,7 @@ async fn integration_payment_get_for_invoice() {
 #[tokio::test]
 #[ignore]
 async fn integration_payment_get_awaiting_confirmation() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create invoice
     let invoice = seeded_test_invoice(&service).await;
@@ -97,7 +97,7 @@ async fn integration_payment_get_awaiting_confirmation() {
 #[tokio::test]
 #[ignore]
 async fn integration_payment_upsert_update() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create invoice
     let invoice = seeded_test_invoice(&service).await;
@@ -131,7 +131,7 @@ async fn integration_payment_upsert_update() {
 #[tokio::test]
 #[ignore]
 async fn integration_payment_query_scopes_to_a_set_of_stores() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mine = seeded_test_invoice(&service).await;
     let theirs = seeded_test_invoice(&service).await;
@@ -181,7 +181,7 @@ async fn integration_payment_query_scopes_to_a_set_of_stores() {
 #[tokio::test]
 #[ignore]
 async fn integration_payment_search_is_scoped_and_counts_what_it_returns() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mine = seeded_test_invoice(&service).await;
     let theirs = seeded_test_invoice(&service).await;
@@ -235,7 +235,7 @@ async fn integration_payment_search_is_scoped_and_counts_what_it_returns() {
 #[tokio::test]
 #[ignore]
 async fn integration_payment_search_anchors_the_hash_but_not_the_sender() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
@@ -342,7 +342,7 @@ async fn integration_payment_search_anchors_the_hash_but_not_the_sender() {
 #[tokio::test]
 #[ignore]
 async fn integration_payment_upsert_keeps_two_transfers_in_one_tx() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
@@ -401,7 +401,7 @@ async fn integration_payment_upsert_keeps_two_transfers_in_one_tx() {
 #[tokio::test]
 #[ignore]
 async fn integration_upsert_with_tx_index_and_obligation_writes_both_rows() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
@@ -457,7 +457,7 @@ async fn integration_upsert_with_tx_index_and_obligation_writes_both_rows() {
 #[ignore]
 async fn integration_redelivered_payment_reuses_the_original_row_id_and_does_not_duplicate_the_obligation()
  {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
@@ -551,7 +551,7 @@ async fn integration_redelivered_payment_reuses_the_original_row_id_and_does_not
 #[tokio::test]
 #[ignore]
 async fn integration_obligation_insert_failure_rolls_back_the_payment_row() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
@@ -626,7 +626,7 @@ async fn integration_obligation_insert_failure_rolls_back_the_payment_row() {
 #[tokio::test]
 #[ignore]
 async fn integration_claim_undispatched_obligations_hides_claimed_rows_until_expiry() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 

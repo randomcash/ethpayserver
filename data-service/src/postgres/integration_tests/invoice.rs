@@ -8,7 +8,7 @@ use super::{assert_amount_eq, create_test_service, seeded_test_invoice};
 #[tokio::test]
 #[ignore]
 async fn integration_invoice_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create invoice
     let invoice = seeded_test_invoice(&service).await;
@@ -73,7 +73,7 @@ async fn integration_invoice_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_invoice_query() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create multiple invoices
     let mut invoice1 = seeded_test_invoice(&service).await;
@@ -112,7 +112,7 @@ async fn integration_invoice_query() {
 #[tokio::test]
 #[ignore]
 async fn integration_invoice_expired() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Create an expired invoice
     let mut expired_invoice = seeded_test_invoice(&service).await;
@@ -142,7 +142,7 @@ async fn integration_invoice_expired() {
 #[tokio::test]
 #[ignore]
 async fn integration_invoice_with_metadata() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mut invoice = seeded_test_invoice(&service).await;
     invoice.metadata = Some(serde_json::json!({
@@ -176,7 +176,7 @@ async fn integration_invoice_with_metadata() {
 #[tokio::test]
 #[ignore]
 async fn integration_invoice_query_scopes_to_a_set_of_stores() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Three stores, one invoice each, so "did it filter" and "did it filter to
     // the right ones" are different observations.
@@ -230,7 +230,7 @@ async fn integration_invoice_query_scopes_to_a_set_of_stores() {
 #[tokio::test]
 #[ignore]
 async fn integration_invoice_search_is_scoped_and_counts_what_it_returns() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     // Unique per run: the test database is shared with every other test in the
     // file, so the term has to identify these rows and nothing else.
@@ -310,7 +310,7 @@ async fn integration_invoice_search_is_scoped_and_counts_what_it_returns() {
 #[tokio::test]
 #[ignore]
 async fn integration_invoice_search_anchors_the_id_but_not_the_currency() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mut invoice = seeded_test_invoice(&service).await;
     invoice.currency = "USDC".to_string();

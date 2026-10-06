@@ -56,13 +56,14 @@ use clap::Parser;
 use data_service::RedisDataService;
 use evm::error::EvmResult;
 use evm::monitor::bridge::{EventBridge, RedisBridge};
+use evm::monitor::startup::{STARTUP_ATTEMPTS, STARTUP_INITIAL_DELAY, start_monitors};
 use evm::monitor::{
     CoordinatorConfig, EventHandler, LoggingHandler, MonitorCoordinator, MonitorEvent,
 };
 use secrecy::ExposeSecret;
 use tokio::signal;
-use tracing::{error, info};
-use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::info;
+use tracing_subscriber::{EnvFilter, util::SubscriberInitExt};
 
 use chain::create_chain_monitor;
 use commands::{handle_commands, restore_watched_addresses};
@@ -185,21 +186,31 @@ async fn main() -> anyhow::Result<()> {
 
     // Add chain monitors
     let monitored_chain_ids: Vec<u64> = chain_configs.iter().map(|c| c.chain_id).collect();
-    for chain_config in &chain_configs {
-        match create_chain_monitor(chain_config).await {
-            Ok(monitor) => {
+    // A monitor that failed to build is not a degraded mode: the process would
+    // stay up, report nothing, and detect no payments on that chain. Retry
+    // briefly for a transient RPC failure, then exit non-zero so the
+    // supervisor restarts us and the failure is visible.
+    start_monitors(
+        &monitored_chain_ids,
+        STARTUP_ATTEMPTS,
+        STARTUP_INITIAL_DELAY,
+        |chain_id| {
+            let chain_config = chain_configs
+                .iter()
+                .find(|c| c.chain_id == chain_id)
+                .expect("chain id comes from chain_configs");
+            create_chain_monitor(chain_config)
+        },
+        |chain_id, monitor| {
+            let coordinator = coordinator.clone();
+            async move {
                 coordinator.add_chain(monitor).await?;
-                info!(chain_id = chain_config.chain_id, "chain monitor started");
+                info!(chain_id, "chain monitor started");
+                Ok(())
             }
-            Err(e) => {
-                error!(
-                    chain_id = chain_config.chain_id,
-                    error = %e,
-                    "failed to create chain monitor"
-                );
-            }
-        }
-    }
+        },
+    )
+    .await?;
 
     // Restore watched addresses from Redis persistence
     restore_watched_addresses(&coordinator, &persistence, &monitored_chain_ids).await;
@@ -297,35 +308,8 @@ fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
     // it. Per-layer filtering (`.with_filter` on each layer instead of a
     // shared `.with(filter)`) is what actually decouples them.
     let sentry_log_level = evm::telemetry::resolve_sentry_log_level();
-    // Floor for the Sentry layer's own callsite interest, independent of
-    // LOG_LEVEL. Fixed at INFO because `sentry_tracing`'s event/span
-    // classification never does anything below INFO regardless of
-    // `sentry_log_level` (DEBUG/TRACE are always `EventFilter::Ignore`), so
-    // this can't suppress anything `sentry_event_filter` would keep.
-    let sentry_filter = tracing_subscriber::filter::LevelFilter::INFO;
 
-    match format {
-        "json" => {
-            tracing_subscriber::registry()
-                .with(
-                    sentry_tracing::layer()
-                        .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
-                        .with_filter(sentry_filter),
-                )
-                .with(tracing_subscriber::fmt::layer().json().with_filter(filter))
-                .init();
-        }
-        _ => {
-            tracing_subscriber::registry()
-                .with(
-                    sentry_tracing::layer()
-                        .event_filter(evm::telemetry::sentry_event_filter(sentry_log_level))
-                        .with_filter(sentry_filter),
-                )
-                .with(tracing_subscriber::fmt::layer().with_filter(filter))
-                .init();
-        }
-    }
+    evm::telemetry::build_subscriber(filter, format == "json", sentry_log_level).init();
 
     Ok(())
 }

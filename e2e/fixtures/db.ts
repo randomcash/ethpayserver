@@ -62,6 +62,48 @@ export async function resetDatabase(): Promise<void> {
 }
 
 /**
+ * Make an existing account a `server_admin`, by the id registration showed.
+ *
+ * It throws when no row matches, because an UPDATE that touches nothing looks
+ * like success and the test that called it would then be asserting about an
+ * account that is still an ordinary user.
+ */
+export async function promoteToServerAdmin(userId: string): Promise<void> {
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rowCount } = await client.query(
+      `UPDATE users SET role = 'server_admin' WHERE id::text = $1`,
+      [userId],
+    );
+    if (rowCount !== 1) {
+      throw new Error(`expected to promote exactly one account, matched ${rowCount}`);
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+/** The stored role and lock of an account, for asserting what the UI really changed. */
+export async function readUserAccess(
+  userId: string,
+): Promise<{ role: string; locked: boolean }> {
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rows } = await client.query(
+      `SELECT role, (locked_until IS NOT NULL AND locked_until > NOW()) AS locked
+         FROM users WHERE id::text = $1`,
+      [userId],
+    );
+    if (rows.length !== 1) throw new Error(`expected one account, found ${rows.length}`);
+    return { role: rows[0].role as string, locked: rows[0].locked as boolean };
+  } finally {
+    await client.end();
+  }
+}
+
+/**
  * A user with an API key, created directly in the database.
  *
  * Registration goes through WebAuthn in a browser, which is the right way to
@@ -76,7 +118,7 @@ export async function resetDatabase(): Promise<void> {
  */
 export async function createUserWithApiKey(
   role: 'user' | 'server_admin' = 'user',
-): Promise<{ userId: string; apiKey: string }> {
+): Promise<{ userId: string; apiKey: string; email: string }> {
   const crypto = await import('node:crypto');
   // `ak_` because that is the shape `validate_api_key` looks for, and a key
   // that does not start with it fails for a reason that reads as "wrong
@@ -114,7 +156,7 @@ export async function createUserWithApiKey(
       `INSERT INTO users (email, kdf_params, encrypted_symmetric_key,
                           recovery_verification_hash, role)
        VALUES ($1, $2, $3, 'e2e-placeholder', $4)
-       RETURNING id`,
+       RETURNING id, email`,
       [
         `e2e-${crypto.randomBytes(6).toString('hex')}@example.test`,
         JSON.stringify({
@@ -133,6 +175,7 @@ export async function createUserWithApiKey(
       ],
     );
     const userId = rows[0].id as string;
+    const email = rows[0].email as string;
 
     // `id` is supplied, unlike for `users` above. The two tables differ:
     // `users.id` is `UUID PRIMARY KEY DEFAULT uuid_generate_v4()`, while
@@ -146,7 +189,7 @@ export async function createUserWithApiKey(
        VALUES ($1, $2, 'e2e', $3, $4, true)`,
       [crypto.randomUUID(), userId, keyHash, apiKey.slice(0, 12)],
     );
-    return { userId, apiKey };
+    return { userId, apiKey, email };
   } finally {
     await client.end();
   }
@@ -220,6 +263,57 @@ export async function seedPaymentForInvoice(
     );
     await client.query(`UPDATE invoices SET status = 'paid' WHERE id = $1`, [invoiceId]);
     return rows[0].id as string;
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * Refuse to touch the database from the remote lane.
+ *
+ * A remote run targets a deployed environment whose database this process must
+ * never write to. Throws rather than returning, so a test that needs a seed
+ * fails there instead of being skipped: a skipped control looks the same as a
+ * passing one.
+ */
+export function requireLocalDatabase(what: string): void {
+  if (process.env.E2E_REMOTE === 'true') {
+    throw new Error(`${what} writes to the database, which the remote lane must never do`);
+  }
+}
+
+/** Delete a payment seeded by `seedPaymentForInvoice`, to run the control case. */
+export async function removeSeededPayment(paymentId: string): Promise<void> {
+  requireLocalDatabase('removeSeededPayment');
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rowCount } = await client.query('DELETE FROM payments WHERE id = $1', [paymentId]);
+    if (rowCount !== 1) {
+      throw new Error(`expected to remove exactly one seeded payment, removed ${rowCount}`);
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * Whether the owner of the store named `storeName` still has a user row.
+ *
+ * Reads the database rather than trusting a status code: a refused delete and a
+ * successful one are told apart by whether the account is still there. Returns
+ * false once the owner is deleted, as the store cascades away with it.
+ */
+export async function storeOwnerExists(storeName: string): Promise<boolean> {
+  requireLocalDatabase('storeOwnerExists');
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rows } = await client.query(
+      `SELECT 1 FROM stores s JOIN users u ON u.id = s.owner_id WHERE s.name = $1`,
+      [storeName],
+    );
+    return rows.length > 0;
   } finally {
     await client.end();
   }

@@ -36,7 +36,9 @@ impl MerchantDirectoryReader for PgDataService {
 
     async fn list_stores(&self, offset: i64, limit: i64) -> RepositoryResult<Vec<MerchantStore>> {
         let rows = sqlx::query(
-            "SELECT id, name, owner_id, archived FROM stores ORDER BY created_at LIMIT $1 OFFSET $2",
+            // `id` breaks ties: offset paging over a non-total order can skip or repeat
+            // a store, and a store a caller never sees is a merchant it never bills.
+            "SELECT id, name, owner_id, archived FROM stores ORDER BY created_at, id LIMIT $1 OFFSET $2",
         )
         .bind(limit)
         .bind(offset)

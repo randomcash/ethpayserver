@@ -27,9 +27,7 @@ use crate::support::{
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_payments() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -98,9 +96,7 @@ async fn an_api_key_cannot_reach_another_tenants_payments() {
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_wallets() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -175,9 +171,7 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_stores() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -187,7 +181,7 @@ async fn an_api_key_cannot_reach_another_tenants_stores() {
         server::api::stores::get_store(a_via_key, State(state.clone()), Path(b.store.id.0)).await;
     assert_eq!(
         result.unwrap_err(),
-        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
         "an API key must not fetch another tenant's store by id"
     );
 
@@ -201,9 +195,10 @@ async fn an_api_key_cannot_reach_another_tenants_stores() {
     assert_eq!(own.id, a.store.id.0);
 
     let a_via_key = authenticate_via_bearer(&state, &a.api_key_raw).await;
-    let listed = server::api::stores::list_stores(a_via_key, State(state))
-        .await
-        .expect("listing one's own stores via an api key must succeed");
+    let listed =
+        server::api::stores::list_stores(a_via_key, State(state), Query(Default::default()))
+            .await
+            .expect("listing one's own stores via an api key must succeed");
     let ids: Vec<Uuid> = listed.iter().map(|s| s.id).collect();
     assert!(
         ids.contains(&a.store.id.0),
@@ -222,9 +217,7 @@ async fn an_api_key_cannot_reach_another_tenants_stores() {
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_payouts_refunds_or_deliveries() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let b_payout = seed_payout(&pg, &b.store).await;

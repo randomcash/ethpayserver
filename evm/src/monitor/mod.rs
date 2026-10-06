@@ -66,6 +66,7 @@ mod coordinator;
 pub mod events;
 mod handlers;
 mod source;
+pub mod startup;
 
 pub use source::rpc::{RpcBlockSource, RpcSourceConfig};
 pub use source::{BlockNotification, BlockSource, ChainHealth, LogFilter, SourceStatus};

@@ -2,9 +2,10 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
+use serde::Deserialize;
 use uuid::Uuid;
 
 use auth::repository::{StoreRepository, UserStoreRepository};
@@ -33,12 +34,62 @@ pub(crate) fn store_response(store: Store) -> StoreResponse {
     }
 }
 
+/// Answer a by-id store request on facts already loaded.
+///
+/// A store that does not exist and a store the caller has no standing in must
+/// be indistinguishable, so both are `NOT_FOUND`: a different status for the
+/// foreign case would confirm which store ids exist. `FORBIDDEN` is reserved
+/// for a caller who can already see the store (a member) but lacks the
+/// authority the route needs, since refusing them reveals nothing.
+pub(crate) fn store_for_caller(
+    store: Option<Store>,
+    caller: auth::UserId,
+    is_member: bool,
+    owner_only: bool,
+) -> Result<Store, StatusCode> {
+    let store = store.ok_or(StatusCode::NOT_FOUND)?;
+    let is_owner = store.owner_id == caller;
+    if !is_owner && !is_member {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if owner_only && !is_owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(store)
+}
+
+/// Whether `caller` is a member of `store_id`.
+async fn is_store_member<A: SessionService>(
+    state: &PgAppState<A>,
+    caller: auth::UserId,
+    store_id: StoreId,
+) -> Result<bool, StatusCode> {
+    Ok(state
+        .data_service
+        .get_user_store(caller, store_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_some())
+}
+
+/// Query for `GET /stores`.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct ListStoresQuery {
+    /// List only archived stores. Off by default: an archived store is
+    /// retired, not destroyed, and should not crowd the working list.
+    #[serde(default)]
+    pub archived: bool,
+}
+
 /// List stores for the authenticated user.
+///
+/// Archived stores are left out; `archived=true` returns only them.
 #[utoipa::path(
     get,
     path = "/stores",
     tag = "stores",
     security(("bearer_auth" = [])),
+    params(ListStoresQuery),
     responses(
         (status = 200, description = "List of stores", body = Vec<StoreResponse>),
         (status = 401, description = "Unauthorized"),
@@ -47,6 +98,7 @@ pub(crate) fn store_response(store: Store) -> StoreResponse {
 pub async fn list_stores<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
+    Query(query): Query<ListStoresQuery>,
 ) -> Result<Json<Vec<StoreResponse>>, StatusCode>
 where
     A: SessionService + 'static,
@@ -57,7 +109,13 @@ where
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(stores.into_iter().map(store_response).collect()))
+    Ok(Json(
+        stores
+            .into_iter()
+            .filter(|s| s.archived == query.archived)
+            .map(store_response)
+            .collect(),
+    ))
 }
 
 /// Create a new store.
@@ -157,21 +215,9 @@ where
         .data_service
         .get_store(StoreId(store_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    // Check user has access (is owner or member)
-    let is_owner = store.owner_id == user.id;
-    let is_member = state
-        .data_service
-        .get_user_store(user.id, StoreId(store_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .is_some();
-
-    if !is_owner && !is_member {
-        return Err(StatusCode::FORBIDDEN);
-    }
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let is_member = is_store_member(&state, user.id, StoreId(store_id)).await?;
+    let store = store_for_caller(store, user.id, is_member, false)?;
 
     Ok(Json(store_response(store)))
 }
@@ -272,12 +318,9 @@ where
         .data_service
         .get_store(StoreId(store_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    if store.owner_id != user.id {
-        return Err(StatusCode::FORBIDDEN);
-    }
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let is_member = is_store_member(&state, user.id, StoreId(store_id)).await?;
+    store_for_caller(store, user.id, is_member, true)?;
 
     state
         .data_service
@@ -286,4 +329,48 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Unarchive a store, making it listable and invoice-capable again.
+///
+/// Only the store owner can unarchive a store.
+#[utoipa::path(
+    post,
+    path = "/stores/{store_id}/unarchive",
+    tag = "stores",
+    security(("bearer_auth" = [])),
+    params(
+        ("store_id" = Uuid, Path, description = "Store ID")
+    ),
+    responses(
+        (status = 200, description = "Store unarchived", body = StoreResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Only store owner can unarchive"),
+        (status = 404, description = "Store not found"),
+    )
+)]
+pub async fn unarchive_store<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path(store_id): Path<Uuid>,
+) -> Result<Json<StoreResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let store = state
+        .data_service
+        .get_store(StoreId(store_id))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let is_member = is_store_member(&state, user.id, StoreId(store_id)).await?;
+    let mut store = store_for_caller(store, user.id, is_member, true)?;
+
+    store.archived = false;
+    state
+        .data_service
+        .update_store(&store)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(store_response(store)))
 }

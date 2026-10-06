@@ -39,6 +39,12 @@
 # ratchet, or the measurement-failure guards below - all of which took real
 # debugging and none of which are about the limit itself.
 #
+# Reverts: undoing a split restores larger files, which a direction-measuring
+# gate would read as growth - making every improvement it rewarded irreversible.
+# A file byte-identical to a version already in the base's history is not
+# flagged. The ratchet cannot serve here: it is consulted only for ADDED paths,
+# so it can cover a restored deleted file but never a modified one.
+#
 # Measurement failures still fail the build even with enforcement off. "Could
 # not look" is not "nothing found", and that conflation is a different bug from
 # the one this gate was arguing about.
@@ -146,6 +152,35 @@ fi
 # git diff, and it isn't here - only -M (rename detection) is. 'C' staying in
 # --diff-filter is inert (a filter narrows what git already detected, it
 # doesn't turn detection on), so a case arm for it would just be dead code.
+# A file whose content is byte-identical to some version of the same path on
+# the base's history is an undo, not growth: reverting a refactor restores
+# larger files by construction, and a gate that measures direction would make
+# every improvement it rewarded irreversible. Exact blob equality, not "no
+# bigger than it once was" - a file regrown to its old size with different
+# content is still growth. Only consulted once a file has already failed the
+# size comparison, so ordinary runs pay nothing. The path's history includes
+# commits that deleted it, so a restored-from-deletion file is covered too;
+# enrolment cannot do this, as it only applies to added paths.
+#
+# Deliberately wider than "reverts one commit": any version the base ever held
+# counts, so pasting back an old oversized file is waived too. Narrowing it to
+# the immediately preceding version would break reverting a refactor that has
+# since been edited, which is the common case. It cannot admit new content.
+# Needs the base's full history (CI checks out with fetch-depth: 0); in a
+# shallow clone it sees too little and fails toward reporting growth.
+restores_known_state() { # path
+  local blob c
+  if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+    echo "note: shallow clone - revert detection for $1 sees truncated history" >&2
+  fi
+  blob="$(git rev-parse --verify --quiet "HEAD:$1")" || return 1
+  while IFS= read -r c; do
+    [ -z "$c" ] && continue
+    [ "$(git rev-parse --verify --quiet "${c}:$1" 2>/dev/null)" = "$blob" ] && return 0
+  done < <(git log --format=%H "$base" -- "$1" 2>/dev/null)
+  return 1
+}
+
 while IFS=$'\t' read -r dstatus path1 path2; do
   [ -z "$dstatus" ] && continue
   case "$dstatus" in
@@ -191,7 +226,11 @@ while IFS=$'\t' read -r dstatus path1 path2; do
   esac
   over_after=$(( after > LINE_LIMIT ? after - LINE_LIMIT : 0 ))
   over_before=$(( before > LINE_LIMIT ? before - LINE_LIMIT : 0 ))
-  if [ "$over_after" -gt "$over_before" ]; then
+  if [ "$over_after" -gt "$over_before" ] && restores_known_state "$f"; then
+    # A revert of a split necessarily restores the larger files. That size is
+    # not growth, it is a state the base already held.
+    echo "note: $f is byte-identical to a version already in $base's history - restoring it is not growth" >&2
+  elif [ "$over_after" -gt "$over_before" ]; then
     grew=$((grew + 1))
     if [ "$ENFORCE" = "1" ]; then
       status=1

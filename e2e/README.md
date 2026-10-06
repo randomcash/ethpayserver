@@ -2,6 +2,10 @@
 
 Playwright end-to-end tests for ethpayserver.
 
+Playwright was chosen over Cypress for its built-in WebAuthn
+virtual-authenticator support via the Chrome DevTools Protocol, which is
+required to drive the passkey-based auth flow.
+
 ## Local mode (default)
 
 Runs against a local backend and trunk dev server. Requires PostgreSQL with an
@@ -90,6 +94,13 @@ E2E_SKIP_AUTH=false \
 | `E2E_SKIP_DB_RESET` | _(unset)_                                | Skip database truncate-and-seed in `beforeAll`     |
 | `E2E_SKIP_AUTH`     | _(unset)_                                | Set `true` to skip the auth spec                   |
 
+### Target guard
+
+In local mode (`E2E_REMOTE` not `true`) the harness refuses to start unless
+`E2E_API_URL` is loopback on ports 3000-3099 and `E2E_BASE_URL` is loopback on
+8000-8099. The live service's port is refused on any host with no override.
+Any other target needs `E2E_ALLOW_NON_LOCAL_TARGET=true`. Remote mode is unaffected.
+
 ### Running against testnet from a local machine
 
 ```bash
@@ -173,7 +184,7 @@ weeks. Sweep it, or fund ~0.1.
 ## Leftover synthetic-payment stores (`scripts/sweep-e2e-stores.mjs`)
 
 The synthetic-payment spec creates a store per run and now removes it again in
-an `afterEach`. This script clears the ones that accumulated before
+an `afterEach`. This script archives the ones that accumulated before
 that landed, and anything a run abandoned by dying outright.
 
 ```bash
@@ -183,21 +194,19 @@ E2E_API_URL=... E2E_REMOTE=true E2E_API_TOKEN=ak_... \
   node scripts/sweep-e2e-stores.mjs --execute
 ```
 
-It only ever touches names matching the exact stamp the spec generates
-(`e2e-synthetic-2026-08-27T17-29-33-596Z`), and `GET /stores` only returns the
-token's own stores, so it cannot reach another account. Names that start with
-`e2e-synthetic-` but do not match the full shape are listed and left alone.
+It **archives** every live store whose name starts with `e2e-`, through the
+self-service `DELETE /stores/{id}`. Archived stores drop out of `GET /stores`
+(`?archived=true` lists them), refuse new invoices, and keep their payment
+history; `POST /stores/{id}/unarchive` reverses it. Because it is reversible
+there is no timestamp-shape gate, and the token only needs to own the stores
+(it need not be `server_admin`). `GET /stores` returns only the token's own
+stores, so it cannot reach another account. A real merchant store whose name
+starts with `e2e-` would be archived too, so `--execute` refuses any host other
+than `testnet.random.cash` or localhost unless you add `--force`.
 
-This calls `DELETE /admin/stores/{id}` (`hard_delete_store` in
-`server/src/api/admin/mod.rs`), not the self-service `DELETE /stores/{id}` —
-that one only **archives** (`UPDATE stores SET archived = true`), which
-leaves a row `GET /stores` returns forever, with its payment method, webhook
-and invoices intact. The admin route actually deletes it, cascading to all of
-those, which is why `E2E_API_TOKEN` here must be a `server_admin` token and
-why the endpoint independently refuses any store whose name is not the exact
-synthetic shape - see `sweep-e2e-accounts.mjs`'s note below on why a
-hardcoded, redundant guard is worth it even when a check above it should
-already be enough.
+It no longer hard-deletes. `DELETE /admin/stores/{id}` (`hard_delete_store`)
+still exists as the escape hatch and still refuses any name that is not the
+exact synthetic stamp.
 
 ## Leftover registrations (`scripts/sweep-e2e-accounts.mjs`)
 
@@ -289,7 +298,7 @@ E2E_TEST_MNEMONIC="..." E2E_API_TOKEN=ak_... E2E_SEPOLIA_RPC_URL=https://... \
 |----------------------------|----------|--------------------------------------------------------------------|
 | `E2E_SYNTHETIC_PAYMENT`    | yes      | `true` to run the spec at all                                      |
 | `E2E_TEST_MNEMONIC`        | yes      | BIP39 phrase — merchant xpub **and** the spending wallet           |
-| `E2E_API_TOKEN`            | yes      | `server_admin` API key (`ak_...`) — creates the store and hard-deletes it afterward |
+| `E2E_API_TOKEN`            | yes      | `server_admin` API key (`ak_...`) — creates the store and archives it afterward |
 | `E2E_SEPOLIA_RPC_URL`      | yes      | Sepolia RPC endpoint used to broadcast                             |
 | `E2E_WEBHOOK_PUBLIC_URL`   | no       | Skip the cloudflared quick tunnel and use this base URL instead    |
 | `E2E_WEBHOOK_PORT`         | no       | Bind the sink to a fixed port (pairs with the above)               |

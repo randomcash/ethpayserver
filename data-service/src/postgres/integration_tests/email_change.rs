@@ -11,22 +11,13 @@
 //! means: recovery verifies against those two fields, never against whatever
 //! address was used to look the account up.
 
+use crate::test_support::pg_service;
 use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::email_change::EmailChangeWriter;
 use crate::postgres::PgDataService;
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 async fn seed_user_with_email(pool: &PgPool, email: &str) -> Uuid {
     let id = Uuid::new_v4();
@@ -70,9 +61,7 @@ async fn apply_confirmed_change(service: &PgDataService, user_id: auth::UserId, 
 #[tokio::test]
 #[ignore]
 async fn confirming_a_change_updates_email_and_leaves_the_recovery_salt_and_hash_untouched() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user_id = seed_user_with_email(&service.pool, "original@example.com").await;
     let before = auth::UserRepository::get_user(&service, auth::UserId(user_id))
         .await
@@ -119,9 +108,7 @@ async fn confirming_a_change_updates_email_and_leaves_the_recovery_salt_and_hash
 #[tokio::test]
 #[ignore]
 async fn an_expired_token_is_rejected() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user_id = seed_user_with_email(&service.pool, "expiring@example.com").await;
 
     let request = service
@@ -148,9 +135,7 @@ async fn an_expired_token_is_rejected() {
 #[tokio::test]
 #[ignore]
 async fn a_token_cannot_be_redeemed_twice() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user_id = seed_user_with_email(&service.pool, "reused@example.com").await;
 
     let request = service
@@ -188,9 +173,7 @@ async fn a_token_cannot_be_redeemed_twice() {
 #[tokio::test]
 #[ignore]
 async fn concurrent_requests_never_leave_two_live_tokens() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let service = std::sync::Arc::new(service);
     let user_id = seed_user_with_email(&service.pool, "racer@example.com").await;
 
@@ -263,9 +246,7 @@ async fn concurrent_requests_never_leave_two_live_tokens() {
 #[tokio::test]
 #[ignore]
 async fn a_new_request_supersedes_the_old_one() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user_id = seed_user_with_email(&service.pool, "super@example.com").await;
 
     let first = service

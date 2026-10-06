@@ -23,9 +23,7 @@ use crate::support::{
 #[tokio::test]
 #[ignore]
 async fn list_invoices_with_no_store_id_shows_only_the_callers_own() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -59,9 +57,7 @@ async fn list_invoices_with_no_store_id_shows_only_the_callers_own() {
 #[tokio::test]
 #[ignore]
 async fn list_invoices_with_another_tenants_store_id_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -118,9 +114,7 @@ async fn list_invoices_with_another_tenants_store_id_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn list_invoices_with_a_nil_store_id_is_refused_like_any_foreign_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let _b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -154,9 +148,7 @@ async fn list_invoices_with_a_nil_store_id_is_refused_like_any_foreign_store() {
 #[tokio::test]
 #[ignore]
 async fn list_invoices_with_no_store_id_as_server_admin_sees_every_tenant() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -193,9 +185,7 @@ async fn list_invoices_with_no_store_id_as_server_admin_sees_every_tenant() {
 #[tokio::test]
 #[ignore]
 async fn get_invoice_by_id_across_tenants_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -209,8 +199,21 @@ async fn get_invoice_by_id_across_tenants_is_refused() {
 
     assert_eq!(
         result.unwrap_err(),
-        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
         "A must not be able to fetch B's invoice by id"
+    );
+
+    // A foreign invoice must be indistinguishable from one that does not exist.
+    let missing = server::api::invoices::get_invoice(
+        store_scoped_user_info(a.user_id),
+        State(state.clone()),
+        Path(Uuid::new_v4().to_string()),
+    )
+    .await;
+    assert_eq!(
+        missing.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "a missing invoice answers the same as a foreign one"
     );
 
     // Positive control: the admin test below proves the admin bypass works,
@@ -235,9 +238,7 @@ async fn get_invoice_by_id_across_tenants_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn get_invoice_across_tenants_is_permitted_for_a_server_admin() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -259,9 +260,7 @@ async fn get_invoice_across_tenants_is_permitted_for_a_server_admin() {
 #[tokio::test]
 #[ignore]
 async fn get_invoice_payments_across_tenants_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -294,9 +293,7 @@ async fn get_invoice_payments_across_tenants_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn get_invoice_status_across_tenants_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));

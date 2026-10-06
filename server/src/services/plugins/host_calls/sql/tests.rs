@@ -126,20 +126,16 @@ fn a_malformed_request_is_an_error_not_a_panic() {
 /// plugin would be given.
 async fn live(
     name: &str,
-) -> Option<(
+) -> (
     PluginCalls,
     String,
     crate::services::plugins::PluginStorage,
     PluginId,
-)> {
+) {
     use crate::services::plugins::{PluginStorage, generate_role_password, role_name};
 
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let host_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await
-        .expect("DATABASE_URL is set but connecting failed");
+    let url = data_service::test_support::database_url();
+    let host_pool = data_service::test_support::pool_for(&url, 2).await;
     let storage = PluginStorage::new(host_pool.clone());
     let plugin = PluginId::new(name).unwrap();
 
@@ -163,21 +159,19 @@ async fn live(
     let pools = Arc::new(PluginPools::new(url, 4));
     pools.register(&plugin, &password).await.unwrap();
 
-    Some((
+    (
         PluginCalls::new(plugin.clone(), pools),
         schema,
         storage,
         plugin,
-    ))
+    )
 }
 
 /// The whole path, as billing will use it.
 #[tokio::test]
 #[ignore]
 async fn a_plugin_writes_and_reads_its_own_schema() {
-    let Some((calls, schema, storage, plugin)) = live("cash.random.hc.roundtrip").await else {
-        return;
-    };
+    let (calls, schema, storage, plugin) = live("cash.random.hc.roundtrip").await;
 
     let written = calls
             .run(request(&format!(
@@ -224,19 +218,7 @@ async fn a_plugin_writes_and_reads_its_own_schema() {
 #[tokio::test]
 #[ignore]
 async fn an_update_without_returning_cannot_confirm_its_own_match() {
-    // Unlike the file's other `live()`-gated tests, a silent skip here
-    // would defeat the point: this test exists to *prove* the
-    // `rows_affected` footgun, and a green run that never touched
-    // Postgres would look identical to one that did. CI always has
-    // `DATABASE_URL` set for `--ignored` runs; a bare `cargo test
-    // --ignored` without it fails loudly instead.
-    let Some((calls, schema, storage, plugin)) = live("cash.random.hc.update").await else {
-        panic!(
-            "DATABASE_URL must be set to run this test - it exists to \
-                 prove a real Postgres behaviour, so skipping it silently \
-                 would prove nothing"
-        );
-    };
+    let (calls, schema, storage, plugin) = live("cash.random.hc.update").await;
 
     calls
             .run(request(&format!(
@@ -292,9 +274,7 @@ async fn an_update_without_returning_cannot_confirm_its_own_match() {
 #[tokio::test]
 #[ignore]
 async fn a_failing_statement_rolls_back_everything_before_it() {
-    let Some((calls, schema, storage, plugin)) = live("cash.random.hc.atomic").await else {
-        return;
-    };
+    let (calls, schema, storage, plugin) = live("cash.random.hc.atomic").await;
 
     let result = calls
             .run(request(&format!(
@@ -327,9 +307,7 @@ async fn a_failing_statement_rolls_back_everything_before_it() {
 #[tokio::test]
 #[ignore]
 async fn a_non_text_column_tells_the_author_to_cast_it() {
-    let Some((calls, schema, storage, plugin)) = live("cash.random.hc.cast").await else {
-        return;
-    };
+    let (calls, schema, storage, plugin) = live("cash.random.hc.cast").await;
 
     // A row has to exist: the check runs per row, so an empty result
     // set has nothing to convert and would pass whatever the column type.
@@ -364,9 +342,7 @@ async fn a_non_text_column_tells_the_author_to_cast_it() {
 #[tokio::test]
 #[ignore]
 async fn a_plugin_cannot_reach_core_tables_through_a_storage_call() {
-    let Some((calls, _schema, storage, plugin)) = live("cash.random.hc.core").await else {
-        return;
-    };
+    let (calls, _schema, storage, plugin) = live("cash.random.hc.core").await;
 
     let err = calls
         .run(request(

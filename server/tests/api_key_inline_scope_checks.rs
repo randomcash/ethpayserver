@@ -18,6 +18,7 @@
 //! the owner's default "Owner" role is swapped for a store-scoped role built
 //! with exactly the permission a test needs.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -58,16 +59,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by these handlers")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -132,9 +123,7 @@ async fn seed_owner_with_permissions(
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_users_can_list_members() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -173,9 +162,7 @@ async fn a_key_scoped_to_view_users_can_list_members() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_something_else_is_refused_list_members() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -213,9 +200,7 @@ async fn a_key_scoped_to_something_else_is_refused_list_members() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_users_can_add_a_member() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let new_member = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
@@ -261,9 +246,7 @@ async fn a_key_scoped_to_modify_users_can_add_a_member() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_one_store_is_refused_remove_member_on_another() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let member = seed_user(pg.pool()).await;
     let store_a = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
@@ -313,9 +296,7 @@ async fn a_key_scoped_to_one_store_is_refused_remove_member_on_another() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_view_settings_reaches_past_get_wallet_permission_check() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -353,9 +334,7 @@ async fn a_key_scoped_to_view_settings_reaches_past_get_wallet_permission_check(
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_something_else_is_refused_get_wallet() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -396,9 +375,7 @@ async fn a_key_scoped_to_something_else_is_refused_get_wallet() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_users_can_update_a_member() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let member = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
@@ -457,9 +434,7 @@ async fn a_key_scoped_to_modify_users_can_update_a_member() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_one_store_is_refused_update_member_on_another() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let member = seed_user(pg.pool()).await;
     let store_a = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
@@ -519,9 +494,7 @@ async fn is_member(pg: &PgDataService, store_id: Uuid, user: Uuid) -> bool {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_something_else_is_refused_add_member() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let new_member = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
@@ -570,9 +543,7 @@ async fn a_key_scoped_to_something_else_is_refused_add_member() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_users_can_remove_a_member() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let member = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));

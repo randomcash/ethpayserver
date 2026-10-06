@@ -22,6 +22,7 @@
 //! a test that merely called a repository method sharing a handler's name
 //! would count as driving that handler.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -72,16 +73,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by these handlers")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -137,11 +128,11 @@ async fn seed_store(pg: &PgDataService, owner: Uuid) -> Store {
     store
 }
 
-async fn env() -> Option<(PgAppState<UnusedSessionService>, Uuid, Store)> {
-    let pg = service().await?;
+async fn env() -> (PgAppState<UnusedSessionService>, Uuid, Store) {
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = seed_store(&pg, owner).await;
-    Some((app_state(Arc::new(pg)), owner, store))
+    (app_state(Arc::new(pg)), owner, store)
 }
 
 // --- seeding and inspection helpers -----------------------------------
@@ -243,9 +234,7 @@ fn webhook_request() -> Json<ConfigureWebhookRequest> {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_configure_the_store_webhook() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let result = configure_store_webhook(
         StoreScopedUser(
             user_info(owner),
@@ -270,9 +259,7 @@ async fn a_key_scoped_to_modify_settings_can_configure_the_store_webhook() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_configuring_the_store_webhook() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let result = configure_store_webhook(
         StoreScopedUser(
             user_info(owner),
@@ -290,9 +277,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_configuring_the_store_webhook
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_get_the_store_webhook() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     seed_webhook(&state.data_service, store.id.0).await;
     let result = get_store_webhook(
         StoreScopedUser(
@@ -317,9 +302,7 @@ async fn a_key_scoped_to_modify_settings_can_get_the_store_webhook() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_getting_the_store_webhook() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     seed_webhook(&state.data_service, store.id.0).await;
     let result = get_store_webhook(
         StoreScopedUser(
@@ -336,9 +319,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_getting_the_store_webhook() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_delete_the_store_webhook() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     seed_webhook(&state.data_service, store.id.0).await;
     let result = delete_store_webhook(
         StoreScopedUser(
@@ -356,9 +337,7 @@ async fn a_key_scoped_to_modify_settings_can_delete_the_store_webhook() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_deleting_the_store_webhook() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     seed_webhook(&state.data_service, store.id.0).await;
     let result = delete_store_webhook(
         StoreScopedUser(
@@ -381,9 +360,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_deleting_the_store_webhook() 
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_set_the_token_policy() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let result = set_token_policy(
         StoreScopedUser(
             user_info(owner),
@@ -407,9 +384,7 @@ async fn a_key_scoped_to_modify_settings_can_set_the_token_policy() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_setting_the_token_policy() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let result = set_token_policy(
         StoreScopedUser(
             user_info(owner),
@@ -427,9 +402,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_setting_the_token_policy() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_get_the_token_policy() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     seed_policy(&state.data_service, store.id.0).await;
     let result = get_token_policy(
         StoreScopedUser(
@@ -449,9 +422,7 @@ async fn a_key_scoped_to_modify_settings_can_get_the_token_policy() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_getting_the_token_policy() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     seed_policy(&state.data_service, store.id.0).await;
     let result = get_token_policy(
         StoreScopedUser(
@@ -468,9 +439,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_getting_the_token_policy() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_delete_the_token_policy() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     seed_policy(&state.data_service, store.id.0).await;
     let result = delete_token_policy(
         StoreScopedUser(
@@ -490,9 +459,7 @@ async fn a_key_scoped_to_modify_settings_can_delete_the_token_policy() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_deleting_the_token_policy() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     seed_policy(&state.data_service, store.id.0).await;
     let result = delete_token_policy(
         StoreScopedUser(
@@ -528,9 +495,7 @@ fn settings_request() -> Json<UpdateStoreSettingsRequest> {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_update_store_settings() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let result = update_store_settings(
         StoreScopedUser(
             user_info(owner),
@@ -554,9 +519,7 @@ async fn a_key_scoped_to_modify_settings_can_update_store_settings() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_updating_store_settings() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let result = update_store_settings(
         StoreScopedUser(
             user_info(owner),
@@ -588,9 +551,7 @@ fn create_method_request() -> Json<CreatePaymentMethodRequest> {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_create_a_payment_method() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let result = create_payment_method(
         StoreScopedUser(
             user_info(owner),
@@ -613,9 +574,7 @@ async fn a_key_scoped_to_modify_settings_can_create_a_payment_method() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_creating_a_payment_method() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let result = create_payment_method(
         StoreScopedUser(
             user_info(owner),
@@ -636,9 +595,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_creating_a_payment_method() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_list_payment_methods() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let method = seed_method(&state.data_service, store.id.0).await;
     let result = list_payment_methods(
         StoreScopedUser(
@@ -659,9 +616,7 @@ async fn a_key_scoped_to_modify_settings_can_list_payment_methods() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_listing_payment_methods() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     seed_method(&state.data_service, store.id.0).await;
     let result = list_payment_methods(
         StoreScopedUser(
@@ -678,9 +633,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_listing_payment_methods() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_get_a_payment_method() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let method = seed_method(&state.data_service, store.id.0).await;
     let result = get_payment_method(
         StoreScopedUser(
@@ -701,9 +654,7 @@ async fn a_key_scoped_to_modify_settings_can_get_a_payment_method() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_getting_a_payment_method() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let method = seed_method(&state.data_service, store.id.0).await;
     let result = get_payment_method(
         StoreScopedUser(
@@ -720,9 +671,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_getting_a_payment_method() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_update_a_payment_method() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let method = seed_method(&state.data_service, store.id.0).await;
     let result = update_payment_method(
         StoreScopedUser(
@@ -748,9 +697,7 @@ async fn a_key_scoped_to_modify_settings_can_update_a_payment_method() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_updating_a_payment_method() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let method = seed_method(&state.data_service, store.id.0).await;
     let result = update_payment_method(
         StoreScopedUser(
@@ -779,9 +726,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_updating_a_payment_method() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_delete_a_payment_method() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let method = seed_method(&state.data_service, store.id.0).await;
     let result = delete_payment_method(
         StoreScopedUser(
@@ -802,9 +747,7 @@ async fn a_key_scoped_to_modify_settings_can_delete_a_payment_method() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_deleting_a_payment_method() {
-    let Some((state, owner, store)) = env().await else {
-        return;
-    };
+    let (state, owner, store) = env().await;
     let method = seed_method(&state.data_service, store.id.0).await;
     let result = delete_payment_method(
         StoreScopedUser(

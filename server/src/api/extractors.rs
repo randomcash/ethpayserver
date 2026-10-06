@@ -14,7 +14,8 @@ use chrono::{DateTime, Utc};
 use super::api_key_deprecation::DeprecationSlot;
 use super::api_key_hash::hash_api_key;
 pub(super) use super::api_key_scope::{
-    key_grants_store_permission, key_retains_unrestricted_access,
+    key_grants_merchant_read, key_grants_standing_push, key_grants_store_permission,
+    key_retains_unrestricted_access,
 };
 use super::auth_freshness::{is_grace_expired, is_reauth_stale};
 use crate::state::PgAppState;
@@ -166,7 +167,7 @@ async fn validate_session<A>(
 where
     A: SessionService + 'static,
 {
-    let (user_info, _is_operator, scope) = validate_session_with_scope(parts, state).await?;
+    let (user_info, _is_operator, scope) = validate_session_with_scope(parts, state, true).await?;
 
     // A key that carries a narrowed scope must not reach a caller that did
     // not ask for one.
@@ -205,9 +206,14 @@ where
 /// the API key's stored store-permission scope (`None` for session auth).
 /// Split out so the ~80 call sites that only ever want `UserInfo` don't have
 /// to carry data they never look at - see `StoreScopedUser`.
+///
+/// `narrow_role` is whether a scoped key's admin owner is downgraded to
+/// `Role::User` (see `validate_api_key`). Only `MerchantReader` passes false,
+/// because it has to know the owner's real role to check the scope against it.
 async fn validate_session_with_scope<A>(
     parts: &mut Parts,
     state: &PgAppState<A>,
+    narrow_role: bool,
 ) -> Result<(UserInfo, bool, Option<Vec<String>>), (StatusCode, &'static str)>
 where
     A: SessionService + 'static,
@@ -216,7 +222,7 @@ where
 
     // If the token starts with "ak_", validate as API key
     if token.starts_with("ak_") {
-        return validate_api_key(&token, parts, state).await;
+        return validate_api_key(&token, parts, state, narrow_role).await;
     }
 
     // Otherwise treat as session UUID
@@ -247,6 +253,7 @@ async fn validate_api_key<A>(
     raw_key: &str,
     parts: &mut Parts,
     state: &PgAppState<A>,
+    narrow_role: bool,
 ) -> Result<(UserInfo, bool, Option<Vec<String>>), (StatusCode, &'static str)>
 where
     A: SessionService + 'static,
@@ -322,7 +329,8 @@ where
     // `permissions` is null (never narrowed - every key that predates this
     // column, and any key an admin has not deliberately scoped) or
     // explicitly includes `unrestricted`.
-    if user.role == Role::ServerAdmin
+    if narrow_role
+        && user.role == Role::ServerAdmin
         && !key_retains_unrestricted_access(key_info.permissions.as_deref())
     {
         user.role = Role::User;
@@ -379,7 +387,8 @@ where
         parts: &mut Parts,
         state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
-        let (user_info, _is_operator, scope) = validate_session_with_scope(parts, state).await?;
+        let (user_info, _is_operator, scope) =
+            validate_session_with_scope(parts, state, true).await?;
         Ok(StoreScopedUser(user_info, scope))
     }
 }
@@ -394,12 +403,87 @@ where
         parts: &mut Parts,
         state: &PgAppState<A>,
     ) -> Result<Self, Self::Rejection> {
-        let (user, is_operator, key_scope) = validate_session_with_scope(parts, state).await?;
+        let (user, is_operator, key_scope) =
+            validate_session_with_scope(parts, state, true).await?;
         Ok(AuthenticatedCaller {
             user,
             is_operator,
             key_scope,
         })
+    }
+}
+
+/// Read-only access to the server-wide merchant listing, for a session, an
+/// unrestricted key, or a key scoped to `ethpay.server.canviewusers`.
+///
+/// `AdminAuth` cannot serve this: it refuses every scoped key, which is right
+/// for everything that can change something and leaves a read-only
+/// integration no choice but an unrestricted admin key. The owner must still
+/// be a `ServerAdmin` - a key never exceeds its owner - and that role is read
+/// before the scoped-key downgrade, which would otherwise hide it.
+pub struct MerchantReader(pub UserInfo);
+
+impl<A> FromRequestParts<PgAppState<A>> for MerchantReader
+where
+    A: SessionService + 'static,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &PgAppState<A>,
+    ) -> Result<Self, Self::Rejection> {
+        let (user_info, _is_operator, scope) =
+            validate_session_with_scope(parts, state, false).await?;
+
+        if user_info.role != Role::ServerAdmin {
+            return Err((StatusCode::FORBIDDEN, "Admin access required"));
+        }
+        if !key_grants_merchant_read(scope.as_deref()) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "This API key is not scoped to read the merchant listing",
+            ));
+        }
+
+        Ok(MerchantReader(user_info))
+    }
+}
+
+/// The caller of the account-standing push: an API key scoped to exactly that
+/// action, owned by a `ServerAdmin`.
+///
+/// Stricter than `MerchantReader` on purpose. A session, an unscoped key and an
+/// `unrestricted` key are all refused: the sender is meant to hold a credential
+/// that cannot be used for anything else, and accepting an admin key would let
+/// it be given one without anyone noticing. The owner's real role is read
+/// before the scoped-key downgrade, as there, so a key never exceeds its owner.
+pub struct StandingPusher(pub UserInfo);
+
+impl<A> FromRequestParts<PgAppState<A>> for StandingPusher
+where
+    A: SessionService + 'static,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &PgAppState<A>,
+    ) -> Result<Self, Self::Rejection> {
+        let (user_info, _is_operator, scope) =
+            validate_session_with_scope(parts, state, false).await?;
+
+        if !key_grants_standing_push(scope.as_deref()) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "This credential is not scoped to push account standing",
+            ));
+        }
+        if user_info.role != Role::ServerAdmin {
+            return Err((StatusCode::FORBIDDEN, "Admin access required"));
+        }
+
+        Ok(StandingPusher(user_info))
     }
 }
 

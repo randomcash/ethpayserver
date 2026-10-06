@@ -10,6 +10,7 @@
 //! and checks the replacement's scope both in the handler's own response
 //! and in what was actually persisted.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -45,16 +46,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by this handler")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -121,9 +112,7 @@ async fn seed_key(pg: &PgDataService, owner: Uuid, permissions: Option<&[String]
 #[tokio::test]
 #[ignore]
 async fn rotating_a_scoped_key_carries_its_scope_to_the_replacement() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let scope = vec![auth::Permission::StoreCreateInvoice.as_policy().to_string()];
     let key_id = seed_key(&pg, owner, Some(&scope)).await;

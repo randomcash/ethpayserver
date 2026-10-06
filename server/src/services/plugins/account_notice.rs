@@ -131,6 +131,7 @@ fn notice_address(email: Option<String>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use data_service::test_support::pg_service;
     use std::sync::{Arc, Mutex};
 
     use auth::{Result as AuthResult, Session, SessionId, UserInfo};
@@ -247,13 +248,6 @@ mod tests {
         }
     }
 
-    async fn live_service() -> Option<data_service::PgDataService> {
-        let database_url = std::env::var("DATABASE_URL").ok()?;
-        data_service::PgDataService::connect(&database_url)
-            .await
-            .ok()
-    }
-
     /// `kdf_params`/`encrypted_symmetric_key` need real shape, not `{}`:
     /// `get_user` deserialises both into `crypto::KdfParams`/`EncryptedBlob`,
     /// and a `{}` blob fails there before `notify_account` ever gets a
@@ -295,9 +289,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn notify_account_delivers_to_the_accounts_own_email() {
-        let Some(service) = live_service().await else {
-            return;
-        };
+        let service = pg_service().await;
         let pool = service.pool().clone();
         // Unique per run: `email` is unique on `users`, and the same fixture
         // is shared with every other test in this suite.
@@ -326,9 +318,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn notify_account_refuses_a_wallet_only_account() {
-        let Some(service) = live_service().await else {
-            return;
-        };
+        let service = pg_service().await;
         let pool = service.pool().clone();
         let account_id = seed_user(&pool, None).await;
         let sender = Arc::new(RecordingEmailSender::default());
@@ -351,9 +341,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn notify_account_refuses_an_account_that_does_not_exist() {
-        let Some(service) = live_service().await else {
-            return;
-        };
+        let service = pg_service().await;
         let sender = Arc::new(RecordingEmailSender::default());
         let missing = UserId(uuid::Uuid::new_v4());
         let api = notifier(service, sender.clone());

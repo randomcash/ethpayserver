@@ -1,5 +1,8 @@
 //! Test utilities for data service.
 
+mod invoice_creation;
+mod store_payment_method;
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -12,8 +15,8 @@ use types::{
     InvoiceStatus, InvoiceWriter, PaymentData, PaymentEventWriter, PaymentMethodId,
     PaymentOptionData, PaymentOptionId, PaymentOptionReader, PaymentOptionWriter,
     PaymentQueryParams, PaymentReader, PaymentWriter, PendingWatchInfo, RepositoryError,
-    RepositoryResult, StoreId, StoreSettings, StoreSettingsReader, StoreWebhook,
-    StoreWebhookReader, TokenData, TokenQueryParams, TokenReader, TokenWriter,
+    RepositoryResult, StoreId, StorePaymentMethod, StoreSettings, StoreSettingsReader,
+    StoreWebhook, StoreWebhookReader, TokenData, TokenQueryParams, TokenReader, TokenWriter,
     WatchedAddressReader, WatchedAddressWriter,
 };
 use uuid::Uuid;
@@ -44,6 +47,8 @@ pub struct InMemoryDataService {
     tokens: RwLock<HashMap<i64, TokenData>>,
     token_id_counter: RwLock<i64>,
     webhooks: RwLock<HashMap<Uuid, StoreWebhook>>,
+    // Kept as a Vec so `get_enabled_payment_methods` returns a stable order.
+    payment_methods: RwLock<Vec<StorePaymentMethod>>,
     chain_cursors: RwLock<HashMap<(String, u64), ChainCursor>>,
     // `reset_chain_watch_notifications` is otherwise a no-op here (see its
     // impl below), so a test asserting a lineage break actually re-armed
@@ -238,7 +243,7 @@ impl InvoiceReader for InMemoryDataService {
             .collect();
 
         let total = results.len() as i64;
-        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        results.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         let offset = params.offset as usize;
         let limit = params.limit as usize;
@@ -408,7 +413,7 @@ impl PaymentReader for InMemoryDataService {
             .cloned()
             .collect();
 
-        filtered.sort_by(|a, b| b.detected_at.cmp(&a.detected_at));
+        filtered.sort_by_key(|b| std::cmp::Reverse(b.detected_at));
         let total = filtered.len() as i64;
         let offset = params.offset as usize;
         let limit = params.limit as usize;

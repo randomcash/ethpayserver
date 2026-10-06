@@ -362,7 +362,9 @@ async fn expired_watch_fixture(
     .unwrap();
 
     let chain = ChainId::parse("eip155:1").unwrap();
-    let address = Address::repeat_byte(0x42);
+    // Hex letters, so the stored checksum-cased form differs from the
+    // lower-case form the event side formats.
+    let address = Address::repeat_byte(0xCD);
     let address_str = format!("{:#x}", address);
     let po = PaymentOptionData {
         id: PaymentOptionId(uuid::Uuid::new_v4()),
@@ -372,7 +374,7 @@ async fn expired_watch_fixture(
         asset_symbol: "ETH".to_string(),
         token_address: token.map(str::to_string),
         decimals: 18,
-        payment_address: address_str.clone(),
+        payment_address: address.to_checksum(None),
         wallet_id: None,
         derivation_index: None,
         amount: "1".to_string(),
