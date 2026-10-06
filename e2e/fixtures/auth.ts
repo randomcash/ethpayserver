@@ -1,4 +1,6 @@
 import { test as base, expect, type Page, type CDPSession } from '@playwright/test';
+import { validateMnemonic } from '@scure/bip39';
+import { wordlist } from '@scure/bip39/wordlists/english.js';
 
 export async function setupVirtualAuthenticator(
   page: Page,
@@ -17,7 +19,22 @@ export async function setupVirtualAuthenticator(
   return { cdpSession: client, authenticatorId };
 }
 
-export async function register(page: Page): Promise<void> {
+/**
+ * What registration hands the user, and the only things that can recover the
+ * account later.
+ *
+ * A passkey-only account has no email and no wallet address, so `accountId` is
+ * the sole identifier it can present at recovery — the phrase alone is not
+ * enough. Both are shown once, on the same screen, and never again.
+ */
+export interface RecoveryCredentials {
+  /** The 24 BIP39 words, in order. */
+  mnemonic: string[];
+  /** Shown only for passkey-only accounts, which have no other handle. */
+  accountId: string | null;
+}
+
+export async function register(page: Page): Promise<RecoveryCredentials> {
   await page.goto('/register');
 
   // Select the passkey tab
@@ -26,29 +43,133 @@ export async function register(page: Page): Promise<void> {
   // Fill username if a text input is present in the passkey form
   const usernameInput = page.locator('.ps-passkey-form input:not([type="hidden"]):not([type="checkbox"])');
   if (await usernameInput.isVisible({ timeout: 1_000 }).catch(() => false)) {
-    await usernameInput.fill(`e2e_user_${Date.now()}`);
+    // Date.now() alone collides when parallel workers register in the same
+    // millisecond. That was harmless while every run started from a reset
+    // database; now that this spec runs against shared environments, a
+    // collision would surface as a confusing duplicate-account failure.
+    const unique = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    await usernameInput.fill(`e2e_user_${unique}`);
   }
 
   // Trigger passkey creation — the virtual authenticator handles the prompt
   await page.locator('.ps-passkey-button').click();
 
+  return finishRegistration(page);
+}
+
+/**
+ * The half of registration that every authentication method shares.
+ *
+ * Whether the account was created with a passkey or a wallet, registration
+ * pauses on the same recovery screen and finishes the same way. Extracted so a
+ * second method does not mean a second copy of the capture-and-validate logic,
+ * which is exactly the kind of duplication that lets one copy silently rot.
+ */
+export async function finishRegistration(page: Page): Promise<RecoveryCredentials> {
   // Registration pauses on the recovery-phrase step before it redirects. Wait
-  // for whichever of the two arrives first instead of giving that step a fixed
-  // budget: a cold server answers the passkey round trip in more than the 5s
-  // the previous version allowed, and the wait below then timed out against a
-  // page still sitting on the recovery screen.
+  // for whichever arrives first instead of giving that step a fixed budget: a
+  // cold server answers the passkey round trip in more than the 5s an earlier
+  // version allowed, and the wait below then timed out against a page still
+  // sitting on the recovery screen.
+  //
+  // Two shapes are handled on purpose. "Skip for Now" is being
+  // removed from the default registration flow, because skipping strands the
+  // account with no recovery route. Accepting either shape keeps this fixture
+  // working on both sides of that change, so the ui-kit default can flip
+  // without a synchronised merge.
   const skipButton = page.locator('.ps-button-ghost', { hasText: /skip/i });
+  const savedButton = page.locator('.ps-button-primary', { hasText: /written it down/i });
   const settled = /\/(evm)?$/;
   await Promise.race([
     page.waitForURL(settled, { timeout: 30_000 }).catch(() => {}),
     skipButton.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {}),
+    savedButton.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {}),
   ]);
+
+  // Capture the recovery material BEFORE dismissing the screen. It is displayed
+  // exactly once and is unrecoverable afterwards by design, so a test that needs
+  // it has this one opportunity. Reading it here rather than in each test also
+  // means the selectors live in one place.
+  const credentials: RecoveryCredentials = { mnemonic: [], accountId: null };
+
+  // `require_recovery` defaults to true, so reaching this screen is
+  // not optional and neither is capturing it. A conditional capture would
+  // return an empty phrase on any markup change and let a later recovery test
+  // run against nothing - passing silently as coverage, which is the outcome
+  // this work exists to avoid. So: throw rather than skip.
+  const wordLocator = page.locator('.ps-mnemonic-word');
+  try {
+    await wordLocator.first().waitFor({ state: 'visible', timeout: 10_000 });
+  } catch {
+    // A bare "waitFor timed out" says nothing about why. Registration can fail
+    // for reasons the page states plainly - a 429 from the auth rate limit is
+    // the one that actually bit - so surface that text instead of the timeout.
+    const shown = (
+      await page
+        .locator('.ps-auth-error, [class*="error"]')
+        .first()
+        .textContent({ timeout: 1_000 })
+        .catch(() => null)
+    )?.trim();
+    throw new Error(
+      shown
+        ? `registration did not reach the recovery screen: ${shown}`
+        : 'registration did not reach the recovery screen and reported no error',
+    );
+  }
+
+  const words = await wordLocator.all();
+  for (const [i, word] of words.entries()) {
+    // Explicit short timeout: if these inner selectors are renamed in ui-kit
+    // while .ps-mnemonic-word survives, fail with a legible selector error
+    // rather than hanging until the 30s per-test budget expires.
+    const text = (await word.locator('.ps-mnemonic-text').textContent({ timeout: 2_000 }))?.trim();
+    if (!text) throw new Error(`recovery phrase word ${i + 1} is empty`);
+    credentials.mnemonic.push(text);
+  }
+
+  // BIP39 checksum, not a shape check.
+  //
+  // This replaces an earlier assertion that each word's displayed index matched
+  // its position. That check could never fail: RecoverySetup renders the index
+  // from `enumerate()`, so it was derived from the same DOM order it was being
+  // compared against. A shuffled phrase would have rendered 1..24 against the
+  // shuffled words and passed.
+  //
+  // The checksum is the real check. BIP39 encodes a checksum over the entropy in
+  // the final word, so reordering, substituting or dropping a word fails here -
+  // at registration, loudly - instead of at recovery, where it is
+  // indistinguishable from a merchant typing the wrong phrase.
+  //
+  // The phrase is deliberately not in the message: it would land in CI logs and
+  // the uploaded playwright-report artifact.
+  if (!validateMnemonic(credentials.mnemonic.join(' '), wordlist)) {
+    throw new Error(
+      `registration produced a phrase failing BIP39 validation ` +
+        `(${credentials.mnemonic.length} words); value withheld from logs`,
+    );
+  }
+
+  const accountId = page.locator('.ps-recovery-account-id-value');
+  if (await accountId.isVisible().catch(() => false)) {
+    credentials.accountId =
+      ((await accountId.textContent({ timeout: 2_000 })) ?? '').trim() || null;
+  }
+
   if (await skipButton.isVisible().catch(() => false)) {
     await skipButton.click();
+  } else if (await savedButton.isVisible().catch(() => false)) {
+    // Confirm path: acknowledge the phrase, tick the attestation, complete.
+    // There is no word re-entry, so the fixture does not need to type it back.
+    await savedButton.click();
+    await page.locator('.ps-checkbox').check();
+    await page.locator('.ps-button-primary', { hasText: /complete setup/i }).click();
   }
 
   // Wait for redirect to dashboard
   await page.waitForURL(settled, { timeout: 15_000 });
+
+  return credentials;
 }
 
 export async function login(page: Page): Promise<void> {
@@ -58,12 +179,82 @@ export async function login(page: Page): Promise<void> {
   await page.waitForURL(/\/(evm)?$/, { timeout: 15_000 });
 }
 
+/**
+ * Log out through the UI, the way a merchant does.
+ *
+ * Logout lives in the user menu, which is closed by default - clicking the item
+ * without opening the trigger first finds nothing and times out looking like a
+ * broken logout rather than a closed menu.
+ */
+export async function logout(page: Page): Promise<void> {
+  await page.locator('.user-menu-trigger').click();
+  await expect(page.locator('.user-menu-dropdown.open')).toBeVisible();
+  await page.locator('.user-menu-logout').click();
+  await page.waitForURL(/\/login/, { timeout: 15_000 });
+}
+
 export interface AuthFixtures {
   withAuthenticator: Page;
   registeredPage: Page;
 }
 
+/**
+ * A Rust panic in the WASM client, from either channel it can arrive on.
+ *
+ * A release build compiles `panic!` to a bare `unreachable` trap, so the
+ * pageerror is the single word "unreachable" with no message; a debug build
+ * also logs "panicked at <location>" through console_error_panic_hook. Match
+ * both, and nothing else - ordinary console errors are common and noisy here
+ * (404s, WebSocket handshake failures), and failing on those would make this
+ * check worthless within a week.
+ */
+export function isClientPanic(text: string): boolean {
+  return (
+    text.includes('panicked at') ||
+    text.includes('RuntimeError: unreachable') ||
+    text.trim() === 'unreachable'
+  );
+}
+
 export const test = base.extend<AuthFixtures>({
+  /**
+   * Fail any test whose client panicked.
+   *
+   * Nothing in this suite asserted on client panics, and here is what that
+   * cost: the deployed client panicked TWICE on every single registration for
+   * months while these tests passed, because a panic is invisible unless
+   * something reads the console. scout collected console errors and only
+   * printed them, which is not the same as failing.
+   *
+   * Checked at teardown rather than inline so the panic is attributed to the
+   * test that caused it, and skipped when the test has already failed - a
+   * panic is usually the consequence of that failure, and replacing the real
+   * error with this one loses the cause.
+   */
+  page: async ({ page }, use, testInfo) => {
+    const panics: string[] = [];
+    const record = (text: string) => {
+      if (isClientPanic(text)) panics.push(text.split('\n')[0].trim());
+    };
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') record(msg.text());
+    });
+    page.on('pageerror', (err: Error) => record(err.message));
+
+    await use(page);
+
+    if (panics.length > 0 && testInfo.status === testInfo.expectedStatus) {
+      const unique = [...new Set(panics)];
+      throw new Error(
+        `the WASM client panicked ${panics.length} time(s) during this test:\n` +
+          unique.map((p) => `  ${p}`).join('\n') +
+          `\n\nA release build strips the panic message, so "unreachable" on its own is ` +
+          `all there is. Build the client locally (debug_assertions, or ` +
+          `--cfg leptos_debuginfo) to get the signal's definition and read sites.`,
+      );
+    }
+  },
+
   withAuthenticator: async ({ page }, use) => {
     await setupVirtualAuthenticator(page);
     await use(page);

@@ -1,20 +1,27 @@
 [workspace]
-members = ["server", "data-service", "evm", "client", "mcp-server", "loadtest"]
+members = ["server", "data-service", "evm", "mcp-server", "loadtest"]
 resolver = "3"
 
 [workspace.package]
 
-# Use local payserver-commons instead of Git during development
-[patch."https://github.com/randomcash/payserver-commons.git"]
-types = { path = "../payserver-commons/types" }
-auth = { path = "../payserver-commons/auth" }
-crypto = { path = "../payserver-commons/crypto" }
-rates = { path = "../payserver-commons/rates" }
-ui-kit = { path = "../payserver-commons/ui-kit" }
-
-# Size-optimize the WASM client only. Scoped to this package (not a
-# workspace-wide `[profile.release]`) so the server / monitor / migrate
-# binaries keep their runtime-optimized release builds. wasm-opt -Oz runs on
-# top of this via the trunk `data-wasm-opt="z"` flag in client/index.html.
-[profile.release.package.ethpayserver-client]
-opt-level = "z"
+# The one place payserver-commons is pinned.
+#
+# `rev` is what makes a build reproducible: with the old sibling-path `[patch]`
+# the lock file recorded no commons revision at all, so which code you got was
+# decided by CI shell logic and by whatever `main` happened to be that minute.
+# Rebuilding last week's commit silently picked up this week's commons, and a
+# breaking change to a shared crate broke `testnet` the moment it merged
+# (that happened on 2026-09-06).
+#
+# To work against a local commons checkout, do NOT edit this. Run
+# `scripts/commons.sh link`, which writes an uncommitted `.cargo/config.toml`
+# patch. To move the pin, `scripts/commons.sh pin <rev>`.
+[workspace.dependencies]
+api-types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "bc7ed066061585a5f7d2fd2f46d9534a9dc3968f" }
+scrub = { git = "https://github.com/randomcash/payserver-commons.git", rev = "bc7ed066061585a5f7d2fd2f46d9534a9dc3968f" }
+types = { git = "https://github.com/randomcash/payserver-commons.git", rev = "bc7ed066061585a5f7d2fd2f46d9534a9dc3968f" }
+auth = { git = "https://github.com/randomcash/payserver-commons.git", rev = "bc7ed066061585a5f7d2fd2f46d9534a9dc3968f" }
+crypto = { git = "https://github.com/randomcash/payserver-commons.git", rev = "bc7ed066061585a5f7d2fd2f46d9534a9dc3968f" }
+rates = { git = "https://github.com/randomcash/payserver-commons.git", rev = "bc7ed066061585a5f7d2fd2f46d9534a9dc3968f" }
+payserver-plugin-api = { git = "https://github.com/randomcash/payserver-commons.git", rev = "bc7ed066061585a5f7d2fd2f46d9534a9dc3968f" }
+payserver-plugin-host = { git = "https://github.com/randomcash/payserver-commons.git", rev = "bc7ed066061585a5f7d2fd2f46d9534a9dc3968f" }

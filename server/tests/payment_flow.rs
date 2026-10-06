@@ -22,7 +22,7 @@ use evm::{Address, B256, U256};
 use server::EventConsumer;
 use server::services::evm_monitor::{EVMMonitor, EVMMonitorError};
 use types::{
-    InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, Network, PaymentMethodId,
+    ChainId, InvoiceData, InvoiceId, InvoiceReader, InvoiceStatus, InvoiceWriter, PaymentMethodId,
     PaymentOptionData, PaymentOptionId, PaymentReader, StoreId, WatchedAddressWriter,
 };
 
@@ -36,7 +36,7 @@ struct NoopEVMMonitor;
 impl EVMMonitor for NoopEVMMonitor {
     async fn watch_address(
         &self,
-        _network: Network,
+        _chain_id: &ChainId,
         _address: Address,
         _invoice_id: Uuid,
         _expected_amount: Option<U256>,
@@ -58,7 +58,7 @@ impl EVMMonitor for NoopEVMMonitor {
 
     async fn unwatch_address(
         &self,
-        _network: Network,
+        _chain_id: &ChainId,
         _address: Address,
         _token_contract: Option<Address>,
     ) -> Result<(), EVMMonitorError> {
@@ -88,7 +88,11 @@ impl EVMMonitor for NoopEVMMonitor {
 // ============================================================================
 
 /// Sepolia chain ID used in tests.
-const TEST_CHAIN_ID: u64 = 11155111;
+/// Sepolia. The EIP-155 number is still needed where the monitor is called.
+const TEST_EIP155: u64 = 11155111;
+fn test_chain() -> ChainId {
+    ChainId::evm(TEST_EIP155)
+}
 
 fn test_invoice(store_id: StoreId) -> InvoiceData {
     InvoiceData {
@@ -101,6 +105,7 @@ fn test_invoice(store_id: StoreId) -> InvoiceData {
         created_at: Utc::now(),
         expires_at: Utc::now() + chrono::Duration::hours(1),
         metadata: None,
+        customer_email: None,
         extra: None,
     }
 }
@@ -114,12 +119,14 @@ fn test_payment_option(
     PaymentOptionData {
         id: PaymentOptionId(Uuid::new_v4()),
         invoice_id: invoice_id.clone(),
-        payment_method_id: PaymentMethodId::new("ETH", TEST_CHAIN_ID),
-        chain_id: TEST_CHAIN_ID,
+        payment_method_id: PaymentMethodId::new("ETH", &test_chain()),
+        chain_id: test_chain(),
         asset_symbol: "ETH".to_string(),
         token_address: None,
         decimals: 18,
         payment_address: address.to_string(),
+        wallet_id: None,
+        derivation_index: None,
         amount: amount_wei.to_string(),
         rate: Some(rate.to_string()),
         rate_at: Some(Utc::now()),
@@ -166,7 +173,7 @@ async fn setup_test_env() -> (
         &*ds,
         &payment_address_str,
         &payment_option.id,
-        TEST_CHAIN_ID,
+        &test_chain(),
         None, // native
     )
     .await
@@ -208,7 +215,7 @@ async fn test_payment_detected_creates_record() {
 
     // Publish PaymentDetected to bridge
     let event = MonitorEvent::PaymentDetected(PaymentDetected {
-        chain_id: TEST_CHAIN_ID,
+        chain_id: TEST_EIP155,
         invoice_id: Uuid::parse_str(invoice.id.as_str()).unwrap(),
         payment_address,
         amount: payment_amount,
@@ -236,7 +243,7 @@ async fn test_payment_detected_creates_record() {
     assert_eq!(payments.len(), 1, "expected 1 payment record");
 
     let payment = &payments[0];
-    assert_eq!(payment.chain_id, TEST_CHAIN_ID);
+    assert_eq!(payment.chain_id, test_chain());
     assert_eq!(payment.amount, payment_amount.to_string());
     assert_eq!(payment.tx_hash, format!("{:#x}", tx_hash));
     assert!(payment.confirmed_at.is_none());
@@ -264,7 +271,7 @@ async fn test_payment_confirmed_marks_invoice_paid() {
     // Step 1: PaymentDetected
     bridge
         .publish(&MonitorEvent::PaymentDetected(PaymentDetected {
-            chain_id: TEST_CHAIN_ID,
+            chain_id: TEST_EIP155,
             invoice_id: invoice_uuid,
             payment_address,
             amount: payment_amount,
@@ -309,7 +316,11 @@ async fn test_payment_confirmed_marks_invoice_paid() {
     // Step 2: PaymentConfirmed
     bridge
         .publish(&MonitorEvent::PaymentConfirmed(PaymentConfirmed {
-            chain_id: TEST_CHAIN_ID,
+            // Native: the handler files these on the -1 sentinel, so a
+            // confirmation naming index 0 would look up a row that does
+            // not exist. Production derives both from the same value.
+            tx_index: -1,
+            chain_id: TEST_EIP155,
             invoice_id: invoice_uuid,
             payment_address,
             amount: payment_amount,
@@ -363,7 +374,7 @@ async fn test_underpayment_stays_processing() {
 
     bridge
         .publish(&MonitorEvent::PaymentDetected(PaymentDetected {
-            chain_id: TEST_CHAIN_ID,
+            chain_id: TEST_EIP155,
             invoice_id: invoice_uuid,
             payment_address,
             amount: half_amount,
@@ -399,7 +410,11 @@ async fn test_underpayment_stays_processing() {
     // Confirm the half payment
     bridge
         .publish(&MonitorEvent::PaymentConfirmed(PaymentConfirmed {
-            chain_id: TEST_CHAIN_ID,
+            // Native: the handler files these on the -1 sentinel, so a
+            // confirmation naming index 0 would look up a row that does
+            // not exist. Production derives both from the same value.
+            tx_index: -1,
+            chain_id: TEST_EIP155,
             invoice_id: invoice_uuid,
             payment_address,
             amount: half_amount,
@@ -483,12 +498,14 @@ async fn test_erc20_payment_detection_event_consumer() {
     let po = PaymentOptionData {
         id: PaymentOptionId(Uuid::new_v4()),
         invoice_id: invoice.id.clone(),
-        payment_method_id: PaymentMethodId::new("USDT", TEST_CHAIN_ID),
-        chain_id: TEST_CHAIN_ID,
+        payment_method_id: PaymentMethodId::new("USDT", &test_chain()),
+        chain_id: test_chain(),
         asset_symbol: "USDT".to_string(),
         token_address: Some(token_address_str.clone()),
         decimals: 6,
         payment_address: payment_address_str.clone(),
+        wallet_id: None,
+        derivation_index: None,
         amount: "100000000".to_string(), // 100 USDT
         rate: None,                      // same-asset (USD-denominated invoice, USDT payment)
         rate_at: None,
@@ -503,7 +520,7 @@ async fn test_erc20_payment_detection_event_consumer() {
         &*ds,
         &payment_address_str,
         &po.id,
-        TEST_CHAIN_ID,
+        &test_chain(),
         Some(&token_address_str),
     )
     .await
@@ -518,7 +535,7 @@ async fn test_erc20_payment_detection_event_consumer() {
 
     bridge
         .publish(&MonitorEvent::PaymentDetected(PaymentDetected {
-            chain_id: TEST_CHAIN_ID,
+            chain_id: TEST_EIP155,
             invoice_id: invoice_uuid,
             payment_address,
             amount: payment_amount,
@@ -542,10 +559,26 @@ async fn test_erc20_payment_detection_event_consumer() {
         .await
         .unwrap();
     assert_eq!(payments.len(), 1);
-    // On testnets, unknown tokens get a shortened address as symbol: "0x{first6hex}..."
+    // This used to assert the opposite - that an unknown token is recorded as
+    // `0x{first6hex}...` - and the expectation was the bug rather than the
+    // code failing to meet it.
+    //
+    // `asset_symbol` is read by machines. The analytics reader groups by it
+    // and the plugin volume capability hands it to a rate provider, and no
+    // provider resolves six hex digits and an ellipsis. The first real USDC
+    // payment on testnet was stored that way and priced at zero, which is how
+    // this was found.
+    //
+    // `ERC20` is what the neighbouring branch already returned for a token
+    // that is registered without a symbol, so the two now agree. Nothing is
+    // lost: `token_address` is on the same row and is the identity in full.
+    assert_eq!(
+        payments[0].asset_symbol, "ERC20",
+        "an unregistered token must record a resolvable symbol, not an address fragment"
+    );
     assert!(
-        payments[0].asset_symbol.starts_with("0x"),
-        "expected shortened address symbol for testnet ERC20, got: {}",
+        !payments[0].asset_symbol.contains("..."),
+        "an ellipsis means this was formatted for a screen: {}",
         payments[0].asset_symbol
     );
     assert!(!payments[0].reorged);

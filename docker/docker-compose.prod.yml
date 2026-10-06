@@ -72,6 +72,8 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-ethpayserver}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-ethpayserver}
       REDIS_URL: redis://redis:6379
+      EVENT_ACCEPT_LINEAGE_BREAK: ${EVENT_ACCEPT_LINEAGE_BREAK:-}
+      EVENT_SKIP_EVENTS: ${EVENT_SKIP_EVENTS:-}
       HOST: 0.0.0.0
       PORT: 3000
       RUST_LOG: ${RUST_LOG:-info}

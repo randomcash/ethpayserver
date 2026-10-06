@@ -1,22 +1,29 @@
-//! HD wallet derivation for Ethereum addresses.
+//! HD wallet derivation for secp256k1 receiving addresses.
 //!
 //! This module implements BIP-32/BIP-44 hierarchical deterministic wallet derivation
-//! for generating unique Ethereum addresses. Each invoice gets a unique address
-//! derived from a master seed.
+//! for generating a unique receiving address per invoice.
 //!
 //! # Derivation Path
 //!
-//! We use BIP-44 with purpose 44' and coin type 60' (Ethereum):
+//! BIP-44 with purpose 44' and the coin type of the key's chain family - 60'
+//! for Ethereum, 195' for Tron (see [`crate::family`]):
 //! ```text
-//! m / 44' / 60' / account' / change / address_index
+//! m / 44' / coin' / account' / change / address_index
 //! ```
 //!
 //! For payment addresses, we use:
 //! - account = 0 (default account)
 //! - change = 0 (external chain, for receiving)
 //! - address_index = incrementing index per invoice
+//!
+//! The coin type is the load-bearing part, and it is *not* recoverable from
+//! the account-level xpub a merchant registers. Everything here therefore
+//! takes the family explicitly rather than assuming Ethereum - an assumption
+//! that, applied to a Tron key, derives addresses the merchant's own wallet
+//! will never show.
 
 use crate::error::{EvmError, EvmResult};
+use crate::family::ChainFamily;
 use alloy::primitives::Address;
 use coins_bip32::{
     enc::{MainnetEncoder, XKeyEncoder},
@@ -26,8 +33,13 @@ use coins_bip32::{
 use coins_bip39::{English, Mnemonic};
 use std::str::FromStr;
 
-/// Standard BIP-44 coin type for Ethereum.
-pub const ETH_COIN_TYPE: u32 = 60;
+/// How many addresses a merchant is asked to compare by eye against another
+/// wallet before trusting a registered key. Shared between the offline
+/// `derive-xpub` tool's printed check addresses and the server's
+/// `verification_addresses` on `POST /wallets` so the two count the same
+/// thing from one source rather than two constants that could silently drift
+/// apart.
+pub const VERIFICATION_ADDRESS_COUNT: u32 = 3;
 
 /// HD wallet for deriving Ethereum addresses.
 #[derive(Clone)]
@@ -60,7 +72,14 @@ impl HdWallet {
             .to_seed(Some(passphrase))
             .map_err(|e| EvmError::InvalidMnemonic(format!("failed to derive seed: {}", e)))?;
 
-        let master_key = XPriv::root_from_seed(&seed[..], None)
+        // `root_from_seed(_, None)` defaults to `Hint::SegWit`, which would
+        // render an account xpub with BIP-84 ("zpub") version bytes instead
+        // of the BIP-44 ("xpub") ones every merchant wallet and this crate's
+        // own docs mean by "xpub". The hint changes nothing about derivation
+        // - addresses come out identical either way - only how a key
+        // encodes to base58, so this is spelled out explicitly rather than
+        // left to the library default.
+        let master_key = XPriv::root_from_seed(&seed[..], Some(Hint::Legacy))
             .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
 
         Ok(Self { master_key })
@@ -75,7 +94,7 @@ impl HdWallet {
             )));
         }
 
-        let master_key = XPriv::root_from_seed(seed, None)
+        let master_key = XPriv::root_from_seed(seed, Some(Hint::Legacy))
             .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
 
         Ok(Self { master_key })
@@ -93,8 +112,21 @@ impl HdWallet {
     ///
     /// The derived Ethereum address as a checksummed string.
     pub fn derive_address(&self, index: u32) -> EvmResult<Address> {
-        let path = format!("m/44'/60'/0'/0/{}", index);
-        self.derive_address_at_path(&path)
+        self.derive_address_for(ChainFamily::Evm, index)
+    }
+
+    /// Derive the receiving address bytes for one chain family at `index`.
+    ///
+    /// The family chooses the coin type, so the same seed produces entirely
+    /// different keys - and therefore entirely different addresses - for
+    /// Ethereum and for Tron. That is the property that makes the two
+    /// non-interchangeable, and re-encoding one family's address in the
+    /// other's alphabet does not produce the other's address.
+    ///
+    /// Returns raw address bytes; render them with
+    /// [`ChainFamily::encode_address`].
+    pub fn derive_address_for(&self, family: ChainFamily, index: u32) -> EvmResult<Address> {
+        self.derive_address_at_path(&family.derivation_path(index))
     }
 
     /// Derive an Ethereum address at a custom derivation path.
@@ -160,7 +192,18 @@ impl HdWallet {
     ///
     /// This can be used to derive addresses without the private key.
     pub fn account_xpub(&self) -> EvmResult<XPub> {
-        let path = DerivationPath::from_str("m/44'/60'/0'")
+        self.account_xpub_for(ChainFamily::Evm)
+    }
+
+    /// The account-level extended public key a merchant's wallet would export
+    /// for one chain family - `m/44'/60'/0'` or `m/44'/195'/0'`.
+    ///
+    /// The two are byte-indistinguishable in form: same version bytes, same
+    /// base58 alphabet, same length. Only the key material differs, and
+    /// nothing can read the coin type back out of it. That is why the family
+    /// is stored beside the key rather than inferred from it.
+    pub fn account_xpub_for(&self, family: ChainFamily) -> EvmResult<XPub> {
+        let path = DerivationPath::from_str(&family.account_path())
             .map_err(|e| EvmError::InvalidDerivationPath(e.to_string()))?;
 
         let account_key = self
@@ -169,6 +212,13 @@ impl HdWallet {
             .map_err(|e| EvmError::WalletDerivation(e.to_string()))?;
 
         Ok(account_key.verify_key())
+    }
+
+    /// [`Self::account_xpub_for`], base58-encoded - the exact string a
+    /// merchant pastes into `POST /wallets`.
+    pub fn account_xpub_string_for(&self, family: ChainFamily) -> EvmResult<String> {
+        MainnetEncoder::xpub_to_base58(&self.account_xpub_for(family)?)
+            .map_err(|e| EvmError::WalletDerivation(e.to_string()))
     }
 }
 
@@ -236,33 +286,91 @@ pub fn validate_mnemonic(phrase: &str) -> bool {
     Mnemonic::<English>::new_from_phrase(phrase).is_ok()
 }
 
-/// Address deriver from an extended public key.
+/// Address deriver from an extended public key, bound to a chain family.
 ///
 /// Allows deriving payment addresses without access to private keys.
 /// Merchants provide their xpub and the server derives unique addresses
 /// for each invoice.
+///
+/// The family is carried, not guessed. An account xpub has its coin type
+/// already spent - the deriver only walks `0/{index}` below it - so by the
+/// time a key reaches here, which family it belongs to is no longer a
+/// question this code could answer from the bytes. Every constructor
+/// therefore demands it, and [`Self::derive_evm_address`] refuses to hand out
+/// EVM-typed bytes for a key that was not registered as EVM.
 #[derive(Clone)]
 pub struct XpubDeriver {
-    /// The account-level extended public key (at path m/44'/60'/0')
+    /// The account-level extended public key (at path m/44'/{coin}'/0')
     account_xpub: XPub,
+    /// The family the key was registered for. Decides how an address is
+    /// rendered, and which callers may use it at all.
+    family: ChainFamily,
 }
 
 impl XpubDeriver {
-    /// Create a new deriver from a base58-encoded xpub string.
+    /// Create a deriver for a key registered under `namespace`.
     ///
-    /// The xpub should be at the account level (m/44'/60'/0').
-    pub fn from_xpub(xpub_str: &str) -> EvmResult<Self> {
+    /// The namespace comes from the wallet row the key was read from - never
+    /// from the key, which cannot be asked, and never from a default. An
+    /// unknown namespace is an error rather than a fallback to Ethereum.
+    pub fn from_xpub(namespace: &str, xpub_str: &str) -> EvmResult<Self> {
+        Self::for_family(crate::family::family_for_namespace(namespace)?, xpub_str)
+    }
+
+    /// Create a deriver for a known family.
+    pub fn for_family(family: ChainFamily, xpub_str: &str) -> EvmResult<Self> {
         let account_xpub = MainnetEncoder::xpub_from_base58(xpub_str)
             .map_err(|e| EvmError::InvalidXpub(format!("failed to parse xpub: {}", e)))?;
 
-        Ok(Self { account_xpub })
+        Ok(Self {
+            account_xpub,
+            family,
+        })
     }
 
-    /// Derive an Ethereum address at the given index.
+    /// The family this key was registered for.
+    pub fn family(&self) -> ChainFamily {
+        self.family
+    }
+
+    /// The full BIP-44 path of the address at `index`, coin type included.
+    pub fn derivation_path(&self, index: u32) -> String {
+        self.family.derivation_path(index)
+    }
+
+    /// Derive the receiving address at `index`, rendered in this key's own
+    /// family encoding.
     ///
-    /// Derives at path: 0/{index} (relative to account xpub)
-    /// Full path would be: m/44'/60'/0'/0/{index}
-    pub fn derive_address(&self, index: u32) -> EvmResult<Address> {
+    /// `0x…` for `eip155`, `T…` for `tron`. This is what a merchant compares
+    /// against their own wallet, and what a customer is asked to pay.
+    pub fn derive_address(&self, index: u32) -> EvmResult<String> {
+        Ok(self
+            .family
+            .encode_address(self.derive_address_bytes(index)?))
+    }
+
+    /// Derive the address at `index` as EVM address bytes.
+    ///
+    /// Refuses a key registered for any other family. The bytes are the same
+    /// shape whatever the family, which is exactly why this refuses rather
+    /// than converts: an `Address` flows on into the chain monitor and the
+    /// watched-address table, both of which mean *an EVM address on an EVM
+    /// chain*, and a Tron key's bytes there would have the server watching an
+    /// Ethereum address for a payment that is never coming.
+    pub fn derive_evm_address(&self, index: u32) -> EvmResult<Address> {
+        if self.family != ChainFamily::Evm {
+            return Err(EvmError::InvalidXpub(format!(
+                "this key is registered for `{}`, not an EVM chain; it cannot                  derive an EVM address",
+                self.family.namespace()
+            )));
+        }
+        self.derive_address_bytes(index)
+    }
+
+    /// Walk `0/{index}` below the account key. Family-independent: the two
+    /// families differ in the coin type already spent above this point, and
+    /// in nothing below it.
+    fn derive_address_bytes(&self, index: u32) -> EvmResult<Address> {
         // Derive external chain (0) then index
         let external = self
             .account_xpub
@@ -291,143 +399,27 @@ pub fn validate_xpub(xpub_str: &str) -> bool {
     MainnetEncoder::xpub_from_base58(xpub_str).is_ok()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Standard test mnemonic (DO NOT USE IN PRODUCTION)
-    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-
-    #[test]
-    fn test_wallet_from_mnemonic() {
-        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
-        let address = wallet.derive_address(0).unwrap();
-
-        // Known address for this mnemonic at m/44'/60'/0'/0/0
-        // Compare lowercase since Address debug format doesn't preserve checksum
-        assert_eq!(
-            format!("{:?}", address).to_lowercase(),
-            "0x9858effd232b4033e47d90003d41ec34ecaeda94"
-        );
+/// Names the more likely reason a string failed `validate_xpub`: it looks
+/// like a pasted *private* key rather than a typo or truncation - either an
+/// extended private key (`xprv`/`tprv`) or the raw 32-byte secp256k1 key a
+/// wallet like MetaMask exports as `0x`-prefixed hex.
+///
+/// `validate_xpub` already refuses this on the version byte (for the `xprv`
+/// case) or because it isn't base58 at all (for raw hex) - so this takes no
+/// part in that boundary. It exists only so a caller can tell an operator
+/// what they actually pasted instead of a bare refusal, which matters
+/// because the more specific message is what stops someone from trying the
+/// same private key again with a typo "fixed".
+pub fn looks_like_a_private_key(xpub_str: &str) -> bool {
+    let trimmed = xpub_str.trim();
+    if trimmed.starts_with("xprv") || trimmed.starts_with("tprv") {
+        return true;
     }
-
-    #[test]
-    fn test_derive_multiple_addresses() {
-        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
-        let addresses = wallet.derive_addresses(0, 5).unwrap();
-
-        assert_eq!(addresses.len(), 5);
-
-        // Each address should be unique
-        let mut unique = addresses.clone();
-        unique.sort();
-        unique.dedup();
-        assert_eq!(unique.len(), 5);
-    }
-
-    #[test]
-    fn test_deterministic_derivation() {
-        let wallet1 = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
-        let wallet2 = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
-
-        for i in 0..10 {
-            assert_eq!(
-                wallet1.derive_address(i).unwrap(),
-                wallet2.derive_address(i).unwrap()
-            );
-        }
-    }
-
-    #[test]
-    fn test_passphrase_changes_addresses() {
-        let wallet1 = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
-        let wallet2 = HdWallet::from_mnemonic(TEST_MNEMONIC, "secret").unwrap();
-
-        assert_ne!(
-            wallet1.derive_address(0).unwrap(),
-            wallet2.derive_address(0).unwrap()
-        );
-    }
-
-    #[test]
-    fn test_invalid_mnemonic() {
-        let result = HdWallet::from_mnemonic("invalid mnemonic phrase", "");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_generate_mnemonic() {
-        let mnemonic = generate_mnemonic(12).unwrap();
-        let words: Vec<&str> = mnemonic.split_whitespace().collect();
-        assert_eq!(words.len(), 12);
-        assert!(validate_mnemonic(&mnemonic));
-
-        let mnemonic = generate_mnemonic(24).unwrap();
-        let words: Vec<&str> = mnemonic.split_whitespace().collect();
-        assert_eq!(words.len(), 24);
-        assert!(validate_mnemonic(&mnemonic));
-    }
-
-    #[test]
-    fn test_validate_mnemonic() {
-        assert!(validate_mnemonic(TEST_MNEMONIC));
-        assert!(!validate_mnemonic("invalid mnemonic"));
-        assert!(!validate_mnemonic(""));
-    }
-
-    #[test]
-    fn test_custom_derivation_path() {
-        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
-
-        // Derive at a custom path
-        let addr1 = wallet.derive_address_at_path("m/44'/60'/0'/0/0").unwrap();
-        let addr2 = wallet.derive_address(0).unwrap();
-
-        // Should be the same
-        assert_eq!(addr1, addr2);
-    }
-
-    #[test]
-    fn test_xpub_deriver_matches_wallet() {
-        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
-        let xpub = wallet.account_xpub().unwrap();
-        let xpub_str = MainnetEncoder::xpub_to_base58(&xpub).unwrap();
-        let deriver = XpubDeriver::from_xpub(&xpub_str).unwrap();
-
-        // XpubDeriver should derive the same addresses as HdWallet
-        for i in 0..5 {
-            assert_eq!(
-                wallet.derive_address(i).unwrap(),
-                deriver.derive_address(i).unwrap()
-            );
-        }
-    }
-
-    #[test]
-    fn test_derive_private_key() {
-        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
-        let key = wallet.derive_private_key(0).unwrap();
-
-        // Should be 32 bytes
-        assert_eq!(key.len(), 32);
-
-        // Should be deterministic
-        let key2 = wallet.derive_private_key(0).unwrap();
-        assert_eq!(key, key2);
-
-        // Different indexes should produce different keys
-        let key3 = wallet.derive_private_key(1).unwrap();
-        assert_ne!(key, key3);
-    }
-
-    #[test]
-    fn test_xpub_validation() {
-        let wallet = HdWallet::from_mnemonic(TEST_MNEMONIC, "").unwrap();
-        let xpub = wallet.account_xpub().unwrap();
-        let xpub_str = MainnetEncoder::xpub_to_base58(&xpub).unwrap();
-
-        assert!(validate_xpub(&xpub_str));
-        assert!(!validate_xpub("invalid-xpub"));
-        assert!(!validate_xpub(""));
-    }
+    let hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
+
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod xpub_encoding_tests;

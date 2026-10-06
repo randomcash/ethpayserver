@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# Reports every .rs file over the line limit, and fails the build on the ones
+# that got worse in this change.
+#
+# An architecture audit found 26 files over 400 lines on 2026-09-14 and 47 of
+# them nine days later - nearly double, on both file count and total lines -
+# despite a whole series of split tickets landing in that window. The
+# splitting happened; the growth outpaced it. The reason is that nothing ever
+# checked: the limit lived in an audit issue that someone had to remember to
+# rerun by hand. A convention nothing enforces is a preference, and the growth
+# curve is what a preference looks like.
+#
+# Failing on all 47 existing files the day this lands is how a gate gets
+# switched off in its first week - see CLAUDE.md's account of exactly that
+# happening to other checks. So the backlog is left alone: what it FLAGS is a
+# file getting worse in this change, either by crossing the limit for the first
+# time or by growing further while already over it. A file that shrinks - even
+# while still over the limit - is never flagged.
+#
+# ENFORCEMENT IS OFF, DELIBERATELY, AS OF 2026-09-26.
+# -------------------------------------------------
+# The limit is a readability rule, and the decision was that this code's only
+# readers are agents, so the rule is not worth blocking merges for. Nine open
+# pull requests could not pass it, and unblocking them by hand meant splitting
+# eight production files - metrics.rs, wallet.rs, admin/mod.rs, config.rs among
+# them - several of which sit on money paths, purely to satisfy a line count.
+# That is a large surgery with real risk to buy a property nobody was reading.
+#
+# What is lost, stated plainly rather than waved away: the measurement that
+# prompted this gate was 26 oversized files growing to 47 in nine days, while
+# a series of split tickets was landing. The growth outpaced the splitting
+# because nothing checked. Enforcement off returns to that condition, and the
+# expected consequence is that these files keep growing. THE REPORT BELOW IS
+# THEREFORE THE POINT NOW, not a preamble to the failure: it is the only thing
+# that will show the curve.
+#
+# Set ENFORCE_FILE_SIZE=1 to arm it again. It is one variable rather than a
+# deleted script so re-arming does not mean rebuilding the rename handling, the
+# ratchet, or the measurement-failure guards below - all of which took real
+# debugging and none of which are about the limit itself.
+#
+# Reverts: undoing a split restores larger files, which a direction-measuring
+# gate would read as growth - making every improvement it rewarded irreversible.
+# A file byte-identical to a version already in the base's history is not
+# flagged. The ratchet cannot serve here: it is consulted only for ADDED paths,
+# so it can cover a restored deleted file but never a modified one.
+#
+# Measurement failures still fail the build even with enforcement off. "Could
+# not look" is not "nothing found", and that conflation is a different bug from
+# the one this gate was arguing about.
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+LINE_LIMIT="${LINE_LIMIT:-400}"
+BASE_REF="${BASE_REF:-origin/testnet}"
+# Per-file ceilings for files that predate this gate but are new to the base.
+# See the file's own header for why an entry is a debt rather than an exemption.
+RATCHET_FILE="${RATCHET_FILE:-scripts/file-size-ratchet.txt}"
+# Off by default - see the header. 1 arms the growth check again.
+ENFORCE="${ENFORCE_FILE_SIZE:-0}"
+status=0
+grew=0
+
+# Report: every .rs file over the limit right now, worst first, independent of
+# the ratchet below. This is what a human audit reads instead of hand-running
+# `wc -l` over the tree again.
+#
+# A failed listing is not the same thing as "nothing is over the limit" - the
+# exact conflation this script exists to catch - so it fails the build rather
+# than reporting a clean zero.
+if ! files="$(git ls-files '*.rs')"; then
+  echo "::error::git ls-files failed - cannot measure current file sizes" >&2
+  exit 1
+fi
+
+unsorted=""
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  if ! n="$(wc -l < "$f")"; then
+    echo "::error::wc -l failed for $f - cannot measure its size" >&2
+    exit 1
+  fi
+  if [ "$n" -gt "$LINE_LIMIT" ]; then
+    unsorted="${unsorted}${n} ${f}"$'\n'
+  fi
+done <<< "$files"
+# <<< instead of a pipe: a `while` on the read end of a pipe runs in a
+# subshell, and `exit 1` above would only kill that subshell, leaving the
+# broken measurement to fail silently just like the git-ls-files case this
+# script already guards against.
+report="$(printf '%s' "$unsorted" | sort -rn)"
+
+count=0
+total=0
+if [ -n "$report" ]; then
+  count="$(printf '%s\n' "$report" | wc -l)"
+  total="$(printf '%s\n' "$report" | awk '{s+=$1} END{print s+0}')"
+fi
+
+echo "files over $LINE_LIMIT lines: $count ($total lines total)"
+if [ -n "$report" ]; then
+  printf '%s\n' "$report" | while read -r n f; do
+    printf '    %6d  %s\n' "$n" "$f"
+  done
+fi
+
+# Ratchet: only files this change actually touches can have "grown in this
+# change", so a file the diff never mentions is never a candidate here no
+# matter how far over the limit it already sits.
+#
+# A base that can't be resolved or diffed is not the same thing as "nothing
+# grew" - that conflation is the exact bug this script exists to catch, so it
+# does not skip on either failure. It narrows to HEAD~1 instead (same move
+# check-no-session-urls.sh makes for the same reason), and only gives up - by
+# failing the build, not passing it - once there is truly nothing left to
+# compare against.
+base="$BASE_REF"
+if ! git rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+  echo "::warning::$BASE_REF not available; checking the previous commit only" >&2
+  base="HEAD~1"
+fi
+
+if ! git rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+  echo "::error::no base commit to diff against ($BASE_REF and HEAD~1 both unavailable) - failing rather than skipping the growth check" >&2
+  exit 1
+fi
+
+if ! changed="$(git diff --name-status -M --diff-filter=ACMR "${base}...HEAD" -- '*.rs' 2>&1)"; then
+  if [ "$base" != "HEAD~1" ] && git rev-parse --verify --quiet "HEAD~1" >/dev/null 2>&1; then
+    echo "::warning::git diff against $base failed ($changed); retrying against the previous commit only" >&2
+    base="HEAD~1"
+    changed="$(git diff --name-status -M --diff-filter=ACMR "${base}...HEAD" -- '*.rs' 2>&1)" || {
+      echo "::error::git diff against $base failed too ($changed) - failing rather than skipping the growth check" >&2
+      exit 1
+    }
+  else
+    echo "::error::git diff against $base failed ($changed) - failing rather than skipping the growth check" >&2
+    exit 1
+  fi
+fi
+# --name-status (not --name-only) so a rename carries its source path
+# alongside its destination. --diff-filter=ACMR includes renames, and
+# --name-only alone would give only the new path - so "before" was being
+# looked up at a path that never existed there, git show failed, and that
+# failure was read as "the file is new" (before=0). Renaming an
+# already-oversized file - exactly the "split, worst first" work this script
+# exists to make safe - would then read as growing from 0 lines and fail the
+# build for a file that never changed.
+#
+# No C* arm: copy status only appears when -C/--find-copies is passed to
+# git diff, and it isn't here - only -M (rename detection) is. 'C' staying in
+# --diff-filter is inert (a filter narrows what git already detected, it
+# doesn't turn detection on), so a case arm for it would just be dead code.
+# A file whose content is byte-identical to some version of the same path on
+# the base's history is an undo, not growth: reverting a refactor restores
+# larger files by construction, and a gate that measures direction would make
+# every improvement it rewarded irreversible. Exact blob equality, not "no
+# bigger than it once was" - a file regrown to its old size with different
+# content is still growth. Only consulted once a file has already failed the
+# size comparison, so ordinary runs pay nothing. The path's history includes
+# commits that deleted it, so a restored-from-deletion file is covered too;
+# enrolment cannot do this, as it only applies to added paths.
+#
+# Deliberately wider than "reverts one commit": any version the base ever held
+# counts, so pasting back an old oversized file is waived too. Narrowing it to
+# the immediately preceding version would break reverting a refactor that has
+# since been edited, which is the common case. It cannot admit new content.
+# Needs the base's full history (CI checks out with fetch-depth: 0); in a
+# shallow clone it sees too little and fails toward reporting growth.
+restores_known_state() { # path
+  local blob c
+  if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+    echo "note: shallow clone - revert detection for $1 sees truncated history" >&2
+  fi
+  blob="$(git rev-parse --verify --quiet "HEAD:$1")" || return 1
+  while IFS= read -r c; do
+    [ -z "$c" ] && continue
+    [ "$(git rev-parse --verify --quiet "${c}:$1" 2>/dev/null)" = "$blob" ] && return 0
+  done < <(git log --format=%H "$base" -- "$1" 2>/dev/null)
+  return 1
+}
+
+while IFS=$'\t' read -r dstatus path1 path2; do
+  [ -z "$dstatus" ] && continue
+  case "$dstatus" in
+    R*) old="$path1"; f="$path2" ;;
+    *) old="$path1"; f="$path1" ;;
+  esac
+  [ -f "$f" ] || continue
+  if ! after="$(wc -l < "$f")"; then
+    echo "::error::wc -l failed for $f - cannot determine its size after this change" >&2
+    exit 1
+  fi
+  case "$dstatus" in
+    A*)
+      # A genuinely new path has nothing to look up at base - 0 is the
+      # correct answer here, not a swallowed failure standing in for one.
+      #
+      # Unless it is enrolled in the ratchet. A file arriving from a branch that
+      # predates this gate is new to the BASE but not new to the project, and
+      # treating it as growth from zero blocks it outright rather than holding it
+      # where it is. An entry gives it what the files already over the limit get
+      # for free: it may not grow, and it is not blocked.
+      before=0
+      if [ -f "$RATCHET_FILE" ]; then
+        enrolled="$(awk -v want="$f" '$1 == want { print $2; exit }' "$RATCHET_FILE")"
+        if [ -n "$enrolled" ]; then
+          before="$enrolled"
+          echo "note: $f is enrolled in the ratchet at $enrolled lines - it may not grow past that" >&2
+        fi
+      fi
+      ;;
+    *)
+      # `$?` here, not PIPESTATUS: the pipe runs inside this command
+      # substitution's own subshell, so the parent's PIPESTATUS never sees it
+      # and stays stale from whatever pipeline last ran in this shell - it
+      # does not reflect git show's exit status at all. `pipefail` (set at
+      # the top of this script) makes the substitution's own $? carry the
+      # pipe's failure instead, which does survive past the subshell boundary.
+      if ! before="$(git show "${base}:${old}" 2>/dev/null | wc -l)"; then
+        echo "::error::git show ${base}:${old} failed - cannot determine $f's size before this change" >&2
+        exit 1
+      fi
+      ;;
+  esac
+  over_after=$(( after > LINE_LIMIT ? after - LINE_LIMIT : 0 ))
+  over_before=$(( before > LINE_LIMIT ? before - LINE_LIMIT : 0 ))
+  if [ "$over_after" -gt "$over_before" ] && restores_known_state "$f"; then
+    # A revert of a split necessarily restores the larger files. That size is
+    # not growth, it is a state the base already held.
+    echo "note: $f is byte-identical to a version already in $base's history - restoring it is not growth" >&2
+  elif [ "$over_after" -gt "$over_before" ]; then
+    grew=$((grew + 1))
+    if [ "$ENFORCE" = "1" ]; then
+      status=1
+      echo "::error::$f grew from $before to $after lines, past the ${LINE_LIMIT}-line limit ($over_before -> $over_after lines over)" >&2
+    else
+      echo "::warning::$f grew from $before to $after lines, past the ${LINE_LIMIT}-line limit ($over_before -> $over_after lines over)" >&2
+    fi
+  fi
+done <<< "$changed"
+
+if [ "$grew" -eq 0 ]; then
+  echo "no .rs file grew past the ${LINE_LIMIT}-line limit in this change"
+elif [ "$ENFORCE" = "1" ]; then
+  echo "  Split the file rather than growing it further. Along the behaviours" >&2
+  echo "  it covers, not by arbitrary halves - see CLAUDE.md." >&2
+else
+  # Says "not enforced" rather than nothing, so a green run is never mistaken
+  # for "nothing grew". Reporting a pass as though it were a clean measurement
+  # is the failure mode every other check here was written to avoid.
+  echo "$grew file(s) grew past the ${LINE_LIMIT}-line limit; NOT ENFORCED (ENFORCE_FILE_SIZE=0)"
+  echo "  Splitting along the behaviours a file covers is still the right move" >&2
+  echo "  when you are already in one - this just no longer blocks the merge." >&2
+fi
+
+exit "$status"

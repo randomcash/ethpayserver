@@ -2,6 +2,7 @@
 //! Require DATABASE_URL environment variable.
 //! Run with: DATABASE_URL="postgres://..." cargo test -p data-service -- --ignored
 
+use crate::test_support::pg_service;
 use chrono::{Duration, Utc};
 
 use auth::{
@@ -9,21 +10,10 @@ use auth::{
     User, UserId, UserRepository, WalletCredentialId, WalletRepository, error::AuthError,
 };
 
-use super::PgDataService;
 use super::tests::{
     test_device, test_encrypted_blob, test_kdf_params, test_session, test_user, test_wallet,
     test_wallet_challenge,
 };
-
-async fn create_test_service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 fn unique_email() -> String {
     format!("test_{}@example.com", uuid::Uuid::new_v4())
@@ -36,7 +26,7 @@ fn unique_wallet_address() -> String {
 #[tokio::test]
 #[ignore]
 async fn integration_user_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user
     let mut user = test_user();
@@ -64,7 +54,7 @@ async fn integration_user_crud() {
     let fetched = service.get_user(user.id).await.unwrap().unwrap();
     assert_eq!(fetched.failed_login_attempts, 3);
 
-    // RCS-201: the pinned identifier must survive a round trip, and update_user
+    // The pinned identifier must survive a round trip, and update_user
     // must not be able to move it. Collapsing the COALESCE back to a plain
     // assignment, or swapping two same-typed binds, previously kept CI green and
     // would only surface when a user tried to recover.
@@ -73,9 +63,16 @@ async fn integration_user_crud() {
         "create_user -> get_user must round-trip the pinned identifier"
     );
 
+    // This used to return Ok(()) and discard the change, which reads
+    // exactly like a successful write. Rejecting it is the point - a caller
+    // that assigns this field should find out, not be told it worked.
     let mut tampered = fetched.clone();
     tampered.kdf_salt_identifier = "attacker-chosen".to_string();
-    service.update_user(&tampered).await.unwrap();
+    let err = service.update_user(&tampered).await.unwrap_err();
+    assert!(
+        matches!(&err, AuthError::ImmutableField(f) if f == "kdf_salt_identifier"),
+        "expected ImmutableField, got {err:?}"
+    );
     let after = service.get_user(user.id).await.unwrap().unwrap();
     assert_eq!(
         after.kdf_salt_identifier, user.kdf_salt_identifier,
@@ -111,7 +108,7 @@ async fn integration_user_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_user_wallet_address() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user with wallet address
     let wallet = unique_wallet_address();
@@ -146,7 +143,7 @@ async fn integration_user_wallet_address() {
 #[tokio::test]
 #[ignore]
 async fn integration_device_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user first
     let mut user = test_user();
@@ -192,7 +189,7 @@ async fn integration_device_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_session_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user and device first
     let mut user = test_user();
@@ -250,7 +247,7 @@ async fn integration_session_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_session_cascade_delete() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user and device
     let mut user = test_user();
@@ -281,7 +278,7 @@ async fn integration_session_cascade_delete() {
 #[tokio::test]
 #[ignore]
 async fn integration_wallet_crud() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user first
     let mut user = test_user();
@@ -338,7 +335,7 @@ async fn integration_wallet_crud() {
 #[tokio::test]
 #[ignore]
 async fn integration_wallet_unique_constraint() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create two users
     let mut user1 = test_user();
@@ -368,10 +365,124 @@ async fn integration_wallet_unique_constraint() {
     service.delete_user(user2.id).await.unwrap();
 }
 
+/// Swapping the primary wallet credential must demote the old one,
+/// promote the new one, keep `users.primary_wallet_address` (what wallet
+/// *login* actually resolves accounts by) in step, and - the regression that
+/// matters - leave the pinned `kdf_salt_identifier` untouched so recovery
+/// keeps working.
+#[tokio::test]
+#[ignore]
+async fn integration_set_primary_wallet_credential() {
+    let service = pg_service().await;
+
+    // A wallet-only account shaped the way `complete_new_user_wallet_registration`
+    // actually creates one: pinned salt identifier, primary_wallet_address
+    // matching the sole (primary) wallet credential.
+    let mut user = test_user();
+    user.email = None;
+    let primary_address = unique_wallet_address();
+    user.primary_wallet_address = Some(primary_address.clone());
+    user.kdf_salt_identifier = format!("wallet:{primary_address}");
+    service.create_user(&user).await.unwrap();
+
+    let mut primary_wallet = test_wallet(user.id);
+    primary_wallet.address = primary_address;
+    primary_wallet.is_primary = true;
+    service.create_wallet(&primary_wallet).await.unwrap();
+
+    let mut other_wallet = test_wallet(user.id);
+    other_wallet.id = WalletCredentialId::new();
+    other_wallet.address = unique_wallet_address();
+    other_wallet.is_primary = false;
+    service.create_wallet(&other_wallet).await.unwrap();
+
+    let promoted = service
+        .set_primary_wallet_credential(user.id, other_wallet.id)
+        .await
+        .unwrap();
+    assert!(promoted.is_primary);
+    assert_eq!(promoted.address, other_wallet.address);
+
+    // The old primary is demoted, not deleted or deactivated.
+    let old = service
+        .get_wallet(primary_wallet.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!old.is_primary);
+    assert!(old.is_active);
+
+    let stored_user = service.get_user(user.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored_user.primary_wallet_address,
+        Some(other_wallet.address.clone())
+    );
+    assert_eq!(stored_user.kdf_salt_identifier, user.kdf_salt_identifier);
+
+    // Idempotent: naming the already-primary wallet is a no-op, not an error.
+    let again = service
+        .set_primary_wallet_credential(user.id, other_wallet.id)
+        .await
+        .unwrap();
+    assert!(again.is_primary);
+
+    // A wallet id that exists, but not on this account, is not found - never
+    // silently repointed onto the caller's account.
+    let mut stranger = test_user();
+    stranger.id = UserId::new();
+    stranger.email = Some(unique_email());
+    service.create_user(&stranger).await.unwrap();
+    let err = service
+        .set_primary_wallet_credential(stranger.id, primary_wallet.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::WalletNotFound(_)));
+
+    // Cleanup
+    service.delete_user(user.id).await.unwrap();
+    service.delete_user(stranger.id).await.unwrap();
+}
+
+/// The invariant the migration exists for, asserted against Postgres
+/// directly rather than through `set_primary_wallet_credential` - which
+/// never produces this state itself. Two active primaries for one account
+/// must be impossible even for code that bypasses the Rust layer entirely.
+#[tokio::test]
+#[ignore]
+async fn integration_wallet_credentials_one_primary_is_db_enforced() {
+    let service = pg_service().await;
+
+    let mut user = test_user();
+    user.email = Some(unique_email());
+    service.create_user(&user).await.unwrap();
+
+    let mut a = test_wallet(user.id);
+    a.address = unique_wallet_address();
+    a.is_primary = true;
+    service.create_wallet(&a).await.unwrap();
+
+    let second_id = WalletCredentialId::new();
+    let second_address = unique_wallet_address();
+    let err = sqlx::query(
+        "INSERT INTO wallet_credentials (id, user_id, address, name, is_primary, created_at, is_active) \
+         VALUES ($1, $2, $3, $4, TRUE, NOW(), TRUE)",
+    )
+    .bind(second_id.0)
+    .bind(user.id.0)
+    .bind(&second_address)
+    .bind("Second primary attempt")
+    .execute(service.pool())
+    .await
+    .unwrap_err();
+    assert!(matches!(&err, sqlx::Error::Database(e) if e.is_unique_violation()));
+
+    service.delete_user(user.id).await.unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn integration_wallet_challenge() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     let user_id = UserId::new();
     let challenge = test_wallet_challenge();
@@ -396,10 +507,72 @@ async fn integration_wallet_challenge() {
     assert!(fetched.is_none());
 }
 
+/// The wallet-reauth-challenge table backing `POST .../reauth-challenge` and
+/// `PATCH .../primary` — a separate slot from `wallet_challenges` above, and
+/// with the same single-use, one-row-per-user shape.
+#[tokio::test]
+#[ignore]
+async fn integration_wallet_reauth_challenge() {
+    let service = pg_service().await;
+
+    let mut user = test_user();
+    user.email = Some(unique_email());
+    service.create_user(&user).await.unwrap();
+
+    let address = unique_wallet_address();
+    let created_at = Utc::now();
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "abc123", created_at)
+        .await
+        .unwrap();
+
+    let fetched = service
+        .take_wallet_reauth_challenge(user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.address, address);
+    assert_eq!(fetched.challenge, "abc123");
+    assert_eq!(fetched.created_at.timestamp(), created_at.timestamp());
+
+    // Single-use: taken once, gone after.
+    let fetched = service.take_wallet_reauth_challenge(user.id).await.unwrap();
+    assert!(fetched.is_none());
+
+    // A second challenge request overwrites the first rather than stacking -
+    // only the most recent one this user asked for should ever be answerable.
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "first", Utc::now())
+        .await
+        .unwrap();
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "second", Utc::now())
+        .await
+        .unwrap();
+    let fetched = service
+        .take_wallet_reauth_challenge(user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.challenge, "second");
+
+    // Past the freshness window, the challenge is no longer answerable - the
+    // same rule `take_wallet_challenge` enforces for login challenges.
+    let stale = Utc::now() - Duration::minutes(10);
+    service
+        .store_wallet_reauth_challenge(user.id, &address, "stale", stale)
+        .await
+        .unwrap();
+    let fetched = service.take_wallet_reauth_challenge(user.id).await.unwrap();
+    assert!(fetched.is_none());
+
+    service.delete_user(user.id).await.unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn integration_cascade_delete_user() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = pg_service().await;
 
     // Create user with device, session, and wallet
     let mut user = test_user();
@@ -423,4 +596,87 @@ async fn integration_cascade_delete_user() {
     assert!(service.get_device(device.id).await.unwrap().is_none());
     assert!(service.get_session(session.id).await.unwrap().is_none());
     assert!(service.get_wallet(wallet.id).await.unwrap().is_none());
+}
+
+/// The Postgres half of the silent-discard fix.
+///
+/// `kdf_salt_identifier` is pinned at registration and the stored
+/// `recovery_verification_hash` was derived from it, so a change would strand
+/// the account. The statement has always refused to apply one — it omits the
+/// column from its SET clause — but it used to report success while doing so,
+/// which is indistinguishable from having worked.
+#[tokio::test]
+#[ignore]
+async fn integration_kdf_salt_identifier_is_immutable() {
+    let service = pg_service().await;
+
+    let mut user = test_user();
+    user.email = Some(unique_email());
+    user.kdf_salt_identifier = user.email.clone().unwrap();
+    service.create_user(&user).await.unwrap();
+
+    // Changing it is an error, not a silent no-op.
+    let mut tampered = user.clone();
+    tampered.kdf_salt_identifier = format!("wallet:{}", unique_wallet_address());
+    let err = service.update_user(&tampered).await.unwrap_err();
+    assert!(
+        matches!(&err, AuthError::ImmutableField(f) if f == "kdf_salt_identifier"),
+        "expected ImmutableField, got {err:?}"
+    );
+
+    // The whole update is rejected, so no other field from it leaked through.
+    let stored = service.get_user(user.id).await.unwrap().unwrap();
+    assert_eq!(stored.kdf_salt_identifier, user.kdf_salt_identifier);
+
+    // An update that leaves it alone still works, including one that adds an
+    // email — the case the pin exists for, where recomputing would change it.
+    let mut updated = stored;
+    updated.failed_login_attempts = 2;
+    service.update_user(&updated).await.unwrap();
+    let stored = service.get_user(user.id).await.unwrap().unwrap();
+    assert_eq!(stored.failed_login_attempts, 2);
+    assert_eq!(stored.kdf_salt_identifier, user.kdf_salt_identifier);
+}
+
+/// A row the old binary wrote during a rolling deploy has a NULL identifier and
+/// must still be pinnable — that is what the COALESCE is for, and the new WHERE
+/// clause has to keep letting it through rather than treating it as a change.
+#[tokio::test]
+#[ignore]
+async fn integration_null_kdf_salt_identifier_can_still_be_pinned() {
+    let service = pg_service().await;
+
+    let mut user = test_user();
+    user.email = Some(unique_email());
+    user.kdf_salt_identifier = user.email.clone().unwrap();
+    service.create_user(&user).await.unwrap();
+
+    // Simulate the pre-backfill state.
+    sqlx::query("UPDATE users SET kdf_salt_identifier = NULL WHERE id = $1")
+        .bind(user.id.0)
+        .execute(service.pool())
+        .await
+        .unwrap();
+
+    // A read of that row falls back to the computed identifier, and writing it
+    // back pins it for good.
+    let loaded = service.get_user(user.id).await.unwrap().unwrap();
+    assert_eq!(loaded.kdf_salt_identifier, user.kdf_salt_identifier);
+    service.update_user(&loaded).await.unwrap();
+
+    let pinned: Option<String> =
+        sqlx::query_scalar("SELECT kdf_salt_identifier FROM users WHERE id = $1")
+            .bind(user.id.0)
+            .fetch_one(service.pool())
+            .await
+            .unwrap();
+    assert_eq!(pinned.as_deref(), Some(user.kdf_salt_identifier.as_str()));
+
+    // And now that it is pinned, it is immutable like any other row.
+    let mut tampered = loaded;
+    tampered.kdf_salt_identifier = format!("wallet:{}", unique_wallet_address());
+    assert!(matches!(
+        service.update_user(&tampered).await,
+        Err(AuthError::ImmutableField(_))
+    ));
 }

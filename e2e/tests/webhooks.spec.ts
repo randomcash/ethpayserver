@@ -31,19 +31,19 @@ test.describe('Webhooks', () => {
 
     // The endpoint card's badge reads Active/Disabled (the checkbox in the form
     // is the one labelled "Enabled").
-    const status = page.locator('.detail-card-header .badge').first();
+    const status = page.locator('.ps-card-header .badge').first();
     await expect(status).toHaveText('Active');
 
     // Re-open the form and clear the Enabled checkbox
     await page.locator('button', { hasText: 'Edit endpoint' }).click();
     const form = webhookForm(page);
     await form.locator('input[type="checkbox"]').uncheck();
-    await form.locator('.btn-primary', { hasText: 'Save' }).click();
+    await form.locator('.ps-btn-primary', { hasText: 'Save' }).click();
 
     await expect(status).toHaveText('Disabled');
 
     await page.reload();
     await openWebhooksTab(page);
-    await expect(page.locator('.detail-card-header .badge').first()).toHaveText('Disabled');
+    await expect(page.locator('.ps-card-header .badge').first()).toHaveText('Disabled');
   });
 });

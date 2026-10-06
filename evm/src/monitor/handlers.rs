@@ -97,6 +97,7 @@ impl EventHandler for LoggingHandler {
                     fork_block = r.fork_block,
                     depth = r.depth,
                     affected = r.affected_invoices.len(),
+                    survived = r.survived_tx_hashes.len(),
                     "reorg detected"
                 );
             }

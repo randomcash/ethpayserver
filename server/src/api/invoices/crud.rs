@@ -6,15 +6,18 @@ use auth::{SessionService, repository::UserStoreRepository};
 use data_service::StorePaymentMethodReader;
 use rust_decimal::Decimal;
 
-use crate::api::extractors::AuthenticatedUser;
+use crate::api::extractors::{AuthenticatedCaller, key_grants_store_permission};
 use crate::metrics;
+use crate::services::plugins::{
+    FilterVerdict, InvoiceCreationFilterRequest, run_invoice_creation_filters,
+};
 use crate::state::PgAppState;
 use ::types::currency::DEFAULT_INVOICE_EXPIRATION_SECS;
 use rates::{RateError, is_fiat_currency};
 
 use super::{
     CreateInvoiceRequest, InvoiceResponse, apply_token_policy_filter,
-    convert_human_to_smallest_unit, convert_to_crypto_smallest_unit, extract_customer_email,
+    convert_human_to_smallest_unit, convert_to_crypto_smallest_unit, customer_email_of,
     invoice_error, rate_stale_reject_secs, rate_stale_warn_secs,
 };
 
@@ -37,21 +40,19 @@ use super::{
 )]
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // validation + payment-option setup is one logical flow
 pub async fn create_invoice<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    caller: AuthenticatedCaller,
     State(state): State<PgAppState<A>>,
     Json(req): Json<CreateInvoiceRequest>,
 ) -> Result<(StatusCode, Json<InvoiceResponse>), (StatusCode, Json<serde_json::Value>)>
 where
     A: SessionService + 'static,
 {
-    // Check permission on the store
+    // The owner must have this AND the key (if any) must grant it - never the key alone.
+    const CREATE_INVOICE: &str = "ethpay.store.cancreateinvoice";
+    let store_id = StoreId(req.store_id);
     let has_permission = state
         .data_service
-        .user_has_store_permission(
-            user.id,
-            StoreId(req.store_id),
-            "ethpay.store.cancreateinvoice",
-        )
+        .user_has_store_permission(caller.user.id, store_id, CREATE_INVOICE)
         .await
         .map_err(|_| {
             invoice_error(
@@ -59,13 +60,98 @@ where
                 "internal_error",
                 "Failed to check store permissions",
             )
-        })?;
+        })?
+        && key_grants_store_permission(caller.key_scope.as_deref(), CREATE_INVOICE, store_id);
 
     if !has_permission {
         return Err(invoice_error(
             StatusCode::FORBIDDEN,
             "forbidden",
             "Insufficient permissions to create invoices for this store",
+        ));
+    }
+
+    // An archived store is retired: it keeps its history but takes no new
+    // invoices. Checked after the permission gate so a caller without access
+    // learns nothing about the store's state.
+    match auth::StoreRepository::get_store(&*state.data_service, store_id).await {
+        Ok(Some(store)) if store.archived => {
+            return Err(invoice_error(
+                StatusCode::CONFLICT,
+                "store_archived",
+                "This store is archived and cannot receive new invoices",
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(%store_id, error = %e, "failed to load store for invoice creation");
+            return Err(invoice_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to load store",
+            ));
+        }
+    }
+
+    // A plugin (host capability 2) may refuse invoice creation - e.g. to
+    // enforce a lapsed subscription. The merchant keeps every other
+    // capability; only this endpoint is ever filtered.
+    //
+    // A request authenticated as the operator is exempt, and that exemption
+    // is load-bearing rather than a convenience. The invoice that renews a
+    // subscription is created by the same plugin that decides whether
+    // subscriptions are in good standing, authenticated with the operator's
+    // own credential. Without the exemption a plugin that refuses - because
+    // of a bug, or simply because it is down and fails closed - refuses the
+    // renewal that would have cleared the refusal, and nothing short of
+    // editing the database gets out of it.
+    //
+    // `is_operator` is a property of the credential, decided at
+    // authentication time - never a comparison against the requested store,
+    // and never implied by role. An admin session is not exempt; only a
+    // credential explicitly granted this carries it.
+
+    // Resolved only when something is actually going to be asked. Billing is
+    // per merchant rather than per store - a merchant running three stores
+    // pays once, and their volume is one figure rather than three small ones
+    // - so a filter needs the owner, not just the store. That costs a read,
+    // and this is the invoice-creation path, so no plugin installed means no
+    // read: the common case, and every deployment today.
+    let account_id = if caller.is_operator || state.invoice_creation_filters.is_empty() {
+        None
+    } else {
+        match auth::StoreRepository::get_store(&*state.data_service, StoreId(req.store_id)).await {
+            Ok(Some(store)) => Some(store.owner_id),
+            // The permission check above already passed, so the store exists
+            // and is readable; reaching here means the database answered
+            // differently between two calls. Refuse rather than ask the
+            // filter about a merchant we could not identify - a billing
+            // decision made against the wrong account is worse than a
+            // refusal the caller can retry.
+            Ok(None) | Err(_) => {
+                return Err(invoice_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Could not identify the account that owns this store",
+                ));
+            }
+        }
+    };
+
+    if let Some(account_id) = account_id
+        && let FilterVerdict::Deny { reason } = run_invoice_creation_filters(
+            &state.invoice_creation_filters,
+            InvoiceCreationFilterRequest {
+                store_id: StoreId(req.store_id),
+                account_id,
+            },
+        )
+        .await
+    {
+        return Err(invoice_error(
+            StatusCode::FORBIDDEN,
+            "invoice_creation_blocked",
+            &reason,
         ));
     }
 
@@ -105,6 +191,26 @@ where
             StatusCode::BAD_REQUEST,
             "no_payment_methods",
             "Store has no enabled payment methods. Configure at least one payment method before creating invoices.",
+        ));
+    }
+
+    // Every method already carries the answer to its own pin -> store override
+    // -> account primary walk (`StorePaymentMethod::wallet_id`, resolved by
+    // `get_enabled_payment_methods`), so this is a read of what was already
+    // fetched, not a new query. An invoice whose every method resolves to no
+    // wallet quotes no address, or one derived from nothing - it can never be
+    // paid, so refuse it here rather than let each method fail derivation one
+    // at a time after rates have already been fetched.
+    if store_has_no_wallet(&payment_methods) {
+        tracing::warn!(
+            "Store {} has enabled payment methods but none resolve to a wallet",
+            req.store_id
+        );
+        return Err(invoice_error(
+            StatusCode::BAD_REQUEST,
+            "no_wallet",
+            "This store has no wallet to receive payments. Add a wallet on the Wallets \
+             page before creating an invoice.",
         ));
     }
 
@@ -293,18 +399,26 @@ where
         .unwrap_or(DEFAULT_INVOICE_EXPIRATION_SECS);
     let expires_at = Utc::now() + chrono::Duration::seconds(expiration_secs as i64);
 
-    // Merge customer_email into metadata so the generated DB column picks it up.
-    let metadata = match (req.customer_email, req.metadata) {
-        (Some(email), Some(mut meta)) => {
-            if let Some(obj) = meta.as_object_mut() {
-                obj.entry("customer_email")
-                    .or_insert_with(|| serde_json::Value::String(email));
-            }
-            Some(meta)
-        }
-        (Some(email), None) => Some(serde_json::json!({ "customer_email": email })),
-        (None, meta) => meta,
-    };
+    // customer_email is stored in its own column, not folded into metadata.
+    // It used to be merged in so a generated Postgres column could
+    // derive it back out - which would have silently returned NULL, and stopped
+    // customer receipts, the moment metadata became ciphertext.
+    //
+    // Accept `buyer_email` from metadata as an inbound alias, since integrations
+    // already send it that way and the old generated column COALESCEd both. It
+    // is lifted out rather than left behind: contact data should live in exactly
+    // one place, and metadata is the half that stops being readable.
+    let mut metadata = req.metadata;
+    let customer_email = req.customer_email.or_else(|| {
+        metadata
+            .as_mut()
+            .and_then(|m| m.as_object_mut())
+            .and_then(|obj| {
+                obj.remove("customer_email")
+                    .or_else(|| obj.remove("buyer_email"))
+                    .and_then(|v| v.as_str().map(str::to_string))
+            })
+    });
 
     // Create invoice (network-agnostic) - only after validating payment methods
     let invoice = InvoiceData {
@@ -317,21 +431,15 @@ where
         created_at: Utc::now(),
         expires_at,
         metadata,
+        customer_email,
         extra: None,
     };
 
-    ::types::InvoiceWriter::upsert(&*state.data_service, &invoice)
-        .await
-        .map_err(|_| {
-            invoice_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "Failed to create invoice",
-            )
-        })?;
-
-    // Create payment options for each validated payment method
-    let created_options = super::payment_options::build_payment_options(
+    // Derive every address first. Nothing is written until they all exist, so a
+    // derivation failure on the third method cannot leave an invoice committed
+    // with the first two - payable in some assets and not others, quoting a
+    // customer an address nobody is watching.
+    let derived = super::payment_options::derive_payment_options(
         &state,
         &invoice,
         &payment_methods,
@@ -341,18 +449,46 @@ where
 
     // Defensive check: should never happen since we pre-validate payment methods
     debug_assert!(
-        !created_options.is_empty(),
+        !derived.is_empty(),
         "Pre-validation should ensure at least one valid method"
     );
+
+    // One transaction: the invoice, its options and their watched addresses, or
+    // none of them.
+    let options: Vec<_> = derived.iter().map(|d| d.option.clone()).collect();
+    data_service::InvoiceCreationWriter::create_invoice_with_options(
+        &*state.data_service,
+        &invoice,
+        &options,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(invoice_id = %invoice.id.0, error = %e, "invoice creation rolled back");
+        invoice_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Failed to create invoice",
+        )
+    })?;
+
+    // Only now, and best-effort. Announcing an address before the commit would
+    // have the monitor watching for money against a payment option that might
+    // never exist; a missed notification is recoverable by the retry service,
+    // an unsent one is not.
+    super::payment_options::notify_monitor_for(&state, &invoice, &derived).await;
+
+    let created_options = options;
 
     // Record metrics
     metrics::record_invoice_created(&invoice.currency);
 
-    let customer_email = extract_customer_email(&invoice.metadata);
+    let customer_email = customer_email_of(&invoice);
     let response = InvoiceResponse {
         id: invoice.id.0,
+        store_id: invoice.store_id.0.to_string(),
+        store_name: None,
         currency: invoice.currency,
-        status: invoice.status.to_string(),
+        status: invoice.status,
         amount: invoice.amount,
         amount_received: invoice.amount_received,
         created_at: invoice.created_at,
@@ -363,4 +499,14 @@ where
     };
 
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// Whether every enabled payment method on this store resolves to no wallet.
+///
+/// A store with none of its methods resolving cannot pay any invoice it is
+/// asked to create - see the gate in `create_invoice`. A store where even one
+/// method resolves is left alone: that invoice can be paid on that method, and
+/// gating here is not this ticket's job.
+pub(crate) fn store_has_no_wallet(payment_methods: &[data_service::StorePaymentMethod]) -> bool {
+    payment_methods.iter().all(|pm| pm.wallet_id.is_none())
 }

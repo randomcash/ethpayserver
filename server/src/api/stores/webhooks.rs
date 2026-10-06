@@ -5,51 +5,16 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use auth::repository::StoreRepository;
 use auth::{SessionService, StoreId};
 use types::{StoreWebhookReader, StoreWebhookWriter};
 
-use super::super::extractors::AuthenticatedUser;
+use super::super::extractors::StoreScopedUser;
 use super::require_store_settings_permission;
 use crate::state::PgAppState;
-
-/// Request to configure a webhook.
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct ConfigureWebhookRequest {
-    /// Webhook URL to receive notifications.
-    pub webhook_url: String,
-    /// Whether the webhook is enabled.
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-fn default_enabled() -> bool {
-    true
-}
-
-/// Webhook response.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct WebhookResponse {
-    /// Webhook ID.
-    pub id: Uuid,
-    /// Store ID.
-    pub store_id: Uuid,
-    /// Webhook URL.
-    pub webhook_url: String,
-    /// Webhook secret (for signature verification).
-    /// Only shown once when created/updated.
-    pub webhook_secret: Option<String>,
-    /// Whether the webhook is enabled.
-    pub enabled: bool,
-    /// Creation timestamp.
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Last update timestamp.
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
+pub use api_types::{ConfigureWebhookRequest, WebhookResponse};
 
 /// Get webhook configuration for a store.
 #[utoipa::path(
@@ -68,14 +33,14 @@ pub struct WebhookResponse {
     )
 )]
 pub async fn get_store_webhook<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<Json<WebhookResponse>, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let webhook = StoreWebhookReader::get_webhook(&*state.data_service, store_id)
         .await
@@ -115,7 +80,7 @@ where
     )
 )]
 pub async fn configure_store_webhook<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
     Json(req): Json<ConfigureWebhookRequest>,
@@ -123,7 +88,7 @@ pub async fn configure_store_webhook<A>(
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     // Validate webhook URL - must be HTTPS (or localhost for dev)
     if !req.webhook_url.starts_with("https://") && !req.webhook_url.starts_with("http://localhost")
@@ -180,14 +145,14 @@ where
     )
 )]
 pub async fn delete_store_webhook<A>(
-    AuthenticatedUser(user): AuthenticatedUser,
+    StoreScopedUser(user, key_scope): StoreScopedUser,
     State(state): State<PgAppState<A>>,
     Path(store_id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode>
 where
     A: SessionService + 'static,
 {
-    require_store_settings_permission(&state, &user, store_id).await?;
+    require_store_settings_permission(&state, &user, key_scope.as_deref(), store_id).await?;
 
     let deleted = StoreWebhookWriter::delete_webhook(&*state.data_service, store_id)
         .await

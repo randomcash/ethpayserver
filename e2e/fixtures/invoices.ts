@@ -80,6 +80,6 @@ export async function createInvoice(
  * is the icon button in `.modal-header`.
  */
 export async function closeCreateInvoiceModal(page: Page): Promise<void> {
-  await createInvoiceModal(page).locator('.modal-header .btn-icon').click();
+  await createInvoiceModal(page).locator('.modal-header .ps-btn-icon').click();
   await expect(createInvoiceModal(page)).not.toBeVisible();
 }

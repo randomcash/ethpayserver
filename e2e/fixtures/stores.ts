@@ -10,15 +10,15 @@ import { expect, type Page } from '@playwright/test';
  *
  * This helper existed as four near-identical copies across the specs. That is
  * part of how it went stale unnoticed: nothing ran it, because the E2E job
- * carried `continue-on-error: true` (RCS-112).
+ * carried `continue-on-error: true`.
  */
 export async function createStore(page: Page, name: string): Promise<void> {
   await page.goto('/evm/stores');
   await page.locator('button', { hasText: /create store/i }).click();
 
-  const form = page.locator('.detail-card', { hasText: 'New Store' });
+  const form = page.locator('.ps-card', { hasText: 'New Store' });
   await form.getByPlaceholder('My Store').fill(name);
-  await form.locator('.form-actions .btn-primary').click();
+  await form.locator('.form-actions .ps-btn-primary').click();
 
   await expect(page.locator('.store-card-name', { hasText: name })).toBeVisible();
 }
@@ -35,8 +35,8 @@ export async function createStoreAndOpen(page: Page, name: string): Promise<void
  *
  * The layout auto-selects the first store, but only when the store list is
  * fetched — creating a store from an already-loaded page leaves the selector on
- * "All Stores", and the Create Invoice modal takes whatever is selected
- * (RCS-172), so an invoice opened straight after `createStore` has no store.
+ * "All Stores", and the Create Invoice modal takes whatever is selected,
+ * so an invoice opened straight after `createStore` has no store.
  */
 export async function selectStore(page: Page, name: string): Promise<void> {
   const selector = page.locator('.store-selector');

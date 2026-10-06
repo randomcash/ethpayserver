@@ -187,6 +187,16 @@ pub trait BlockSource: Send + Sync {
         addresses: &[Address],
     ) -> EvmResult<Vec<NativeTransfer>>;
 
+    /// Get the canonical hash of the block at `number`, if known.
+    ///
+    /// Used for reorg detection when a gap between processed blocks means the
+    /// new block's `parent_hash` cannot be compared directly against the last
+    /// processed hash: this asks the chain whether the block we last
+    /// processed is still there.
+    async fn get_block_hash(&self, number: u64) -> EvmResult<Option<B256>> {
+        Ok(self.get_block(number).await?.map(|b| b.header.hash))
+    }
+
     /// Get the number of confirmations for a block.
     ///
     /// Returns `current_block - block_number + 1`, or 0 if block not found.

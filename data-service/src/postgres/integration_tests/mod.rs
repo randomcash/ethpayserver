@@ -8,11 +8,48 @@
 //! - `payment`: Payment CRUD and confirmation tests
 //! - `watched_address`: Watched address management tests
 //! - `aggregation`: Multi-currency payment aggregation E2E tests
+//! - `analytics`: Dashboard payment-volume aggregation
+//! - `wallet`: Account wallet derivation and store resolution
+//! - `wallet_migration`: the account-wallets migration run over old-shape data
+//! - `backfill_truncated_payment_symbols`: the truncated-address backfill,
+//!   resolving known tokens and falling back for the rest
+//! - `account_standing`: the version compare-and-set and the fail-open read
+//! - `account_deletion`: what blocks deleting an account, against the real FKs
+//! - `store_creation`: a store and the membership that owns it, as one unit
+//! - `payout_claims`: which invoices a store's payouts already hold
+//! - `email_change`: pending email changes leave the recovery salt untouched
+//! - `webhook_delivery`: retries of one job collapse to one row, and a
+//!   store's deliveries stay scoped to it
+//! - `merchant_directory`: the plugin host's server-wide account/store list
+//! - `installed_plugins`: what is installed survives a restart, and the
+//!   audit trail outlives the plugin it describes
+//! - `seeded_tokens`: the migration-seeded L2 and testnet tokens, resolved
+//!   by `TokenReader::get_by_address` the way a real payment resolves them
+//! - `expected_watch`: `expected_watched_addresses` excludes a still-active
+//!   watch once its invoice resolves, not just once it is deactivated
 
+mod account_deletion;
+mod account_standing;
 mod aggregation;
+mod analytics;
+mod backfill_truncated_payment_symbols;
+mod chain_cursor;
+mod email_change;
+mod expected_watch;
+mod installed_plugins;
 mod invoice;
+mod invoice_creation;
+mod merchant_directory;
 mod payment;
+mod payout_claims;
+mod seeded_tokens;
+mod server_settings;
+mod store_creation;
+mod wallet;
+mod wallet_migration;
+mod wallet_namespace_migration;
 mod watched_address;
+mod webhook_delivery;
 
 use chrono::Utc;
 use types::{PaymentMethodId, PaymentOptionData, PaymentOptionId};
@@ -28,17 +65,19 @@ use super::tests::{
 /// Create a basic payment option for testing.
 pub(crate) fn test_payment_option(
     invoice_id: &types::InvoiceId,
-    chain_id: u64,
+    chain_id: &types::ChainId,
 ) -> PaymentOptionData {
     PaymentOptionData {
         id: PaymentOptionId::new(),
         invoice_id: invoice_id.clone(),
         payment_method_id: PaymentMethodId::new("ETH", chain_id),
-        chain_id,
+        chain_id: chain_id.clone(),
         asset_symbol: "ETH".to_string(),
         token_address: None,
         decimals: 18,
         payment_address: format!("0x{:040x}", uuid::Uuid::new_v4().as_u128()),
+        wallet_id: None,
+        derivation_index: None,
         amount: "1000000000000000000".to_string(),
         rate: None,
         rate_at: None,
@@ -50,7 +89,7 @@ pub(crate) fn test_payment_option(
 /// Create a payment option with specific asset, rate, and decimals.
 pub(crate) fn test_payment_option_with_rate(
     invoice_id: &types::InvoiceId,
-    chain_id: u64,
+    chain_id: &types::ChainId,
     asset_symbol: &str,
     token_address: Option<String>,
     decimals: u8,
@@ -61,11 +100,13 @@ pub(crate) fn test_payment_option_with_rate(
         id: PaymentOptionId::new(),
         invoice_id: invoice_id.clone(),
         payment_method_id: PaymentMethodId::new(asset_symbol, chain_id),
-        chain_id,
+        chain_id: chain_id.clone(),
         asset_symbol: asset_symbol.to_string(),
         token_address,
         decimals,
         payment_address: format!("0x{:040x}", uuid::Uuid::new_v4().as_u128()),
+        wallet_id: None,
+        derivation_index: None,
         amount: amount.to_string(),
         rate,
         rate_at: Some(Utc::now()),
@@ -78,7 +119,7 @@ pub(crate) fn test_payment_option_with_rate(
 pub(crate) fn test_payment_with_credit(
     invoice_id: &types::InvoiceId,
     payment_option_id: Option<uuid::Uuid>,
-    chain_id: u64,
+    chain_id: &types::ChainId,
     asset_symbol: &str,
     amount: &str,
     credited_amount: Option<String>,
@@ -89,7 +130,7 @@ pub(crate) fn test_payment_with_credit(
         id: uuid::Uuid::new_v4(),
         invoice_id: invoice_id.clone(),
         payment_option_id,
-        chain_id,
+        chain_id: chain_id.clone(),
         asset_type: types::AssetType::Native,
         amount: amount.to_string(),
         asset_symbol: asset_symbol.to_string(),

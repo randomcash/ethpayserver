@@ -6,9 +6,40 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{PaymentReader, PaymentWriter, RepositoryError, RepositoryResult, sqlx_to_repo_error};
-use types::{AssetType, InvoiceId, PaymentData, PaymentQueryParams};
+use types::{AssetType, InvoiceId, PaymentData, PaymentQueryParams, StoreId};
 
-use super::PgDataService;
+use super::{PgDataService, search_contains_pattern, search_prefix_pattern};
+
+/// Bind the payment filter values in exactly the order the WHERE clause names
+/// them.
+///
+/// Extracted so the count query and the data query cannot drift apart. These
+/// binds are positional: one list missing a value shifts every later filter
+/// onto the wrong placeholder, which does not fail — it silently answers a
+/// different question. Two hand-maintained copies of the same sequence is how
+/// that happens, so there is now one.
+fn bind_payment_filters<'q>(
+    mut query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    params: &'q PaymentQueryParams,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    if let Some(store_id) = params.store_id {
+        query = query.bind(store_id.0);
+    }
+    if let Some(ref store_ids) = params.store_ids {
+        query = query.bind(store_ids.iter().map(|s| s.0).collect::<Vec<_>>());
+    }
+    if let Some(ref invoice_id) = params.invoice_id {
+        query = query.bind(invoice_id.as_str());
+    }
+    // Free-text search, in the same position the WHERE clause gives it: the
+    // anchored pattern first, then the substring one.
+    if let Some(term) = params.search_term() {
+        query = query
+            .bind(search_prefix_pattern(term))
+            .bind(search_contains_pattern(term));
+    }
+    query
+}
 
 /// Convert AssetType to database string.
 fn asset_type_to_db(asset_type: AssetType) -> &'static str {
@@ -118,15 +149,52 @@ impl PaymentReader for PgDataService {
         // Build dynamic WHERE clause
         let mut conditions = Vec::new();
         let mut bind_idx = 1;
-        let needs_join = params.store_id.is_some();
+        // Either store filter needs the invoices join - payments carry no
+        // store_id of their own.
+        let needs_join = params.store_id.is_some() || params.store_ids.is_some();
 
         if params.store_id.is_some() {
             conditions.push(format!("i.store_id = ${}", bind_idx));
             bind_idx += 1;
         }
+        // Membership scoping. An empty list matches nothing, which is the
+        // correct answer for a caller who belongs to no store - it must not
+        // collapse into "no filter". Binds below repeat this order exactly.
+        if params.store_ids.is_some() {
+            conditions.push(format!("i.store_id = ANY(${})", bind_idx));
+            bind_idx += 1;
+        }
         if params.invoice_id.is_some() {
             conditions.push(format!("p.invoice_id = ${}", bind_idx));
             bind_idx += 1;
+        }
+        // Free-text search. Two binds, each reused by every column
+        // that wants that shape: `${bind_idx}` is the anchored `term%` pattern,
+        // `${bind_idx + 1}` the `%term%` one.
+        //
+        // Anchored on `tx_hash` and `invoice_id` because both are identifiers
+        // a merchant pastes whole, and because only an anchored pattern can
+        // ever be index-served: `%...%` forecloses it for good. Nothing serves
+        // it today - `idx_payments_tx_hash` is on the raw column, not
+        // `LOWER(...)` - but the query shape is the one a
+        // `payments(LOWER(tx_hash) varchar_pattern_ops)` index would satisfy
+        // when this gets hot. Substring on `asset_symbol` and `from_address`
+        // because neither is indexed at all, so anchoring buys nothing, and a
+        // partial match is what someone typing "usd" or a fragment of an
+        // address means.
+        //
+        // Note this touches only `payments` columns, so it needs no join and
+        // cannot widen the store scope: the scope conditions above stay ANDed
+        // on top.
+        if params.search_term().is_some() {
+            let matches = [
+                format!("LOWER(p.tx_hash) LIKE ${}", bind_idx),
+                format!("LOWER(p.invoice_id) LIKE ${}", bind_idx),
+                format!("LOWER(p.asset_symbol) LIKE ${}", bind_idx + 1),
+                format!("LOWER(p.from_address) LIKE ${}", bind_idx + 1),
+            ];
+            conditions.push(format!("({})", matches.join(" OR ")));
+            bind_idx += 2;
         }
         if let Some(confirmed) = params.confirmed {
             if confirmed {
@@ -174,13 +242,7 @@ impl PaymentReader for PgDataService {
         );
 
         // Bind parameters to count query
-        let mut count_query = sqlx::query(&count_sql);
-        if let Some(store_id) = params.store_id {
-            count_query = count_query.bind(store_id.0);
-        }
-        if let Some(ref invoice_id) = params.invoice_id {
-            count_query = count_query.bind(invoice_id.as_str());
-        }
+        let count_query = bind_payment_filters(sqlx::query(&count_sql), params);
 
         let count_row = count_query
             .fetch_one(&self.pool)
@@ -189,14 +251,9 @@ impl PaymentReader for PgDataService {
         let total: i64 = count_row.get("count");
 
         // Bind parameters to data query
-        let mut data_query = sqlx::query(&data_sql);
-        if let Some(store_id) = params.store_id {
-            data_query = data_query.bind(store_id.0);
-        }
-        if let Some(ref invoice_id) = params.invoice_id {
-            data_query = data_query.bind(invoice_id.as_str());
-        }
-        data_query = data_query.bind(params.limit).bind(params.offset);
+        let data_query = bind_payment_filters(sqlx::query(&data_sql), params)
+            .bind(params.limit)
+            .bind(params.offset);
 
         let rows = data_query
             .fetch_all(&self.pool)
@@ -209,52 +266,84 @@ impl PaymentReader for PgDataService {
     }
 }
 
+/// Insert or merge a payment row, keyed by `(chain_id, tx_hash, tx_index)`.
+///
+/// `tx_index` distinguishes two transfers batched into one transaction - see
+/// `payment_tx_index::PaymentTxIndexWriter`. Callers that don't know their
+/// transfer's position (everything reaching this through the plain
+/// `PaymentWriter::upsert` trait method) pass 0, which is correct for the
+/// overwhelming majority of payments: one transfer per transaction.
+/// Upsert one payment row, returning the id of the row that now exists.
+///
+/// That id is not always `payment.id`: `ON CONFLICT (chain_id, tx_hash,
+/// tx_index) DO UPDATE` updates the existing row in place without touching
+/// `id`, so a redelivered event (delivery is documented as at-least-once)
+/// carries a freshly generated `payment.id` that the conflict path never
+/// writes anywhere. A caller that needs the row's real id - the webhook
+/// outbox insert below does, for its `payment_id` foreign key - must read it
+/// back with `RETURNING` rather than trust the value it upserted with.
+///
+/// Generic over the executor so the same query can run against a bare pool
+/// or inside a transaction: [`PaymentTxIndexWriter::upsert_with_tx_index_and_obligation`]
+/// needs this and the outbox insert to commit or fail together.
+async fn upsert_payment_row<'e, E>(
+    executor: E,
+    payment: &PaymentData,
+    tx_index: i32,
+) -> RepositoryResult<Uuid>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let (id,): (Uuid,) = sqlx::query_as(
+        r#"
+        INSERT INTO payments (
+            id, invoice_id, payment_option_id, chain_id, asset_type, amount, asset_symbol,
+            token_address, tx_hash, tx_index, block_number, detected_at, confirmed_at, from_address, extra,
+            credited_amount, rate_used, rate_applied_at
+        ) VALUES (
+            $1, $2, $3, $4, $5::asset_type, $6::numeric, $7,
+            $8, $9, $10, $11, $12, $13, $14, $15,
+            $16::numeric, $17::numeric, $18
+        )
+        ON CONFLICT (chain_id, tx_hash, tx_index) DO UPDATE SET
+            block_number = COALESCE(EXCLUDED.block_number, payments.block_number),
+            confirmed_at = COALESCE(EXCLUDED.confirmed_at, payments.confirmed_at),
+            extra = COALESCE(EXCLUDED.extra, payments.extra),
+            credited_amount = COALESCE(EXCLUDED.credited_amount, payments.credited_amount),
+            rate_used = COALESCE(EXCLUDED.rate_used, payments.rate_used),
+            rate_applied_at = COALESCE(EXCLUDED.rate_applied_at, payments.rate_applied_at)
+        RETURNING id
+        "#,
+    )
+    .bind(payment.id)
+    .bind(payment.invoice_id.as_str())
+    .bind(payment.payment_option_id)
+    .bind(payment.chain_id.as_str())
+    .bind(asset_type_to_db(payment.asset_type))
+    .bind(&payment.amount)
+    .bind(&payment.asset_symbol)
+    .bind(&payment.token_address)
+    .bind(&payment.tx_hash)
+    .bind(tx_index)
+    .bind(payment.block_number.map(|n| n as i64))
+    .bind(payment.detected_at)
+    .bind(payment.confirmed_at)
+    .bind(&payment.from_address)
+    .bind(&payment.extra)
+    .bind(&payment.credited_amount)
+    .bind(&payment.rate_used)
+    .bind(payment.rate_applied_at)
+    .fetch_one(executor)
+    .await
+    .map_err(sqlx_to_repo_error)?;
+
+    Ok(id)
+}
+
 #[async_trait]
 impl PaymentWriter for PgDataService {
     async fn upsert(&self, payment: &PaymentData) -> RepositoryResult<()> {
-        // Use ON CONFLICT (tx_hash, chain_id) to handle duplicate PaymentDetected events
-        // (e.g., after service restart). This is the unique constraint in the DB.
-        sqlx::query(
-            r#"
-            INSERT INTO payments (
-                id, invoice_id, payment_option_id, chain_id, asset_type, amount, asset_symbol,
-                token_address, tx_hash, block_number, detected_at, confirmed_at, from_address, extra,
-                credited_amount, rate_used, rate_applied_at
-            ) VALUES (
-                $1, $2, $3, $4, $5::asset_type, $6::numeric, $7,
-                $8, $9, $10, $11, $12, $13, $14,
-                $15::numeric, $16::numeric, $17
-            )
-            ON CONFLICT (tx_hash, chain_id) DO UPDATE SET
-                block_number = COALESCE(EXCLUDED.block_number, payments.block_number),
-                confirmed_at = COALESCE(EXCLUDED.confirmed_at, payments.confirmed_at),
-                extra = COALESCE(EXCLUDED.extra, payments.extra),
-                credited_amount = COALESCE(EXCLUDED.credited_amount, payments.credited_amount),
-                rate_used = COALESCE(EXCLUDED.rate_used, payments.rate_used),
-                rate_applied_at = COALESCE(EXCLUDED.rate_applied_at, payments.rate_applied_at)
-            "#,
-        )
-        .bind(payment.id)
-        .bind(payment.invoice_id.as_str())
-        .bind(payment.payment_option_id)
-        .bind(payment.chain_id as i64)
-        .bind(asset_type_to_db(payment.asset_type))
-        .bind(&payment.amount)
-        .bind(&payment.asset_symbol)
-        .bind(&payment.token_address)
-        .bind(&payment.tx_hash)
-        .bind(payment.block_number.map(|n| n as i64))
-        .bind(payment.detected_at)
-        .bind(payment.confirmed_at)
-        .bind(&payment.from_address)
-        .bind(&payment.extra)
-        .bind(&payment.credited_amount)
-        .bind(&payment.rate_used)
-        .bind(payment.rate_applied_at)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_to_repo_error)?;
-
+        upsert_payment_row(&self.pool, payment, 0).await?;
         Ok(())
     }
 
@@ -285,7 +374,7 @@ impl PaymentWriter for PgDataService {
     async fn mark_reorged(
         &self,
         invoice_id: &InvoiceId,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         fork_block: u64,
     ) -> RepositoryResult<u64> {
         let result = sqlx::query(
@@ -299,7 +388,7 @@ impl PaymentWriter for PgDataService {
             "#,
         )
         .bind(invoice_id.as_str())
-        .bind(chain_id as i64)
+        .bind(chain_id.as_str())
         .bind(fork_block as i64)
         .execute(&self.pool)
         .await
@@ -319,7 +408,7 @@ impl PgDataService {
     /// Uses the UNIQUE constraint on (tx_hash, chain_id) for efficient lookup.
     pub async fn get_payment_by_tx_hash(
         &self,
-        chain_id: u64,
+        chain_id: &types::ChainId,
         tx_hash: &str,
     ) -> RepositoryResult<Option<PaymentData>> {
         let query = format!(
@@ -327,7 +416,7 @@ impl PgDataService {
             PAYMENT_SELECT_COLS
         );
         let row = sqlx::query(&query)
-            .bind(chain_id as i64)
+            .bind(chain_id.as_str())
             .bind(tx_hash)
             .fetch_optional(&self.pool)
             .await
@@ -340,9 +429,56 @@ impl PgDataService {
     }
 }
 
+// =============================================================================
+// Reorg candidate finding and retraction
+// =============================================================================
+
+use crate::reorg::{ReorgCandidateReader, ReorgWriter};
+
+#[async_trait]
+impl ReorgCandidateReader for PgDataService {
+    async fn reorg_candidates(
+        &self,
+        chain_id: &types::ChainId,
+        fork_block: u64,
+    ) -> RepositoryResult<Vec<PaymentData>> {
+        let query = format!(
+            "SELECT {} FROM payments WHERE chain_id = $1 AND block_number >= $2 AND reorged = FALSE",
+            PAYMENT_SELECT_COLS
+        );
+        let rows = sqlx::query(&query)
+            .bind(chain_id.as_str())
+            .bind(fork_block as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+
+        rows.iter().map(try_row_to_payment).collect()
+    }
+}
+
+#[async_trait]
+impl ReorgWriter for PgDataService {
+    async fn mark_payment_reorged(&self, id: Uuid) -> RepositoryResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE payments
+            SET reorged = TRUE, confirmed_at = NULL
+            WHERE id = $1 AND reorged = FALSE
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        Ok(())
+    }
+}
+
 /// Convert a database row to PaymentData.
 fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentData> {
-    let chain_id: i64 = row.get("chain_id");
+    let chain_id = chain_id_from_row(row, "chain_id");
     let block_number: Option<i64> = row.get("block_number");
     let asset_type_str: String = row.get("asset_type");
 
@@ -350,7 +486,7 @@ fn try_row_to_payment(row: &sqlx::postgres::PgRow) -> RepositoryResult<PaymentDa
         id: row.get("id"),
         invoice_id: InvoiceId::from_string(row.get("invoice_id")),
         payment_option_id: row.get("payment_option_id"),
-        chain_id: chain_id as u64,
+        chain_id,
         asset_type: db_to_asset_type(&asset_type_str),
         amount: row.get("amount"),
         asset_symbol: row.get("asset_symbol"),
@@ -399,5 +535,223 @@ impl PaymentEventWriter for PgDataService {
         .map_err(sqlx_to_repo_error)?;
 
         Ok(row.get("id"))
+    }
+}
+
+// =============================================================================
+// Payment Analytics
+// =============================================================================
+
+use super::conversions::chain_id_from_row;
+use crate::analytics::{
+    PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery, StorePaymentVolumeBucket,
+};
+
+#[async_trait]
+impl PaymentAnalyticsReader for PgDataService {
+    async fn payment_volume_by_day(
+        &self,
+        query: &PaymentVolumeQuery,
+    ) -> RepositoryResult<Vec<PaymentVolumeBucket>> {
+        // `= ANY('{}')` is already false for every row, but short-circuiting
+        // keeps the "no stores means no rows" rule visible in both this
+        // implementation and the in-memory double rather than resting on a
+        // Postgres detail.
+        if query.store_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let store_ids: Vec<Uuid> = query.store_ids.iter().map(|s| s.0).collect();
+
+        // `payment_options` is LEFT joined because the FK is ON DELETE SET
+        // NULL: a payment outlives the option it was made against, and
+        // dropping those rows would understate a merchant's volume. 18 is the
+        // same fallback the payment list uses for an unknown asset.
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                (p.detected_at AT TIME ZONE 'UTC')::date AS day,
+                p.asset_symbol AS asset_symbol,
+                COALESCE(po.decimals, 18)::smallint AS decimals,
+                SUM(p.amount)::text AS raw_amount,
+                COUNT(*) AS payment_count
+            FROM payments p
+            JOIN invoices i ON i.id = p.invoice_id
+            LEFT JOIN payment_options po ON po.id = p.payment_option_id
+            WHERE i.store_id = ANY($1)
+              AND p.reorged = FALSE
+              AND p.detected_at >= $2
+              AND p.detected_at < $3
+            GROUP BY 1, 2, 3
+            ORDER BY 1, 2, 3
+            "#,
+        )
+        .bind(&store_ids)
+        .bind(query.since)
+        .bind(query.until)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        rows.iter()
+            .map(|row| {
+                let raw_decimals: i16 = row.get("decimals");
+                let decimals = u8::try_from(raw_decimals).map_err(|_| {
+                    RepositoryError::Database(format!("negative token decimals: {raw_decimals}"))
+                })?;
+                Ok(PaymentVolumeBucket {
+                    day: row.get("day"),
+                    asset_symbol: row.get("asset_symbol"),
+                    decimals,
+                    raw_amount: row
+                        .get::<Option<String>, _>("raw_amount")
+                        .unwrap_or_default(),
+                    payment_count: row.get("payment_count"),
+                })
+            })
+            .collect()
+    }
+
+    async fn payment_volume_by_day_per_store(
+        &self,
+        query: &PaymentVolumeQuery,
+    ) -> RepositoryResult<Vec<StorePaymentVolumeBucket>> {
+        // Same short-circuit as `payment_volume_by_day`, for the same reason.
+        if query.store_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let store_ids: Vec<Uuid> = query.store_ids.iter().map(|s| s.0).collect();
+
+        // Identical to `payment_volume_by_day` with `i.store_id` carried into
+        // the SELECT and the group key rather than only the WHERE clause.
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                i.store_id AS store_id,
+                (p.detected_at AT TIME ZONE 'UTC')::date AS day,
+                p.asset_symbol AS asset_symbol,
+                COALESCE(po.decimals, 18)::smallint AS decimals,
+                SUM(p.amount)::text AS raw_amount,
+                COUNT(*) AS payment_count
+            FROM payments p
+            JOIN invoices i ON i.id = p.invoice_id
+            LEFT JOIN payment_options po ON po.id = p.payment_option_id
+            WHERE i.store_id = ANY($1)
+              AND p.reorged = FALSE
+              AND p.detected_at >= $2
+              AND p.detected_at < $3
+            GROUP BY 1, 2, 3, 4
+            ORDER BY 1, 2, 3, 4
+            "#,
+        )
+        .bind(&store_ids)
+        .bind(query.since)
+        .bind(query.until)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        rows.iter()
+            .map(|row| {
+                let raw_decimals: i16 = row.get("decimals");
+                let decimals = u8::try_from(raw_decimals).map_err(|_| {
+                    RepositoryError::Database(format!("invalid token decimals: {raw_decimals}"))
+                })?;
+                Ok(StorePaymentVolumeBucket {
+                    store_id: StoreId(row.get("store_id")),
+                    day: row.get("day"),
+                    asset_symbol: row.get("asset_symbol"),
+                    decimals,
+                    raw_amount: row
+                        .get::<Option<String>, _>("raw_amount")
+                        .unwrap_or_default(),
+                    payment_count: row.get("payment_count"),
+                })
+            })
+            .collect()
+    }
+}
+
+// =============================================================================
+// Payment upsert keyed by transfer
+// =============================================================================
+
+use crate::payment_tx_index::{PaymentTxIndexReader, PaymentTxIndexWriter};
+
+#[async_trait]
+impl PaymentTxIndexWriter for PgDataService {
+    async fn upsert_with_tx_index(
+        &self,
+        payment: &PaymentData,
+        tx_index: i32,
+    ) -> RepositoryResult<()> {
+        upsert_payment_row(&self.pool, payment, tx_index).await?;
+        Ok(())
+    }
+
+    async fn upsert_with_tx_index_and_obligation(
+        &self,
+        payment: &PaymentData,
+        tx_index: i32,
+        event_type: &str,
+    ) -> RepositoryResult<()> {
+        let mut tx = self.pool.begin().await.map_err(sqlx_to_repo_error)?;
+
+        let payment_id = upsert_payment_row(&mut *tx, payment, tx_index).await?;
+
+        // `ON CONFLICT DO NOTHING` on the same key a redelivered event would
+        // upsert onto: an obligation for this payment and event either
+        // already sits in the outbox undispatched, or was already drained,
+        // and a redelivery must not requeue a second notification for it.
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_outbox (id, payment_id, invoice_id, event_type)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (payment_id, event_type) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(payment_id)
+        .bind(payment.invoice_id.as_str())
+        .bind(event_type)
+        .execute(&mut *tx)
+        .await
+        .map_err(sqlx_to_repo_error)?;
+
+        tx.commit().await.map_err(sqlx_to_repo_error)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PaymentTxIndexReader for PgDataService {
+    async fn get_by_tx_index(
+        &self,
+        invoice_id: &types::InvoiceId,
+        tx_hash: &str,
+        tx_index: i32,
+    ) -> RepositoryResult<Option<PaymentData>> {
+        // Scoped to the invoice as well as the transfer: the same transaction
+        // can pay two different invoices, and a confirmation is always about
+        // one of them.
+        let query = format!(
+            "SELECT {} FROM payments \
+             WHERE invoice_id = $1 AND tx_hash = $2 AND tx_index = $3 \
+             AND reorged = FALSE",
+            PAYMENT_SELECT_COLS
+        );
+        let row = sqlx::query(&query)
+            .bind(invoice_id.as_str())
+            .bind(tx_hash)
+            .bind(tx_index)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(sqlx_to_repo_error)?;
+
+        match row {
+            Some(r) => Ok(Some(try_row_to_payment(&r)?)),
+            None => Ok(None),
+        }
     }
 }

@@ -154,7 +154,13 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
             match self
                 .evm_monitor
                 .watch_address_by_chain_id(
-                    watch.chain_id,
+                    match watch.chain_id.evm_chain_id() {
+                        Some(eip155) => eip155,
+                        None => {
+                            tracing::error!(chain_id = %watch.chain_id, "not an EVM chain; skipping");
+                            continue;
+                        }
+                    },
                     address,
                     invoice_id,
                     expected_amount,
@@ -167,7 +173,7 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
                     if let Err(e) = WatchedAddressWriter::mark_notified(
                         &*self.data_service,
                         &watch.address,
-                        watch.chain_id,
+                        &watch.chain_id,
                         watch.token_address.as_deref(),
                     )
                     .await
@@ -180,7 +186,7 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
                     } else {
                         tracing::info!(
                             address = %watch.address,
-                            chain_id = watch.chain_id,
+                            chain_id = %watch.chain_id,
                             invoice_id = %invoice_id,
                             "Successfully retried WatchAddress command"
                         );
@@ -189,7 +195,7 @@ impl<D: WatchRetryDataService + 'static, E: EVMMonitor + 'static> WatchRetryServ
                 Err(e) => {
                     tracing::warn!(
                         address = %watch.address,
-                        chain_id = watch.chain_id,
+                        chain_id = %watch.chain_id,
                         error = %e,
                         "Failed to retry WatchAddress command, will retry later"
                     );

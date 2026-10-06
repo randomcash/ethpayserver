@@ -15,12 +15,15 @@ path = "src/bin/migrate_postgres.rs"
 
 [dependencies]
 # Internal crates
-auth = { git = "https://github.com/randomcash/payserver-commons.git", features = ["metrics", "captcha"] }
-crypto = { git = "https://github.com/randomcash/payserver-commons.git" }
-data-service = { path = "../data-service" }
+auth = { workspace = true, features = ["metrics", "captcha"] }
+crypto = { workspace = true }
+data-service = { path = "../data-service", features = ["redis"] }
 evm = { path = "../evm", features = ["api", "redis", "sentry-scrub"] }
-rates = { git = "https://github.com/randomcash/payserver-commons.git" }
-types = { git = "https://github.com/randomcash/payserver-commons.git", features = ["openapi"] }
+rates = { workspace = true }
+api-types = { workspace = true, features = ["openapi"] }
+types = { workspace = true, features = ["openapi"] }
+payserver-plugin-api = { workspace = true }
+payserver-plugin-host = { workspace = true }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
@@ -53,8 +56,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error monitoring
-sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls"] }
-sentry-tracing = "0.47"
+# `tower-axum-matched-path`: performance transactions are named from the
+# route pattern (`/api/invoices/{id}`), not the request URI. Without it every
+# distinct invoice/store/etc. id creates its own transaction name, which is
+# unbounded cardinality and an unreadable performance page.
+#
+# `logs`: the structured-log pipeline `sentry_log_event_filter` gates.
+# `metrics`: the gauge pipeline the fanout recorder forwards to.
+#
+# Every one of these turns on a whole pipeline, and dropping one on a merge
+# turns that pipeline off with nothing red to show for it.
+sentry = { version = "0.49.3", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "tower-axum-matched-path", "logs", "metrics"] }
+sentry-tracing = { version = "0.49.3", features = ["logs"] }
 
 # Metrics
 metrics = "0.24"
@@ -66,11 +79,14 @@ dashmap = "6"
 
 # Ethereum primitives
 alloy-primitives = "1"
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 rust_decimal = "1.36"
+bigdecimal = "0.4"
 url = "2"
 
 # Webhook delivery
@@ -79,7 +95,12 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+# Already in the dependency tree; taken as a direct dependency rather than
+# adding `multer` for one plugin-upload endpoint. See api/admin/plugins.rs.
+base64 = "0.22"
 getrandom = "0.3"
+# Staging a plugin's migrations for sqlx's Migrator, which reads a path.
+tempfile = "3"
 
 # Email
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
@@ -91,8 +112,24 @@ secrecy = "0.10.3"
 [dev-dependencies]
 tokio = { version = "1.42", features = ["test-util"] }
 tokio-tungstenite = "0.28"
-data-service = { path = "../data-service", features = ["test-utils"] }
+# `redis` here, not in the dependency above: the live watched-address reader the
+# watch-reconciliation test compares against is behind that feature, and this
+# keeps it a test-only build. The running server links data-service without it.
+data-service = { path = "../data-service", features = ["test-utils", "redis"] }
 evm = { path = "../evm", features = ["api", "redis", "test-utils"] }
+wat = "1.259.0"
+tempfile = "3"
+# Same crate and features as the `sentry` dependency above, plus `test`: gives
+# tests `sentry::test::with_captured_envelopes`, an isolated per-call Hub with
+# a captured transport that keeps envelopes instead of sending them. That is
+# what the transaction-naming test reads. Dev-only, so it never reaches a
+# production build.
+#
+# The features have to track the real dependency rather than being trimmed to
+# what a test appears to need: cargo unifies them, so a feature listed there
+# and not here is on anyway, and one listed here and not there is a test
+# passing against a client the server never builds.
+sentry = { version = "0.49.3", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "tower-axum-matched-path", "logs", "metrics", "test"] }
 
 # Clippy lints — catches panics on user-input paths at compile time.
 # `unwrap` / `expect` are allowed only in tests and in explicit initialisation

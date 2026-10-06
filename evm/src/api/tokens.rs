@@ -9,7 +9,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use types::{Network, TokenData, TokenQueryParams, TokenReader, TokenWriter};
+use types::{ChainId, TokenData, TokenQueryParams, TokenReader, TokenWriter};
 use utoipa::{IntoParams, ToSchema};
 
 use super::{EvmDataService, EvmDataServiceReader, EvmState, extractors::AdminAuth};
@@ -23,7 +23,7 @@ pub struct CreateTokenRequest {
     /// Contract address.
     pub address: String,
     /// Network name.
-    pub network: String,
+    pub chain_id: String,
     /// Token name.
     pub name: Option<String>,
     /// Token symbol.
@@ -66,7 +66,7 @@ pub struct ListTokensQuery {
     /// Filter by token type.
     pub token_type: Option<String>,
     /// Filter by network.
-    pub network: Option<String>,
+    pub chain_id: Option<String>,
     /// Filter by enabled status.
     pub enabled: Option<bool>,
     /// Filter by symbol.
@@ -89,7 +89,7 @@ pub struct TokenResponse {
     pub id: i64,
     pub token_type: String,
     pub address: String,
-    pub network: String,
+    pub chain_id: String,
     pub enabled: bool,
     pub name: Option<String>,
     pub symbol: Option<String>,
@@ -103,7 +103,7 @@ impl From<TokenData> for TokenResponse {
             id: t.id.unwrap_or(0),
             token_type: t.token_type,
             address: t.address,
-            network: t.network.to_string(),
+            chain_id: t.chain_id.to_string(),
             enabled: t.enabled,
             name: t.name,
             symbol: t.symbol,
@@ -122,9 +122,12 @@ pub struct TokenListResponse {
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
 
-fn parse_network(s: &str) -> Result<Network, (StatusCode, String)> {
-    s.parse()
-        .map_err(|_| (StatusCode::BAD_REQUEST, format!("invalid network: {}", s)))
+/// Parse a CAIP-2 chain id from a query string.
+///
+/// Was a `Network` enum parse, which accepted names like "ethereum" and could
+/// only ever name a chain someone had added a variant for.
+fn parse_chain_id(s: &str) -> Result<ChainId, (StatusCode, String)> {
+    ChainId::parse(s).map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid chain id: {e}")))
 }
 
 fn validate_token_standard(
@@ -169,9 +172,8 @@ where
     if let Some(token_type) = query.token_type {
         params = params.with_token_type(token_type);
     }
-    if let Some(network) = query.network {
-        let net = parse_network(&network)?;
-        params = params.with_network(net);
+    if let Some(chain) = query.chain_id {
+        params = params.with_chain(parse_chain_id(&chain)?);
     }
     if let Some(enabled) = query.enabled {
         params = params.with_enabled(enabled);
@@ -242,14 +244,15 @@ where
     D: EvmDataService + 'static,
     A: SessionService + 'static,
 {
-    // Validate network
-    let network = parse_network(&req.network)?;
+    let chain_id = parse_chain_id(&req.chain_id)?;
 
-    // Validate EVM network
-    if !network.is_evm() {
+    // This server only derives and monitors EVM chains, so it may only be told
+    // about EVM tokens. `is_evm()` is a namespace check, not a lookup in a list
+    // someone has to maintain.
+    if !chain_id.is_evm() {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!("{} is not an EVM network", req.network),
+            format!("{chain_id} is not an EVM chain"),
         ));
     }
 
@@ -257,7 +260,7 @@ where
     validate_token_standard(&req.standard, req.decimals, req.token_id.as_deref())?;
 
     // Build token data
-    let mut token = TokenData::new(&req.standard, &req.address, network).with_enabled(req.enabled);
+    let mut token = TokenData::new(&req.standard, &req.address, chain_id).with_enabled(req.enabled);
 
     if let Some(name) = req.name {
         token = token.with_name(name);

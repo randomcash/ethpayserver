@@ -1,0 +1,31 @@
+-- A database role per plugin, so a plugin's SQL is bounded by Postgres
+-- rather than by the host's own care.
+--
+-- A plugin's schema was always only a `search_path` default, never an
+-- enforcement boundary: the connection runs as the host's role, so a query
+-- naming `public.wallets` explicitly reaches it. That is fine while the host
+-- writes every statement, and stops being fine the moment a plugin supplies
+-- one. The app connects as a superuser on our deployments, so a plugin
+-- running on it would not merely read the database - it would own the server.
+--
+-- So each plugin gets its own login role, granted DML on its own schema and
+-- nothing else, and its statements run on a connection authenticated as that
+-- role. The host keeps ownership of the schema and its tables, which is what
+-- makes runtime DDL impossible and keeps a plugin's shape exactly what its
+-- migrations say.
+
+-- The role's password.
+--
+-- Plaintext, deliberately. This credential grants strictly less than the
+-- access needed to read the row holding it: anyone who can select from
+-- `installed_plugins` is already connected to this database with more
+-- privilege than the role would give them. Encrypting it here would add a
+-- key to manage and protect against nothing - the threat it would need to
+-- stop has already won by the time it can read this column.
+--
+-- NULL means a plugin installed before roles existed, or one whose role
+-- provisioning did not complete. Such a plugin gets no database access
+-- rather than falling back to the host's connection, which is the failure
+-- direction that cannot leak.
+ALTER TABLE installed_plugins
+    ADD COLUMN db_role_password TEXT;

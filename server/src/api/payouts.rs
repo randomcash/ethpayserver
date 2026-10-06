@@ -1,8 +1,24 @@
 //! Payout/settlement API endpoints.
 //!
-//! POST /stores/{store_id}/payouts — Initiate a payout (sweep funds to merchant wallet).
+//! POST /stores/{store_id}/payouts — record a payout the merchant will make.
 //! GET  /stores/{store_id}/payouts — List payouts for a store.
 //! GET  /stores/{store_id}/payouts/{payout_id} — Get payout details.
+//! POST /stores/{store_id}/payouts/{payout_id}/settle — the merchant made it.
+//! POST /stores/{store_id}/payouts/{payout_id}/abandon — they will not.
+//!
+//! **This server never sends funds.** It holds public xpubs and no spending
+//! key, so a payout is something the merchant performs from their own wallet
+//! and this records. Nothing here signs or broadcasts a transaction, and the
+//! row a payout creates was never an instruction the server would act on.
+//!
+//! Three rules hold everything together, and all three are enforced below
+//! rather than assumed: a payout may only be computed from invoices the store
+//! in the path owns; an invoice's money may only be claimed once; and a claim
+//! can always be released, because a claim that outlives the intent it was
+//! protecting refuses every later payout of the same money.
+
+#[cfg(test)]
+mod tests;
 
 use axum::{
     Json,
@@ -10,85 +26,155 @@ use axum::{
     http::StatusCode,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use alloy_primitives::U256;
 use auth::{SessionService, UserStoreRepository};
-use data_service::{PaymentReader, PayoutReader, PayoutWriter};
+use data_service::{InvoiceReader, PaymentReader, PayoutClaimReader, PayoutReader, PayoutWriter};
 use types::{PayoutData, PayoutStatus, StoreId};
 
 use super::extractors::AuthenticatedUser;
 use crate::metrics;
 use crate::state::PgAppState;
+pub use api_types::{CreatePayoutRequest, PayoutListResponse, PayoutResponse};
 
-/// Request body for creating a payout.
-#[derive(Debug, Deserialize)]
-pub struct CreatePayoutRequest {
-    /// Invoice IDs to include in this payout.
-    /// If empty, sweeps all settled invoices.
-    pub invoice_ids: Vec<String>,
-    /// Destination wallet address.
-    pub destination_address: String,
-    /// EIP-155 chain ID to sweep from.
-    pub chain_id: u64,
-    /// Asset symbol to sweep (e.g., "ETH", "USDC").
-    pub asset_symbol: String,
-    /// Token contract address (required for ERC20 payouts).
-    pub token_address: Option<String>,
-}
-
-/// Payout response.
-#[derive(Debug, Serialize)]
-pub struct PayoutResponse {
-    pub id: Uuid,
-    pub store_id: Uuid,
-    pub invoice_ids: Vec<String>,
-    pub destination_address: String,
-    pub chain_id: u64,
-    pub asset_type: String,
-    pub asset_symbol: String,
-    pub amount: String,
-    pub tx_hash: Option<String>,
-    pub status: String,
-    pub fee_amount: Option<String>,
-    pub error_message: Option<String>,
-    pub created_at: chrono::DateTime<Utc>,
-    pub confirmed_at: Option<chrono::DateTime<Utc>>,
-}
-
-impl From<PayoutData> for PayoutResponse {
-    fn from(p: PayoutData) -> Self {
-        Self {
-            id: p.id,
-            store_id: p.store_id.0,
-            invoice_ids: p.invoice_ids,
-            destination_address: p.destination_address,
-            chain_id: p.chain_id,
-            asset_type: p.asset_type,
-            asset_symbol: p.asset_symbol,
-            amount: p.amount,
-            tx_hash: p.tx_hash,
-            status: p.status.to_string(),
-            fee_amount: p.fee_amount,
-            error_message: p.error_message,
-            created_at: p.created_at,
-            confirmed_at: p.confirmed_at,
-        }
-    }
-}
-
-/// Payout list response with pagination.
-#[derive(Debug, Serialize)]
-pub struct PayoutListResponse {
-    pub total: i64,
-    pub payouts: Vec<PayoutResponse>,
-}
-
-/// Initiate a payout — sweep funds from derived addresses to merchant wallet.
+/// Total of the payments on this chain and asset that may be paid out.
 ///
-/// Creates a payout record. The actual transaction signing and broadcasting
-/// is handled by a background service that monitors pending payouts.
+/// Reorged and unconfirmed payments are excluded; an unparseable amount is
+/// skipped rather than failing the payout, matching the behaviour before
+/// chain ids became CAIP-2.
+fn sum_payable(
+    payments: &[types::PaymentData],
+    chain_id: &types::ChainId,
+    asset_symbol: &str,
+) -> U256 {
+    payments
+        .iter()
+        .filter(|p| {
+            p.confirmed_at.is_some()
+                && !p.reorged
+                && &p.chain_id == chain_id
+                && p.asset_symbol == asset_symbol
+        })
+        .filter_map(|p| p.amount.parse::<U256>().ok())
+        .fold(U256::ZERO, |acc, amt| acc + amt)
+}
+
+/// Sum what `invoice_ids` are worth, refusing any invoice the store does not own.
+///
+/// The caller supplies the invoice ids and the destination address; membership
+/// of the store in the path is all that has been checked by this point. So each
+/// invoice is loaded and matched against that store — an id the store does not
+/// own contributes nothing and stops the request.
+///
+/// The refusal is 404, the same answer as an invoice that does not exist. A 403
+/// would separate "not yours" from "no such invoice", and that difference is
+/// itself another merchant's data.
+async fn payable_total<R>(
+    reader: &R,
+    store_id: StoreId,
+    invoice_ids: &[String],
+    chain_id: &types::ChainId,
+    asset_symbol: &str,
+) -> Result<U256, StatusCode>
+where
+    R: InvoiceReader + PaymentReader,
+{
+    let mut total = U256::ZERO;
+
+    for invoice_id_str in invoice_ids {
+        let invoice_id = types::InvoiceId::from_string(invoice_id_str.clone());
+
+        let invoice = InvoiceReader::get(reader, &invoice_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+
+        if invoice.store_id != store_id {
+            tracing::warn!(
+                store_id = %store_id,
+                "Payout named an invoice that belongs to another store"
+            );
+            return Err(StatusCode::NOT_FOUND);
+        }
+
+        let payments = PaymentReader::get_valid_for_invoice(reader, &invoice_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        total += sum_payable(&payments, chain_id, asset_symbol);
+    }
+
+    Ok(total)
+}
+
+/// Refuse a payout over invoices an existing payout already claims.
+///
+/// Without this the same invoices can be paid out again and again, each payout
+/// recomputing the full total from the same payments. Answered 409: the request
+/// is well formed, the state is what refuses it.
+async fn reject_claimed_invoices<R>(
+    reader: &R,
+    store_id: StoreId,
+    invoice_ids: &[String],
+) -> Result<(), StatusCode>
+where
+    R: PayoutClaimReader,
+{
+    let claimed = reader
+        .invoice_ids_already_claimed(store_id, invoice_ids)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to read existing payout claims");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if claimed.is_empty() {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        store_id = %store_id,
+        claimed = claimed.len(),
+        "Payout refused: these invoices are already claimed by another payout"
+    );
+    Err(StatusCode::CONFLICT)
+}
+
+/// Load a payout, refusing one that belongs to a different store.
+///
+/// The path carries both ids and only the store id is checked by the membership
+/// gate, so the payout itself must be matched to it. Mismatch is 404 for the
+/// same reason as in [`payable_total`].
+async fn payout_for_store<R>(
+    reader: &R,
+    store_id: StoreId,
+    payout_id: Uuid,
+) -> Result<PayoutData, StatusCode>
+where
+    R: PayoutReader,
+{
+    let payout = PayoutReader::get_payout(reader, payout_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if payout.store_id != store_id {
+        tracing::warn!(
+            store_id = %store_id,
+            "Payout lookup refused: the payout belongs to another store"
+        );
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(payout)
+}
+
+/// Initiate a payout — record an intent to sweep funds to a merchant wallet.
+///
+/// This writes a payout row and nothing else. No transaction is signed or
+/// broadcast anywhere in this deployment: the server holds only public xpubs, so
+/// the record stays `Pending` until something outside this process acts on it.
 pub async fn create_payout<A>(
     AuthenticatedUser(user): AuthenticatedUser,
     State(state): State<PgAppState<A>>,
@@ -122,47 +208,37 @@ where
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Determine asset type from token_address
-    let asset_type = if body.token_address.is_some() {
-        "erc20".to_string()
-    } else {
-        "native".to_string()
-    };
+    // Ownership first, then whether the money is still unclaimed: an invoice
+    // this store does not own is a 404 whatever its payout history says.
+    let total_amount = payable_total(
+        &*state.data_service,
+        store_id,
+        &body.invoice_ids,
+        &body.chain_id,
+        &body.asset_symbol,
+    )
+    .await?;
 
-    // Calculate total amount from confirmed payments for the specified invoices
-    let mut total_amount = U256::ZERO;
-    for invoice_id_str in &body.invoice_ids {
-        let invoice_id = types::InvoiceId::from_string(invoice_id_str.clone());
-        let payments = PaymentReader::get_valid_for_invoice(&*state.data_service, &invoice_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        for payment in payments {
-            if payment.confirmed_at.is_some()
-                && !payment.reorged
-                && payment.chain_id == body.chain_id
-                && payment.asset_symbol == body.asset_symbol
-                && let Ok(amt) = payment.amount.parse::<U256>()
-            {
-                total_amount += amt;
-            }
-        }
-    }
+    reject_claimed_invoices(&*state.data_service, store_id, &body.invoice_ids).await?;
 
     if total_amount.is_zero() {
-        tracing::warn!(
-            store_id = %store_id,
-            "No confirmed payments found for payout"
-        );
+        tracing::warn!(store_id = %store_id, "No confirmed payments found for payout");
         return Err(StatusCode::BAD_REQUEST);
     }
+
+    let asset_type = if body.token_address.is_some() {
+        "erc20"
+    } else {
+        "native"
+    }
+    .to_string();
 
     let payout = PayoutData {
         id: Uuid::new_v4(),
         store_id,
         invoice_ids: body.invoice_ids,
         destination_address: body.destination_address,
-        chain_id: body.chain_id,
+        chain_id: body.chain_id.clone(),
         asset_type,
         asset_symbol: body.asset_symbol.clone(),
         token_address: body.token_address,
@@ -182,7 +258,7 @@ where
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    metrics::record_payout_initiated(body.chain_id, &body.asset_symbol);
+    metrics::record_payout_initiated(&body.chain_id, &body.asset_symbol);
 
     tracing::info!(
         payout_id = %payout.id,
@@ -238,11 +314,13 @@ pub async fn get_payout<A>(
 where
     A: SessionService + 'static,
 {
+    let store_id = StoreId(store_id);
+
     // Verify user has access to this store
     if !user.role.is_admin()
         && state
             .data_service
-            .get_user_store(user.id, StoreId(store_id))
+            .get_user_store(user.id, store_id)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .is_none()
@@ -250,10 +328,170 @@ where
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let payout = PayoutReader::get_payout(&*state.data_service, payout_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let payout = payout_for_store(&*state.data_service, store_id, payout_id).await?;
 
     Ok(Json(payout.into()))
+}
+
+/// What a merchant sends when recording a payout they made themselves.
+#[derive(Debug, serde::Deserialize)]
+pub struct SettlePayoutRequest {
+    /// The transaction the merchant broadcast from their own wallet.
+    pub tx_hash: String,
+}
+
+/// Why a payout is being abandoned.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AbandonPayoutRequest {
+    /// Free text, stored on the payout so the next reader knows why.
+    pub reason: Option<String>,
+}
+
+/// Record that the merchant has made this payout from their own wallet.
+///
+/// This server never sends funds. It holds public xpubs only and has no
+/// spending key, so a payout is something the merchant performs and this
+/// records — the row was never an instruction the server would act on.
+///
+/// Moves the payout to `Confirmed` and stores the transaction hash the
+/// merchant supplies. Deliberately not verified against the chain: the server
+/// cannot know which wallet the merchant paid from, and refusing a hash it
+/// cannot corroborate would leave the merchant unable to close out a payout
+/// they genuinely made. The hash is the merchant's own record.
+///
+/// Only a `Pending` payout can be settled. Settling one twice is refused
+/// rather than silently overwriting the first transaction hash.
+pub async fn settle_payout<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path((store_id, payout_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<SettlePayoutRequest>,
+) -> Result<Json<PayoutResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let store_id = StoreId(store_id);
+
+    if !user.role.is_admin()
+        && state
+            .data_service
+            .get_user_store(user.id, store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let tx_hash = body.tx_hash.trim();
+    if tx_hash.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let payout = payout_for_store(&*state.data_service, store_id, payout_id).await?;
+
+    if payout.status != PayoutStatus::Pending {
+        tracing::warn!(
+            payout_id = %payout_id,
+            status = ?payout.status,
+            "Settle refused: only a pending payout can be settled"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
+    PayoutWriter::update_payout_status(
+        &*state.data_service,
+        payout_id,
+        PayoutStatus::Confirmed,
+        Some(tx_hash),
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to settle payout");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!(
+        payout_id = %payout_id,
+        store_id = %store_id,
+        tx_hash = %tx_hash,
+        "Payout settled by the merchant"
+    );
+
+    let settled = payout_for_store(&*state.data_service, store_id, payout_id).await?;
+    Ok(Json(settled.into()))
+}
+
+/// Abandon a payout the merchant is not going to make.
+///
+/// Creating a payout claims its invoices so the same money cannot be paid out
+/// twice, and that claim covers every payout that is not `failed`. Without a
+/// way to release it, a payout recorded by mistake would hold those invoices
+/// for good and refuse every later payout of the same money — the claim
+/// outliving the intent it was protecting.
+///
+/// Moves the payout to `Failed`, which is what the claim query already treats
+/// as released.
+pub async fn abandon_payout<A>(
+    AuthenticatedUser(user): AuthenticatedUser,
+    State(state): State<PgAppState<A>>,
+    Path((store_id, payout_id)): Path<(Uuid, Uuid)>,
+    body: Option<Json<AbandonPayoutRequest>>,
+) -> Result<Json<PayoutResponse>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let store_id = StoreId(store_id);
+
+    if !user.role.is_admin()
+        && state
+            .data_service
+            .get_user_store(user.id, store_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let payout = payout_for_store(&*state.data_service, store_id, payout_id).await?;
+
+    if payout.status != PayoutStatus::Pending {
+        tracing::warn!(
+            payout_id = %payout_id,
+            status = ?payout.status,
+            "Abandon refused: only a pending payout can be abandoned"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .unwrap_or_else(|| "abandoned by the merchant".to_string());
+
+    PayoutWriter::update_payout_status(
+        &*state.data_service,
+        payout_id,
+        PayoutStatus::Failed,
+        None,
+        None,
+        Some(&reason),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to abandon payout");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!(
+        payout_id = %payout_id,
+        store_id = %store_id,
+        reason = %reason,
+        "Payout abandoned; its invoices are claimable again"
+    );
+
+    let abandoned = payout_for_store(&*state.data_service, store_id, payout_id).await?;
+    Ok(Json(abandoned.into()))
 }

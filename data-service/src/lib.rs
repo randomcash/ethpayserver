@@ -17,13 +17,57 @@
 //! sqlx migrate run --source migrations/postgres
 //! ```
 
+pub mod account_deletion;
+pub mod account_standing;
+pub mod analytics;
+pub mod chain_cursor;
+pub mod email_change;
+pub mod installed_plugins;
+pub mod invoice_creation;
+pub mod merchant_directory;
+pub mod payment_tx_index;
+pub mod payout_claims;
+pub mod reorg;
+pub mod settlement_tolerance;
+pub mod store_creation;
+pub mod watch_reconciliation;
+pub mod webhook_delivery;
+pub mod webhook_outbox;
+
+pub use account_deletion::{AccountDeletionBlockers, AccountDeletionReader};
+pub use account_standing::{
+    AccountStanding, AccountStandingStore, ApplyOutcome, HeldStanding, StandingDecision,
+};
+pub use analytics::{PaymentAnalyticsReader, PaymentVolumeBucket, PaymentVolumeQuery};
+pub use chain_cursor::{ChainCursor, ChainCursorReader, ChainCursorWriter};
+pub use email_change::{EmailChangeRequest, EmailChangeWriter};
+pub use installed_plugins::{
+    InstalledPlugin, InstalledPluginReader, InstalledPluginWriter, NewInstalledPlugin,
+    NewPluginEvent, PluginEvent, PluginEventKind,
+};
+pub use invoice_creation::InvoiceCreationWriter;
+pub use merchant_directory::{MerchantAccount, MerchantDirectoryReader, MerchantStore};
+pub use payment_tx_index::{PaymentTxIndexReader, PaymentTxIndexWriter};
+pub use payout_claims::PayoutClaimReader;
+pub use reorg::{ReorgCandidateReader, ReorgWriter};
+pub use settlement_tolerance::{
+    DEFAULT_TOLERANCE_PERCENT, MAX_TOLERANCE_PERCENT, SettlementAllowance,
+    SettlementToleranceReader, SettlementToleranceWriter,
+};
+pub use watch_reconciliation::{WatchKey, WatchReconciliation, reconcile};
+pub use webhook_delivery::{
+    UpsertDeliveryParams, WebhookDeliveryData, WebhookDeliveryReader, WebhookDeliveryStatus,
+    WebhookDeliveryWriter,
+};
+pub use webhook_outbox::{WebhookObligation, WebhookOutboxReader, WebhookOutboxWriter};
+
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
 #[cfg(feature = "postgres")]
 pub use postgres::{
-    ApiKeyAuthInfo, ApiKeyFullInfo, ApiKeyRateLimitInfo, PendingWatch, PgDataService,
-    WalletRotation,
+    ApiKeyAuthInfo, ApiKeyFullInfo, ApiKeyRateLimitInfo, ExpectedWatch, PendingWatch,
+    PgDataService, WalletReauthChallenge, WalletRotation,
 };
 
 #[cfg(feature = "redis")]
@@ -37,6 +81,9 @@ pub mod test_utils;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_utils::InMemoryDataService;
+
+#[cfg(all(any(test, feature = "test-utils"), feature = "postgres"))]
+pub mod test_support;
 
 // Re-export repository traits and types from the types crate for convenience.
 pub use types::{
@@ -101,11 +148,6 @@ pub use types::{
     StoreTokenPolicyRepository,
     StoreTokenPolicyWithEntries,
     StoreTokenPolicyWriter,
-    // Store Wallet (deprecated)
-    StoreWallet,
-    StoreWalletReader,
-    StoreWalletRepository,
-    StoreWalletWriter,
     // Store Webhook
     StoreWebhook,
     StoreWebhookReader,
@@ -119,6 +161,11 @@ pub use types::{
     TokenReader,
     TokenRepository,
     TokenWriter,
+    // Account Wallet
+    Wallet,
+    WalletReader,
+    WalletRepository,
+    WalletWriter,
     WatchedAddressReader,
     WatchedAddressRepository,
     WatchedAddressWriter,
@@ -136,80 +183,4 @@ pub fn sqlx_to_repo_error(e: sqlx::Error) -> RepositoryError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::test_utils::*;
-    use types::{
-        InvoiceId, InvoiceQueryParams, InvoiceReader, InvoiceStatus, InvoiceWriter,
-        PaymentOptionId, WatchedAddressReader, WatchedAddressWriter,
-    };
-
-    #[tokio::test]
-    async fn test_in_memory_data_service() {
-        let ds = InMemoryDataService::new();
-        let invoice = create_test_invoice();
-
-        // Upsert
-        InvoiceWriter::upsert(&ds, &invoice).await.unwrap();
-
-        // Get
-        let retrieved = InvoiceReader::get(&ds, &invoice.id).await.unwrap();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().id, invoice.id);
-
-        // Update status
-        InvoiceWriter::update_status(&ds, &invoice.id, InvoiceStatus::Paid)
-            .await
-            .unwrap();
-        let updated = InvoiceReader::get(&ds, &invoice.id).await.unwrap().unwrap();
-        assert_eq!(updated.status, InvoiceStatus::Paid);
-    }
-
-    #[tokio::test]
-    async fn test_watched_addresses() {
-        let ds = InMemoryDataService::new();
-        let payment_option_id = PaymentOptionId(uuid::Uuid::new_v4());
-        let address = "0x1234567890abcdef1234567890abcdef12345678";
-        let chain_id: u64 = 1; // Ethereum mainnet
-
-        WatchedAddressWriter::upsert(&ds, address, &payment_option_id, chain_id, None)
-            .await
-            .unwrap();
-
-        let found = WatchedAddressReader::get_payment_option_id(&ds, address, chain_id, None)
-            .await
-            .unwrap();
-        assert_eq!(found, Some(payment_option_id.clone()));
-
-        WatchedAddressWriter::deactivate(&ds, address, chain_id, None)
-            .await
-            .unwrap();
-        let found = WatchedAddressReader::get_payment_option_id(&ds, address, chain_id, None)
-            .await
-            .unwrap();
-        assert!(found.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_query_by_currency() {
-        let ds = InMemoryDataService::new();
-
-        let usd_invoice = create_test_invoice();
-        InvoiceWriter::upsert(&ds, &usd_invoice).await.unwrap();
-
-        let mut eur_invoice = create_test_invoice();
-        eur_invoice.id = InvoiceId::new();
-        eur_invoice.currency = "EUR".to_string();
-        InvoiceWriter::upsert(&ds, &eur_invoice).await.unwrap();
-
-        // Query all
-        let params = InvoiceQueryParams::new();
-        let (total, _) = InvoiceReader::query(&ds, &params).await.unwrap();
-        assert_eq!(total, 2);
-
-        // Query USD only
-        let params = InvoiceQueryParams::new().with_currency("USD");
-        let (total, invoices) = InvoiceReader::query(&ds, &params).await.unwrap();
-        assert_eq!(total, 1);
-        assert_eq!(invoices[0].currency, "USD");
-    }
-}
+mod tests;

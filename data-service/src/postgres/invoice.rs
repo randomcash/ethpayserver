@@ -13,8 +13,8 @@ use crate::{
 };
 use types::{InvoiceData, InvoiceId, InvoiceStatus, StoreId};
 
-use super::PgDataService;
 use super::conversions::{status_to_db, try_db_to_status};
+use super::{PgDataService, search_contains_pattern, search_prefix_pattern};
 
 #[async_trait]
 impl InvoiceReader for PgDataService {
@@ -23,7 +23,7 @@ impl InvoiceReader for PgDataService {
             r#"
             SELECT
                 id, store_id, currency, status::text, amount::text,
-                amount_received::text, created_at, expires_at, metadata, extra
+                amount_received::text, created_at, expires_at, metadata, customer_email, extra
             FROM invoices
             WHERE id = $1
             "#,
@@ -52,6 +52,15 @@ impl InvoiceReader for PgDataService {
             conditions.push(format!("store_id = ${}", bind_idx));
             bind_idx += 1;
         }
+        // Membership scoping. Separate from `store_id`, and an empty
+        // list stays a filter that matches nothing rather than becoming no
+        // filter at all - a caller who belongs to no store must see no rows,
+        // not every row. Every bind block below repeats this in the same order;
+        // the binds are positional, so order is the correctness condition.
+        if params.store_ids.is_some() {
+            conditions.push(format!("store_id = ANY(${})", bind_idx));
+            bind_idx += 1;
+        }
         if params.status.is_some() {
             conditions.push(format!("status = ${}::invoice_status", bind_idx));
             bind_idx += 1;
@@ -59,6 +68,35 @@ impl InvoiceReader for PgDataService {
         if params.currency.is_some() {
             conditions.push(format!("currency = ${}", bind_idx));
             bind_idx += 1;
+        }
+        // Free-text search. Two binds, each reused by every column
+        // that wants that shape: `${bind_idx}` is the anchored `term%` pattern,
+        // `${bind_idx + 1}` the `%term%` one.
+        //
+        // Anchored on `id` because it is what a merchant pastes whole, and
+        // because only an anchored pattern can ever be index-served: `%...%`
+        // forecloses it for good. Nothing serves it today - the primary key
+        // index is on the raw column, not `LOWER(...)` - but this is the shape
+        // an `invoices(LOWER(id) varchar_pattern_ops)` index would satisfy when
+        // it gets hot. Substring on `currency` and `amount` because both are
+        // short, neither has an index a prefix could use, and a partial match
+        // is what the box is for. `amount` is `numeric(78,18)`, matched on the
+        // same text rendering the API returns, so what the user sees is what
+        // they can search.
+        let search = params.search_term();
+        if search.is_some() {
+            let matches = [
+                format!("LOWER(id) LIKE ${}", bind_idx),
+                format!("LOWER(currency) LIKE ${}", bind_idx + 1),
+                format!("amount::text LIKE ${}", bind_idx + 1),
+                // TODO: delete this one line when metadata is encrypted
+                // client-side: the server will hold ciphertext, and matching
+                // that is worse than not offering it, because it returns
+                // nothing rather than saying it cannot look.
+                format!("LOWER(metadata::text) LIKE ${}", bind_idx + 1),
+            ];
+            conditions.push(format!("({})", matches.join(" OR ")));
+            bind_idx += 2;
         }
         if params.created_after.is_some() {
             conditions.push(format!("created_at >= ${}", bind_idx));
@@ -83,7 +121,7 @@ impl InvoiceReader for PgDataService {
             r#"
             SELECT
                 id, store_id, currency, status::text, amount::text,
-                amount_received::text, created_at, expires_at, metadata, extra
+                amount_received::text, created_at, expires_at, metadata, customer_email, extra
             FROM invoices
             {}
             ORDER BY created_at DESC
@@ -99,11 +137,22 @@ impl InvoiceReader for PgDataService {
         if let Some(store_id) = params.store_id {
             count_query = count_query.bind(store_id.0);
         }
+        if let Some(ref store_ids) = params.store_ids {
+            count_query = count_query.bind(store_ids.iter().map(|s| s.0).collect::<Vec<_>>());
+        }
         if let Some(status) = params.status {
             count_query = count_query.bind(status_to_db(status));
         }
         if let Some(ref currency) = params.currency {
             count_query = count_query.bind(currency);
+        }
+        // Same order as the conditions above; the binds are positional, so a
+        // filter added here out of order applies the wrong value to the wrong
+        // column and still returns rows.
+        if let Some(term) = search {
+            count_query = count_query
+                .bind(search_prefix_pattern(term))
+                .bind(search_contains_pattern(term));
         }
         if let Some(after) = params.created_after {
             count_query = count_query.bind(after);
@@ -123,11 +172,22 @@ impl InvoiceReader for PgDataService {
         if let Some(store_id) = params.store_id {
             data_query = data_query.bind(store_id.0);
         }
+        if let Some(ref store_ids) = params.store_ids {
+            data_query = data_query.bind(store_ids.iter().map(|s| s.0).collect::<Vec<_>>());
+        }
         if let Some(status) = params.status {
             data_query = data_query.bind(status_to_db(status));
         }
         if let Some(ref currency) = params.currency {
             data_query = data_query.bind(currency);
+        }
+        // Same order as the conditions above; the binds are positional, so a
+        // filter added here out of order applies the wrong value to the wrong
+        // column and still returns rows.
+        if let Some(term) = search {
+            data_query = data_query
+                .bind(search_prefix_pattern(term))
+                .bind(search_contains_pattern(term));
         }
         if let Some(after) = params.created_after {
             data_query = data_query.bind(after);
@@ -152,7 +212,7 @@ impl InvoiceReader for PgDataService {
             r#"
             SELECT
                 id, store_id, currency, status::text, amount::text,
-                amount_received::text, created_at, expires_at, metadata, extra
+                amount_received::text, created_at, expires_at, metadata, customer_email, extra
             FROM invoices
             WHERE status IN ('pending', 'processing', 'partially_paid')
               AND expires_at < NOW()
@@ -195,10 +255,10 @@ impl InvoiceWriter for PgDataService {
             r#"
             INSERT INTO invoices (
                 id, store_id, currency, status, amount, amount_received,
-                created_at, expires_at, metadata, extra
+                created_at, expires_at, metadata, customer_email, extra
             ) VALUES (
                 $1, $2, $3, $4::invoice_status, $5::numeric, $6::numeric,
-                $7, $8, $9, $10
+                $7, $8, $9, $10, $11
             )
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
@@ -206,6 +266,7 @@ impl InvoiceWriter for PgDataService {
                 amount_received = EXCLUDED.amount_received,
                 expires_at = EXCLUDED.expires_at,
                 metadata = EXCLUDED.metadata,
+                customer_email = EXCLUDED.customer_email,
                 extra = EXCLUDED.extra
             "#,
         )
@@ -218,6 +279,7 @@ impl InvoiceWriter for PgDataService {
         .bind(invoice.created_at)
         .bind(invoice.expires_at)
         .bind(&invoice.metadata)
+        .bind(&invoice.customer_email)
         .bind(&invoice.extra)
         .execute(&self.pool)
         .await
@@ -293,6 +355,7 @@ fn try_row_to_invoice(row: &sqlx::postgres::PgRow) -> RepositoryResult<InvoiceDa
         created_at: row.get("created_at"),
         expires_at: row.get("expires_at"),
         metadata: row.get("metadata"),
+        customer_email: row.get("customer_email"),
         extra: row.get("extra"),
     })
 }

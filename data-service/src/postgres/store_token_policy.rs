@@ -5,6 +5,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::PgDataService;
+use super::conversions::chain_id_from_row;
 use crate::{
     RepositoryResult, StoreTokenPolicyReader, StoreTokenPolicyWithEntries, StoreTokenPolicyWriter,
     TokenPolicyEntryInput, TokenPolicyMode, sqlx_to_repo_error,
@@ -15,7 +16,7 @@ fn row_to_entry(row: &sqlx::postgres::PgRow) -> StoreTokenPolicyEntry {
     StoreTokenPolicyEntry {
         id: row.get("id"),
         policy_id: row.get("policy_id"),
-        chain_id: row.get("chain_id"),
+        chain_id: chain_id_from_row(row, "chain_id"),
         token_address: row.get("token_address"),
         asset_symbol: row.get("asset_symbol"),
     }
@@ -110,7 +111,7 @@ impl StoreTokenPolicyWriter for PgDataService {
                 "#,
             )
             .bind(policy_id)
-            .bind(entry.chain_id)
+            .bind(entry.chain_id.as_str())
             .bind(entry.token_address.as_deref())
             .bind(&entry.asset_symbol)
             .fetch_one(&mut *tx)

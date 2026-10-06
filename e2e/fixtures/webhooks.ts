@@ -19,10 +19,10 @@ export async function openWebhooksTab(page: Page): Promise<void> {
  * `if (visible)` branches that asserted nothing when they missed too.
  */
 export function webhookForm(page: Page) {
-  // Anchored on the field it contains: `.detail-card` nests, so filtering the
+  // Anchored on the field it contains: `.ps-card` nests, so filtering the
   // cards by their heading text matches the outer card as well as the form.
   return page
-    .locator('.detail-card')
+    .locator('.ps-card')
     .filter({ has: page.getByPlaceholder('https://example.com/webhooks/payments') });
 }
 
@@ -32,7 +32,7 @@ export async function configureWebhook(page: Page, url: string): Promise<void> {
   const form = webhookForm(page);
   await expect(form).toBeVisible();
   await form.getByPlaceholder('https://example.com/webhooks/payments').fill(url);
-  await form.locator('.btn-primary', { hasText: 'Save' }).click();
+  await form.locator('.ps-btn-primary', { hasText: 'Save' }).click();
 
   await expect(form).not.toBeVisible();
 }

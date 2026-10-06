@@ -7,14 +7,15 @@
 //! This lets a test retain a handle for injection while `ChainMonitor` owns another.
 
 use super::{BlockNotification, BlockSource, BlockStream, LogFilter, NativeTransfer, SourceStatus};
-use crate::error::EvmResult;
+use crate::error::{EvmError, EvmResult};
 use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::Block;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{RwLock, broadcast};
+use std::sync::RwLock as SyncRwLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{Notify, RwLock, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -25,7 +26,56 @@ struct Inner {
     balances: RwLock<HashMap<Address, U256>>,
     native_transfers: RwLock<HashMap<u64, Vec<NativeTransfer>>>,
     logs: RwLock<HashMap<u64, Vec<alloy::rpc::types::Log>>>,
-    block_tx: broadcast::Sender<EvmResult<BlockNotification>>,
+    /// Behind a `Mutex` (not the `tokio::sync::RwLock` used elsewhere) because
+    /// `kill_connection` replaces it synchronously and `status()` - part of
+    /// the `BlockSource` trait - is not async.
+    block_tx: Mutex<broadcast::Sender<EvmResult<BlockNotification>>>,
+    /// How many times `subscribe_blocks` has succeeded. Lets a test assert
+    /// that a stalled monitor actually reconnected, not just that it kept
+    /// running.
+    subscribe_count: AtomicU64,
+    /// One counter per RPC method, so a test can assert how an operation
+    /// *scales* rather than only that it produced the right answer.
+    ///
+    /// Call volume is not a performance nicety here. Both detection paths are
+    /// O(1) per block - one log filter, one block read - and that shape is
+    /// invisible to every test that checks only whether a payment was found,
+    /// which is how native detection stayed O(N) in open invoices for as long
+    /// as it did.
+    calls: Mutex<HashMap<&'static str, u64>>,
+    /// Last status a `subscribe_blocks` attempt produced. Like the real
+    /// `RpcBlockSource`, this only changes as a side effect of an actual
+    /// subscribe attempt - not the instant `reachable` flips - so a test
+    /// cannot fake recovery by setting this directly; it has to go through
+    /// the same path a stalled watchdog does.
+    status: Mutex<SourceStatus>,
+    /// Whether the next `subscribe_blocks` attempt succeeds. Separate from
+    /// `status` so a test can simulate the endpoint going down and coming
+    /// back independently of when the monitor notices.
+    reachable: AtomicBool,
+    /// Whether the calls block processing makes should block forever instead
+    /// of returning. Simulates an RPC call made *from inside* block processing
+    /// that never completes - as distinct from `kill_connection`, which kills
+    /// the block stream but leaves ordinary request/response calls answering.
+    ///
+    /// Covers every call `process_block` issues rather than one of them, so a
+    /// test wedging the loop does not silently stop wedging anything when
+    /// detection changes which RPC it uses. That is exactly what happened when
+    /// it gated `get_balance` alone.
+    hung: AtomicBool,
+    hang_notify: Notify,
+    /// Hash of every block pushed so far, keyed by number. Backs
+    /// `get_block_hash`, which reorg detection uses to check chain
+    /// continuity across a gap.
+    block_hashes: SyncRwLock<HashMap<u64, B256>>,
+    /// When set, `find_native_transfers_to` returns this error instead of
+    /// looking anything up. Lets a test simulate an RPC failure during reorg
+    /// re-validation without disturbing ordinary payment detection.
+    find_native_transfers_error: SyncRwLock<Option<String>>,
+    /// When set, `get_block_hash` returns this error instead of looking
+    /// anything up. Lets a test simulate an RPC failure during the
+    /// block-gap continuity check without disturbing ordinary processing.
+    get_block_hash_error: SyncRwLock<Option<String>>,
 }
 
 /// A mock block source for testing payment detection.
@@ -58,9 +108,103 @@ impl MockBlockSource {
                 balances: RwLock::new(HashMap::new()),
                 native_transfers: RwLock::new(HashMap::new()),
                 logs: RwLock::new(HashMap::new()),
-                block_tx,
+                block_tx: Mutex::new(block_tx),
+                subscribe_count: AtomicU64::new(0),
+                calls: Mutex::new(HashMap::new()),
+                status: Mutex::new(SourceStatus::Connected),
+                reachable: AtomicBool::new(true),
+                hung: AtomicBool::new(false),
+                hang_notify: Notify::new(),
+                block_hashes: SyncRwLock::new(HashMap::new()),
+                find_native_transfers_error: SyncRwLock::new(None),
+                get_block_hash_error: SyncRwLock::new(None),
             }),
         }
+    }
+
+    /// Number of times `subscribe_blocks` has been called on this source
+    /// (through any clone, since they share state).
+    pub fn subscribe_count(&self) -> u64 {
+        self.inner.subscribe_count.load(Ordering::SeqCst)
+    }
+
+    /// How many times `method` has been called on this source.
+    #[must_use]
+    pub fn call_count(&self, method: &str) -> u64 {
+        self.inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(method)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Every method called so far, with counts. Handy in a failure message:
+    /// "12 calls" is not actionable, "get_balance 12, get_logs 1" is.
+    #[must_use]
+    pub fn call_counts(&self) -> Vec<(&'static str, u64)> {
+        let mut counts: Vec<(&'static str, u64)> = self
+            .inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        counts.sort_unstable();
+        counts
+    }
+
+    /// Forget every recorded call. Lets one test measure several scenarios
+    /// without a fresh source and fresh wiring for each.
+    pub fn reset_call_counts(&self) {
+        self.inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Block while [`Self::hang_rpc`] is in effect.
+    ///
+    /// Shared by every call `process_block` makes, so a test wedging the loop
+    /// does not have to know which RPC the loop happens to be sitting in.
+    async fn await_if_hung(&self) {
+        loop {
+            if !self.inner.hung.load(Ordering::SeqCst) {
+                break;
+            }
+            // Register interest before re-checking, so a `release_hang` that
+            // lands between the load above and this point isn't missed.
+            let notified = self.inner.hang_notify.notified();
+            if !self.inner.hung.load(Ordering::SeqCst) {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    fn record_call(&self, method: &'static str) {
+        *self
+            .inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(method)
+            .or_insert(0) += 1;
+    }
+
+    /// Make `find_native_transfers_to` fail with `message` until cleared with
+    /// `None`. Simulates an RPC error during reorg re-validation.
+    pub fn set_find_native_transfers_error(&self, message: Option<&str>) {
+        *self.inner.find_native_transfers_error.write().unwrap() = message.map(ToString::to_string);
+    }
+
+    /// Make `get_block_hash` fail with `message` until cleared with `None`.
+    /// Simulates an RPC error during the block-gap continuity check.
+    pub fn set_get_block_hash_error(&self, message: Option<&str>) {
+        *self.inner.get_block_hash_error.write().unwrap() = message.map(ToString::to_string);
     }
 
     /// Push a block notification to all subscribers.
@@ -68,7 +212,43 @@ impl MockBlockSource {
         self.inner
             .current_block
             .store(block.number, Ordering::SeqCst);
-        let _ = self.inner.block_tx.send(Ok(block));
+        self.inner
+            .block_hashes
+            .write()
+            .unwrap()
+            .insert(block.number, block.hash);
+        let _ = self
+            .inner
+            .block_tx
+            .lock()
+            .expect("mock block_tx mutex poisoned")
+            .send(Ok(block));
+    }
+
+    /// Kill the RPC endpoint: every `subscribe_blocks` attempt fails (and
+    /// reports `status() == Disconnected`, exactly like `RpcBlockSource`
+    /// does on a failed connect) until [`Self::restore_connection`]. Also
+    /// severs every stream already handed out, the way a dropped WebSocket
+    /// would: an existing subscriber sees its stream end for good, and only
+    /// a fresh, successful `subscribe_blocks` call sees blocks pushed after
+    /// this point.
+    pub fn kill_connection(&self) {
+        self.inner.reachable.store(false, Ordering::SeqCst);
+        let (new_tx, _) = broadcast::channel(256);
+        *self
+            .inner
+            .block_tx
+            .lock()
+            .expect("mock block_tx mutex poisoned") = new_tx;
+    }
+
+    /// Restore the RPC endpoint. `status()` does not move back to
+    /// `Connected` until something actually calls `subscribe_blocks` again -
+    /// same as the real source, whose status is only ever touched inside a
+    /// subscribe attempt - so recovery still depends on the monitor retrying
+    /// on its own.
+    pub fn restore_connection(&self) {
+        self.inner.reachable.store(true, Ordering::SeqCst);
     }
 
     /// Set the balance for an address.
@@ -102,6 +282,44 @@ impl MockBlockSource {
     pub fn set_block_number(&self, number: u64) {
         self.inner.current_block.store(number, Ordering::SeqCst);
     }
+
+    /// Make the RPC calls `process_block` issues block forever, simulating a
+    /// call made from inside the monitor's own event loop that never returns -
+    /// wedging the loop itself, rather than just leaving its subscription
+    /// silent the way [`Self::kill_connection`] does.
+    ///
+    /// Covers every call `process_block` issues - the block read, the log
+    /// query, the balance read and the reorg continuity check - because which
+    /// one the loop is sitting in is an implementation detail of detection and
+    /// not what a test wedging the loop is trying to say. Gating only
+    /// `get_balance` meant these tests quietly stopped wedging anything when
+    /// native detection moved to reading the block instead of polling; gating
+    /// only the two calls native detection happens to make now would leave the
+    /// same trap for an ERC20-only or reorg-path test.
+    pub fn hang_rpc(&self) {
+        self.inner.hung.store(true, Ordering::SeqCst);
+    }
+
+    /// Release every call currently blocked by [`Self::hang_rpc`] (and let
+    /// future ones return normally).
+    pub fn release_hang(&self) {
+        self.inner.hung.store(false, Ordering::SeqCst);
+        self.inner.hang_notify.notify_waiters();
+    }
+
+    /// Directly set the canonical hash the mock reports for a given height,
+    /// without pushing a block notification.
+    ///
+    /// Lets a test simulate a reorg that replaced a block the monitor has
+    /// already processed: `push_block` alone cannot express "block N now has
+    /// a different hash" without also moving the current block forward.
+    pub fn set_block_hash(&self, number: u64, hash: B256) {
+        self.inner
+            .block_hashes
+            .write()
+            .unwrap()
+            .insert(number, hash);
+    }
 }
 
 #[async_trait]
@@ -111,11 +329,37 @@ impl BlockSource for MockBlockSource {
     }
 
     fn status(&self) -> SourceStatus {
-        SourceStatus::Connected
+        self.inner
+            .status
+            .lock()
+            .expect("mock status mutex poisoned")
+            .clone()
     }
 
     async fn subscribe_blocks(&self) -> EvmResult<BlockStream> {
-        let rx = self.inner.block_tx.subscribe();
+        if !self.inner.reachable.load(Ordering::SeqCst) {
+            *self
+                .inner
+                .status
+                .lock()
+                .expect("mock status mutex poisoned") = SourceStatus::Disconnected;
+            return Err(EvmError::Connection(
+                "mock source is not connected".to_string(),
+            ));
+        }
+        *self
+            .inner
+            .status
+            .lock()
+            .expect("mock status mutex poisoned") = SourceStatus::Connected;
+
+        self.inner.subscribe_count.fetch_add(1, Ordering::SeqCst);
+        let rx = self
+            .inner
+            .block_tx
+            .lock()
+            .expect("mock block_tx mutex poisoned")
+            .subscribe();
         let stream = BroadcastStream::new(rx).filter_map(|result| match result {
             Ok(Ok(block)) => Some(Ok(block)),
             Ok(Err(e)) => Some(Err(e)),
@@ -125,6 +369,8 @@ impl BlockSource for MockBlockSource {
     }
 
     async fn get_logs(&self, filter: &LogFilter) -> EvmResult<Vec<alloy::rpc::types::Log>> {
+        self.record_call("get_logs");
+        self.await_if_hung().await;
         let logs = self.inner.logs.read().await;
         let mut result = Vec::new();
 
@@ -154,16 +400,36 @@ impl BlockSource for MockBlockSource {
     }
 
     async fn get_balance(&self, address: Address, _block: Option<u64>) -> EvmResult<U256> {
+        self.record_call("get_balance");
+        self.await_if_hung().await;
+
         let balances = self.inner.balances.read().await;
         Ok(balances.get(&address).copied().unwrap_or(U256::ZERO))
     }
 
     async fn get_block_number(&self) -> EvmResult<u64> {
+        self.record_call("get_block_number");
         Ok(self.inner.current_block.load(Ordering::SeqCst))
     }
 
     async fn get_block(&self, _number: u64) -> EvmResult<Option<Block>> {
+        self.record_call("get_block");
         Ok(None)
+    }
+
+    async fn get_block_hash(&self, number: u64) -> EvmResult<Option<B256>> {
+        self.await_if_hung().await;
+        if let Some(message) = self.inner.get_block_hash_error.read().unwrap().clone() {
+            return Err(EvmError::Rpc(message));
+        }
+
+        Ok(self
+            .inner
+            .block_hashes
+            .read()
+            .unwrap()
+            .get(&number)
+            .copied())
     }
 
     async fn find_native_transfers_to(
@@ -171,6 +437,18 @@ impl BlockSource for MockBlockSource {
         block_number: u64,
         addresses: &[Address],
     ) -> EvmResult<Vec<NativeTransfer>> {
+        self.record_call("find_native_transfers_to");
+        self.await_if_hung().await;
+        if let Some(message) = self
+            .inner
+            .find_native_transfers_error
+            .read()
+            .unwrap()
+            .clone()
+        {
+            return Err(EvmError::Rpc(message));
+        }
+
         let transfers = self.inner.native_transfers.read().await;
         Ok(transfers
             .get(&block_number)

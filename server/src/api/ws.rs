@@ -3,6 +3,13 @@
 //! Clients connect to `/ws` and authenticate by sending an auth message as the
 //! first frame: `{"type":"auth","token":"SESSION_ID"}`. The server validates
 //! the session and then forwards JSON-encoded status updates.
+//!
+//! Every update is tied to the store it happened in, and a socket receives it
+//! only if its user is a server admin or a member of that store. The decision
+//! is made per event, against the database, at the moment the event is
+//! delivered - not once at connect time - so a member removed while connected
+//! stops receiving at once. Anything that prevents the decision (a database
+//! error, a user that no longer exists) withholds the event.
 
 use axum::{
     extract::{
@@ -11,12 +18,14 @@ use axum::{
     },
     response::IntoResponse,
 };
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, future::BoxFuture};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use auth::SessionService;
+use auth::{SessionService, UserRepository, repository::UserStoreRepository};
+use types::{InvoiceId, InvoiceReader, StoreId};
 
+use super::invoices::{StoreScope, verify_store_access_for_query};
 use crate::state::PgAppState;
 
 /// Client-to-server messages.
@@ -51,10 +60,22 @@ pub enum StatusUpdate {
     Ping,
 }
 
+/// A status update together with the store it happened in.
+///
+/// The store id is not part of the wire format: it is what the socket handlers
+/// decide delivery on, and is dropped before the update is serialised.
+#[derive(Debug, Clone)]
+pub struct WsEvent {
+    /// Store the invoice or payment belongs to.
+    pub store_id: StoreId,
+    /// What clients are told.
+    pub update: StatusUpdate,
+}
+
 /// Shared broadcast channel for status updates.
 #[derive(Clone)]
 pub struct WsBroadcast {
-    tx: broadcast::Sender<StatusUpdate>,
+    tx: broadcast::Sender<WsEvent>,
 }
 
 impl WsBroadcast {
@@ -64,15 +85,72 @@ impl WsBroadcast {
         Self { tx }
     }
 
-    /// Send a status update to all connected clients.
-    pub fn send(&self, update: StatusUpdate) {
+    /// Publish a status update for `store_id`.
+    ///
+    /// The store is required, not optional: an update with no store would have
+    /// no one it could safely be shown to.
+    pub fn send(&self, store_id: StoreId, update: StatusUpdate) {
         // Ignore send errors (no receivers).
-        let _ = self.tx.send(update);
+        let _ = self.tx.send(WsEvent { store_id, update });
+    }
+
+    /// Publish a status update for an invoice whose store the caller does not
+    /// already hold, looking the store up from the invoice.
+    ///
+    /// If the store cannot be determined - the lookup fails, or the invoice is
+    /// gone - nothing is published: an update that cannot be attributed to a
+    /// store cannot be shown to anyone.
+    pub async fn send_for_invoice<R>(
+        &self,
+        reader: &R,
+        invoice_id: &InvoiceId,
+        update: StatusUpdate,
+    ) where
+        R: InvoiceReader + ?Sized,
+    {
+        match reader.get(invoice_id).await {
+            Ok(Some(invoice)) => self.send(invoice.store_id, update),
+            Ok(None) => tracing::warn!(
+                invoice_id = %invoice_id.as_str(),
+                "status update dropped: invoice not found, so its store is unknown"
+            ),
+            Err(e) => tracing::warn!(
+                invoice_id = %invoice_id.as_str(),
+                error = %e,
+                "status update dropped: invoice lookup failed, so its store is unknown"
+            ),
+        }
     }
 
     /// Subscribe to status updates.
-    pub fn subscribe(&self) -> broadcast::Receiver<StatusUpdate> {
+    pub fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
         self.tx.subscribe()
+    }
+}
+
+/// Answers, per event, whether one authenticated socket may see a store.
+type StoreGate = std::sync::Arc<dyn Fn(StoreId) -> BoxFuture<'static, bool> + Send + Sync>;
+
+/// Whether `user_id` may see events of `store_id`: a server admin, or a member.
+///
+/// The user is read afresh, so a demotion takes effect on the next event, and
+/// the membership check is the one the REST list endpoints use. Fails closed:
+/// every error, and a user row that is gone, answers `false`.
+pub(crate) async fn may_see_store<D>(
+    data_service: &D,
+    user_id: auth::UserId,
+    store_id: StoreId,
+) -> bool
+where
+    D: UserRepository + UserStoreRepository + ?Sized,
+{
+    let user = match data_service.get_user(user_id).await {
+        Ok(Some(user)) => auth::UserInfo::from(&user),
+        Ok(None) | Err(_) => return false,
+    };
+    match verify_store_access_for_query(data_service, &user, Some(store_id.0)).await {
+        Ok(StoreScope::One(_)) => true,
+        Ok(_) | Err(_) => false,
     }
 }
 
@@ -96,8 +174,9 @@ where
     };
     let rx = ws_broadcast.subscribe();
     let auth_service = state.auth_service.clone();
+    let data_service = state.data_service.clone();
 
-    ws.on_upgrade(move |socket| handle_socket(socket, rx, auth_service))
+    ws.on_upgrade(move |socket| handle_socket(socket, rx, auth_service, data_service))
         .into_response()
 }
 
@@ -110,8 +189,9 @@ const AUTH_TIMEOUT_SECS: u64 = 10;
 /// then forwards broadcast updates.
 async fn handle_socket<A: SessionService>(
     socket: WebSocket,
-    rx: broadcast::Receiver<StatusUpdate>,
+    rx: broadcast::Receiver<WsEvent>,
     auth_service: std::sync::Arc<A>,
+    data_service: std::sync::Arc<data_service::PgDataService>,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -145,20 +225,29 @@ async fn handle_socket<A: SessionService>(
         }
     };
 
-    if auth_service.validate_session(session_id).await.is_err() {
-        let _ = sender.close().await;
-        return;
-    }
+    let user_id = match auth_service.validate_session(session_id).await {
+        Ok((user, _session)) => user.id,
+        Err(_) => {
+            let _ = sender.close().await;
+            return;
+        }
+    };
+
+    let gate: StoreGate = std::sync::Arc::new(move |store_id| {
+        let data_service = data_service.clone();
+        Box::pin(async move { may_see_store(&*data_service, user_id, store_id).await })
+    });
 
     // Auth succeeded — hand off to the forwarding loop
-    handle_socket_forwarding(sender, receiver, rx).await;
+    handle_socket_forwarding(sender, receiver, rx, gate).await;
 }
 
 /// Forward broadcast updates to an authenticated WebSocket client.
 async fn handle_socket_forwarding(
     mut sender: futures::stream::SplitSink<WebSocket, Message>,
     receiver: futures::stream::SplitStream<WebSocket>,
-    mut rx: broadcast::Receiver<StatusUpdate>,
+    mut rx: broadcast::Receiver<WsEvent>,
+    gate: StoreGate,
 ) {
     // Send connected acknowledgement. Serialising a unit-variant is infallible.
     #[allow(
@@ -172,8 +261,11 @@ async fn handle_socket_forwarding(
 
     // Spawn a task to forward broadcast messages to the client
     let mut send_task = tokio::spawn(async move {
-        while let Ok(update) = rx.recv().await {
-            let msg = match serde_json::to_string(&update) {
+        while let Ok(event) = rx.recv().await {
+            if !gate(event.store_id).await {
+                continue;
+            }
+            let msg = match serde_json::to_string(&event.update) {
                 Ok(json) => json,
                 Err(_) => continue,
             };
@@ -206,6 +298,10 @@ mod tests {
     use super::*;
     use axum::routing;
     use futures::StreamExt;
+
+    fn store() -> StoreId {
+        StoreId(uuid::Uuid::from_bytes([7; 16]))
+    }
 
     #[test]
     fn test_status_update_serde_invoice_status() {
@@ -277,7 +373,7 @@ mod tests {
     fn test_ws_broadcast_send_no_receivers() {
         let broadcast = WsBroadcast::new(16);
         // Should not panic even with no receivers
-        broadcast.send(StatusUpdate::Ping);
+        broadcast.send(store(), StatusUpdate::Ping);
     }
 
     #[tokio::test]
@@ -285,18 +381,21 @@ mod tests {
         let broadcast = WsBroadcast::new(16);
         let mut rx = broadcast.subscribe();
 
-        broadcast.send(StatusUpdate::Connected);
-        broadcast.send(StatusUpdate::InvoiceStatus {
-            invoice_id: "inv_1".to_string(),
-            status: "paid".to_string(),
-        });
+        broadcast.send(store(), StatusUpdate::Connected);
+        broadcast.send(
+            store(),
+            StatusUpdate::InvoiceStatus {
+                invoice_id: "inv_1".to_string(),
+                status: "paid".to_string(),
+            },
+        );
 
         let msg1 = rx.recv().await.unwrap();
-        assert!(matches!(msg1, StatusUpdate::Connected));
+        assert!(matches!(msg1.update, StatusUpdate::Connected));
 
         let msg2 = rx.recv().await.unwrap();
         assert!(
-            matches!(msg2, StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "inv_1")
+            matches!(msg2.update, StatusUpdate::InvoiceStatus { invoice_id, .. } if invoice_id == "inv_1")
         );
     }
 
@@ -306,10 +405,16 @@ mod tests {
         let mut rx1 = broadcast.subscribe();
         let mut rx2 = broadcast.subscribe();
 
-        broadcast.send(StatusUpdate::Ping);
+        broadcast.send(store(), StatusUpdate::Ping);
 
-        assert!(matches!(rx1.recv().await.unwrap(), StatusUpdate::Ping));
-        assert!(matches!(rx2.recv().await.unwrap(), StatusUpdate::Ping));
+        assert!(matches!(
+            rx1.recv().await.unwrap().update,
+            StatusUpdate::Ping
+        ));
+        assert!(matches!(
+            rx2.recv().await.unwrap().update,
+            StatusUpdate::Ping
+        ));
     }
 
     #[tokio::test]
@@ -318,9 +423,9 @@ mod tests {
         let mut rx = broadcast.subscribe();
 
         // Send more messages than the channel capacity
-        broadcast.send(StatusUpdate::Ping);
-        broadcast.send(StatusUpdate::Connected);
-        broadcast.send(StatusUpdate::Ping);
+        broadcast.send(store(), StatusUpdate::Ping);
+        broadcast.send(store(), StatusUpdate::Connected);
+        broadcast.send(store(), StatusUpdate::Ping);
 
         // The receiver should report lagged (missed messages)
         let result = rx.recv().await;
@@ -331,13 +436,15 @@ mod tests {
 
         // After the lag error, the remaining buffered messages are still receivable
         let msg1 = rx.recv().await.unwrap();
-        assert!(matches!(msg1, StatusUpdate::Connected));
+        assert!(matches!(msg1.update, StatusUpdate::Connected));
         let msg2 = rx.recv().await.unwrap();
-        assert!(matches!(msg2, StatusUpdate::Ping));
+        assert!(matches!(msg2.update, StatusUpdate::Ping));
     }
 
-    /// Helper handler for integration tests — upgrades to WebSocket and delegates
-    /// to `handle_socket_forwarding` (skips auth for unit test isolation).
+    /// Helper handler for transport tests — upgrades to WebSocket and delegates
+    /// to `handle_socket_forwarding` with a gate that permits every store.
+    /// Which stores a socket may see is covered through the real `/ws` handler
+    /// in `server/tests/ws_store_scope.rs`.
     async fn test_upgrade(
         ws: WebSocketUpgrade,
         axum::extract::State(bc): axum::extract::State<WsBroadcast>,
@@ -345,7 +452,8 @@ mod tests {
         let rx = bc.subscribe();
         ws.on_upgrade(move |socket| {
             let (sender, receiver) = socket.split();
-            handle_socket_forwarding(sender, receiver, rx)
+            let allow_all: StoreGate = std::sync::Arc::new(|_| Box::pin(async { true }));
+            handle_socket_forwarding(sender, receiver, rx, allow_all)
         })
     }
 
@@ -402,10 +510,13 @@ mod tests {
             .unwrap();
 
         // Broadcast a status update
-        broadcast.send(StatusUpdate::InvoiceStatus {
-            invoice_id: "inv_42".to_string(),
-            status: "paid".to_string(),
-        });
+        broadcast.send(
+            store(),
+            StatusUpdate::InvoiceStatus {
+                invoice_id: "inv_42".to_string(),
+                status: "paid".to_string(),
+            },
+        );
 
         let msg = tokio::time::timeout(timeout, ws.next())
             .await
@@ -439,7 +550,7 @@ mod tests {
 
         // Server should handle the close gracefully — sending after close
         // should not panic (the broadcast just goes nowhere).
-        broadcast.send(StatusUpdate::Ping);
+        broadcast.send(store(), StatusUpdate::Ping);
     }
 
     /// Verify the exact JSON contract that the client crate relies on.

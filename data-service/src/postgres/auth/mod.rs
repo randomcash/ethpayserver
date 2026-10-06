@@ -9,9 +9,11 @@ mod device;
 mod passkey;
 mod server_settings;
 mod session;
-mod store;
+pub(crate) mod store;
 mod user;
 mod wallet;
+
+pub use wallet::WalletReauthChallenge;
 
 #[cfg(test)]
 mod integration_tests;

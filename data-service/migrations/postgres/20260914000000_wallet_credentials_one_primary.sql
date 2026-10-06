@@ -1,0 +1,29 @@
+-- Exactly one primary wallet credential per account, enforced here rather
+-- than in application code.
+--
+-- `wallet_credentials.is_primary` had no uniqueness constraint at all before
+-- this migration - only a non-unique index (`idx_wallets_user_primary`) for
+-- filtering. Nothing stopped two rows for the same user both holding
+-- `is_primary = TRUE`, which is exactly the state a "change primary wallet"
+-- endpoint must never be able to produce. Same shape as
+-- `idx_account_wallets_one_primary` on the unrelated `wallets` (xpub payout)
+-- table added by 20260908120000: a partial unique index makes the invariant
+-- physically impossible rather than merely application-enforced, and two
+-- concurrent "make this my primary" requests cannot both win.
+--
+-- Scoped to `is_active`: `deactivate_wallet` (revoke) does not clear
+-- `is_primary` on the row it deactivates - a deactivated wallet can be left
+-- holding `is_primary = TRUE` (see wallet.rs `revoke_wallet`, which permits
+-- this for accounts that also have an email). Constraining on
+-- `is_primary AND is_active` avoids colliding with that pre-existing state;
+-- a promotion always demotes the current active primary first, in the same
+-- transaction, so the index is never asked to hold two active primaries at
+-- once even momentarily.
+--
+-- Safe to add as a hard constraint now: every existing row reached
+-- `is_primary = TRUE` either via `complete_new_user_wallet_registration`
+-- (exactly one wallet, primary, at signup) or `complete_wallet_registration`
+-- (`is_primary = false` for every additional wallet) - no code path before
+-- this ticket ever produced a second active primary for one user.
+CREATE UNIQUE INDEX idx_wallet_credentials_one_primary
+    ON wallet_credentials(user_id) WHERE is_primary AND is_active;
