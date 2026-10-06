@@ -437,8 +437,11 @@ sqlx migrate revert --source data-service/migrations/postgres
 
 ### What's Remaining
 
-- [ ] Load test: first live run, pending `LOADTEST_API_KEY` / `LOADTEST_STORE_ID` secrets
-      (CI job and automated regression comparison already exist)
+- [ ] Load test: live run (pending `LOADTEST_API_KEY` / `LOADTEST_STORE_ID` secrets) and
+      baselines measured from it for automated regression comparison. The CI job
+      (`.github/workflows/loadtest.yml`) and comparison script
+      (`scripts/loadtest-check-regression.py`) already exist, but `loadtest/baselines.json`
+      still holds sizing targets, not measured results.
 - [ ] Security audit (pre-mainnet)
 - [ ] Public /rates API endpoint for frontends
 
