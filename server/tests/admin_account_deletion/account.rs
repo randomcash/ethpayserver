@@ -313,6 +313,10 @@ async fn deleting_an_account_with_a_still_watched_address_is_refused() {
         message.contains("watch"),
         "the operator must see why, got: {message}"
     );
+    assert!(
+        message.contains("retry"),
+        "an expired invoice's watch outlives expiry, so the message must say to retry, got: {message}"
+    );
 
     let no_command_arrived = tokio::time::timeout(Duration::from_millis(500), commands.next())
         .await
