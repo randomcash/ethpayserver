@@ -184,7 +184,10 @@ where
                 "This account has {} still-watched address(es) for a pending invoice. \
                  A payment broadcast to one of them may not have confirmed yet, and \
                  deleting now would stop watching it with nothing left to credit it to. \
-                 Refused until the invoice resolves (paid, cancelled or expired).",
+                 Refused until the watch is released: that happens once the invoice \
+                 is paid or cancelled, or shortly after it expires (the watch \
+                 outlives expiry by a short grace period). If the invoice has \
+                 already expired, retry in a minute or two.",
                 addresses.len()
             ),
         ));
