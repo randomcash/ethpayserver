@@ -4,11 +4,20 @@ on:
   pull_request:
   # A merge queue tests the *merged* result before it lands, which is the only
   # thing that catches a pull request that is green against a base it no longer
-  # merges into. Required checks here are not strict, so a branch is never
-  # re-tested against the base it actually joins: on 2026-09-15 a change adding
-  # a parameter to `PgAppState::new` was green on its own branch while four
-  # callsites merged in the meantime had not been updated, and two branches
-  # picked the same migration version, each green alone.
+  # merges into. That failure is what this trigger exists for: on 2026-09-15 a
+  # change adding a parameter to `PgAppState::new` was green on its own branch
+  # while four callsites merged in the meantime had not been updated, and two
+  # branches picked the same migration version, each green alone.
+  #
+  # Required checks ARE strict today (verified against the branch-protection
+  # API on 2026-10-06; this comment previously said they were not, which was
+  # true when it was written and has since become false). Strict forces a
+  # branch up to date before it can merge, so the commit that gets tested is
+  # the base merged into the head - close to the merge result. The gap a queue
+  # still closes is that NOTHING PERFORMS THAT UPDATE: every merge leaves every
+  # other open pull request behind and therefore unmergeable, with no signal
+  # saying so, until a person updates each one by hand. On 2026-10-06 ten of
+  # thirteen open pull requests were in that state, one of them for ten days.
   #
   # Without this trigger a queue would hang forever - Lint, Test and Audit are
   # required, and on a `refs/heads/gh-readonly-queue/...` ref they would never
@@ -803,9 +812,13 @@ jobs:
           E2E_API_URL: http://localhost:3000
           E2E_BASE_URL: http://localhost:8080
           E2E_DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
-          # Tenant isolation of the status socket, against this server. Here
-          # membership is seeded in the database, so the spec can actually run;
-          # the nightly cannot seed and reports why.
+          # Tenant isolation of the status socket, against this server. The
+          # spec seeds two ordinary accounts that each own a store, through
+          # the API, so no database access is needed and a local run and the
+          # nightly take the same path (they differ only in how the admin
+          # token is obtained). The pull request job runs only the lifecycle
+          # subset below, so this spec first runs on the push after a merge,
+          # and in the nightly.
           E2E_WS_ISOLATION: "true"
           PLAYWRIGHT_LIST_PRINT_STEPS: "1"
           EVENT_NAME: ${{ github.event_name }}
