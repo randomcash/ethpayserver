@@ -16,9 +16,7 @@ use crate::support::{
 #[tokio::test]
 #[ignore]
 async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -85,9 +83,7 @@ async fn an_api_key_is_bound_to_its_owners_tenancy_same_as_a_session() {
 #[tokio::test]
 #[ignore]
 async fn an_api_keys_own_payment_reads_remain_reachable() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let state = app_state(Arc::new(pg));
 
@@ -125,9 +121,7 @@ async fn an_api_keys_own_payment_reads_remain_reachable() {
 #[tokio::test]
 #[ignore]
 async fn an_api_keys_own_payouts_refunds_and_deliveries_remain_reachable() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let a_payout = seed_payout(&pg, &a.store).await;
     let a_refund = seed_refund(&pg, &a).await;

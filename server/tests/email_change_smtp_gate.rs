@@ -12,9 +12,11 @@
 //! Needs a real Postgres and is `#[ignore]`d, matching the convention
 //! `data-service`'s own DB-backed tests use (see
 //! `data-service/src/postgres/integration_tests`): set `DATABASE_URL` and
-//! run with `--ignored`. Skips (rather than failing) when it is unset, same
-//! as those tests, so the default `cargo test` run stays DB-free.
+//! run with `--ignored`. Fails, naming `DATABASE_URL`, when it is unset or
+//! the database is unreachable; `#[ignore]` keeps the default `cargo test`
+//! run DB-free.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -23,7 +25,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::Utc;
-use data_service::PgDataService;
 use rates::NoOpRateProvider;
 use server::api::FreshlyAuthenticatedUser;
 use server::api::users::{RequestEmailChangePayload, request_email_change};
@@ -57,20 +58,14 @@ impl SessionService for UnusedSessionService {
     }
 }
 
-async fn state() -> Option<PgAppState<UnusedSessionService>> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(AppState::new(
-        Arc::new(PgDataService::new(pool)),
+async fn state() -> PgAppState<UnusedSessionService> {
+    AppState::new(
+        Arc::new(pg_service().await),
         Arc::new(UnusedSessionService),
         None,
         Arc::new(NoOpRateProvider),
         Arc::new(NoopEmailSender),
-    ))
+    )
 }
 
 async fn seed_user(pool: &PgPool, email: &str) -> Uuid {
@@ -101,9 +96,7 @@ async fn cleanup(pool: &PgPool, user: Uuid) {
 #[tokio::test]
 #[ignore]
 async fn smtp_unconfigured_rejects_before_creating_a_pending_request() {
-    let Some(state) = state().await else {
-        return;
-    };
+    let state = state().await;
     let pool = state.data_service.pool().clone();
     let user_id = seed_user(&pool, "existing@example.com").await;
 

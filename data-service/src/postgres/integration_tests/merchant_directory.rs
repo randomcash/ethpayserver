@@ -5,21 +5,11 @@
 //! reads back exactly the identifiers seeded, not a projection that silently
 //! drops or renames a column.
 
+use crate::test_support::pg_service;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::merchant_directory::MerchantDirectoryReader;
-use crate::postgres::PgDataService;
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 async fn seed_user(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
@@ -57,9 +47,7 @@ async fn cleanup(pool: &PgPool, user: Uuid) {
 #[tokio::test]
 #[ignore]
 async fn lists_a_seeded_account_and_its_store() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user(&service.pool).await;
     let store = seed_store(&service.pool, user, "merchant-directory-test").await;
 
@@ -87,9 +75,7 @@ async fn lists_a_seeded_account_and_its_store() {
 #[tokio::test]
 #[ignore]
 async fn limit_bounds_the_page() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user(&service.pool).await;
     seed_store(&service.pool, user, "merchant-directory-limit-a").await;
     seed_store(&service.pool, user, "merchant-directory-limit-b").await;

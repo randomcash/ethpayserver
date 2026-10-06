@@ -66,9 +66,7 @@ async fn seed_pinned_method(
 #[tokio::test]
 #[ignore]
 async fn the_migration_changes_no_routing() {
-    let Some((pool, name, server)) = pre_migration_db_for(MIGRATION, "ns_routing").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db_for(MIGRATION, "ns_routing").await;
 
     let (user, store) = seed_store(&pool, "ns").await;
     let primary = seed_wallet(&pool, user, "xpub-primary", true).await;
@@ -165,9 +163,7 @@ async fn the_migration_changes_no_routing() {
 #[tokio::test]
 #[ignore]
 async fn after_the_migration_a_cross_family_pin_is_refused() {
-    let Some((pool, name, server)) = pre_migration_db_for(MIGRATION, "ns_pin").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db_for(MIGRATION, "ns_pin").await;
 
     let (user, store) = seed_store(&pool, "ns_pin").await;
     let evm = seed_wallet(&pool, user, "xpub-evm", true).await;
@@ -224,9 +220,7 @@ async fn after_the_migration_a_cross_family_pin_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn after_the_migration_a_store_holds_one_override_per_family() {
-    let Some((pool, name, server)) = pre_migration_db_for(MIGRATION, "ns_two").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db_for(MIGRATION, "ns_two").await;
 
     let (user, store) = seed_store(&pool, "ns_two").await;
     let evm = seed_wallet(&pool, user, "xpub-evm", true).await;

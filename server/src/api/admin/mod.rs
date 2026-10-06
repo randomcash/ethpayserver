@@ -637,6 +637,7 @@ where
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use data_service::test_support::pg_service;
     use types::ChainId;
 
     #[test]
@@ -913,8 +914,9 @@ mod tests {
     // ========================================================================
     // `update_settings` against a real database.
     //
-    // `#[ignore]`d and skipped with no `DATABASE_URL`, the same convention as
-    // every other database-backed test in this codebase (see
+    // `#[ignore]`d, and fails naming `DATABASE_URL` when it is unset or the
+    // database is unreachable, the same convention as every other
+    // database-backed test in this codebase (see
     // `server/src/api/stores/tests.rs`'s handler tests, or
     // `data-service/src/postgres/integration_tests/*`).
     // ========================================================================
@@ -943,13 +945,6 @@ mod tests {
         async fn cleanup_stale_sessions(&self) -> auth::Result<u64> {
             Err(auth::AuthError::InvalidCredentials)
         }
-    }
-
-    async fn settings_test_service() -> Option<data_service::PgDataService> {
-        let database_url = std::env::var("DATABASE_URL").ok()?;
-        data_service::PgDataService::connect(&database_url)
-            .await
-            .ok()
     }
 
     async fn settings_test_user(pool: &sqlx::PgPool) -> uuid::Uuid {
@@ -1064,9 +1059,7 @@ mod tests {
     async fn the_operator_store_alarm_fires_only_on_an_actual_change() {
         use tracing_subscriber::prelude::*;
 
-        let Some(service) = settings_test_service().await else {
-            return;
-        };
+        let service = pg_service().await;
         let pool = service.pool().clone();
         sqlx::query("DELETE FROM server_settings WHERE id = 1")
             .execute(&pool)
@@ -1137,9 +1130,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn the_endpoint_refuses_a_store_the_operator_does_not_own() {
-        let Some(service) = settings_test_service().await else {
-            return;
-        };
+        let service = pg_service().await;
         let pool = service.pool().clone();
         sqlx::query("DELETE FROM server_settings WHERE id = 1")
             .execute(&pool)
@@ -1187,9 +1178,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn an_owned_store_that_cannot_be_invoiced_on_is_still_refused() {
-        let Some(service) = settings_test_service().await else {
-            return;
-        };
+        let service = pg_service().await;
         let pool = service.pool().clone();
         sqlx::query("DELETE FROM server_settings WHERE id = 1")
             .execute(&pool)

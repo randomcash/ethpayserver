@@ -66,9 +66,7 @@ impl AccountClosedObserver for RecordingObserver {
 #[tokio::test]
 #[ignore]
 async fn deleting_your_own_account_with_an_unpaid_invoice_succeeds_and_unwatches() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };
@@ -159,9 +157,7 @@ async fn deleting_your_own_account_with_an_unpaid_invoice_succeeds_and_unwatches
 #[tokio::test]
 #[ignore]
 async fn deleting_your_own_account_with_no_monitor_wired_counts_the_watch_it_left_behind() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
 
     let target = seed_user(pg.pool(), "user").await;
     let store = Store::new(format!("store-{target}"), UserId(target));
@@ -213,9 +209,7 @@ async fn deleting_your_own_account_with_no_monitor_wired_counts_the_watch_it_lef
 #[tokio::test]
 #[ignore]
 async fn deleting_your_own_untraded_account_still_succeeds() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let target = seed_user(pg.pool(), "user").await;
     let state = app_state(Arc::new(pg));
 
@@ -246,9 +240,7 @@ async fn deleting_your_own_untraded_account_still_succeeds() {
 #[tokio::test]
 #[ignore]
 async fn deleting_your_own_account_that_took_a_payment_notifies_nobody() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let target = seed_user(pg.pool(), "user").await;
     let store = Store::new(format!("store-{target}"), UserId(target));
     pg.create_store_owned_by(&store, UserId(target))

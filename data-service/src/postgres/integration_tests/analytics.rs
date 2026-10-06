@@ -45,7 +45,7 @@ async fn seed_one_eth_payment(service: &PgDataService) -> (types::StoreId, types
 async fn integration_analytics_empty_store_list_reads_nothing() {
     // "No stores" must filter everything out. Treating it as "all stores" is
     // how a user who belongs to no store ends up reading the whole server.
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     seed_one_eth_payment(&service).await;
 
     let buckets = service
@@ -58,7 +58,7 @@ async fn integration_analytics_empty_store_list_reads_nothing() {
 #[tokio::test]
 #[ignore]
 async fn integration_analytics_scopes_to_the_named_stores() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let (mine, _) = seed_one_eth_payment(&service).await;
     let (theirs, _) = seed_one_eth_payment(&service).await;
     assert_ne!(mine, theirs);
@@ -81,7 +81,7 @@ async fn integration_analytics_scopes_to_the_named_stores() {
 #[tokio::test]
 #[ignore]
 async fn integration_analytics_uses_the_payment_options_decimals() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
@@ -122,7 +122,7 @@ async fn integration_analytics_uses_the_payment_options_decimals() {
 async fn integration_analytics_excludes_reorged_payments() {
     // A reorged payment was rolled back by the chain; charting it would show
     // a merchant money that never arrived.
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
@@ -144,7 +144,7 @@ async fn integration_analytics_excludes_reorged_payments() {
 #[tokio::test]
 #[ignore]
 async fn integration_analytics_window_is_bounded() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
@@ -166,7 +166,7 @@ async fn integration_analytics_window_is_bounded() {
 #[tokio::test]
 #[ignore]
 async fn integration_analytics_groups_by_day_and_asset() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
 
@@ -199,7 +199,7 @@ async fn integration_analytics_groups_by_day_and_asset() {
 #[tokio::test]
 #[ignore]
 async fn integration_analytics_per_store_reads_nothing_for_an_empty_store_list() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     seed_one_eth_payment(&service).await;
 
     let buckets = service
@@ -214,7 +214,7 @@ async fn integration_analytics_per_store_reads_nothing_for_an_empty_store_list()
 #[tokio::test]
 #[ignore]
 async fn integration_analytics_per_store_keeps_each_store_separate() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let (store_a, _) = seed_one_eth_payment(&service).await;
     let (store_b, _) = seed_one_eth_payment(&service).await;
     assert_ne!(store_a, store_b);

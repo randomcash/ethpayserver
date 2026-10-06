@@ -175,6 +175,14 @@ jobs:
       - name: Migration guard self-test
         run: ./scripts/check-migrations.test.sh
 
+      # A database test helper that returns on a missing or unreachable
+      # database makes "ran" and "skipped" the same output. See the script.
+      - name: Database tests fail loudly, never skip
+        run: ./scripts/check-test-db-skips.sh
+
+      - name: Database-skip guard self-test
+        run: ./scripts/check-test-db-skips.test.sh
+
       # A scope check with no test driving it in both directions is how a key
       # came to exceed its owner without any test noticing. See the script for
       # what it does and does not prove.

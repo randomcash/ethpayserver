@@ -21,9 +21,7 @@ use crate::support::{
 #[tokio::test]
 #[ignore]
 async fn list_store_members_refuses_a_non_members_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     // None of the seeded default roles grant `canviewstoreusers`, including
@@ -58,9 +56,7 @@ async fn list_store_members_refuses_a_non_members_store() {
 #[tokio::test]
 #[ignore]
 async fn get_store_webhook_refuses_a_non_members_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     // Both tenants need a webhook actually configured, or the positive
@@ -95,9 +91,7 @@ async fn get_store_webhook_refuses_a_non_members_store() {
 #[tokio::test]
 #[ignore]
 async fn get_token_policy_refuses_a_non_members_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -133,9 +127,7 @@ async fn get_token_policy_refuses_a_non_members_store() {
 #[tokio::test]
 #[ignore]
 async fn store_settings_via_api_key_cannot_reach_another_tenants_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let _a_delivery = seed_webhook_delivery(&pg, &a).await;

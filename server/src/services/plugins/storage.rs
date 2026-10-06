@@ -449,11 +449,6 @@ mod tests {
         PluginId::new(id).unwrap()
     }
 
-    /// `None` only when `DATABASE_URL` is unset — the legitimate "not running
-    /// against Postgres" skip. If it's set but the connection fails, that's a
-    /// broken test environment, not an absent one: panic instead of
-    /// returning `None`, or a bad DB fails the same as no DB at all — a
-    /// silent pass instead of the failure it should be.
     /// A pool authenticated as `role`, against the same database
     /// `DATABASE_URL` names.
     ///
@@ -464,7 +459,7 @@ mod tests {
     /// the role it authenticated as, so a test written that way would be
     /// asserting against an escape hatch the plugin itself could take.
     async fn pool_as_role(role: &str, password: &str) -> PgPool {
-        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let url = data_service::test_support::database_url();
         let rest = url.split_once("://").expect("scheme").1;
         let host_and_db = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
         let as_role = format!(
@@ -496,15 +491,8 @@ mod tests {
             .collect()
     }
 
-    async fn test_pool() -> Option<PgPool> {
-        let database_url = std::env::var("DATABASE_URL").ok()?;
-        Some(
-            PgPoolOptions::new()
-                .max_connections(3)
-                .connect(&database_url)
-                .await
-                .expect("DATABASE_URL is set but connecting to it failed"),
-        )
+    async fn test_pool() -> PgPool {
+        data_service::test_support::pg_pool(3).await
     }
 
     /// A fresh migrations directory with one migration that creates a table,
@@ -518,9 +506,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
     async fn install_creates_schema_and_runs_migrations_scoped_to_it() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.storagetest.install");
 
@@ -567,9 +553,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
     async fn a_failing_migration_returns_an_error_instead_of_succeeding() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.storagetest.failing");
 
@@ -590,9 +574,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
     async fn acquired_connection_is_scoped_to_the_plugin_schema() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.storagetest.scoped");
 
@@ -623,14 +605,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
     async fn install_does_not_leak_search_path_to_the_next_pool_borrower() {
-        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
-            return;
-        };
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .unwrap();
+        let pool = data_service::test_support::pg_pool(1).await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.storagetest.installleak");
 
@@ -665,14 +640,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
     async fn acquire_does_not_leak_search_path_to_the_next_pool_borrower() {
-        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
-            return;
-        };
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .unwrap();
+        let pool = data_service::test_support::pg_pool(1).await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.storagetest.acquireleak");
 
@@ -715,9 +683,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires DATABASE_URL"]
     async fn uninstall_without_drop_schema_keeps_the_data() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.storagetest.keepdata");
 
@@ -780,9 +746,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn a_plugin_role_cannot_read_core_tables() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.rolescope.core");
         let password = generate_role_password().unwrap();
@@ -822,9 +786,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn a_plugin_role_cannot_create_tables_in_its_own_schema() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.rolescope.ddl");
         let password = generate_role_password().unwrap();
@@ -865,9 +827,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn a_plugin_role_can_use_a_table_created_after_it_was_provisioned() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.rolescope.dml");
         let password = generate_role_password().unwrap();
@@ -917,9 +877,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn dropping_the_role_leaves_the_plugins_data_intact() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.rolescope.dropdata");
         let schema = schema_name(&id).unwrap();
@@ -965,9 +923,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn provisioning_the_same_role_twice_converges() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool.clone());
         let id = plugin_id("cash.random.rolescope.twice");
 
@@ -1000,9 +956,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn dropping_a_role_that_does_not_exist_is_fine() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        let pool = test_pool().await;
         let storage = PluginStorage::new(pool);
         storage
             .drop_role(&plugin_id("cash.random.rolescope.absent"))
@@ -1021,9 +975,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_alphanumeric_role_password_is_refused_rather_than_escaped() {
-        let Some(pool) = test_pool().await else {
-            return;
-        };
+        // The password is refused before any query is sent, so this needs no
+        // database: a lazy pool never connects, and if the check were removed
+        // the call would fail on the connection instead of on the password.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+            .unwrap();
         let storage = PluginStorage::new(pool);
         let result = storage
             .provision_role(

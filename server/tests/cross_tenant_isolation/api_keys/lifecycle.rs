@@ -21,9 +21,7 @@ use crate::support::{app_state, seed_tenant, service, sha256_hex};
 #[tokio::test]
 #[ignore]
 async fn a_revoked_api_key_no_longer_authenticates() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let key = ApiKeyRepository::get_api_key_by_hash(&pg, &sha256_hex(&a.api_key_raw))
         .await
@@ -51,9 +49,7 @@ async fn a_revoked_api_key_no_longer_authenticates() {
 #[tokio::test]
 #[ignore]
 async fn an_expired_api_key_no_longer_authenticates() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
 
     let expired_raw = format!("ak_test_{}", Uuid::new_v4());

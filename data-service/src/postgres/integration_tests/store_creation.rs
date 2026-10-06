@@ -6,22 +6,12 @@
 //! membership, and undeletable through it. Only real foreign keys and a real
 //! transaction can show that the pair lands together or not at all.
 
+use crate::test_support::pg_service;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::postgres::PgDataService;
 use crate::store_creation::{StoreCreationError, StoreCreationWriter};
 use auth::{Store, UserId};
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 async fn seed_user(pool: &PgPool) -> Uuid {
     let user_id = Uuid::new_v4();
@@ -55,9 +45,7 @@ async fn counts(pool: &PgPool, store_id: Uuid) -> (i64, i64) {
 #[tokio::test]
 #[ignore]
 async fn a_store_and_its_ownership_land_together() {
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user(&service.pool).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(user));
 
@@ -95,9 +83,7 @@ async fn an_absent_role_reads_as_none_which_is_what_becomes_missing_owner_role()
     // its own transaction, so it could not observe a deletion staged in the
     // test's transaction anyway. A test that cannot see the state it sets up is
     // worse than one that says what it covers.
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let mut conn = service.pool.acquire().await.expect("connection");
 
     let found = crate::postgres::store_creation::default_role_by_name(&mut conn, "Owner")
@@ -129,9 +115,7 @@ async fn a_duplicate_store_id_changes_nothing() {
     // key, so it fails at the first statement and there is nothing to roll back.
     // The rollback itself is proved by
     // `the_store_insert_rolls_back_when_the_membership_fails` below.
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user(&service.pool).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(user));
 
@@ -170,9 +154,7 @@ async fn the_store_insert_rolls_back_when_the_membership_fails() {
     // bad role id, and the writer sources that id from its own lookup. So this
     // runs the same two statements the writer runs, in one transaction, with the
     // second one guaranteed to fail.
-    let Some(service) = service().await else {
-        return;
-    };
+    let service = pg_service().await;
     let user = seed_user(&service.pool).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(user));
 

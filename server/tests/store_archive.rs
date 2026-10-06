@@ -8,9 +8,11 @@
 //! extractors and the handlers are all on the path, not just the handler
 //! bodies.
 //!
-//! Needs `DATABASE_URL`; skips when unset, like the other ignored integration
-//! tests, and runs in CI's `--run-ignored` step.
+//! Needs `DATABASE_URL` and fails, naming it, when it is unset or the database
+//! is unreachable, like the other ignored integration tests; runs in CI's
+//! `--run-ignored` step.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,16 +47,6 @@ use types::{
 /// file: one xpub can be registered to one account only, and the files share
 /// a database.
 const XPUB: &str = "xpub68Gmy5EdvgibQVfPdqkBBCHxA5htiqg55crXYuXoQRKfDBFA1WEjWgP6LHhwBZeNK1VTsfTFUHCdrfp1bgwQ9xv5ski8PX9rL2dZXvgGDnw";
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("DATABASE_URL is set but the database is unreachable");
-    Some(PgDataService::new(pool))
-}
 
 struct Merchant {
     store: Store,
@@ -192,9 +184,7 @@ fn invoice_body(store_id: Uuid) -> serde_json::Value {
 #[tokio::test]
 #[ignore]
 async fn list_hides_archived_and_unarchive_brings_the_store_back() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let m = seed_merchant(&pg, false).await;
     let app = app(&pg);
@@ -233,9 +223,7 @@ async fn list_hides_archived_and_unarchive_brings_the_store_back() {
 #[tokio::test]
 #[ignore]
 async fn only_the_owner_can_unarchive() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let owner = seed_merchant(&pg, false).await;
     let stranger = seed_merchant(&pg, false).await;
@@ -272,9 +260,7 @@ async fn only_the_owner_can_unarchive() {
 #[tokio::test]
 #[ignore]
 async fn invoice_creation_is_refused_on_an_archived_store_and_works_when_unarchived() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let m = seed_merchant(&pg, true).await;
     let app = app(&pg);
@@ -481,9 +467,7 @@ async fn deliver_full_payment(
 #[tokio::test]
 #[ignore]
 async fn an_invoice_on_an_archived_store_is_still_watched_and_settles() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let m = seed_merchant(&pg, false).await;
     let app = app(&pg);
