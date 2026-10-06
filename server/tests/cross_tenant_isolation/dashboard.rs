@@ -17,9 +17,7 @@ use crate::support::{app_state, authenticate_via_bearer, seed_tenant, service, u
 #[tokio::test]
 #[ignore]
 async fn get_stats_never_counts_another_tenants_data() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let _b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -42,9 +40,7 @@ async fn get_stats_never_counts_another_tenants_data() {
 #[tokio::test]
 #[ignore]
 async fn get_analytics_never_counts_another_tenants_data() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let _b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -71,9 +67,7 @@ async fn get_analytics_never_counts_another_tenants_data() {
 #[tokio::test]
 #[ignore]
 async fn dashboard_via_api_key_never_counts_another_tenants_data() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let _b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));

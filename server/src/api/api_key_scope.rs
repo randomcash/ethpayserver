@@ -21,6 +21,32 @@ pub(super) fn key_retains_unrestricted_access(permissions: Option<&[String]>) ->
     }
 }
 
+/// Whether a key's stored scope grants reading the server-wide merchant
+/// listing: unscoped, `unrestricted`, or naming `ethpay.server.canviewusers`.
+///
+/// That policy is the only server-level one enforced individually, and only
+/// by the routes that call this; every other server policy still grants
+/// nothing (see `validate_requested_permissions`).
+pub(super) fn key_grants_merchant_read(permissions: Option<&[String]>) -> bool {
+    key_retains_unrestricted_access(permissions)
+        || permissions.is_some_and(|set| set.iter().any(|p| p == Policies::SERVER_VIEW_USERS))
+}
+
+/// The scope entry that lets a key push an account's standing, and nothing
+/// else. Not a commons policy: none of those means "write standing", and a
+/// key-creation-only string keeps this server from needing a commons change
+/// before it can enforce it.
+pub(super) const STANDING_PUSH_SCOPE: &str = "ethpay.server.canpushstanding";
+
+/// Whether a key's stored scope names the standing-push entry.
+///
+/// Unlike `key_grants_merchant_read`, unscoped and `unrestricted` keys do NOT
+/// count: the sender must hold a credential that cannot be used for anything
+/// else, so an admin key is refused rather than accepted by default.
+pub(super) fn key_grants_standing_push(permissions: Option<&[String]>) -> bool {
+    permissions.is_some_and(|set| set.iter().any(|p| p == STANDING_PUSH_SCOPE))
+}
+
 /// Whether a key's stored scope grants `policy` on `store_id` - the other
 /// half of "effective permission is the intersection of the key's set and
 /// the owner's role", specifically for store permissions.
@@ -110,6 +136,41 @@ mod tests {
 
     fn store(n: u128) -> StoreId {
         StoreId(uuid::Uuid::from_u128(n))
+    }
+
+    #[test]
+    fn merchant_read_is_granted_by_no_scope_unrestricted_or_its_own_policy() {
+        let strs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(key_grants_merchant_read(None));
+        assert!(key_grants_merchant_read(Some(&strs(&["unrestricted"]))));
+        assert!(key_grants_merchant_read(Some(&strs(&[
+            "ethpay.store.cancreateinvoice",
+            "ethpay.server.canviewusers",
+        ]))));
+        assert!(!key_grants_merchant_read(Some(&strs(&[
+            "ethpay.store.cancreateinvoice"
+        ]))));
+        assert!(!key_grants_merchant_read(Some(&[])));
+        assert!(!key_grants_merchant_read(Some(&strs(&[
+            "ethpay.server.canmanageusers"
+        ]))));
+    }
+
+    #[test]
+    fn standing_push_is_granted_only_by_its_own_entry() {
+        let strs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(key_grants_standing_push(Some(&strs(&[
+            "ethpay.server.canpushstanding"
+        ]))));
+        assert!(
+            !key_grants_standing_push(None),
+            "an unscoped key is an admin key"
+        );
+        assert!(!key_grants_standing_push(Some(&strs(&["unrestricted"]))));
+        assert!(!key_grants_standing_push(Some(&strs(&[
+            "ethpay.server.canviewusers"
+        ]))));
+        assert!(!key_grants_standing_push(Some(&[])));
     }
 
     #[test]

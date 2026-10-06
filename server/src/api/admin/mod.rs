@@ -19,11 +19,12 @@ use ::types::ChainId;
 use auth::{
     Role, ServerSettings, ServerSettingsRepository, SessionService, UserId, UserRepository,
 };
+use data_service::MerchantDirectoryReader;
 
 pub mod deletion;
 pub mod plugins;
 
-use super::extractors::AdminAuth;
+use super::extractors::{AdminAuth, MerchantReader};
 use crate::state::PgAppState;
 pub use api_types::{
     AdminUserInfo, ServerSettingsResponse, UpdateRoleRequest, UpdateServerSettingsRequest,
@@ -60,6 +61,48 @@ pub struct SafeModeResponse {
     /// boot. Plugins are disabled, not uninstalled - their files and data are
     /// untouched, and clearing the flag on the next boot restores them.
     pub safe_mode: bool,
+    /// True when something on this server can use the operator store: at
+    /// least one installed plugin is enabled and safe mode is off. The
+    /// operator store only decides where a plugin's invoices are issued and
+    /// which store's payments a plugin is told about, so on a server with no
+    /// running plugin the setting does nothing and a client should not offer
+    /// it.
+    pub operator_store_available: bool,
+}
+
+/// The safe-mode response for a server, read from its installed plugins.
+///
+/// A failed read reports the store as unavailable rather than failing the
+/// request: `safe_mode` is known without the database, and a client showing
+/// its safe-mode warning must still get it when the plugin list cannot be
+/// read.
+async fn safe_mode_response<R>(reader: &R, safe_mode: bool) -> SafeModeResponse
+where
+    R: data_service::InstalledPluginReader + ?Sized,
+{
+    let enabled = match reader.list_installed_plugins().await {
+        Ok(installed) => installed.iter().map(|p| p.enabled).collect::<Vec<_>>(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list plugins for the safe-mode response");
+            Vec::new()
+        }
+    };
+    SafeModeResponse {
+        safe_mode,
+        operator_store_available: operator_store_available(safe_mode, enabled),
+    }
+}
+
+/// Whether an operator store has any consumer on this server.
+///
+/// Any enabled plugin counts, not only a billing one: the host hands the
+/// operator store to every loaded plugin (invoice issuing and payment
+/// reports are host-wide), and the server cannot tell what a plugin is for.
+/// Based on the installed rows rather than what loaded at boot, so a plugin
+/// that was installed or enabled after boot (and takes the store up on the
+/// next restart, like the store itself) still makes the setting reachable.
+fn operator_store_available(safe_mode: bool, enabled: impl IntoIterator<Item = bool>) -> bool {
+    !safe_mode && enabled.into_iter().any(|e| e)
 }
 
 // ============================================================================
@@ -122,6 +165,67 @@ where
         offset,
         limit,
     }))
+}
+
+/// One store in the server-wide listing.
+///
+/// Only what `data_service::MerchantStore` carries: identifiers, name and
+/// archived flag, no settings or wallet data.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MerchantStoreEntry {
+    pub id: String,
+    pub name: String,
+    pub owner_id: String,
+    pub archived: bool,
+}
+
+/// List every store on the server (paginated), oldest first.
+///
+/// Read-only, so unlike the rest of `/admin` it also accepts an API key
+/// scoped to `ethpay.server.canviewusers` (owned by a server admin). That
+/// lets an integration that only needs to enumerate merchants hold a key
+/// that can do nothing else on the admin surface.
+#[utoipa::path(
+    get,
+    path = "/admin/stores",
+    tag = "admin",
+    security(("bearer_auth" = [])),
+    params(
+        ("limit" = Option<i64>, Query, description = "Max results (default 50, max 200)"),
+        ("offset" = Option<i64>, Query, description = "Offset for pagination"),
+    ),
+    responses(
+        (status = 200, description = "Stores on this server", body = Vec<MerchantStoreEntry>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin access, or a key scoped to read the merchant listing, required"),
+    )
+)]
+pub async fn list_stores<A>(
+    MerchantReader(_reader): MerchantReader,
+    Query(params): Query<ListUsersParams>,
+    State(state): State<PgAppState<A>>,
+) -> Result<Json<Vec<MerchantStoreEntry>>, StatusCode>
+where
+    A: SessionService + 'static,
+{
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let stores = MerchantDirectoryReader::list_stores(&*state.data_service, offset, limit)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(
+        stores
+            .into_iter()
+            .map(|s| MerchantStoreEntry {
+                id: s.id.0.to_string(),
+                name: s.name,
+                owner_id: s.owner_id.0.to_string(),
+                archived: s.archived,
+            })
+            .collect(),
+    ))
 }
 
 /// Change a user's role.
@@ -526,15 +630,14 @@ pub async fn get_safe_mode<A>(
 where
     A: SessionService + 'static,
 {
-    Json(SafeModeResponse {
-        safe_mode: state.safe_mode,
-    })
+    Json(safe_mode_response(&*state.data_service, state.safe_mode).await)
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use data_service::test_support::pg_service;
     use types::ChainId;
 
     #[test]
@@ -625,9 +728,102 @@ mod tests {
 
     #[test]
     fn test_safe_mode_response_serialization() {
-        let resp = SafeModeResponse { safe_mode: true };
+        let resp = SafeModeResponse {
+            safe_mode: true,
+            operator_store_available: false,
+        };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["safe_mode"], true);
+        assert_eq!(json["operator_store_available"], false);
+    }
+
+    /// The operator store is offered only when a plugin could use it.
+    #[test]
+    fn the_operator_store_is_available_only_with_an_enabled_plugin() {
+        assert!(!operator_store_available(false, []), "no plugins installed");
+        assert!(
+            !operator_store_available(false, [false]),
+            "the only plugin is disabled"
+        );
+        assert!(operator_store_available(false, [false, true]));
+        assert!(
+            !operator_store_available(true, [true]),
+            "safe mode loads nothing"
+        );
+    }
+
+    struct Plugins(Result<Vec<bool>, ()>);
+
+    #[async_trait::async_trait]
+    impl data_service::InstalledPluginReader for Plugins {
+        async fn list_installed_plugins(
+            &self,
+        ) -> data_service::RepositoryResult<Vec<data_service::InstalledPlugin>> {
+            let Ok(flags) = &self.0 else {
+                return Err(data_service::RepositoryError::InvalidData("down".into()));
+            };
+            Ok(flags
+                .iter()
+                .map(|&enabled| data_service::InstalledPlugin {
+                    id: "p".to_string(),
+                    version: "1.0.0".to_string(),
+                    manifest_toml: String::new(),
+                    artifact_sha256: String::new(),
+                    enabled,
+                    disabled_reason: None,
+                    db_role_password: None,
+                    installed_at: Utc::now(),
+                    updated_at: Utc::now(),
+                })
+                .collect())
+        }
+        async fn get_installed_plugin(
+            &self,
+            _id: &str,
+        ) -> data_service::RepositoryResult<Option<data_service::InstalledPlugin>> {
+            Ok(None)
+        }
+        async fn plugin_events(
+            &self,
+            _id: &str,
+            _limit: i64,
+        ) -> data_service::RepositoryResult<Vec<data_service::PluginEvent>> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn response_json(plugins: Result<Vec<bool>, ()>, safe_mode: bool) -> serde_json::Value {
+        serde_json::to_value(safe_mode_response(&Plugins(plugins), safe_mode).await).unwrap()
+    }
+
+    /// The handler's body, end to end over the wire shape: it must read the
+    /// installed rows, and a failed read must not take `safe_mode` with it.
+    #[tokio::test]
+    async fn the_safe_mode_response_reflects_the_installed_plugins() {
+        let none = response_json(Ok(vec![]), false).await;
+        assert_eq!(none["operator_store_available"], false);
+        assert_eq!(none["safe_mode"], false);
+
+        let off = response_json(Ok(vec![false]), false).await;
+        assert_eq!(off["operator_store_available"], false);
+
+        let on = response_json(Ok(vec![false, true]), false).await;
+        assert_eq!(on["operator_store_available"], true);
+
+        let safe = response_json(Ok(vec![true]), true).await;
+        assert_eq!(safe["safe_mode"], true);
+        assert_eq!(safe["operator_store_available"], false);
+
+        let failed = response_json(Err(()), true).await;
+        assert_eq!(failed["safe_mode"], true, "safe_mode survives a read error");
+        assert_eq!(failed["operator_store_available"], false);
+
+        let failed_live = response_json(Err(()), false).await;
+        assert_eq!(failed_live["safe_mode"], false);
+        assert_eq!(
+            failed_live["operator_store_available"], false,
+            "an unreadable plugin list reports the store unavailable"
+        );
     }
 
     fn method(wallet: Option<uuid::Uuid>) -> data_service::StorePaymentMethod {
@@ -718,8 +914,9 @@ mod tests {
     // ========================================================================
     // `update_settings` against a real database.
     //
-    // `#[ignore]`d and skipped with no `DATABASE_URL`, the same convention as
-    // every other database-backed test in this codebase (see
+    // `#[ignore]`d, and fails naming `DATABASE_URL` when it is unset or the
+    // database is unreachable, the same convention as every other
+    // database-backed test in this codebase (see
     // `server/src/api/stores/tests.rs`'s handler tests, or
     // `data-service/src/postgres/integration_tests/*`).
     // ========================================================================
@@ -748,13 +945,6 @@ mod tests {
         async fn cleanup_stale_sessions(&self) -> auth::Result<u64> {
             Err(auth::AuthError::InvalidCredentials)
         }
-    }
-
-    async fn settings_test_service() -> Option<data_service::PgDataService> {
-        let database_url = std::env::var("DATABASE_URL").ok()?;
-        data_service::PgDataService::connect(&database_url)
-            .await
-            .ok()
     }
 
     async fn settings_test_user(pool: &sqlx::PgPool) -> uuid::Uuid {
@@ -869,9 +1059,7 @@ mod tests {
     async fn the_operator_store_alarm_fires_only_on_an_actual_change() {
         use tracing_subscriber::prelude::*;
 
-        let Some(service) = settings_test_service().await else {
-            return;
-        };
+        let service = pg_service().await;
         let pool = service.pool().clone();
         sqlx::query("DELETE FROM server_settings WHERE id = 1")
             .execute(&pool)
@@ -942,9 +1130,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn the_endpoint_refuses_a_store_the_operator_does_not_own() {
-        let Some(service) = settings_test_service().await else {
-            return;
-        };
+        let service = pg_service().await;
         let pool = service.pool().clone();
         sqlx::query("DELETE FROM server_settings WHERE id = 1")
             .execute(&pool)
@@ -992,9 +1178,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn an_owned_store_that_cannot_be_invoiced_on_is_still_refused() {
-        let Some(service) = settings_test_service().await else {
-            return;
-        };
+        let service = pg_service().await;
         let pool = service.pool().clone();
         sqlx::query("DELETE FROM server_settings WHERE id = 1")
             .execute(&pool)

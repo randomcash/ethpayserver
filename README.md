@@ -245,7 +245,7 @@ is meant to serve every payserver — EVM, Tron, Solana, Monero — rather than 
 one. The image tag this server is **tested against** is pinned in
 `ops/client-image.pin`. That is not the tag serving production: the
 frontend deploys on its own cadence from payserver-client via
-central-infrastructure, so the two can drift.
+the private deploy repository, so the two can drift.
 
 ### Crates
 
@@ -664,7 +664,11 @@ handled by `server/src/api/admin/plugins.rs`.
 
 ### What's Remaining
 
-- [ ] Load test CI integration and regression tracking
+- [ ] Load test: live run (pending `LOADTEST_API_KEY` / `LOADTEST_STORE_ID` secrets) and
+      baselines measured from it for automated regression comparison. The CI job
+      (`.github/workflows/loadtest.yml`) and comparison script
+      (`scripts/loadtest-check-regression.py`) already exist, but `loadtest/baselines.json`
+      still holds sizing targets, not measured results.
 - [ ] Security audit (pre-mainnet)
 - [ ] Public /rates API endpoint for frontends
 

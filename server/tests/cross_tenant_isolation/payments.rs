@@ -20,9 +20,7 @@ use crate::support::{
 #[tokio::test]
 #[ignore]
 async fn list_payments_with_no_store_id_shows_only_the_callers_own() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -55,9 +53,7 @@ async fn list_payments_with_no_store_id_shows_only_the_callers_own() {
 #[tokio::test]
 #[ignore]
 async fn list_payments_with_another_tenants_store_id_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -109,9 +105,7 @@ async fn list_payments_with_another_tenants_store_id_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn list_payments_with_a_nil_store_id_is_refused_like_any_foreign_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let _b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -142,9 +136,7 @@ async fn list_payments_with_a_nil_store_id_is_refused_like_any_foreign_store() {
 #[tokio::test]
 #[ignore]
 async fn list_payments_with_no_store_id_as_server_admin_sees_every_tenant() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -180,9 +172,7 @@ async fn list_payments_with_no_store_id_as_server_admin_sees_every_tenant() {
 #[tokio::test]
 #[ignore]
 async fn get_payment_by_id_across_tenants_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));

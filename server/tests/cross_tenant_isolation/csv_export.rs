@@ -21,9 +21,7 @@ use crate::support::{
 #[tokio::test]
 #[ignore]
 async fn export_invoices_csv_with_another_tenants_store_id_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -72,9 +70,7 @@ async fn export_invoices_csv_with_another_tenants_store_id_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn export_invoices_csv_with_a_nil_store_id_is_refused_like_any_foreign_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let _b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -103,9 +99,7 @@ async fn export_invoices_csv_with_a_nil_store_id_is_refused_like_any_foreign_sto
 #[tokio::test]
 #[ignore]
 async fn export_payments_csv_with_another_tenants_store_id_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -148,9 +142,7 @@ async fn export_payments_csv_with_another_tenants_store_id_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn export_payments_csv_with_a_nil_store_id_is_refused_like_any_foreign_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let _b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -184,9 +176,7 @@ async fn export_payments_csv_with_a_nil_store_id_is_refused_like_any_foreign_sto
 #[tokio::test]
 #[ignore]
 async fn csv_export_via_api_key_cannot_reach_another_tenants_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));

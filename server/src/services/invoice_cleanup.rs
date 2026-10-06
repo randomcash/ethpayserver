@@ -193,10 +193,15 @@ impl<D: CleanupDataService + 'static, M: EVMMonitor, W: WebhookDataService + 'st
                             metrics::record_invoice_expired();
                             // Broadcast invoice expired via WebSocket
                             if let Some(ref ws) = self.ws_broadcast {
-                                ws.send(StatusUpdate::InvoiceStatus {
-                                    invoice_id: invoice_id.as_str().to_string(),
-                                    status: "expired".to_string(),
-                                });
+                                ws.send_for_invoice(
+                                    &*self.data_service,
+                                    &invoice_id,
+                                    StatusUpdate::InvoiceStatus {
+                                        invoice_id: invoice_id.as_str().to_string(),
+                                        status: "expired".to_string(),
+                                    },
+                                )
+                                .await;
                             }
                             // Queue webhook notification for expiration
                             self.queue_expiration_webhook(&invoice_id).await;

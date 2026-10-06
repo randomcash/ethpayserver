@@ -26,6 +26,7 @@ pub mod api_key_scope;
 pub mod auth_freshness;
 pub mod checkout;
 pub mod dashboard;
+pub mod entitlements;
 pub mod extractors;
 pub mod health;
 pub mod http_metrics;
@@ -43,7 +44,8 @@ pub mod webhook_deliveries;
 pub mod ws;
 
 pub use extractors::{
-    AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser, StoreScopedUser,
+    AdminAuth, AuthenticatedCaller, AuthenticatedUser, FreshlyAuthenticatedUser, MerchantReader,
+    StandingPusher, StoreScopedUser,
 };
 pub use openapi::ApiDoc;
 
@@ -265,6 +267,9 @@ where
         // manifest, so building a menu runs no plugin code.
         .route("/", get(plugins::list_plugin_pages::<A>))
         .route("/{id}/pages/{*path}", get(plugins::get_page::<A>))
+        // Core, not a plugin's: the standing gates invoice creation, so it is
+        // stored by the host and lands whether or not any plugin is loaded.
+        .route("/entitlements", entitlements::route::<A>())
         .with_state(state.clone());
 
     // Dashboard endpoint
@@ -285,6 +290,7 @@ where
         // and gated on the verification token alone.
         .route("/me/email", post(users::request_email_change::<A>))
         .route("/me/email", delete(users::remove_email::<A>))
+        .route("/me/email/status", get(users::get_email_status::<A>))
         .route(
             "/me/email/confirm",
             post(users::confirm_email_change::<A>),
@@ -315,6 +321,7 @@ where
         .route("/users", get(admin::list_users::<A>))
         .route("/users/{id}", delete(admin::delete_user_account::<A>))
         .route("/users/{id}/stores", get(admin::list_user_stores::<A>))
+        .route("/stores", get(admin::list_stores::<A>))
         .route("/stores/{id}", delete(admin::hard_delete_store::<A>))
         .route(
             "/users/{id}/role",

@@ -28,8 +28,8 @@ forget:
   both of which already carry it. `scripts/check-no-ticket-refs.sh` enforces
   this in CI; `CLAUDE.md`, `AGENTS.md` and `docs/` are exempt.
 
-`central-infrastructure` and `payserver-billing` are private. Deploy config and
-billing logic live there and must not migrate here.
+Deploy config and billing logic live in private repositories and must not
+migrate here.
 
 ## Three repositories, one product
 
@@ -170,6 +170,16 @@ human-reviewed without exception.
 
 ## Deploys
 
-`testnet` deploys on every push, via a dispatch to `central-infrastructure`.
+`testnet` deploys on every push, via a dispatch to the private deploy repository.
 `mainnet` takes release tags only — `vMAJOR.MINOR.PATCH` exactly, no prerelease
 suffix — and holds real merchant funds. There is no staging.
+- **A bound that logs its measurement every time it checks produces a time
+  series for free, and the series answers questions the bound was not built
+  to answer.** When a threshold fires or a number looks wrong, pull the last N
+  readings before reasoning about the latest one. A level is not a rate (26G
+  against a 30G ceiling says nothing about how fast the gap is closing), and
+  three widely spaced points straddling the steps of a staircase look exactly
+  like a ramp. One decrease falsifies unbounded growth; twenty increases are
+  consistent with both. `scripts/check-file-size.sh` prints a per-file report on
+  every CI run and no longer blocks, so those runs are the only record of the
+  growth curve.

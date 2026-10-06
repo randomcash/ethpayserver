@@ -17,9 +17,7 @@ use crate::support::{app_state, seed_tenant, service, user_info};
 #[tokio::test]
 #[ignore]
 async fn get_store_by_id_across_tenants_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -32,9 +30,38 @@ async fn get_store_by_id_across_tenants_is_refused() {
     .await;
     assert_eq!(
         result.unwrap_err(),
-        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
         "A must not be able to fetch B's store by id"
     );
+
+    // A foreign store must be indistinguishable from one that does not exist.
+    let missing = server::api::stores::get_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(
+        missing.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "a missing store answers the same as a foreign one"
+    );
+
+    // So must delete.
+    let foreign_delete = server::api::stores::delete_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(b.store.id.0),
+    )
+    .await;
+    let missing_delete = server::api::stores::delete_store(
+        AuthenticatedUser(user_info(a.user_id)),
+        State(state.clone()),
+        Path(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(foreign_delete.unwrap_err(), StatusCode::NOT_FOUND);
+    assert_eq!(missing_delete.unwrap_err(), StatusCode::NOT_FOUND);
 
     // Positive control: without this, an endpoint that refuses regardless of
     // caller would pass the assertion above for the wrong reason.
@@ -51,9 +78,7 @@ async fn get_store_by_id_across_tenants_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn list_stores_never_includes_another_tenants_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -81,9 +106,7 @@ async fn list_stores_hides_archived_unless_asked() {
     use auth::repository::StoreRepository;
     use server::api::stores::ListStoresQuery;
 
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     pg.archive_store(a.store.id).await.expect("archive");
     let state = app_state(Arc::new(pg));
@@ -122,9 +145,7 @@ async fn unarchive_store_is_owner_only_and_round_trips() {
     use auth::repository::StoreRepository;
     use server::api::stores::ListStoresQuery;
 
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     pg.archive_store(a.store.id).await.expect("archive");
@@ -136,7 +157,18 @@ async fn unarchive_store_is_owner_only_and_round_trips() {
         Path(a.store.id.0),
     )
     .await;
-    assert_eq!(refused.unwrap_err(), StatusCode::FORBIDDEN);
+    assert_eq!(refused.unwrap_err(), StatusCode::NOT_FOUND);
+    let missing = server::api::stores::unarchive_store(
+        AuthenticatedUser(user_info(b.user_id)),
+        State(state.clone()),
+        Path(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(
+        missing.unwrap_err(),
+        StatusCode::NOT_FOUND,
+        "a missing store answers the same as a foreign one"
+    );
     let still = state
         .data_service
         .get_store(a.store.id)
@@ -182,9 +214,7 @@ async fn archived_store_refuses_new_invoices() {
     use server::api::AuthenticatedCaller;
     use server::api::invoices::{CreateInvoiceRequest, create_invoice};
 
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let state = app_state(Arc::new(pg));
     let request = || CreateInvoiceRequest {

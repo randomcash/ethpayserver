@@ -28,9 +28,7 @@ use crate::support::*;
 #[tokio::test]
 #[ignore]
 async fn hard_delete_store_tells_a_live_monitor_to_unwatch_a_pending_invoices_address() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };
@@ -105,9 +103,7 @@ async fn hard_delete_store_tells_a_live_monitor_to_unwatch_a_pending_invoices_ad
 #[tokio::test]
 #[ignore]
 async fn hard_delete_store_refused_by_a_payout_never_tells_the_monitor_to_unwatch() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };

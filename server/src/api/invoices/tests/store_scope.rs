@@ -275,3 +275,42 @@ fn list_handlers_do_not_reintroduce_a_nil_uuid_sentinel() {
         );
     }
 }
+
+// A foreign invoice and a missing one must answer alike, or the status code
+// confirms which invoice ids exist.
+mod invoice_visibility {
+    use super::super::super::visible_invoice;
+    use ::types::{InvoiceId, InvoiceStatus, StoreId, traits::InvoiceData};
+    use axum::http::StatusCode;
+    use uuid::Uuid;
+
+    fn an_invoice() -> InvoiceData {
+        InvoiceData {
+            id: InvoiceId("inv-1".to_string()),
+            store_id: StoreId(Uuid::from_bytes([3; 16])),
+            currency: "USD".to_string(),
+            status: InvoiceStatus::Pending,
+            amount: "10".to_string(),
+            amount_received: "0".to_string(),
+            created_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now(),
+            metadata: None,
+            customer_email: None,
+            extra: None,
+        }
+    }
+
+    #[test]
+    fn a_foreign_invoice_answers_the_same_as_a_missing_one() {
+        let foreign = visible_invoice(Some(an_invoice()), false, false, None);
+        let missing = visible_invoice(None, false, false, None);
+        assert_eq!(foreign.unwrap_err(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn a_member_and_an_admin_still_see_it() {
+        assert!(visible_invoice(Some(an_invoice()), false, true, None).is_ok());
+        assert!(visible_invoice(Some(an_invoice()), true, false, None).is_ok());
+    }
+}

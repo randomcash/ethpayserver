@@ -2,6 +2,10 @@
 
 Playwright end-to-end tests for ethpayserver.
 
+Playwright was chosen over Cypress for its built-in WebAuthn
+virtual-authenticator support via the Chrome DevTools Protocol, which is
+required to drive the passkey-based auth flow.
+
 ## Local mode (default)
 
 Runs against a local backend and trunk dev server. Requires PostgreSQL with an
@@ -89,6 +93,13 @@ E2E_SKIP_AUTH=false \
 | `E2E_DATABASE_URL`  | `postgres://postgres:postgres@localhost:5432/ethpayserver_e2e` | Database connection string      |
 | `E2E_SKIP_DB_RESET` | _(unset)_                                | Skip database truncate-and-seed in `beforeAll`     |
 | `E2E_SKIP_AUTH`     | _(unset)_                                | Set `true` to skip the auth spec                   |
+
+### Target guard
+
+In local mode (`E2E_REMOTE` not `true`) the harness refuses to start unless
+`E2E_API_URL` is loopback on ports 3000-3099 and `E2E_BASE_URL` is loopback on
+8000-8099. The live service's port is refused on any host with no override.
+Any other target needs `E2E_ALLOW_NON_LOCAL_TARGET=true`. Remote mode is unaffected.
 
 ### Running against testnet from a local machine
 

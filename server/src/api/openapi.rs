@@ -6,7 +6,7 @@
 
 use utoipa::OpenApi;
 
-use super::{admin, dashboard, health, invoices, plugins, rates, stores, users};
+use super::{admin, dashboard, entitlements, health, invoices, plugins, rates, stores, users};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -81,6 +81,8 @@ use super::{admin, dashboard, health, invoices, plugins, rates, stores, users};
         users::wallets::set_primary_wallet_credential,
         // Admin
         admin::list_users,
+        admin::list_stores,
+        entitlements::push_entitlement,
         admin::deletion::account::list_user_stores,
         admin::deletion::account::delete_user_account,
         admin::deletion::store::hard_delete_store,
@@ -154,6 +156,9 @@ use super::{admin, dashboard, health, invoices, plugins, rates, stores, users};
         users::WalletReauthChallengeResponse,
         users::PromoteWalletCredentialRequest,
         admin::UserListResponse,
+        admin::MerchantStoreEntry,
+        entitlements::PushEntitlementRequest,
+        entitlements::PushEntitlementResponse,
         admin::AdminUserInfo,
         admin::UpdateRoleRequest,
         admin::ServerSettingsResponse,

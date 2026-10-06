@@ -11,7 +11,7 @@ use super::{create_test_service, seeded_test_invoice, test_payment_option, uniqu
 #[tokio::test]
 #[ignore]
 async fn a_chain_with_no_cursor_is_absent_not_zero() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
 
     let cursors = service.chain_cursors(&adapter_id).await.unwrap();
@@ -21,7 +21,7 @@ async fn a_chain_with_no_cursor_is_absent_not_zero() {
 #[tokio::test]
 #[ignore]
 async fn committing_a_cursor_makes_it_readable_and_scoped_to_its_adapter() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
     let other_adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
     let chain_id = 999_888_777u64;
@@ -48,7 +48,7 @@ async fn committing_a_cursor_makes_it_readable_and_scoped_to_its_adapter() {
 #[tokio::test]
 #[ignore]
 async fn committing_again_replaces_rather_than_duplicates() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
     let chain_id = 999_888_776u64;
 
@@ -92,7 +92,7 @@ async fn committing_again_replaces_rather_than_duplicates() {
 #[tokio::test]
 #[ignore]
 async fn a_lagging_commit_cannot_move_a_cursor_backwards_within_an_epoch() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
     let chain_id = 999_888_775u64;
     let at = |epoch, seq| ChainCursor {
@@ -125,7 +125,7 @@ async fn a_lagging_commit_cannot_move_a_cursor_backwards_within_an_epoch() {
 #[tokio::test]
 #[ignore]
 async fn deleting_a_cursor_removes_only_that_chain_and_adapter() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
     let adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
     let other_adapter_id = format!("test-adapter-{}", uuid::Uuid::new_v4());
     let (gone, kept) = (999_888_771u64, 999_888_772u64);
@@ -165,7 +165,7 @@ async fn deleting_a_cursor_removes_only_that_chain_and_adapter() {
 #[tokio::test]
 #[ignore]
 async fn resetting_watch_notifications_only_touches_the_named_chain() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
@@ -234,7 +234,7 @@ async fn resetting_watch_notifications_only_touches_the_named_chain() {
 #[tokio::test]
 #[ignore]
 async fn inactive_watch_is_neither_rearmed_nor_resolved_to_a_payment_option() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let invoice = seeded_test_invoice(&service).await;
     InvoiceWriter::upsert(&service, &invoice).await.unwrap();
