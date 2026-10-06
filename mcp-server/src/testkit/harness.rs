@@ -39,7 +39,24 @@ pub struct TestHarness {
 impl TestHarness {
     /// One in-scope store with one enabled ETH payment method, no EVM monitor.
     pub fn new(rates: StubRateProvider) -> Self {
-        Self::build(rates, vec![], None)
+        let data = Arc::new(InMemoryDataService::new());
+        let store_id = StoreId(Uuid::new_v4());
+        let method_id = data.add_payment_method(store_id.0, CHAIN_ID, "ETH", 18, TEST_XPUB);
+
+        let server = EthpayMcpServer::new(
+            Arc::clone(&data) as Arc<dyn McpDataService>,
+            UserId(Uuid::new_v4()),
+            vec![store_id],
+            Arc::new(rates),
+            None,
+        );
+
+        Self {
+            server,
+            data,
+            store_id,
+            method_id,
+        }
     }
 
     /// A server whose session scope is exactly `store_ids`, sharing this
@@ -75,34 +92,6 @@ impl TestHarness {
             Arc::new(rates),
             Some(monitor as Arc<EvmMonitor>),
         )
-    }
-
-    fn build(
-        rates: StubRateProvider,
-        extra_store_ids: Vec<StoreId>,
-        monitor: Option<Arc<MemoryBridge>>,
-    ) -> Self {
-        let data = Arc::new(InMemoryDataService::new());
-        let store_id = StoreId(Uuid::new_v4());
-        let method_id = data.add_payment_method(store_id.0, CHAIN_ID, "ETH", 18, TEST_XPUB);
-
-        let mut store_ids = vec![store_id];
-        store_ids.extend(extra_store_ids);
-
-        let server = EthpayMcpServer::new(
-            Arc::clone(&data) as Arc<dyn McpDataService>,
-            UserId(Uuid::new_v4()),
-            store_ids,
-            Arc::new(rates),
-            monitor.map(|m| m as Arc<EvmMonitor>),
-        );
-
-        Self {
-            server,
-            data,
-            store_id,
-            method_id,
-        }
     }
 
     /// A store ID that is in no session scope.
