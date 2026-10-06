@@ -69,10 +69,11 @@ async fn rounds_a_fractional_wei_quote_up() {
 }
 
 /// Base units scale with the method's decimals, not a fixed 18: a 6-decimal
-/// asset is quoted in millionths, and its fractional remainder rounds up.
+/// asset is quoted in millionths, and a fractional remainder below one half
+/// still rounds up (ceiling, not nearest).
 #[tokio::test]
 async fn scales_and_rounds_a_six_decimal_asset_in_its_own_base_units() {
-    let h = TestHarness::new(StubRateProvider::usd_eth().with_rate("USD", "USDC", "0.333333335"));
+    let h = TestHarness::new(StubRateProvider::usd_eth().with_rate("USD", "USDC", "0.333333331"));
     h.data.add_payment_method(
         h.store_id.0,
         crate::testkit::CHAIN_ID,
@@ -89,7 +90,7 @@ async fn scales_and_rounds_a_six_decimal_asset_in_its_own_base_units() {
         .find(|o| o["asset_symbol"] == "USDC")
         .expect("a USDC option");
     assert_eq!(usdc["decimals"], 6);
-    // 100 * 0.333333335 USDC = 33.3333335 USDC = 33333333.5 base units
+    // 100 * 0.333333331 USDC = 33.3333331 USDC = 33333333.1 base units
     assert_eq!(usdc["amount"], "33333334");
     let eth = options.iter().find(|o| o["asset_symbol"] == "ETH").unwrap();
     assert_eq!(eth["amount"], "50000000000000000");

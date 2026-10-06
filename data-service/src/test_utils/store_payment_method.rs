@@ -17,8 +17,9 @@ impl InMemoryDataService {
     ///
     /// Returns the generated payment method ID. Methods are returned by the
     /// reader in insertion order. `chain_id` is the EIP-155 number; the method
-    /// is pinned to a fresh wallet of its own, so unlike Postgres no two
-    /// methods share a derivation counter.
+    /// is pinned to a fresh wallet id of its own, so unlike Postgres no two
+    /// methods share a derivation counter. Methods given the same `xpub` therefore
+    /// derive the same addresses; pass distinct xpubs where that matters.
     pub fn add_payment_method(
         &self,
         store_id: Uuid,
