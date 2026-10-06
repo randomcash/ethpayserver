@@ -2,6 +2,10 @@
 
 Playwright end-to-end tests for ethpayserver.
 
+Playwright was chosen over Cypress for its built-in WebAuthn
+virtual-authenticator support via the Chrome DevTools Protocol, which is
+required to drive the passkey-based auth flow.
+
 ## Local mode (default)
 
 Runs against a local backend and trunk dev server. Requires PostgreSQL with an
