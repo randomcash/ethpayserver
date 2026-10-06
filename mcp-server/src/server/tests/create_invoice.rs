@@ -79,7 +79,9 @@ async fn scales_and_rounds_a_six_decimal_asset_in_its_own_base_units() {
         crate::testkit::CHAIN_ID,
         "USDC",
         6,
-        crate::testkit::TEST_XPUB,
+        // A wallet of its own, as in Postgres: sharing the ETH method's xpub
+        // would derive the same address and collide in the watch table.
+        "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8",
     );
 
     let json = parse_ok(h.server.do_create_invoice(usd_args(h.store_id)).await);
@@ -94,6 +96,7 @@ async fn scales_and_rounds_a_six_decimal_asset_in_its_own_base_units() {
     assert_eq!(usdc["amount"], "33333334");
     let eth = options.iter().find(|o| o["asset_symbol"] == "ETH").unwrap();
     assert_eq!(eth["amount"], "50000000000000000");
+    assert_ne!(usdc["payment_address"], eth["payment_address"]);
 }
 
 #[tokio::test]

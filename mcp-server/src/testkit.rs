@@ -9,5 +9,5 @@ mod harness;
 mod rates;
 
 pub use auth_repo::{RAW_KEY, StubAuthRepo, test_api_key, test_store};
-pub use harness::{CHAIN_ID, TEST_XPUB, TestHarness, caip2_chain_id, parse_ok};
+pub use harness::{CHAIN_ID, TestHarness, caip2_chain_id, parse_ok};
 pub use rates::{StubRateProvider, USD_TO_ETH};
