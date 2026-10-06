@@ -15,4 +15,8 @@ ignore = [
     "RUSTSEC-2026-0012", # upstream transitive dep (warning)
     "RUSTSEC-2026-0002", # lru unsoundness (via alloy-provider)
     "RUSTSEC-2026-0235", # rkyv 0.7 via rust_decimal's optional `rkyv` feature — not enabled, never compiled
+    # wasmtime RUSTSEC-2026-0315/0316/0325/0326/0327 ignores removed: the
+    # commons `rev` bump landed, wasmtime is >=48.0.4, and
+    # scripts/check-wasmtime-ignores.sh now fails on a fixed release with any
+    # of the five still listed.
 ]
