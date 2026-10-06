@@ -12,6 +12,7 @@
 //! real store/role seed, in both directions, plus the store-id-scoping and
 //! owner-revocation cases the same section asks for.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -50,16 +51,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by these handlers")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -124,9 +115,7 @@ fn app_state(data_service: Arc<PgDataService>) -> PgAppState<UnusedSessionServic
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_reaches_past_the_permission_check() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -164,9 +153,7 @@ async fn a_key_scoped_to_create_invoice_reaches_past_the_permission_check() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_something_else_is_refused_invoice_creation() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -202,9 +189,7 @@ async fn a_key_scoped_to_something_else_is_refused_invoice_creation() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_update_the_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -237,9 +222,7 @@ async fn a_key_scoped_to_modify_settings_can_update_the_store() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_store_settings_changes() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -271,9 +254,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_store_settings_changes() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_one_store_is_refused_on_another() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store_a = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     let store_b = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
@@ -320,9 +301,7 @@ async fn a_key_scoped_to_one_store_is_refused_on_another() {
 #[tokio::test]
 #[ignore]
 async fn revoking_the_owners_store_access_refuses_an_unrestricted_key_too() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -365,9 +344,7 @@ async fn revoking_the_owners_store_access_refuses_an_unrestricted_key_too() {
 #[tokio::test]
 #[ignore]
 async fn a_preexisting_unscoped_key_still_creates_invoices() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))

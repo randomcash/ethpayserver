@@ -5,7 +5,6 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use evm::XpubDeriver;
-use evm::monitor::bridge::EventBridge;
 use rates::is_fiat_currency;
 use types::currency::DEFAULT_INVOICE_EXPIRATION_SECS;
 use types::{

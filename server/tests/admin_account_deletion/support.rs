@@ -37,21 +37,7 @@ impl SessionService for UnusedSessionService {
     }
 }
 
-pub(crate) async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    // `?` here would collapse "not configured" and "configured but
-    // unreachable" into the same skip, and a skipped test reports the same
-    // green result as a passing one. These four tests are the only
-    // verification that the server-admin refusal, the financial-history
-    // refusal and the delete cascade actually hold - a DB that is set but
-    // briefly unreachable must fail loudly, not silently report success.
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .unwrap_or_else(|e| panic!("DATABASE_URL is set but connecting failed: {e}"));
-    Some(PgDataService::new(pool))
-}
+pub(crate) use data_service::test_support::pg_service as service;
 
 /// `plugin_invoice_creation_filter.rs`'s `seed_user` uses `'{}'::jsonb` for
 /// both blobs and gets away with it because nothing there ever reads a row

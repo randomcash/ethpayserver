@@ -27,9 +27,7 @@ use crate::support::{
 #[tokio::test]
 #[ignore]
 async fn payout_endpoints_refuse_a_non_members_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let a_payout = seed_payout(&pg, &a.store).await;
@@ -90,9 +88,7 @@ async fn payout_endpoints_refuse_a_non_members_store() {
 #[tokio::test]
 #[ignore]
 async fn get_payout_refuses_another_tenants_payout_even_via_the_callers_own_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let b_payout = seed_payout(&pg, &b.store).await;
@@ -115,9 +111,7 @@ async fn get_payout_refuses_another_tenants_payout_even_via_the_callers_own_stor
 #[tokio::test]
 #[ignore]
 async fn list_refunds_across_tenants_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let a_refund = seed_refund(&pg, &a).await;
@@ -151,9 +145,7 @@ async fn list_refunds_across_tenants_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn list_deliveries_for_invoice_across_tenants_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let a_delivery = seed_webhook_delivery(&pg, &a).await;
@@ -187,9 +179,7 @@ async fn list_deliveries_for_invoice_across_tenants_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn list_deliveries_for_store_across_tenants_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let a_delivery = seed_webhook_delivery(&pg, &a).await;
@@ -228,9 +218,7 @@ async fn list_deliveries_for_store_across_tenants_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn payout_endpoints_with_a_nil_store_id_is_refused_like_any_foreign_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let a_payout = seed_payout(&pg, &a.store).await;
     let state = app_state(Arc::new(pg));
@@ -267,9 +255,7 @@ async fn payout_endpoints_with_a_nil_store_id_is_refused_like_any_foreign_store(
 #[tokio::test]
 #[ignore]
 async fn payout_endpoints_as_server_admin_reach_every_tenants_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let b_payout = seed_payout(&pg, &b.store).await;
@@ -297,9 +283,7 @@ async fn payout_endpoints_as_server_admin_reach_every_tenants_store() {
 #[tokio::test]
 #[ignore]
 async fn list_refunds_as_server_admin_reaches_another_tenants_invoice() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let b_refund = seed_refund(&pg, &b).await;
@@ -318,9 +302,7 @@ async fn list_refunds_as_server_admin_reaches_another_tenants_invoice() {
 #[tokio::test]
 #[ignore]
 async fn list_deliveries_for_invoice_as_server_admin_reaches_another_tenants_invoice() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let b_delivery = seed_webhook_delivery(&pg, &b).await;
@@ -339,9 +321,7 @@ async fn list_deliveries_for_invoice_as_server_admin_reaches_another_tenants_inv
 #[tokio::test]
 #[ignore]
 async fn list_deliveries_for_store_with_a_nil_store_id_is_refused_like_any_foreign_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let state = app_state(Arc::new(pg));
 
@@ -361,9 +341,7 @@ async fn list_deliveries_for_store_with_a_nil_store_id_is_refused_like_any_forei
 #[tokio::test]
 #[ignore]
 async fn list_deliveries_for_store_as_server_admin_reaches_every_tenants_store() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let b_delivery = seed_webhook_delivery(&pg, &b).await;

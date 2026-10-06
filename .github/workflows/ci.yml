@@ -4,11 +4,20 @@ on:
   pull_request:
   # A merge queue tests the *merged* result before it lands, which is the only
   # thing that catches a pull request that is green against a base it no longer
-  # merges into. Required checks here are not strict, so a branch is never
-  # re-tested against the base it actually joins: on 2026-09-15 a change adding
-  # a parameter to `PgAppState::new` was green on its own branch while four
-  # callsites merged in the meantime had not been updated, and two branches
-  # picked the same migration version, each green alone.
+  # merges into. That failure is what this trigger exists for: on 2026-09-15 a
+  # change adding a parameter to `PgAppState::new` was green on its own branch
+  # while four callsites merged in the meantime had not been updated, and two
+  # branches picked the same migration version, each green alone.
+  #
+  # Required checks ARE strict today (verified against the branch-protection
+  # API on 2026-10-06; this comment previously said they were not, which was
+  # true when it was written and has since become false). Strict forces a
+  # branch up to date before it can merge, so the commit that gets tested is
+  # the base merged into the head - close to the merge result. The gap a queue
+  # still closes is that NOTHING PERFORMS THAT UPDATE: every merge leaves every
+  # other open pull request behind and therefore unmergeable, with no signal
+  # saying so, until a person updates each one by hand. On 2026-10-06 ten of
+  # thirteen open pull requests were in that state, one of them for ten days.
   #
   # Without this trigger a queue would hang forever - Lint, Test and Audit are
   # required, and on a `refs/heads/gh-readonly-queue/...` ref they would never
@@ -175,6 +184,14 @@ jobs:
       - name: Migration guard self-test
         run: ./scripts/check-migrations.test.sh
 
+      # A database test helper that returns on a missing or unreachable
+      # database makes "ran" and "skipped" the same output. See the script.
+      - name: Database tests fail loudly, never skip
+        run: ./scripts/check-test-db-skips.sh
+
+      - name: Database-skip guard self-test
+        run: ./scripts/check-test-db-skips.test.sh
+
       # A scope check with no test driving it in both directions is how a key
       # came to exceed its owner without any test noticing. See the script for
       # what it does and does not prove.
@@ -317,7 +334,7 @@ jobs:
         working-directory: e2e
         env:
           E2E_REMOTE: "true"
-        run: npx playwright test tests/route-coverage.spec.ts tests/visual-review-report.spec.ts tests/visual-review-main.spec.ts tests/ws-isolation-helpers.spec.ts
+        run: npx playwright test tests/route-coverage.spec.ts tests/visual-review-report.spec.ts tests/visual-review-main.spec.ts tests/ws-isolation-helpers.spec.ts tests/target-guard.spec.ts
 
   test:
     name: Test
@@ -460,26 +477,26 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # `test` included: without it a push whose tests fail still builds, pushes
-    # an image and deploys. Tests gate merging a PR, but nothing gated the
-    # branch itself.
+    # Deliberately no `needs`. Build and E2E used to queue behind Lint, Audit
+    # and Test, so E2E - not the longest job, just the last - landed its whole
+    # runtime at the end of a serial chain, and a formatting slip cost a full
+    # cycle before E2E had even started. They now run alongside those jobs.
     #
-    # Also runs on pull_request: e2e (below) needs these binaries, and e2e now
-    # runs on pull requests too so a PR that breaks it is red before merge
-    # rather than after. `docker`, further down, keeps its branch/tag-only
-    # `if:` unchanged - building on a PR must not push or sign anything.
+    # What the old `needs` protected was publishing: a push whose tests fail
+    # must not build, push an image and deploy. That gate moved to `docker`,
+    # which still needs [lint, audit, test, build]. Building a binary that is
+    # then thrown away publishes nothing.
     #
-    # `merge_group` included for the same reason, and it is a precondition for
-    # switching the queue on rather than a tidy-up. A queue run's ref is
+    # Also runs on pull_request: e2e (below) needs these binaries.
+    #
+    # `merge_group` included, and it is a precondition for switching the queue
+    # on rather than a tidy-up. A queue run's ref is
     # `refs/heads/gh-readonly-queue/...` and its event is `merge_group`, so
-    # neither arm above matched it: with the queue enabled and this arm absent,
-    # `build` and `e2e` are SKIPPED on the merged result, and since a queue
-    # lands a pull request without re-running its own checks, nothing would
-    # ever build or end-to-end test what actually merges. Lint, Test and Audit
-    # are required and would still run, so the queue would report green while
-    # covering less than the pull request it replaced. `docker` keeps its
-    # branch/tag-only `if:` - a queue run must not push or sign an image.
-    needs: [lint, audit, test]
+    # without that arm `build` and `e2e` are SKIPPED on the merged result, and
+    # since a queue lands a pull request without re-running its own checks,
+    # nothing would ever build or end-to-end test what actually merges.
+    # `docker` keeps its branch/tag-only `if:` - a queue run must not push or
+    # sign an image.
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'merge_group'
     steps:
       - uses: actions/checkout@v4
@@ -688,6 +705,18 @@ jobs:
           # from the moment it merged and the job stayed green-looking for two
           # steps afterwards.
           SENTRY_ENVIRONMENT: dev
+          # The ws isolation spec expires real invoices and waits for the
+          # cleanup service's expiry sweeps, then deletes its accounts, which
+          # is refused while any expired invoice's address is still watched.
+          # The defaults (60s grace, 60s sweep tick) make that minutes per
+          # run; these keep it to seconds without changing what is tested.
+          #
+          # Trade-off: this lane no longer exercises the production cleanup
+          # timing. A defect that only appears inside the 60s grace window
+          # would not show up here; the isolation spec is not testing the
+          # grace period, so that is accepted.
+          CLEANUP_UNWATCH_GRACE_PERIOD_SECS: "1"
+          CLEANUP_FALLBACK_INTERVAL_SECS: "5"
         # Fails here if the server does not come up, rather than letting a dead
         # server surface two steps later as "frontend proxy is not reaching the
         # API" - which reads as a client or nginx problem and is why this took
@@ -783,12 +812,33 @@ jobs:
           E2E_API_URL: http://localhost:3000
           E2E_BASE_URL: http://localhost:8080
           E2E_DATABASE_URL: postgres://test:test@127.0.0.1:5432/ethpayserver_e2e
-          # Tenant isolation of the status socket, against this server. Here
-          # membership is seeded in the database, so the spec can actually run;
-          # the nightly cannot seed and reports why.
+          # Tenant isolation of the status socket, against this server. The
+          # spec seeds two ordinary accounts that each own a store, through
+          # the API, so no database access is needed and a local run and the
+          # nightly take the same path (they differ only in how the admin
+          # token is obtained). The pull request job runs only the lifecycle
+          # subset below, so this spec first runs on the push after a merge,
+          # and in the nightly.
           E2E_WS_ISOLATION: "true"
           PLAYWRIGHT_LIST_PRINT_STEPS: "1"
-        run: npx playwright test
+          EVENT_NAME: ${{ github.event_name }}
+        # A pull request runs the money-adjacent lifecycles - create, use,
+        # delete - so a behaviour change is caught on the change that caused
+        # it, at a fraction of the runtime. Pushes and merge-queue runs keep
+        # the whole suite: the nightly run only drives remote-capable specs
+        # against testnet, so it is not a substitute for it. The account
+        # deletion regression that only this suite caught is in
+        # account-lifecycle, which the subset includes.
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            npx playwright test \
+              tests/account-lifecycle.spec.ts \
+              tests/wallet-lifecycle.spec.ts \
+              tests/stores.spec.ts \
+              tests/invoices.spec.ts
+          else
+            npx playwright test
+          fi
 
       - name: Upload report
         if: always()
@@ -802,7 +852,9 @@ jobs:
     name: Docker
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [build]
+    # Lint, audit and test are listed here because `build` no longer waits on
+    # them: this is the gate between a failing check and a published image.
+    needs: [lint, audit, test, build]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
@@ -1049,20 +1101,22 @@ jobs:
     name: Testnet deploy status
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [audit, build, docker, notify-deploy-testnet, deploy-verify-testnet]
+    needs: [lint, test, audit, build, docker, notify-deploy-testnet, deploy-verify-testnet]
     if: always() && github.ref == 'refs/heads/testnet'
     permissions: {}
     steps:
       - name: Fail if testnet did not deploy this commit
         run: |
+          lint="${{ needs['lint'].result }}"
+          test="${{ needs['test'].result }}"
           audit="${{ needs['audit'].result }}"
           build="${{ needs['build'].result }}"
           image="${{ needs['docker'].result }}"
           dispatch="${{ needs['notify-deploy-testnet'].result }}"
           verify="${{ needs['deploy-verify-testnet'].result }}"
 
-          printf 'audit=%s build=%s docker=%s dispatch=%s verify=%s\n' \
-            "$audit" "$build" "$image" "$dispatch" "$verify"
+          printf 'lint=%s test=%s audit=%s build=%s docker=%s dispatch=%s verify=%s\n' \
+            "$lint" "$test" "$audit" "$build" "$image" "$dispatch" "$verify"
 
           if [ "$verify" = "success" ]; then
             echo "testnet is serving ${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"
@@ -1071,7 +1125,7 @@ jobs:
 
           # Name the first link that broke rather than the last, so the message
           # points at the cause and not at the skip it produced.
-          for pair in "audit:$audit" "build:$build" "docker:$image" \
+          for pair in "lint:$lint" "test:$test" "audit:$audit" "build:$build" "docker:$image" \
                       "dispatch:$dispatch" "verify:$verify"; do
             stage="${pair%%:*}"
             result="${pair#*:}"

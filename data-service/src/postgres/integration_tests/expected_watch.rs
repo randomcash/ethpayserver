@@ -26,7 +26,7 @@ use super::{
 #[tokio::test]
 #[ignore]
 async fn expected_watched_addresses_includes_a_still_pending_invoices_watch() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mut invoice = seeded_test_invoice(&service).await;
     invoice.expires_at = Utc::now() + Duration::hours(2);
@@ -68,7 +68,7 @@ async fn expected_watched_addresses_includes_a_still_pending_invoices_watch() {
 #[tokio::test]
 #[ignore]
 async fn expected_watched_addresses_includes_a_just_paid_invoices_watch() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mut invoice = seeded_test_invoice(&service).await;
     invoice.expires_at = Utc::now() + Duration::hours(2);
@@ -116,7 +116,7 @@ async fn expected_watched_addresses_includes_a_just_paid_invoices_watch() {
 #[tokio::test]
 #[ignore]
 async fn expected_watched_addresses_excludes_a_long_resolved_invoices_watch() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mut invoice = seeded_test_invoice(&service).await;
     invoice.expires_at = Utc::now() + Duration::hours(2);
@@ -173,7 +173,7 @@ async fn expected_watched_addresses_excludes_a_long_resolved_invoices_watch() {
 #[tokio::test]
 #[ignore]
 async fn expected_watched_addresses_includes_a_processing_or_partially_paid_invoices_watch() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     for status in [InvoiceStatus::Processing, InvoiceStatus::PartiallyPaid] {
         let mut invoice = seeded_test_invoice(&service).await;
@@ -219,7 +219,7 @@ async fn expected_watched_addresses_includes_a_processing_or_partially_paid_invo
 #[tokio::test]
 #[ignore]
 async fn expected_watched_addresses_includes_an_expired_but_not_yet_cleaned_up_invoices_watch() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mut invoice = seeded_test_invoice(&service).await;
     invoice.expires_at = Utc::now() - Duration::hours(1);
@@ -260,7 +260,7 @@ async fn expected_watched_addresses_includes_an_expired_but_not_yet_cleaned_up_i
 #[tokio::test]
 #[ignore]
 async fn expected_watched_addresses_excludes_a_long_expired_invoices_watch() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mut invoice = seeded_test_invoice(&service).await;
     invoice.expires_at = Utc::now() - Duration::days(2);
@@ -311,7 +311,7 @@ async fn expected_watched_addresses_excludes_a_long_expired_invoices_watch() {
 #[tokio::test]
 #[ignore]
 async fn expected_watched_addresses_includes_a_cancelled_but_not_yet_cleaned_up_invoices_watch() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mut invoice = seeded_test_invoice(&service).await;
     invoice.expires_at = Utc::now() - Duration::days(2);
@@ -358,7 +358,7 @@ async fn expected_watched_addresses_includes_a_cancelled_but_not_yet_cleaned_up_
 #[tokio::test]
 #[ignore]
 async fn expected_watched_addresses_includes_a_late_paid_invoices_watch() {
-    let service = create_test_service().await.expect("DATABASE_URL required");
+    let service = create_test_service().await;
 
     let mut invoice = seeded_test_invoice(&service).await;
     invoice.expires_at = Utc::now() - Duration::days(2);

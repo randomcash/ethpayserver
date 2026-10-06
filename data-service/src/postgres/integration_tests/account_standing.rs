@@ -4,23 +4,13 @@
 //! one. It lives in a single SQL statement, so only a real Postgres can show
 //! it holds - including with two pushes racing.
 
+use crate::test_support::pg_service;
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::account_standing::{
     AccountStanding, AccountStandingStore, ApplyOutcome, StandingDecision,
 };
-use crate::postgres::PgDataService;
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(8)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
-}
 
 fn standing(account: Uuid, version: i64, good: bool) -> AccountStanding {
     AccountStanding {
@@ -36,7 +26,7 @@ fn standing(account: Uuid, version: i64, good: bool) -> AccountStanding {
 #[tokio::test]
 #[ignore]
 async fn a_lower_version_never_replaces_a_higher_one() {
-    let Some(svc) = service().await else { return };
+    let svc = pg_service().await;
     let a = Uuid::new_v4();
 
     assert_eq!(
@@ -64,7 +54,7 @@ async fn a_lower_version_never_replaces_a_higher_one() {
 #[tokio::test]
 #[ignore]
 async fn the_same_version_twice_changes_nothing_and_keeps_the_held_content() {
-    let Some(svc) = service().await else { return };
+    let svc = pg_service().await;
     let a = Uuid::new_v4();
 
     svc.apply_account_standing(&standing(a, 6, true))
@@ -85,7 +75,7 @@ async fn the_same_version_twice_changes_nothing_and_keeps_the_held_content() {
 #[tokio::test]
 #[ignore]
 async fn a_higher_version_replaces_the_held_one() {
-    let Some(svc) = service().await else { return };
+    let svc = pg_service().await;
     let a = Uuid::new_v4();
 
     svc.apply_account_standing(&standing(a, 1, true))
@@ -102,7 +92,7 @@ async fn a_higher_version_replaces_the_held_one() {
 #[tokio::test]
 #[ignore]
 async fn racing_pushes_leave_the_highest_version_whatever_the_order() {
-    let Some(svc) = service().await else { return };
+    let svc = pg_service().await;
     for _ in 0..10 {
         let a = Uuid::new_v4();
         let svc = std::sync::Arc::new(svc.clone());
@@ -130,7 +120,7 @@ async fn racing_pushes_leave_the_highest_version_whatever_the_order() {
 #[tokio::test]
 #[ignore]
 async fn only_a_repeat_of_the_held_version_counts_as_hearing_the_sender() {
-    let Some(svc) = service().await else { return };
+    let svc = pg_service().await;
     let a = Uuid::new_v4();
     svc.apply_account_standing(&standing(a, 6, true))
         .await
@@ -182,7 +172,7 @@ async fn only_a_repeat_of_the_held_version_counts_as_hearing_the_sender() {
 #[tokio::test]
 #[ignore]
 async fn the_filter_read_denies_allows_and_surfaces_fail_open() {
-    let Some(svc) = service().await else { return };
+    let svc = pg_service().await;
     let max_age = Duration::days(7);
 
     let never = Uuid::new_v4();
@@ -222,7 +212,7 @@ async fn the_filter_read_denies_allows_and_surfaces_fail_open() {
 #[tokio::test]
 #[ignore]
 async fn a_malformed_row_is_refused_by_the_table_itself() {
-    let Some(svc) = service().await else { return };
+    let svc = pg_service().await;
     for (version, plan, url) in [
         (0i64, "p", None),
         (1, "", None),

@@ -11,6 +11,7 @@
 //! checks that nothing moved: a handler that returned 403 after doing the
 //! work would pass a status-only assertion.
 
+use data_service::test_support::pg_service;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -52,16 +53,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by these handlers")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -135,9 +126,7 @@ async fn store_override(pg: &PgDataService, store_id: Uuid) -> Option<Uuid> {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_configure_the_store_wallet() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = seed_store(&pg, owner).await;
     let wallet = WalletWriter::create_wallet(&pg, owner, NAMESPACE_EIP155, &fresh_xpub(), None)
@@ -173,9 +162,7 @@ async fn a_key_scoped_to_modify_settings_can_configure_the_store_wallet() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_configuring_the_store_wallet() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = seed_store(&pg, owner).await;
     let wallet = WalletWriter::create_wallet(&pg, owner, NAMESPACE_EIP155, &fresh_xpub(), None)
@@ -214,9 +201,7 @@ async fn a_key_scoped_to_create_invoice_is_refused_configuring_the_store_wallet(
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_one_store_is_refused_configuring_the_wallet_of_another() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store_a = seed_store(&pg, owner).await;
     let store_b = seed_store(&pg, owner).await;
@@ -254,9 +239,7 @@ async fn a_key_scoped_to_one_store_is_refused_configuring_the_wallet_of_another(
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_delete_the_store_wallet() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = seed_store(&pg, owner).await;
     let wallet = WalletWriter::create_wallet(&pg, owner, NAMESPACE_EIP155, &fresh_xpub(), None)
@@ -296,9 +279,7 @@ async fn a_key_scoped_to_modify_settings_can_delete_the_store_wallet() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_deleting_the_store_wallet() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = seed_store(&pg, owner).await;
     let wallet = WalletWriter::create_wallet(&pg, owner, NAMESPACE_EIP155, &fresh_xpub(), None)
@@ -382,9 +363,7 @@ fn rotate_request(xpub: String) -> Json<RotateWalletRequest> {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_modify_settings_can_rotate_the_store_wallet() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let (store, method_id) = store_with_method(&pg, owner, &fresh_xpub()).await;
     let before = method_wallet_id(&pg, method_id).await;
@@ -418,9 +397,7 @@ async fn a_key_scoped_to_modify_settings_can_rotate_the_store_wallet() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_create_invoice_is_refused_rotating_the_store_wallet() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let (store, method_id) = store_with_method(&pg, owner, &fresh_xpub()).await;
     let before = method_wallet_id(&pg, method_id).await;

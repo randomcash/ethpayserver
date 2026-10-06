@@ -27,9 +27,7 @@ use crate::support::{
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_payments() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -98,9 +96,7 @@ async fn an_api_key_cannot_reach_another_tenants_payments() {
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_wallets() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -175,9 +171,7 @@ async fn an_api_key_cannot_reach_another_tenants_wallets() {
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_stores() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let state = app_state(Arc::new(pg));
@@ -223,9 +217,7 @@ async fn an_api_key_cannot_reach_another_tenants_stores() {
 #[tokio::test]
 #[ignore]
 async fn an_api_key_cannot_reach_another_tenants_payouts_refunds_or_deliveries() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = service().await;
     let a = seed_tenant(&pg, "a").await;
     let b = seed_tenant(&pg, "b").await;
     let b_payout = seed_payout(&pg, &b.store).await;

@@ -154,9 +154,7 @@ async fn assert_resolved(pool: &PgPool, case: (Uuid, Uuid), expected: &str, why:
 #[tokio::test]
 #[ignore]
 async fn migration_resolves_known_tokens_and_falls_back_for_the_rest() {
-    let Some((pool, name, server)) = pre_migration_db_for(MIGRATION, "backfill").await else {
-        return;
-    };
+    let (pool, name, server) = pre_migration_db_for(MIGRATION, "backfill").await;
 
     let (_, store) = seed_store(&pool, "backfill").await;
     // Sepolia, the chain this bug was found on.

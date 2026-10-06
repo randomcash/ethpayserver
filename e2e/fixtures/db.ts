@@ -62,6 +62,48 @@ export async function resetDatabase(): Promise<void> {
 }
 
 /**
+ * Make an existing account a `server_admin`, by the id registration showed.
+ *
+ * It throws when no row matches, because an UPDATE that touches nothing looks
+ * like success and the test that called it would then be asserting about an
+ * account that is still an ordinary user.
+ */
+export async function promoteToServerAdmin(userId: string): Promise<void> {
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rowCount } = await client.query(
+      `UPDATE users SET role = 'server_admin' WHERE id::text = $1`,
+      [userId],
+    );
+    if (rowCount !== 1) {
+      throw new Error(`expected to promote exactly one account, matched ${rowCount}`);
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+/** The stored role and lock of an account, for asserting what the UI really changed. */
+export async function readUserAccess(
+  userId: string,
+): Promise<{ role: string; locked: boolean }> {
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    const { rows } = await client.query(
+      `SELECT role, (locked_until IS NOT NULL AND locked_until > NOW()) AS locked
+         FROM users WHERE id::text = $1`,
+      [userId],
+    );
+    if (rows.length !== 1) throw new Error(`expected one account, found ${rows.length}`);
+    return { role: rows[0].role as string, locked: rows[0].locked as boolean };
+  } finally {
+    await client.end();
+  }
+}
+
+/**
  * A user with an API key, created directly in the database.
  *
  * Registration goes through WebAuthn in a browser, which is the right way to
@@ -76,7 +118,7 @@ export async function resetDatabase(): Promise<void> {
  */
 export async function createUserWithApiKey(
   role: 'user' | 'server_admin' = 'user',
-): Promise<{ userId: string; apiKey: string }> {
+): Promise<{ userId: string; apiKey: string; email: string }> {
   const crypto = await import('node:crypto');
   // `ak_` because that is the shape `validate_api_key` looks for, and a key
   // that does not start with it fails for a reason that reads as "wrong
@@ -114,7 +156,7 @@ export async function createUserWithApiKey(
       `INSERT INTO users (email, kdf_params, encrypted_symmetric_key,
                           recovery_verification_hash, role)
        VALUES ($1, $2, $3, 'e2e-placeholder', $4)
-       RETURNING id`,
+       RETURNING id, email`,
       [
         `e2e-${crypto.randomBytes(6).toString('hex')}@example.test`,
         JSON.stringify({
@@ -133,6 +175,7 @@ export async function createUserWithApiKey(
       ],
     );
     const userId = rows[0].id as string;
+    const email = rows[0].email as string;
 
     // `id` is supplied, unlike for `users` above. The two tables differ:
     // `users.id` is `UUID PRIMARY KEY DEFAULT uuid_generate_v4()`, while
@@ -146,38 +189,7 @@ export async function createUserWithApiKey(
        VALUES ($1, $2, 'e2e', $3, $4, true)`,
       [crypto.randomUUID(), userId, keyHash, apiKey.slice(0, 12)],
     );
-    return { userId, apiKey };
-  } finally {
-    await client.end();
-  }
-}
-
-/**
- * Put a user into a store under a global default role, by writing the same
- * `user_stores` row `add_user_to_store` writes and the same `store_roles` row
- * the member-add route resolves the role name against.
- *
- * Exists because the member route is unusable as a precondition: it needs the
- * store-users permissions and no seeded role carries them. Nothing here is
- * cached or derived - `get_user_store`, which every store-scoped access check
- * reads, is a plain `SELECT ... FROM user_stores WHERE user_id AND store_id`.
- */
-export async function addStoreMember(
-  userId: string,
-  storeId: string,
-  roleName: string,
-): Promise<void> {
-  const client = new Client({ connectionString: DATABASE_URL });
-  await client.connect();
-  try {
-    const { rowCount } = await client.query(
-      `INSERT INTO user_stores (user_id, store_id, store_role_id)
-       SELECT $1, $2, id FROM store_roles WHERE role = $3 AND store_id IS NULL`,
-      [userId, storeId, roleName],
-    );
-    if (rowCount !== 1) {
-      throw new Error(`no global store role named ${roleName} to grant`);
-    }
+    return { userId, apiKey, email };
   } finally {
     await client.end();
   }
