@@ -23,6 +23,7 @@ use auth::{
 };
 use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
+use data_service::test_support::pg_service;
 use rates::NoOpRateProvider;
 use server::api::StoreScopedUser;
 use server::api::stores::{CreateInviteRequest, create_store_invite};
@@ -45,16 +46,6 @@ impl SessionService for UnusedSessionService {
     async fn cleanup_stale_sessions(&self) -> AuthResult<u64> {
         unimplemented!("not exercised by this handler")
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    Some(PgDataService::new(pool))
 }
 
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -100,9 +91,7 @@ fn app_state(data_service: Arc<PgDataService>) -> PgAppState<UnusedSessionServic
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_can_invite_users_reaches_past_the_permission_check() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))
@@ -139,9 +128,7 @@ async fn a_key_scoped_to_can_invite_users_reaches_past_the_permission_check() {
 #[tokio::test]
 #[ignore]
 async fn a_key_scoped_to_something_else_is_refused_create_invite() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let owner = seed_user(pg.pool()).await;
     let store = Store::new(format!("store-{}", Uuid::new_v4()), UserId(owner));
     pg.create_store_owned_by(&store, UserId(owner))

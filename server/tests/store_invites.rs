@@ -25,6 +25,7 @@ use uuid::Uuid;
 use auth::{AuthConfig, AuthService, Store, UserId};
 use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
+use data_service::test_support::pg_service;
 use rates::NoOpRateProvider;
 use server::services::RedisEVMMonitor;
 use server::services::email::{
@@ -78,16 +79,6 @@ impl EmailSender for Outbox {
     fn is_configured(&self) -> bool {
         true
     }
-}
-
-async fn service() -> Option<PgDataService> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("DATABASE_URL is set but the database is unreachable");
-    Some(PgDataService::new(pool))
 }
 
 struct Account {
@@ -215,9 +206,7 @@ async fn is_member(pg: &PgDataService, user: Uuid, store: &Store) -> bool {
 #[tokio::test]
 #[ignore]
 async fn the_response_is_identical_for_a_known_and_an_unknown_address_and_nobody_joins_early() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let outbox = Arc::new(Outbox::default());
     let app = app(&pg, &outbox);
@@ -260,9 +249,7 @@ async fn the_response_is_identical_for_a_known_and_an_unknown_address_and_nobody
 #[tokio::test]
 #[ignore]
 async fn after_acceptance_the_member_can_list_the_stores_invoices() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let outbox = Arc::new(Outbox::default());
     let app = app(&pg, &outbox);
@@ -302,9 +289,7 @@ async fn after_acceptance_the_member_can_list_the_stores_invoices() {
 #[tokio::test]
 #[ignore]
 async fn a_guest_cannot_invite_and_a_stranger_cannot_either() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let outbox = Arc::new(Outbox::default());
     let app = app(&pg, &outbox);
@@ -343,9 +328,7 @@ async fn a_guest_cannot_invite_and_a_stranger_cannot_either() {
 #[tokio::test]
 #[ignore]
 async fn an_invite_cannot_demote_an_existing_member_or_grant_ownership() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let outbox = Arc::new(Outbox::default());
     let app = app(&pg, &outbox);
@@ -411,9 +394,7 @@ async fn join_as(
 #[tokio::test]
 #[ignore]
 async fn a_reinvite_revokes_the_earlier_code() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let outbox = Arc::new(Outbox::default());
     let app = app(&pg, &outbox);
@@ -454,9 +435,7 @@ async fn a_reinvite_revokes_the_earlier_code() {
 #[tokio::test]
 #[ignore]
 async fn an_expired_invite_is_refused() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let outbox = Arc::new(Outbox::default());
     let app = app(&pg, &outbox);
@@ -491,9 +470,7 @@ async fn an_expired_invite_is_refused() {
 #[tokio::test]
 #[ignore]
 async fn a_manager_and_an_employee_cannot_invite() {
-    let Some(pg) = service().await else {
-        return;
-    };
+    let pg = pg_service().await;
     let pg = Arc::new(pg);
     let outbox = Arc::new(Outbox::default());
     let app = app(&pg, &outbox);
