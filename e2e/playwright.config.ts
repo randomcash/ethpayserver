@@ -2,6 +2,8 @@ import { defineConfig } from '@playwright/test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { assertSafeTarget } from './fixtures/target-guard';
+
 // Local runs only. CI's /tmp is disk-backed and the container is thrown away
 // after the job, so there is nothing to redirect there - and this box's own
 // /tmp is RAM-backed, which is where Playwright puts the chromium profile
@@ -27,6 +29,9 @@ if (!process.env.CI) {
 // `=== 'true'`, not truthiness: `E2E_REMOTE=false` would otherwise select the
 // remote origin. Must stay in step with fixtures/api.ts and fixtures/db.ts.
 const REMOTE = process.env.E2E_REMOTE === 'true';
+
+// Before anything else can write: a mistyped local URL must not reach a live service.
+assertSafeTarget(process.env);
 
 // Where to find the payserver-client checkout for the local dev server.
 // Overridable because not everyone lays their repositories out the same way,
