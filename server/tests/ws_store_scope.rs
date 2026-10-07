@@ -15,8 +15,13 @@
 //! update" proves the other tenant's update, published before it, was not
 //! delivered rather than merely late.
 //!
-//! An open socket re-checks its session and memberships on a timer; the
-//! harness shortens it so the revocation tests do not wait seconds.
+//! Routing is not the access decision. That is taken per event, immediately
+//! before the send, so the tests that pin revocation run with the periodic
+//! re-check set to an hour: with no tick possible, only a decision taken on
+//! the event itself can withhold or close.
+//!
+//! And a client cannot keep access by refusing to read: a send that a peer
+//! will not accept within the deadline closes the socket.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -36,7 +41,7 @@ use auth::{
 use data_service::PgDataService;
 use data_service::store_creation::StoreCreationWriter;
 use rates::NoOpRateProvider;
-use server::api::ws::{StatusUpdate, WsBroadcast, ws_handler};
+use server::api::ws::{DEFAULT_SEND_DEADLINE, StatusUpdate, WsBroadcast, ws_handler};
 use server::services::RedisEVMMonitor;
 use server::state::PgAppState;
 
@@ -112,13 +117,26 @@ async fn serve_revalidating(
     people: &[&Person],
     revalidate: Duration,
 ) -> Harness {
+    serve_with(data_service, people, revalidate, DEFAULT_SEND_DEADLINE).await
+}
+
+async fn serve_with(
+    data_service: Arc<PgDataService>,
+    people: &[&Person],
+    revalidate: Duration,
+    send_deadline: Duration,
+) -> Harness {
     let sessions = Arc::new(Sessions(std::sync::Mutex::new(
         people
             .iter()
             .map(|p| (p.session, support::user_info(p.user_id)))
             .collect(),
     )));
-    let broadcast = Arc::new(WsBroadcast::new(64).with_revalidate_interval(revalidate));
+    let broadcast = Arc::new(
+        WsBroadcast::new(64)
+            .with_revalidate_interval(revalidate)
+            .with_send_deadline(send_deadline),
+    );
     let mut state = PgAppState::new(
         data_service,
         sessions.clone(),
@@ -356,6 +374,120 @@ async fn a_member_removed_mid_connection_stops_receiving() {
     assert_silent(&mut ws_member).await;
 }
 
+/// The access decision is taken on the event, not read from a map a timer
+/// keeps up to date. The periodic re-check is set to an hour, so no tick can
+/// run during the test: if the removal is not acted on at the moment the next
+/// event is forwarded, the ex-member receives it.
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_member_removed_mid_connection_stops_receiving_on_the_next_event() {
+    let pg = support::service().await;
+    let pg = Arc::new(pg);
+    let owner = Person::new(pg.pool()).await;
+    let member = Person::new(pg.pool()).await;
+    let admin = Person::new(pg.pool()).await;
+    make_admin(pg.pool(), &admin).await;
+    let (store, owner_membership) = tenant(&pg, &owner, "shared").await;
+    pg.add_user_to_store(&UserStore::new(
+        UserId(member.user_id),
+        store.id,
+        owner_membership.store_role_id,
+    ))
+    .await
+    .unwrap();
+    let h = serve_revalidating(pg.clone(), &[&member, &admin], Duration::from_secs(3600)).await;
+    let mut ws_member = connect(&h, &member).await;
+    let mut ws_admin = connect(&h, &admin).await;
+
+    // While still a member: delivered. This is the positive control.
+    h.broadcast.send(sid(&store), paid("before-removal"));
+    assert_eq!(
+        next_update(&mut ws_member).await.expect("member sees it")["invoice_id"],
+        "before-removal"
+    );
+    assert_eq!(
+        next_update(&mut ws_admin).await.unwrap()["invoice_id"],
+        "before-removal"
+    );
+
+    pg.remove_user_from_store(UserId(member.user_id), store.id)
+        .await
+        .unwrap();
+
+    // The very next event, with nothing waited for in between.
+    h.broadcast.send(sid(&store), paid("after-removal"));
+    assert_eq!(
+        next_update(&mut ws_admin).await.unwrap()["invoice_id"],
+        "after-removal",
+        "the event was published and reached an entitled socket"
+    );
+    assert_silent(&mut ws_member).await;
+}
+
+/// A logout is acted on at the next event too, with no tick available.
+#[tokio::test]
+#[ignore = "needs DATABASE_URL"]
+async fn a_revoked_session_closes_the_socket_on_the_next_event() {
+    let pg = support::service().await;
+    let pg = Arc::new(pg);
+    let a = Person::new(pg.pool()).await;
+    let (store_a, _) = tenant(&pg, &a, "a").await;
+    let h = serve_revalidating(pg.clone(), &[&a], Duration::from_secs(3600)).await;
+    let mut ws_a = connect(&h, &a).await;
+
+    h.broadcast.send(sid(&store_a), paid("while-logged-in"));
+    assert_eq!(
+        next_update(&mut ws_a).await.expect("delivered")["invoice_id"],
+        "while-logged-in"
+    );
+
+    // Logout: the user still belongs to the store, and no re-check is due.
+    h.sessions.revoke(a.session);
+    h.broadcast.send(sid(&store_a), paid("after-logout"));
+
+    assert_closed(&mut ws_a, "session revoked, next event").await;
+}
+
+/// A frame large enough that a few dozen of them exhaust the socket buffers on
+/// both ends, so the server's write genuinely blocks on a client that has
+/// stopped reading. The payload is in a field the wire format already carries.
+fn bulky(invoice: &str) -> StatusUpdate {
+    StatusUpdate::InvoiceStatus {
+        invoice_id: invoice.to_string(),
+        status: "x".repeat(256 * 1024),
+    }
+}
+
+/// Backpressure must end access, not extend it. Everything else that could
+/// close this socket is held off: the session stays valid, the membership
+/// stays, no re-check is due for an hour, and the burst is well inside the
+/// channel capacities so nothing lags. The only thing left that can close it
+/// is the bounded write.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs DATABASE_URL"]
+async fn a_client_that_stops_reading_loses_its_socket() {
+    let pg = support::service().await;
+    let pg = Arc::new(pg);
+    let a = Person::new(pg.pool()).await;
+    let (store_a, _) = tenant(&pg, &a, "a").await;
+    let deadline = Duration::from_millis(500);
+    let h = serve_with(pg.clone(), &[&a], Duration::from_secs(3600), deadline).await;
+    let mut ws_a = connect(&h, &a).await;
+
+    // From here the client reads nothing. Every update is one it is entitled
+    // to, so refusing to read is the only thing wrong with it.
+    for i in 0..48 {
+        h.broadcast
+            .send(sid(&store_a), bulky(&format!("stall-{i}")));
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(deadline * 4).await;
+
+    // Reading now drains what was buffered and then reaches the close the
+    // server already decided on.
+    assert_closed(&mut ws_a, "the client stopped reading").await;
+}
+
 #[tokio::test]
 #[ignore = "needs DATABASE_URL"]
 async fn when_the_decision_cannot_be_made_the_socket_is_closed() {
@@ -453,9 +585,9 @@ async fn routing_alone_keeps_another_tenants_update_away() {
     let (a, b) = (Person::new(pg.pool()).await, Person::new(pg.pool()).await);
     let (store_a, _) = tenant(&pg, &a, "a").await;
     let (store_b, _) = tenant(&pg, &b, "b").await;
-    // The socket never re-checks anything while the test runs, and there is
-    // no per-event check at all: only the channels it was subscribed to at
-    // connect can deliver.
+    // The socket never re-derives its subscriptions while the test runs, so
+    // only the channels it took at connect could deliver anything - and B's
+    // store is not among them, so B's update has nowhere to arrive.
     let h = serve_revalidating(pg.clone(), &[&a], Duration::from_secs(3600)).await;
     let mut ws_a = connect(&h, &a).await;
 

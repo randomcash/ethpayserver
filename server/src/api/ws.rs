@@ -10,11 +10,22 @@
 //! a server admin - so another store's update never reaches it, rather than
 //! reaching it and being filtered.
 //!
-//! Every few seconds the socket re-validates its session and re-derives its
-//! stores, subscribing and unsubscribing to match. A logged-out or revoked
-//! session, or a user that no longer exists, closes the socket; a membership
-//! removal stops delivery. Anything that prevents the decision (a database
-//! error) closes the socket too: it fails closed.
+//! Routing decides what can arrive; it does not decide what may be sent. The
+//! authorization decision is made per event, against the database, immediately
+//! before each send - not read from the subscription map, which a timer keeps
+//! up to date. A membership removed, a role lost or a session ended since the
+//! update was queued stops it on that event, whatever any loop is doing. A
+//! logged-out or revoked session, or a user that no longer exists, closes the
+//! socket; anything that prevents the decision (a database error) closes it
+//! too: it fails closed.
+//!
+//! A client that stops reading must not be able to hold its access open by
+//! declining to read. Each send is bounded by [`DEFAULT_SEND_DEADLINE`] and a
+//! client that exceeds it loses its socket, so backpressure ends access rather
+//! than extending it - and the per-event check cannot be stalled by a peer.
+//!
+//! The periodic re-derivation is subscription upkeep, not the control: it adds
+//! channels for stores newly joined and drops those no longer allowed.
 
 use axum::{
     extract::{
@@ -138,10 +149,29 @@ pub struct WsBroadcast {
     invoices: std::sync::Arc<Channels<String>>,
     admins: std::sync::Arc<Channels<()>>,
     revalidate_interval: std::time::Duration,
+    send_deadline: std::time::Duration,
 }
 
-/// How often an open `/ws` socket re-checks its session and memberships.
+/// How often an open `/ws` socket re-derives which channels it subscribes to.
+///
+/// This is upkeep, not the access decision: that is made per event, just
+/// before each send. It bounds only how long a store joined mid-connection
+/// goes unsubscribed, and how long an unentitled channel stays subscribed
+/// while delivering nothing.
 pub const DEFAULT_REVALIDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long one frame may take to reach a client before its socket is closed.
+///
+/// A client that stops reading applies backpressure through the kernel buffers
+/// back to the server's send. Waiting on that without a bound would let a peer
+/// suspend the forwarding loop, and with it the per-event authorization check,
+/// for as long as it declines to read; a revoked member could then hold its
+/// subscription open simply by not reading. The wait is therefore bounded and
+/// a client that exceeds it loses its socket: backpressure terminates access
+/// instead of extending it. A live client acknowledges a frame of a few
+/// hundred bytes far inside this; one that does not is gone, and reconnects
+/// and refetches.
+pub const DEFAULT_SEND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl WsBroadcast {
     /// Create broadcast channels with the given per-channel capacity.
@@ -151,13 +181,22 @@ impl WsBroadcast {
             invoices: std::sync::Arc::new(Channels::new(capacity)),
             admins: std::sync::Arc::new(Channels::new(capacity)),
             revalidate_interval: DEFAULT_REVALIDATE_INTERVAL,
+            send_deadline: DEFAULT_SEND_DEADLINE,
         }
     }
 
-    /// Set how often an open socket re-validates its session and memberships.
-    /// This bounds how long a logout, or a membership removal, goes unnoticed.
+    /// Set how often an open socket re-derives its subscriptions. This bounds
+    /// how long a store joined mid-connection goes unheard; it does not bound
+    /// revocation, which takes effect on the next event.
     pub fn with_revalidate_interval(mut self, interval: std::time::Duration) -> Self {
         self.revalidate_interval = interval;
+        self
+    }
+
+    /// Set how long a single send may block on a client before its socket is
+    /// closed. See [`DEFAULT_SEND_DEADLINE`].
+    pub fn with_send_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.send_deadline = deadline;
         self
     }
 
@@ -410,6 +449,30 @@ fn sync_listeners(
     }
 }
 
+/// Send one text frame, waiting at most `deadline` for the client to take it.
+///
+/// `false` means the socket must be closed: the write failed, or the client
+/// did not accept the frame in time. The deadline is what stops a peer that
+/// has stopped reading from parking the caller - and so the per-event
+/// authorization check - for as long as it likes. See
+/// [`DEFAULT_SEND_DEADLINE`].
+async fn send_within(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    msg: String,
+    deadline: std::time::Duration,
+) -> bool {
+    match tokio::time::timeout(deadline, sender.send(Message::Text(msg.into()))).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            tracing::info!(
+                "ws: the client did not accept a frame within the send deadline; closing the socket"
+            );
+            false
+        }
+    }
+}
+
 /// Forward updates to an authenticated WebSocket client, until it closes or
 /// its session or entitlement can no longer be established.
 async fn handle_socket_forwarding(
@@ -435,7 +498,8 @@ async fn handle_socket_forwarding(
         reason = "serde_json of unit variant is infallible"
     )]
     let connected = serde_json::to_string(&StatusUpdate::Connected).unwrap();
-    if sender.send(Message::Text(connected.into())).await.is_err() {
+    let send_deadline = broadcast.send_deadline;
+    if !send_within(&mut sender, connected, send_deadline).await {
         return;
     }
 
@@ -446,16 +510,26 @@ async fn handle_socket_forwarding(
     loop {
         tokio::select! {
             Some((topic, update)) = updates.recv() => {
-                // Already queued when its store was revoked: drop it.
-                if !listeners.contains_key(&topic) {
+                // The access decision is made here, on this event, from the
+                // database - not read back from `listeners`, which a timer
+                // refreshes. An entitlement withdrawn since this update was
+                // queued, or since the last tick, stops it now.
+                let Some(entitlement) = revalidate().await else { break };
+                sync_listeners(&broadcast, &entitlement, &mut listeners, &out, &lagged);
+                if !entitlement.topics.contains(&topic) {
                     continue;
                 }
                 let Ok(msg) = serde_json::to_string(&update) else { continue };
-                if sender.send(Message::Text(msg.into())).await.is_err() {
+                // A client that will not take the frame loses the socket, so
+                // declining to read cannot suspend the check above.
+                if !send_within(&mut sender, msg, send_deadline).await {
                     break;
                 }
             }
             Some(()) = lagged_rx.recv() => break,
+            // Upkeep, on a socket that happens to be idle: pick up a store
+            // joined since the last pass, and stop holding a channel whose
+            // entitlement is gone. Delivery is decided above, per event.
             _ = ticker.tick() => match revalidate().await {
                 Some(entitlement) => sync_listeners(&broadcast, &entitlement, &mut listeners, &out, &lagged),
                 None => break,
@@ -466,7 +540,9 @@ async fn handle_socket_forwarding(
             },
         }
     }
-    let _ = sender.close().await;
+    // The close handshake is a write too, so it gets the same deadline: a peer
+    // that reads nothing must not keep this task alive either.
+    let _ = tokio::time::timeout(send_deadline, sender.close()).await;
 }
 
 #[cfg(test)]
