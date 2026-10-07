@@ -81,6 +81,65 @@ struct WireFilterVerdict {
     allow: bool,
     #[serde(default)]
     reason: Option<String>,
+    /// What an allow rested on, when the plugin reports it. Held as raw JSON
+    /// so a basis this host does not understand cannot turn an answered
+    /// verdict into "could not run".
+    #[serde(default)]
+    standing_basis: Option<serde_json::Value>,
+}
+
+/// Counter incremented once per invoice-creation allow that rests on a
+/// standing never received or older than the freshness bound, labelled by
+/// `reason`. Unlike the per-read counter in the data layer, it is counted
+/// where the outcome is known: a page render or a deny never reaches it.
+pub const FAIL_OPEN_ALLOW_COUNTER: &str = "ethpayserver_standing_fail_open_allow_total";
+
+/// Why an allow rests on missing or old information, or `None` when it rests
+/// on a standing confirmed within `max_age` (or says nothing about standing).
+fn fail_open_reason(
+    basis: Option<&serde_json::Value>,
+    now: chrono::DateTime<chrono::Utc>,
+    max_age: chrono::Duration,
+) -> Option<(&'static str, Option<chrono::Duration>)> {
+    let basis = basis?;
+    match basis.get("basis").and_then(serde_json::Value::as_str) {
+        Some("never_received") => Some(("unheard", None)),
+        Some("confirmed") => {
+            let heard = basis
+                .get("last_heard_at")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.with_timezone(&chrono::Utc));
+            match heard {
+                Some(heard) if now - heard <= max_age => None,
+                Some(heard) => Some(("stale", Some(now - heard))),
+                None => Some(("unreadable", None)),
+            }
+        }
+        _ => Some(("unreadable", None)),
+    }
+}
+
+/// Surface a fail-open allow at error level plus a counter.
+fn surface_fail_open_allow(
+    plugin: &PluginId,
+    account_id: &str,
+    basis: Option<&serde_json::Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let max_age = chrono::Duration::days(data_service::DEFAULT_STANDING_MAX_AGE_DAYS);
+    let Some((reason, silent_for)) = fail_open_reason(basis, now, max_age) else {
+        return;
+    };
+    metrics::counter!(FAIL_OPEN_ALLOW_COUNTER, "reason" => reason).increment(1);
+    tracing::error!(
+        %plugin,
+        %account_id,
+        reason,
+        silent_for_secs = silent_for.map(|d| d.num_seconds()),
+        max_age_secs = max_age.num_seconds(),
+        "invoice creation allowed on a standing that was never received or is older than the freshness bound"
+    );
 }
 
 #[derive(Debug, Serialize)]
@@ -130,6 +189,7 @@ impl InvoiceCreationFilter for PluginInvoiceCreationFilter {
             store_id: request.store_id.0.to_string(),
             account_id: request.account_id.0.to_string(),
         };
+        let account_id = wire.account_id.clone();
 
         let outcome: FilterOutcome<WireFilterVerdict> = self
             .host
@@ -137,7 +197,15 @@ impl InvoiceCreationFilter for PluginInvoiceCreationFilter {
             .await;
 
         match outcome {
-            FilterOutcome::Ran(verdict) if verdict.allow => FilterVerdict::Allow,
+            FilterOutcome::Ran(verdict) if verdict.allow => {
+                surface_fail_open_allow(
+                    &self.id,
+                    &account_id,
+                    verdict.standing_basis.as_ref(),
+                    chrono::Utc::now(),
+                );
+                FilterVerdict::Allow
+            }
             FilterOutcome::Ran(verdict) => FilterVerdict::Deny {
                 // The plugin's own words where it gave any: this is its one
                 // chance to tell the merchant what to do about it.

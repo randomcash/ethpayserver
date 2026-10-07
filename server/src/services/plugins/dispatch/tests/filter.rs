@@ -146,3 +146,110 @@ async fn a_plugin_that_allows_is_not_overridden() {
         FilterVerdict::Allow
     );
 }
+
+#[derive(Clone, Default)]
+struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Buf {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+    type Writer = Buf;
+    fn make_writer(&'a self) -> Buf {
+        self.clone()
+    }
+}
+
+/// Runs one real plugin answer through the dispatch site and reports what
+/// reached an operator: error-level log lines, and the fail-open counter by
+/// reason.
+async fn surfaced_by(answer: &str) -> (FilterVerdict, String, String) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let buf = Buf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
+        .with_ansi(false)
+        .with_writer(buf.clone())
+        .finish();
+    let _log = tracing::subscriber::set_default(subscriber);
+    let _metrics = metrics::set_default_local_recorder(&recorder);
+
+    let host = host();
+    host.register(
+        manifest("cash.random.billing", "filter", None),
+        &answering(FILTER_INVOICE_CREATION, answer),
+    )
+    .unwrap();
+    let filter = PluginInvoiceCreationFilter::new(
+        Arc::clone(&host),
+        PluginId::new("cash.random.billing").unwrap(),
+    );
+    let verdict = filter.filter_invoice_creation(a_store()).await;
+
+    let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    let counters: String = handle
+        .render()
+        .lines()
+        .filter(|l| l.starts_with(FAIL_OPEN_ALLOW_COUNTER))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (verdict, logged, counters)
+}
+
+fn heard_ago(days: i64) -> String {
+    let t = chrono::Utc::now() - chrono::Duration::days(days);
+    format!(
+        r#"{{"allow":true,"standing_basis":{{"basis":"confirmed","last_heard_at":"{}"}}}}"#,
+        t.to_rfc3339()
+    )
+}
+
+#[tokio::test]
+async fn an_allow_on_a_standing_never_received_is_surfaced() {
+    let (verdict, logged, counters) =
+        surfaced_by(r#"{"allow":true,"standing_basis":{"basis":"never_received"}}"#).await;
+    assert_eq!(verdict, FilterVerdict::Allow);
+    assert!(logged.contains("ERROR"), "no error event: {logged}");
+    assert!(counters.contains(r#"reason="unheard"} 1"#), "{counters}");
+}
+
+#[tokio::test]
+async fn an_allow_on_a_standing_older_than_the_bound_is_surfaced() {
+    let days = data_service::DEFAULT_STANDING_MAX_AGE_DAYS + 1;
+    let (verdict, logged, counters) = surfaced_by(&heard_ago(days)).await;
+    assert_eq!(verdict, FilterVerdict::Allow);
+    assert!(logged.contains("ERROR"), "no error event: {logged}");
+    assert!(counters.contains(r#"reason="stale"} 1"#), "{counters}");
+}
+
+/// The control either side of the stale case: a recently confirmed standing,
+/// and an allow that says nothing about standing, raise nothing.
+#[tokio::test]
+async fn a_recently_confirmed_or_unannotated_allow_is_silent() {
+    for answer in [heard_ago(1), r#"{"allow":true}"#.to_string()] {
+        let (verdict, logged, counters) = surfaced_by(&answer).await;
+        assert_eq!(verdict, FilterVerdict::Allow);
+        assert!(logged.is_empty(), "{logged}");
+        assert!(counters.is_empty(), "{counters}");
+    }
+}
+
+/// A deny is not a fail-open allow, whatever the basis it carries.
+#[tokio::test]
+async fn a_deny_is_silent_even_on_a_never_received_basis() {
+    let (verdict, logged, counters) = surfaced_by(
+        r#"{"allow":false,"reason":"over","standing_basis":{"basis":"never_received"}}"#,
+    )
+    .await;
+    assert!(matches!(verdict, FilterVerdict::Deny { .. }));
+    assert!(logged.is_empty(), "{logged}");
+    assert!(counters.is_empty(), "{counters}");
+}
