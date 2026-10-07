@@ -448,13 +448,22 @@ async fn a_revoked_session_closes_the_socket_on_the_next_event() {
     assert_closed(&mut ws_a, "session revoked, next event").await;
 }
 
-/// A frame large enough that a few dozen of them exhaust the socket buffers on
-/// both ends, so the server's write genuinely blocks on a client that has
-/// stopped reading. The payload is in a field the wire format already carries.
+/// How many frames the stalled-client test publishes, and how large each is.
+///
+/// Their product has to exceed what the kernel will buffer on both ends of a
+/// loopback socket, or the server's write never blocks and the test fails for
+/// the wrong reason. Linux's defaults cap that at roughly 4MB of send buffer
+/// plus 6MB of receive buffer, so 24MB clears it several times over. The count
+/// stays below the broadcast capacity the harness uses, so the burst cannot
+/// lag a listener and the only thing that can close the socket is the write
+/// deadline. The payload rides in a field the wire format already carries.
+const STALL_FRAMES: usize = 48;
+const STALL_FRAME_BYTES: usize = 512 * 1024;
+
 fn bulky(invoice: &str) -> StatusUpdate {
     StatusUpdate::InvoiceStatus {
         invoice_id: invoice.to_string(),
-        status: "x".repeat(256 * 1024),
+        status: "x".repeat(STALL_FRAME_BYTES),
     }
 }
 
@@ -476,7 +485,7 @@ async fn a_client_that_stops_reading_loses_its_socket() {
 
     // From here the client reads nothing. Every update is one it is entitled
     // to, so refusing to read is the only thing wrong with it.
-    for i in 0..48 {
+    for i in 0..STALL_FRAMES {
         h.broadcast
             .send(sid(&store_a), bulky(&format!("stall-{i}")));
         tokio::task::yield_now().await;
