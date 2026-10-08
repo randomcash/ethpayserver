@@ -104,8 +104,12 @@ fn fail_open_reason(
     let basis = basis?;
     // Read through the type the plugin serialises, so a basis it cannot
     // parse is exactly one the two sides no longer agree on.
-    let Ok(basis) = serde_json::from_value::<StandingBasis>(basis.clone()) else {
-        return Some(("unreadable", None));
+    let basis = match serde_json::from_value::<StandingBasis>(basis.clone()) {
+        Ok(basis) => basis,
+        Err(error) => {
+            tracing::debug!(%error, "standing_basis did not parse as the shared type");
+            return Some(("unreadable", None));
+        }
     };
     match basis {
         StandingBasis::NeverReceived => Some(("unheard", None)),

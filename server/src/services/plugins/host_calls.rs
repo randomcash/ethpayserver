@@ -206,3 +206,24 @@ impl PluginHostCalls for PluginCalls {
         Err("account_notice is not available on this host".to_string())
     }
 }
+
+#[cfg(test)]
+mod account_notice_tests {
+    use std::sync::Arc;
+
+    use payserver_plugin_api::PluginId;
+    use payserver_plugin_host::PluginHostCalls;
+
+    use super::PluginCalls;
+    use crate::services::plugins::pools::PluginPools;
+
+    /// A refusal that turned into `Ok` would tell the plugin a notice reached
+    /// a merchant when this host has no way to deliver one.
+    #[tokio::test]
+    async fn account_notice_is_refused_not_acknowledged() {
+        let pools = Arc::new(PluginPools::new("postgres://localhost/x".to_string(), 4));
+        let calls = PluginCalls::new(PluginId::new("cash.random.t").unwrap(), pools);
+        let err = calls.account_notice(b"{}").unwrap_err();
+        assert!(err.contains("not available"), "{err}");
+    }
+}
