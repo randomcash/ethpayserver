@@ -107,7 +107,7 @@ fn fail_open_reason(
     let basis = match serde_json::from_value::<StandingBasis>(basis.clone()) {
         Ok(basis) => basis,
         Err(error) => {
-            tracing::debug!(%error, "standing_basis did not parse as the shared type");
+            tracing::warn!(%error, "standing_basis did not parse as the shared type");
             return Some(("unreadable", None));
         }
     };

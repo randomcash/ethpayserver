@@ -299,3 +299,18 @@ async fn what_the_shared_type_serialises_is_never_unreadable() {
         );
     }
 }
+
+/// A standing confirmed within the freshness bound is not a fail-open allow:
+/// the shared type's fresh form must be read, not filed as unreadable.
+#[tokio::test]
+async fn a_fresh_shared_confirmed_basis_raises_nothing() {
+    use payserver_plugin_api::StandingBasis;
+    let basis = StandingBasis::Confirmed {
+        last_heard_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let answer = serde_json::json!({"allow": true, "standing_basis": basis}).to_string();
+    let (verdict, logged, counters) = surfaced_by(&answer).await;
+    assert_eq!(verdict, FilterVerdict::Allow);
+    assert!(logged.is_empty(), "{logged}");
+    assert!(counters.is_empty(), "{counters}");
+}
