@@ -254,13 +254,16 @@ async fn a_deny_is_silent_even_on_a_never_received_basis() {
     assert!(counters.is_empty(), "{counters}");
 }
 
-/// A basis this host does not know, or a timestamp it cannot parse, is the
-/// skew case and says so.
+/// A basis this host does not know, or a timestamp it cannot parse, is filed
+/// as unreadable.
 ///
-/// This pins the server's fall-through only. It cannot detect a sender
-/// renaming a reason, because the accepted strings are typed here, not read
-/// from the sender; the positive cases above pin the accepted set. Closing
-/// that gap needs the wire type shared through the commons pin.
+/// This is a regression guard for the fall-through arm and nothing more. It
+/// is NOT a drift detector: `never_heard` below is exactly the rename that a
+/// sender could make, and it is filed as unreadable (which will then be
+/// mistaken for version skew). The accepted strings are typed on this side,
+/// not read from the sender, so a sender-side rename leaves every test here
+/// green. The positive cases above pin the accepted set; detecting drift
+/// needs the wire type shared through the commons pin.
 #[tokio::test]
 async fn an_unknown_basis_or_bad_timestamp_is_unreadable() {
     for answer in [
