@@ -253,3 +253,17 @@ async fn a_deny_is_silent_even_on_a_never_received_basis() {
     assert!(logged.is_empty(), "{logged}");
     assert!(counters.is_empty(), "{counters}");
 }
+
+/// A basis this host does not know, or a timestamp it cannot parse, is the
+/// skew case and says so.
+#[tokio::test]
+async fn an_unknown_basis_or_bad_timestamp_is_unreadable() {
+    for answer in [
+        r#"{"allow":true,"standing_basis":{"basis":"never_heard"}}"#,
+        r#"{"allow":true,"standing_basis":{"basis":"confirmed","last_heard_at":"yesterday"}}"#,
+    ] {
+        let (verdict, _, counters) = surfaced_by(answer).await;
+        assert_eq!(verdict, FilterVerdict::Allow);
+        assert!(counters.contains(r#"reason="unreadable"} 1"#), "{counters}");
+    }
+}
