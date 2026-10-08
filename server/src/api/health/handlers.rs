@@ -166,7 +166,8 @@ where
             watched-address counts and failure reasons are included only for \
             server admins; everyone else gets chain identity and up/down.",
             body = ChainsHealthResponse),
-        (status = 503, description = "Health data unavailable"),
+        (status = 503, description = "Health data unavailable, or the monitor has published \
+            no snapshot recently"),
     )
 )]
 pub async fn chains_health<A>(
@@ -191,7 +192,15 @@ where
     // Read health data from Redis
     match monitor.get_chain_health().await {
         Ok(chains) => {
-            let all_healthy = chains.iter().all(|c| c.is_healthy);
+            // The monitor republishes its snapshot every few seconds under a key
+            // that expires, so an empty list means it has stopped publishing,
+            // not that every chain is well. `all()` alone is vacuously true on it.
+            let fresh = super::deep::chains_are_fresh(&chains);
+            let status = if chains.is_empty() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::OK
+            };
 
             // Everyone may know a chain is down; only an admin may know how far
             // behind it is or which endpoint failed.
@@ -202,11 +211,11 @@ where
                 .collect();
 
             (
-                StatusCode::OK,
+                status,
                 Json(ChainsHealthResponse {
                     chains: chain_infos,
-                    all_healthy,
-                    data_fresh: true,
+                    all_healthy: fresh,
+                    data_fresh: fresh,
                 }),
             )
         }
