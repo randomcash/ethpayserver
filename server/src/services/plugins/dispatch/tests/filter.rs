@@ -257,13 +257,10 @@ async fn a_deny_is_silent_even_on_a_never_received_basis() {
 /// A basis this host does not know, or a timestamp it cannot parse, is filed
 /// as unreadable.
 ///
-/// This is a regression guard for the fall-through arm and nothing more. It
-/// is NOT a drift detector: `never_heard` below is exactly the rename that a
-/// sender could make, and it is filed as unreadable (which will then be
-/// mistaken for version skew). The accepted strings are typed on this side,
-/// not read from the sender, so a sender-side rename leaves every test here
-/// green. The positive cases above pin the accepted set; detecting drift
-/// needs the wire type shared through the commons pin.
+/// This is a regression guard for the fall-through arm. It is not the drift
+/// detector: the literals here are typed on this side. Drift is caught by
+/// `what_the_shared_type_serialises_is_never_unreadable`, which builds the
+/// verdict from the type the sender serialises.
 #[tokio::test]
 async fn an_unknown_basis_or_bad_timestamp_is_unreadable() {
     for answer in [
@@ -273,5 +270,32 @@ async fn an_unknown_basis_or_bad_timestamp_is_unreadable() {
         let (verdict, _, counters) = surfaced_by(answer).await;
         assert_eq!(verdict, FilterVerdict::Allow);
         assert!(counters.contains(r#"reason="unreadable"} 1"#), "{counters}");
+    }
+}
+
+/// The sender and this host share one `StandingBasis`; whatever it serialises
+/// to must be read, never filed as unreadable. Renaming a variant or its wire
+/// form in the shared type moves both sides together, and a sender still on
+/// an old pin fails to compile instead of being silently misfiled.
+#[tokio::test]
+async fn what_the_shared_type_serialises_is_never_unreadable() {
+    use payserver_plugin_api::StandingBasis;
+    let stale = chrono::Utc::now()
+        - chrono::Duration::days(data_service::DEFAULT_STANDING_MAX_AGE_DAYS + 1);
+    for (basis, reason) in [
+        (StandingBasis::NeverReceived, "unheard"),
+        (
+            StandingBasis::Confirmed {
+                last_heard_at: stale.to_rfc3339(),
+            },
+            "stale",
+        ),
+    ] {
+        let answer = serde_json::json!({"allow": true, "standing_basis": basis}).to_string();
+        let (_, _, counters) = surfaced_by(&answer).await;
+        assert!(
+            counters.contains(&format!(r#"reason="{reason}"}} 1"#)),
+            "{counters}"
+        );
     }
 }

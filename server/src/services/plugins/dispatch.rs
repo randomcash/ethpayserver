@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use auth::UserId;
-use payserver_plugin_api::{PluginId, PluginKind};
+use payserver_plugin_api::{PluginId, PluginKind, StandingBasis};
 use serde::{Deserialize, Serialize};
 
 use super::account_closed::AccountClosedObserver;
@@ -102,13 +102,16 @@ fn fail_open_reason(
     max_age: chrono::Duration,
 ) -> Option<(&'static str, Option<chrono::Duration>)> {
     let basis = basis?;
-    match basis.get("basis").and_then(serde_json::Value::as_str) {
-        Some("never_received") => Some(("unheard", None)),
-        Some("confirmed") => {
-            let heard = basis
-                .get("last_heard_at")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+    // Read through the type the plugin serialises, so a basis it cannot
+    // parse is exactly one the two sides no longer agree on.
+    let Ok(basis) = serde_json::from_value::<StandingBasis>(basis.clone()) else {
+        return Some(("unreadable", None));
+    };
+    match basis {
+        StandingBasis::NeverReceived => Some(("unheard", None)),
+        StandingBasis::Confirmed { last_heard_at } => {
+            let heard = chrono::DateTime::parse_from_rfc3339(&last_heard_at)
+                .ok()
                 .map(|t| t.with_timezone(&chrono::Utc));
             match heard {
                 Some(heard) if now - heard <= max_age => None,
@@ -116,7 +119,6 @@ fn fail_open_reason(
                 None => Some(("unreadable", None)),
             }
         }
-        _ => Some(("unreadable", None)),
     }
 }
 

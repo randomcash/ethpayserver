@@ -196,4 +196,13 @@ impl PluginHostCalls for PluginCalls {
     fn storage_query(&self, request: &[u8]) -> Result<Vec<u8>, String> {
         self.storage_query_impl(request)
     }
+
+    /// Refused: this host does not yet reach an account on a plugin's behalf.
+    /// The trait requires the method so that an implementation cannot hand out
+    /// a merchant-reaching capability by forgetting it; refusing is the
+    /// explicit choice, and the plugin is told so rather than left to assume
+    /// the notice was delivered.
+    fn account_notice(&self, _request: &[u8]) -> Result<Vec<u8>, String> {
+        Err("account_notice is not available on this host".to_string())
+    }
 }
