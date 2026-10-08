@@ -209,6 +209,8 @@ impl PluginHostCalls for PluginCalls {
 
 #[cfg(test)]
 mod account_notice_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use std::sync::Arc;
 
     use payserver_plugin_api::PluginId;
