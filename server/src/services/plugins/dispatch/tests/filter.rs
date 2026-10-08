@@ -256,6 +256,11 @@ async fn a_deny_is_silent_even_on_a_never_received_basis() {
 
 /// A basis this host does not know, or a timestamp it cannot parse, is the
 /// skew case and says so.
+///
+/// This pins the server's fall-through only. It cannot detect a sender
+/// renaming a reason, because the accepted strings are typed here, not read
+/// from the sender; the positive cases above pin the accepted set. Closing
+/// that gap needs the wire type shared through the commons pin.
 #[tokio::test]
 async fn an_unknown_basis_or_bad_timestamp_is_unreadable() {
     for answer in [
