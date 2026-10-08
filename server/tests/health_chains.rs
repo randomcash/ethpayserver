@@ -91,7 +91,12 @@ async fn a_monitor_that_published_nothing_is_not_reported_healthy_or_fresh() {
     assert_eq!(chains, 0);
     assert!(!all_healthy, "no data must not read as all healthy");
     assert!(!data_fresh, "no data must not read as fresh");
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    // 200, deliberately. The body is the answer here, and a non-2xx costs every
+    // caller that treats it as a failed request the body that explains why - the
+    // client's network panel reads `data_fresh` to render exactly this state, and
+    // an environment running no monitor at all sees its normal state. A 503 here
+    // made scout.spec.ts fail on eleven of these and took testnet red.
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -102,7 +107,7 @@ async fn an_empty_published_list_is_not_reported_healthy_or_fresh() {
     };
     assert!(!all_healthy);
     assert!(!data_fresh);
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
