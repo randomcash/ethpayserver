@@ -431,12 +431,14 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
 
 /// The scrubber used to guard only the Sentry hooks, so a secret echoed into a
 /// log line reached the process log untouched. The sink the binaries write to
-/// must redact too, in both output formats, and must leave transaction hashes
+/// must redact too, in both output formats: phrases, key=value secrets (also as
+/// quoted JSON fields) and key-shaped hex with or without 0x. Addresses stay
 /// readable for operators.
 #[test]
-fn log_sink_redacts_credentials_but_keeps_hashes() {
+fn log_sink_redacts_credentials_but_keeps_addresses() {
     let phrase = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima";
-    let tx = format!("0x{}", "ab".repeat(32));
+    let key_hex = "ab".repeat(32);
+    let addr = format!("0x{}", "cd".repeat(20));
     for json in [false, true] {
         let sink = SharedBuf::default();
         let dispatcher = tracing::Dispatch::new(build_subscriber_to(
@@ -447,7 +449,8 @@ fn log_sink_redacts_credentials_but_keeps_hashes() {
         ));
         tracing::dispatcher::with_default(&dispatcher, || {
             tracing::error!(input = phrase, "rejected {phrase}");
-            tracing::info!(tx = %tx, "api_key=supersecretvalue seen");
+            tracing::info!(token = "fieldsecretvalue", addr = %addr, "api_key=supersecretvalue seen");
+            tracing::warn!("bad key 0x{key_hex} and bare {key_hex}");
         });
         let out = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
         assert!(
@@ -456,9 +459,11 @@ fn log_sink_redacts_credentials_but_keeps_hashes() {
         );
         assert!(out.contains("[redacted-mnemonic]"), "json={json}: {out}");
         assert!(!out.contains("supersecretvalue"), "json={json}: {out}");
+        assert!(!out.contains("fieldsecretvalue"), "json={json}: {out}");
         assert!(
-            out.contains(&tx),
-            "json={json}: tx hash was redacted: {out}"
+            !out.contains(&key_hex),
+            "json={json}: key hex leaked: {out}"
         );
+        assert!(out.contains(&addr), "json={json}: address redacted: {out}");
     }
 }

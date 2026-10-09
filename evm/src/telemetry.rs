@@ -33,8 +33,8 @@ use sentry::protocol::{Context, Event, Log, Map, Value};
 
 /// Ordered `(pattern, replacement, credential)` redaction rules applied to every
 /// free-text field. `credential` marks the rules that catch material which must
-/// not survive in a process log either; the rest (on-chain hex, emails) are
-/// telemetry-only, because operators need transaction hashes in the log.
+/// not survive in a process log either; the rest (addresses, emails) are
+/// telemetry-only, because operators need them readable in the log.
 /// Compiled once and reused for the life of the process.
 fn rules() -> &'static [(Regex, &'static str, bool)] {
     static RULES: OnceLock<Vec<(Regex, &'static str, bool)>> = OnceLock::new();
@@ -68,8 +68,12 @@ fn rules() -> &'static [(Regex, &'static str, bool)] {
             // 0x-prefixed hex of address length or longer: addresses (40),
             // private keys / tx hashes / block hashes (64), signatures (130).
             (build(r"0x[0-9a-fA-F]{40,}"), "[redacted-hex]", false),
-            // Bare 64-char hex (private keys / hashes without the 0x prefix).
-            (build(r"\b[0-9a-fA-F]{64}\b"), "[redacted-hex]", false),
+            // 64+ hex chars, 0x-prefixed or bare, is the shape of a private key
+            // and of a transaction hash alike; nothing in the text tells them
+            // apart, so the process log loses hashes rather than risk a key.
+            // Addresses (40) stay readable there.
+            (build(r"0x[0-9a-fA-F]{64,}"), "[redacted-hex]", true),
+            (build(r"\b[0-9a-fA-F]{64}\b"), "[redacted-hex]", true),
             // BIP-39 mnemonics: 12+ consecutive lowercase words.
             (
                 build(r"\b(?:[a-z]+\s+){11,}[a-z]+\b"),
@@ -85,7 +89,7 @@ fn rules() -> &'static [(Regex, &'static str, bool)] {
             // `key: value` / `key=value` for sensitive keys, plus `Bearer <tok>`.
             (
                 build(
-                    r#"(?i)\b(api[_-]?key|secret|password|passwd|token|mnemonic|seed|private[_-]?key|authorization|bearer)\b(\s*[:=]\s*|\s+)("?)[^\s,;"']+"#,
+                    r#"(?i)\b(api[_-]?key|secret|password|passwd|token|mnemonic|seed|private[_-]?key|authorization|bearer)\b("?\s*[:=]\s*|\s+)("?)[^\s,;"']+"#,
                 ),
                 "$1$2$3[redacted]",
                 true,
@@ -104,8 +108,9 @@ pub fn redact_secrets(input: &str) -> String {
 }
 
 /// The subset of [`redact_secrets`] that applies to the process log: keys,
-/// tokens, mnemonics and credentialed URLs, but not on-chain addresses/hashes
-/// or emails, which operators read in the log and which telemetry alone hides.
+/// tokens, mnemonics, credentialed URLs and key-length hex (which is
+/// indistinguishable from a transaction hash), but not 40-char addresses or
+/// emails, which operators read in the log and which telemetry alone hides.
 #[must_use]
 pub fn redact_credentials(input: &str) -> String {
     redact_with(input, true)
@@ -847,6 +852,9 @@ where
         Box::new(
             registry.with(
                 tracing_subscriber::fmt::layer()
+                    // Colour codes would sit between a field name and its value
+                    // and hide the pair from the key=value rule.
+                    .with_ansi(false)
                     .with_writer(sink)
                     .with_filter(log_filter),
             ),
