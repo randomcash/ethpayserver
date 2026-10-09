@@ -254,13 +254,21 @@ async fn a_deny_is_silent_even_on_a_never_received_basis() {
     assert!(counters.is_empty(), "{counters}");
 }
 
-/// A basis this host does not know, or a timestamp it cannot parse, is filed
-/// as unreadable.
+/// A basis this host does not know, or a timestamp that is not RFC 3339, is
+/// filed as unreadable.
 ///
-/// This is a regression guard for the fall-through arm. It is not the drift
-/// detector: the literals here are typed on this side. Drift is caught by
-/// `what_the_shared_type_serialises_is_never_unreadable`, which builds the
-/// verdict from the type the sender serialises.
+/// Both of these now fail at one place - deserialising the shared type - and
+/// "unreadable" is the honest answer for both, because each really is a
+/// payload the two sides do not agree on. That was not true while the
+/// timestamp was a `String`: such a payload deserialised cleanly and failed a
+/// second parse further in, so a sender that had merely sent a bad value was
+/// reported as one speaking a dialect. A sender holding the shared type can
+/// no longer produce either of these, so reaching this arm means a sender on
+/// a different pin, or something hand-rolling the JSON.
+///
+/// It is not the drift detector: the literals here are typed on this side.
+/// Drift is caught by `what_the_shared_type_serialises_is_never_unreadable`,
+/// which builds the verdict from the type the sender serialises.
 #[tokio::test]
 async fn an_unknown_basis_or_bad_timestamp_is_unreadable() {
     for answer in [
@@ -286,7 +294,7 @@ async fn what_the_shared_type_serialises_is_never_unreadable() {
         (StandingBasis::NeverReceived, "unheard"),
         (
             StandingBasis::Confirmed {
-                last_heard_at: stale.to_rfc3339(),
+                last_heard_at: stale,
             },
             "stale",
         ),
@@ -306,7 +314,7 @@ async fn what_the_shared_type_serialises_is_never_unreadable() {
 async fn a_fresh_shared_confirmed_basis_raises_nothing() {
     use payserver_plugin_api::StandingBasis;
     let basis = StandingBasis::Confirmed {
-        last_heard_at: chrono::Utc::now().to_rfc3339(),
+        last_heard_at: chrono::Utc::now(),
     };
     let answer = serde_json::json!({"allow": true, "standing_basis": basis}).to_string();
     let (verdict, logged, counters) = surfaced_by(&answer).await;

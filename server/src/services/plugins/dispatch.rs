@@ -114,13 +114,19 @@ fn fail_open_reason(
     match basis {
         StandingBasis::NeverReceived => Some(("unheard", None)),
         StandingBasis::Confirmed { last_heard_at } => {
-            let heard = chrono::DateTime::parse_from_rfc3339(&last_heard_at)
-                .ok()
-                .map(|t| t.with_timezone(&chrono::Utc));
-            match heard {
-                Some(heard) if now - heard <= max_age => None,
-                Some(heard) => Some(("stale", Some(now - heard))),
-                None => Some(("unreadable", None)),
+            // No parse here, and no "unreadable" arm for a bad instant: the
+            // shared type carries a real timestamp, so a sender cannot emit
+            // one this side would reject. That arm used to file a malformed
+            // timestamp as a disagreement between the two sides, which read
+            // as the sender speaking a dialect rather than sending a bad
+            // value - the exact mislabel the shared type exists to remove.
+            // "unreadable" above still stands, for a basis that genuinely
+            // does not parse as the shared type.
+            let age = now - last_heard_at;
+            if age <= max_age {
+                None
+            } else {
+                Some(("stale", Some(age)))
             }
         }
     }
