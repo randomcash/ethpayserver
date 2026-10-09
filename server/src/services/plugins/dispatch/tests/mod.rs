@@ -13,6 +13,7 @@ use types::StoreId;
 use uuid::Uuid;
 
 mod cancel_subscription;
+mod fail_open_alert;
 mod filter;
 mod observers;
 
