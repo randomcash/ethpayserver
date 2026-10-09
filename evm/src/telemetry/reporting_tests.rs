@@ -407,3 +407,58 @@ fn binaries_build_their_subscriber_through_build_subscriber() {
         );
     }
 }
+
+/// Collects what the stdout layer would write.
+#[derive(Clone, Default)]
+struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedBuf {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
+    type Writer = SharedBuf;
+    fn make_writer(&'a self) -> SharedBuf {
+        self.clone()
+    }
+}
+
+/// The scrubber used to guard only the Sentry hooks, so a secret echoed into a
+/// log line reached the process log untouched. The sink the binaries write to
+/// must redact too, in both output formats, and must leave transaction hashes
+/// readable for operators.
+#[test]
+fn log_sink_redacts_credentials_but_keeps_hashes() {
+    let phrase = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima";
+    let tx = format!("0x{}", "ab".repeat(32));
+    for json in [false, true] {
+        let sink = SharedBuf::default();
+        let dispatcher = tracing::Dispatch::new(build_subscriber_to(
+            sink.clone(),
+            tracing_subscriber::EnvFilter::new("info"),
+            json,
+            tracing::Level::ERROR,
+        ));
+        tracing::dispatcher::with_default(&dispatcher, || {
+            tracing::error!(input = phrase, "rejected {phrase}");
+            tracing::info!(tx = %tx, "api_key=supersecretvalue seen");
+        });
+        let out = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !out.contains("alpha bravo"),
+            "json={json}: phrase leaked: {out}"
+        );
+        assert!(out.contains("[redacted-mnemonic]"), "json={json}: {out}");
+        assert!(!out.contains("supersecretvalue"), "json={json}: {out}");
+        assert!(
+            out.contains(&tx),
+            "json={json}: tx hash was redacted: {out}"
+        );
+    }
+}
